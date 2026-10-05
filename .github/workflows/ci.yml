@@ -77,7 +77,8 @@ jobs:
     if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.changes.outputs.code == 'true'
     needs: changes
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # The job takes about 6 minutes; a Windows runner that hung sat for 40.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -125,7 +126,7 @@ jobs:
     # A build from nothing took 12 minutes on macOS and 19 on Windows; a job
     # that is still going after this is stuck, and fails instead of waiting
     # for the platform's six-hour limit.
-    timeout-minutes: 60
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:

@@ -44,7 +44,10 @@ That is `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
 --locked -- -D warnings` and `cargo test --workspace --locked --no-fail-fast`,
 plus guards for the platforms you are not on: no CRLF in tracked text files,
 `Cargo.lock` current, the generated documents current, the shortcut registry
-checked under both chord tables, and a type check of the crates without C
+checked under both chord tables, the application's tests run again as the
+other desktop platforms (`LEON_SIMULATE_OS=linux|windows`: the chords, the key
+routing in a terminal and "this computer has no POSIX shell", not the real
+operating system), and a type check of the crates without C
 dependencies for Linux and Windows (when those Rust targets are installed). It
 prints a PASS or FAIL summary with the time of each step and says which crates
 it could not check.

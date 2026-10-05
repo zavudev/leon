@@ -128,6 +128,44 @@ step "tests (workspace, --no-fail-fast)" \
 # computer checks the chords every platform will see.
 step "key registry, both chord tables" cargo test -p leon --locked --quiet keys::
 
+# The window and shell suites again, as the platforms this computer is not.
+# `LEON_SIMULATE_OS` (read by crates/app/src/platform.rs in test builds only)
+# makes the chord table, the key routing (a bare Ctrl chord belongs to the
+# program in a terminal off macOS) and the "this computer has no POSIX shell"
+# decisions follow the named platform, so a test that presses the macOS chord
+# in a terminal, or expects a local reading on Windows, fails here and not
+# first in CI. It decides logic only: real files, processes, clipboards and
+# windows stay this computer's, so a test that depends on those is named below
+# with its reason, never skipped silently.
+host_os=$(uname -s)
+sim_tests() { # sim_tests <linux|windows> <cargo test arguments after --skip...>
+    sim=$1
+    shift
+    step "tests as $sim (LEON_SIMULATE_OS=$sim, leon app)" \
+        env LEON_SIMULATE_OS="$sim" \
+        cargo test -p leon --locked --no-fail-fast -- "$@"
+}
+case "$host_os" in
+    Darwin)
+        # Skipped when simulating on a Mac, each an artefact of the simulation:
+        #  - down_moves_into_the_filtered_tree_...: it types Ctrl+A into a text
+        #    field; the toolkit binds select-all in text fields for the real
+        #    platform (Cmd+A here), so Ctrl+A cannot select all on a Mac.
+        sim_tests linux --skip down_moves_into_the_filtered_tree_and_enter_opens_the_best_match
+        sim_tests windows --skip down_moves_into_the_filtered_tree_and_enter_opens_the_best_match
+        notes="$notes
+  - the simulated runs skip 1 test (down_moves_into_the_filtered_tree_...: the toolkit's text-field select-all is bound for the real platform)"
+        ;;
+    Linux)
+        sim_tests windows
+        ;;
+    *)
+        skip "tests as another platform" "no simulation is set up for $host_os"
+        ;;
+esac
+notes="$notes
+  - the simulated runs cover decisions (chords, key routing, \"no POSIX shell\"), not the real OS: file systems, processes, clipboard, windowing and path syntax of Windows or Linux are only seen by CI"
+
 # Generated documents (settings reference, token reference) match their source.
 step "generated docs are current" \
     cargo test -p leon --locked --quiet -- the_settings_reference_is_current \
