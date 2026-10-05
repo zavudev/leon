@@ -112,11 +112,17 @@ that old or newer); a custom `RUNNER_LINUX` decides the baseline instead.
 
 What the workflows already do for speed: `fmt` is its own job and fails in
 seconds; clippy runs beside the tests, not before them; `--locked`;
-`Swatinem/rust-cache` with `cache-on-failure`, written from `main` only (pull
-requests and tags read it); line-tables-only debug information in CI. `sccache`
+`Swatinem/rust-cache` with `cache-on-failure`, saved by `main` and by pull
+requests (a pull request's second push is warm; its first falls back to
+`main`'s cache; a cache is only visible to its own branch and its base);
+line-tables-only debug information in CI. `sccache`
 is deliberately not used: `rust-cache` already restores the whole `target` of the
 dependencies, and a second compiler cache would add network round trips for the
-same objects and compete for the 10 GB cache quota. `mold` is not needed either:
+same objects and compete for the 10 GB cache quota. That quota is per
+repository: GitHub evicts the least recently used caches when it is full, so
+many open pull requests can push `main`'s caches out; if that happens, close
+stale pull requests or go back to saving from `main` only (`save-if:
+${{ github.ref == 'refs/heads/main' }}` on each `rust-cache` step). `mold` is not needed either:
 current stable Rust links with `lld` by default on x86_64 Linux.
 
 Ways to go faster, with rough expectations (a cold build of this workspace is
