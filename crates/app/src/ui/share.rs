@@ -435,10 +435,10 @@ mod tests {
                 reason: "connection refused".into(),
                 attempt: 2,
             },
-            "wss://relay.zavu.dev",
+            "wss://relay.getleon.dev",
         );
         assert!(!ok);
-        assert!(line.contains("wss://relay.zavu.dev") && line.contains("may not be live yet"));
+        assert!(line.contains("wss://relay.getleon.dev") && line.contains("may not be live yet"));
         assert!(relay_line(&RelayState::Online, "wss://x").1);
     }
 

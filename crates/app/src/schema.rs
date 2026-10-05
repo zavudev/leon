@@ -849,9 +849,9 @@ pub const SETTINGS: &[Def] = &[
         "The relay that connects two computers that reach it from behind their routers. The default service is operated by Zavu and is not live yet.",
         "relay server url websocket wss connect code share network",
         K::Text {
-            placeholder: "wss://relay.zavu.dev",
+            placeholder: "wss://relay.getleon.dev",
         },
-        D::Text("wss://relay.zavu.dev"),
+        D::Text("wss://relay.getleon.dev"),
     ),
     def(
         "remote_device_name",

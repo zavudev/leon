@@ -26,7 +26,7 @@
 
 ### Not yet
 
-* The relay service at `wss://relay.zavu.dev` is not deployed.
+* The relay service at `wss://relay.getleon.dev` is not deployed.
 * Sharing stops when Leon closes (a background service is the next stage).
 
 ## [0.1.0]

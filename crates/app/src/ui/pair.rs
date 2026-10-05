@@ -585,10 +585,10 @@ mod tests {
             reason: "connection refused".into(),
             attempt: 1,
         };
-        let (steps, failure) = explain(&state, "wss://relay.zavu.dev");
+        let (steps, failure) = explain(&state, "wss://relay.getleon.dev");
         assert_eq!(steps[0], StepState::Failed);
         let failure = failure.unwrap();
-        assert!(failure.headline.contains("wss://relay.zavu.dev"));
+        assert!(failure.headline.contains("wss://relay.getleon.dev"));
         assert!(failure.advice.contains("not about your computer"));
     }
 

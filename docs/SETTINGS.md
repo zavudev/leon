@@ -99,7 +99,7 @@ Other computers: relay machines, SSH machines and sharing this one.
 | Share SSH connections | `ssh_multiplex` | on, off | `on` | Reuse one connection per machine for every command instead of a handshake each time. (macOS and Linux only.) |
 | Keep a shared connection open | `ssh_persist_minutes` | 1 to 240min | `10` | How long an idle shared SSH connection stays open, in minutes. (macOS and Linux only.) |
 | Connect timeout | `ssh_connect_timeout` | 0 to 120s | `0` | How long ssh waits to connect, in seconds. Zero leaves it to ssh. |
-| Relay server | `remote_relay_url` | text | `wss://relay.zavu.dev` | The relay that connects two computers that reach it from behind their routers. The default service is operated by Zavu and is not live yet. |
+| Relay server | `remote_relay_url` | text | `wss://relay.getleon.dev` | The relay that connects two computers that reach it from behind their routers. The default service is operated by Zavu and is not live yet. |
 | Name of this computer | `remote_device_name` | text | empty | The name other computers see when you share this one or connect from it. Empty uses the computer's own name. |
 | Share this machine | `remote_share` | on, off | `off` | While Leon is open, let computers you pair with a code open terminals and run commands here. A paired computer gets a terminal as you. |
 | Ask before pairing | `remote_require_approval` | on, off | `on` | When a computer pairs with the code, show its name and fingerprint here and wait for your answer. Turning this off makes the code itself the approval. |
