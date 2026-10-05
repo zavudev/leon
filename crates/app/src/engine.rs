@@ -349,6 +349,10 @@ struct Inner {
     /// of their own, outside any scheduler a test controls, so a test waits for
     /// this to reach zero before it looks at what they stored.
     blocking: std::sync::atomic::AtomicUsize,
+    /// Whether this computer has a POSIX shell of its own: false on Windows,
+    /// where its usage is not collected and its processes are listed with
+    /// PowerShell. Decided once from the platform; only tests change it.
+    local_posix_shell: std::sync::atomic::AtomicBool,
 }
 
 /// The background half of the application. Cheap to clone.
@@ -394,6 +398,9 @@ impl Engine {
                 scanner: Mutex::new(None),
                 usage: Mutex::new(None),
                 blocking: std::sync::atomic::AtomicUsize::new(0),
+                local_posix_shell: std::sync::atomic::AtomicBool::new(
+                    crate::platform::local_has_posix_shell(),
+                ),
             }),
         }
     }
@@ -489,7 +496,15 @@ impl Engine {
         let machine = self.inner.store.machine(id).ok()?;
         let started = std::time::Instant::now();
         let local = machine.kind == MachineKind::Local;
-        let spec = leon_remote::processes::scan_command(!local || !cfg!(windows));
+        // PowerShell only for this computer when it is Windows; every remote
+        // machine is POSIX wherever Leon runs.
+        let spec = leon_remote::processes::scan_command(
+            !local
+                || self
+                    .inner
+                    .local_posix_shell
+                    .load(std::sync::atomic::Ordering::Relaxed),
+        );
         let runner = SharedRunner(scanner.exec.clone());
         let found = match runner
             .run(&leon_remote::run_on(&machine, &spec, &self.ssh()))
@@ -579,6 +594,15 @@ impl Engine {
         }
     }
 
+    /// Makes the engine treat this computer as one with, or without, a POSIX
+    /// shell of its own, whatever it is (tests only).
+    #[cfg(test)]
+    pub fn set_local_posix_shell(&self, posix: bool) {
+        self.inner
+            .local_posix_shell
+            .store(posix, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Whether usage is collected at all.
     pub fn collects_usage(&self) -> bool {
         self.usage_setup().is_some()
@@ -656,9 +680,12 @@ impl Engine {
         }
         let now = clock();
         let runner = SharedRunner(self.inner.runner.clone());
-        let collected = leon_usage::collect_machine(
+        let collected = leon_usage::collect_machine_on(
             &runner,
             machine,
+            self.inner
+                .local_posix_shell
+                .load(std::sync::atomic::Ordering::Relaxed),
             &self.ssh(),
             policy,
             credentials.as_ref(),
@@ -3037,7 +3064,11 @@ branch refs/heads/feature/login
         assert!(found.session.is_some());
         assert!(!found.leon_child);
         // This computer's scan is a shell script, and PowerShell on Windows.
-        let program = if cfg!(windows) { "powershell" } else { "sh" };
+        let program = if crate::platform::is_windows() {
+            "powershell"
+        } else {
+            "sh"
+        };
         assert_eq!(rig.runner.calls()[0].program, program);
     }
 
@@ -3293,6 +3324,10 @@ branch refs/heads/feature/login
 
     fn usage_rig(runner: ScriptedRunner) -> (Rig, Arc<leon_usage::network::ScriptedHttp>) {
         let rig = rig(runner);
+        // The scripted runner needs no shell: these tests read this computer
+        // as one that has a POSIX shell, on every platform. Windows has its
+        // own test below.
+        rig.engine.set_local_posix_shell(true);
         let http = Arc::new(leon_usage::network::ScriptedHttp::new());
         rig.engine.set_usage(
             Arc::new(NoCredentials),
@@ -3333,6 +3368,44 @@ branch refs/heads/feature/login
         assert_eq!(history[0].used_percent, 42.0);
         assert_eq!(http.calls().len(), 0);
         assert!(!rig.engine.usage_collecting());
+    }
+
+    #[tokio::test]
+    async fn this_computer_without_a_posix_shell_is_unsupported_but_a_server_is_read() {
+        let (rig, http) = usage_rig(ScriptedRunner::new().reply(found_output()));
+        rig.engine.set_local_posix_shell(false);
+        rig.store
+            .add_machine(
+                "box",
+                MachineKind::Ssh {
+                    host: "box.example".into(),
+                    user: None,
+                    port: None,
+                    identity_file: None,
+                },
+            )
+            .unwrap();
+        rig.engine.run(Op::CollectUsage).await;
+        let calls = rig.runner.calls();
+        assert_eq!(calls.len(), 1, "only the server is asked");
+        assert_eq!(calls[0].program, "ssh");
+        let rows = rig.store.usage_readings().unwrap();
+        let of = |machine: &MachineId, agent| {
+            rows.iter()
+                .find(|r| &r.machine == machine && r.agent == agent)
+                .map(|r| r.payload.clone())
+                .unwrap_or_default()
+        };
+        let local = MachineId::local();
+        assert!(of(&local, leon_core::AgentKind::Codex).contains("not_supported"));
+        let server = rows
+            .iter()
+            .find(|r| r.machine != local)
+            .unwrap()
+            .machine
+            .clone();
+        assert!(of(&server, leon_core::AgentKind::Codex).contains("\"known\""));
+        assert_eq!(http.calls().len(), 0);
     }
 
     #[tokio::test]

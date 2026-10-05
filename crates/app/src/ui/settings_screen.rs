@@ -168,7 +168,7 @@ pub fn entries(section: Section, query: &str, mac: bool) -> Vec<Entry> {
 }
 
 fn secondary(stroke: &Keystroke) -> bool {
-    if cfg!(target_os = "macos") {
+    if crate::platform::is_mac() {
         stroke.modifiers.platform
     } else {
         stroke.modifiers.control
@@ -180,7 +180,7 @@ impl Shell {
     /// then the machines and the removed project roots where they belong.
     pub(super) fn settings_entries(&self) -> Vec<Entry> {
         let ui = &self.settings_ui;
-        let mut list = entries(ui.section, &ui.query, cfg!(target_os = "macos"));
+        let mut list = entries(ui.section, &ui.query, crate::platform::is_mac());
         let query = ui.query.trim();
         let wanted = |label: &str| query.is_empty() || score(query, label).is_some();
         let here = |section: Section| !query.is_empty() || ui.section == section;

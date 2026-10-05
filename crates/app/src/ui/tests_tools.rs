@@ -115,7 +115,7 @@ fn copy_the_visible_screen_leaves_the_history_out(cx: &mut TestAppContext) {
 fn select_all_selects_the_whole_buffer_so_the_ordinary_copy_takes_it(cx: &mut TestAppContext) {
     let (h, _dir, _) = terminal_with(cx, 60);
     h.press_chord("cmd-a", "ctrl-shift-p", cx);
-    if !cfg!(target_os = "macos") {
+    if !crate::platform::is_mac() {
         // Without a chord on this platform: through the palette.
         h.type_text("select all of the terminal", cx);
         h.press("enter", cx);

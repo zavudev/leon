@@ -502,6 +502,9 @@ fn refreshing_collects_through_the_runner_and_shows_what_it_found(cx: &mut TestA
         r#"{"timestamp":"2026-10-04T11:59:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":42.0,"window_minutes":300,"resets_at":1791123000},"secondary":{"used_percent":15.0,"window_minutes":10080,"resets_at":1791678919},"plan_type":"plus"}}}"#
     );
     let h = open(cx, ScriptedRunner::new().reply(Output::ok(found)));
+    // The scripted runner needs no shell: read this computer as one with a
+    // POSIX shell on every platform.
+    h.engine.set_local_posix_shell(true);
     h.engine.set_usage(
         Arc::new(NoCredentials),
         Arc::new(ScriptedHttp::new()),
@@ -534,7 +537,7 @@ fn starting_an_agent_at_its_critical_limit_says_so_with_the_reset_and_never_bloc
         ),
         cx,
     );
-    h.press("ctrl-n", cx);
+    h.press_chord("cmd-n", "ctrl-shift-a", cx);
     h.press("enter", cx); // Claude
     wait_until(&h, cx, "the session", |h, cx| {
         !h.shell(cx, |s| s.live.ids().is_empty())
@@ -558,7 +561,7 @@ fn below_the_critical_limit_or_with_the_setting_off_nothing_is_said(cx: &mut Tes
         ),
         cx,
     );
-    h.press("ctrl-n", cx);
+    h.press_chord("cmd-n", "ctrl-shift-a", cx);
     h.press("enter", cx);
     wait_until(&h, cx, "the session", |h, cx| {
         !h.shell(cx, |s| s.live.ids().is_empty())
@@ -581,7 +584,7 @@ fn below_the_critical_limit_or_with_the_setting_off_nothing_is_said(cx: &mut Tes
         ),
         cx,
     );
-    h.press("ctrl-n", cx);
+    h.press_chord("cmd-n", "ctrl-shift-a", cx);
     h.press("enter", cx);
     wait_until(&h, cx, "a second session", |h, cx| {
         h.shell(cx, |s| s.live.ids().len()) == 2
@@ -606,7 +609,7 @@ fn the_header_of_a_live_agent_session_shows_its_primary_window(cx: &mut TestAppC
         cx,
     );
     assert!(!h.shows("header-usage", cx), "no session yet");
-    h.press("ctrl-n", cx);
+    h.press_chord("cmd-n", "ctrl-shift-a", cx);
     h.press("enter", cx);
     wait_until(&h, cx, "the session", |h, cx| h.shows("header-usage", cx));
 }

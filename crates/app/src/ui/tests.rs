@@ -70,7 +70,7 @@ fn prepare(cx: &mut gpui_kit::App, settings_file: Option<std::path::PathBuf>) {
 /// A key as this platform has it. The tests write the secondary key as
 /// `ctrl`, which is what it is on Linux and Windows; on macOS it is Cmd.
 fn platform_key(key: &str) -> String {
-    if cfg!(target_os = "macos") {
+    if crate::platform::is_mac() {
         key.replacen("ctrl-", "cmd-", 1)
     } else {
         key.to_owned()
@@ -459,7 +459,7 @@ impl Harness {
     /// A chord that is not the same on every platform: `mac` on macOS, `other`
     /// elsewhere, written as GPUI writes keystrokes.
     fn press_chord(&self, mac: &str, other: &str, cx: &mut TestAppContext) {
-        let key = if cfg!(target_os = "macos") {
+        let key = if crate::platform::is_mac() {
             mac
         } else {
             other

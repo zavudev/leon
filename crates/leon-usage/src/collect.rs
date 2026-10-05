@@ -134,8 +134,36 @@ pub async fn collect_machine<R: Runner>(
     http: &dyn Http,
     now: i64,
 ) -> MachineUsage {
+    collect_machine_on(
+        runner,
+        machine,
+        !cfg!(windows),
+        ssh,
+        policy,
+        credentials,
+        http,
+        now,
+    )
+    .await
+}
+
+/// [`collect_machine`] for a computer that has, or has not, a POSIX shell for
+/// its own (`local_posix`: false on Windows). Only the local machine depends
+/// on it: the decision follows the machine that is read, never the computer
+/// Leon runs on, so a Windows client reads a Linux server like any other.
+#[allow(clippy::too_many_arguments)] // `collect_machine` plus the one platform fact
+pub async fn collect_machine_on<R: Runner>(
+    runner: &R,
+    machine: &Machine,
+    local_posix: bool,
+    ssh: &SshOptions,
+    policy: NetworkPolicy,
+    credentials: &dyn Credentials,
+    http: &dyn Http,
+    now: i64,
+) -> MachineUsage {
     let id = machine.id.as_str();
-    if !can_collect(machine.kind == MachineKind::Local, cfg!(windows)) {
+    if !can_collect(machine.kind == MachineKind::Local, !local_posix) {
         return MachineUsage {
             readings: AgentKind::ALL
                 .iter()
@@ -270,16 +298,29 @@ mod tests {
         Output::ok(text)
     }
 
+    /// Collects as a computer with a POSIX shell of its own (the scripted
+    /// runner needs no real shell), whatever computer the tests run on.
     async fn run(
         machine: &Machine,
         out: Output,
         policy: NetworkPolicy,
         http: &ScriptedHttp,
     ) -> (MachineUsage, ScriptedRunner) {
+        run_on_computer(machine, true, out, policy, http).await
+    }
+
+    async fn run_on_computer(
+        machine: &Machine,
+        local_posix: bool,
+        out: Output,
+        policy: NetworkPolicy,
+        http: &ScriptedHttp,
+    ) -> (MachineUsage, ScriptedRunner) {
         let runner = ScriptedRunner::new().reply(out);
-        let got = collect_machine(
+        let got = collect_machine_on(
             &runner,
             machine,
+            local_posix,
             &SshOptions::without_multiplexing(),
             policy,
             &NoCredentials,
@@ -470,6 +511,46 @@ mod tests {
             == State::Unknown {
                 reason: Reason::Unreachable
             }));
+    }
+
+    #[tokio::test]
+    async fn on_windows_the_local_machine_is_unsupported_and_runs_nothing() {
+        let http = ScriptedHttp::new();
+        let (got, runner) = run_on_computer(
+            &local(),
+            false,
+            output(&["claude", "codex"], false, Some(CODEX_LINE)),
+            NetworkPolicy::default(),
+            &http,
+        )
+        .await;
+        assert!(runner.calls().is_empty(), "no shell, so no command");
+        assert_eq!(got.readings.len(), 3);
+        assert!(got.readings.iter().all(|r| r.state
+            == State::Unknown {
+                reason: Reason::NotSupported
+            }));
+        assert!(got.samples.is_empty());
+    }
+
+    #[tokio::test]
+    async fn on_windows_a_remote_machine_is_still_read_over_ssh() {
+        let http = ScriptedHttp::new();
+        let (got, runner) = run_on_computer(
+            &remote(),
+            false,
+            output(&["codex"], false, Some(CODEX_LINE)),
+            NetworkPolicy::default(),
+            &http,
+        )
+        .await;
+        assert_eq!(runner.calls()[0].program, "ssh");
+        let codex = got
+            .readings
+            .iter()
+            .find(|r| r.agent == AgentKind::Codex)
+            .unwrap();
+        assert!(matches!(codex.state, State::Known { .. }));
     }
 
     #[test]

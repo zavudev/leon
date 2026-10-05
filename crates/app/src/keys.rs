@@ -538,7 +538,7 @@ impl Chord {
     /// The chord as the platform writes it: `⇧⌘K` on macOS, `Ctrl+Shift+K`
     /// elsewhere.
     pub fn label(&self) -> String {
-        self.label_for(cfg!(target_os = "macos"))
+        self.label_for(crate::platform::is_mac())
     }
 
     /// [`Self::label`] for a platform that is, or is not, macOS.
@@ -581,7 +581,7 @@ impl Chord {
 
 /// A key's name as this platform prints it (`Esc`, `↩`).
 pub fn key_label(key: &str) -> String {
-    key_name(key, cfg!(target_os = "macos"))
+    key_name(key, crate::platform::is_mac())
 }
 
 /// A key's name as it is printed on the key.
@@ -1747,7 +1747,7 @@ pub fn label(command: Command) -> &'static str {
 /// The keys shown next to a command, written as this platform does; `None`
 /// for a command without keys.
 pub fn keys_label(command: Command) -> Option<String> {
-    chords_on(binding(command)?, cfg!(target_os = "macos"))
+    chords_on(binding(command)?, crate::platform::is_mac())
         .first()
         .map(Chord::label)
 }
@@ -1802,7 +1802,7 @@ pub fn terminal_chords(mac: bool) -> Vec<(Command, Chord)> {
 
 /// The command a keystroke stands for, given what is true of the window.
 pub fn resolve(stroke: &Keystroke, context: Context) -> Option<Command> {
-    resolve_on(stroke, context, cfg!(target_os = "macos"))
+    resolve_on(stroke, context, crate::platform::is_mac())
 }
 
 /// [`resolve`] for a platform that is, or is not, macOS.

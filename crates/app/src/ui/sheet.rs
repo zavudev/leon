@@ -109,7 +109,7 @@ impl Shell {
             .flex()
             .flex_col()
             .gap_4();
-        for (section, rows) in sheet_rows(cfg!(target_os = "macos")) {
+        for (section, rows) in sheet_rows(crate::platform::is_mac()) {
             let mut block = div().flex().flex_col().child(
                 div()
                     .pb(px(4.))
@@ -152,13 +152,13 @@ impl Shell {
                 .pb(px(6.))
                 .text_size(metrics::TEXT_SMALL())
                 .text_color(colours.text_faint)
-                .child(if cfg!(target_os = "macos") {
+                .child(if crate::platform::is_mac() {
                     "Only these Cmd chords are Leon's. Every other key, Ctrl chords included, goes to the program."
                 } else {
                     "Only these Ctrl+Shift chords are Leon's. Every other key, plain Ctrl chords included, goes to the program."
                 }),
         );
-        for row in terminal_rows(cfg!(target_os = "macos")) {
+        for row in terminal_rows(crate::platform::is_mac()) {
             inside = inside.child(
                 div()
                     .h(px(28.))
@@ -202,7 +202,7 @@ impl Shell {
                 .pb(px(4.))
                 .child(section_label("In the Connect screen", colours)),
         );
-        for (label, keys) in connect_keys(cfg!(target_os = "macos")) {
+        for (label, keys) in connect_keys(crate::platform::is_mac()) {
             connect = connect.child(
                 div()
                     .h(px(28.))

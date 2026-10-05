@@ -292,7 +292,7 @@ impl ConnectUi {
 }
 
 fn secondary(stroke: &Keystroke) -> bool {
-    if cfg!(target_os = "macos") {
+    if crate::platform::is_mac() {
         stroke.modifiers.platform
     } else {
         stroke.modifiers.control

@@ -24,7 +24,7 @@ pub mod present;
 pub mod secret;
 pub mod view;
 
-pub use collect::{collect_machine, series_key, MachineUsage};
+pub use collect::{collect_machine, collect_machine_on, series_key, MachineUsage};
 pub use forecast::{forecast, Forecast, Sample};
 pub use model::{
     AgentUsage, Collected, Effective, EffectiveWindow, Reason, Source, State, UsageWindow,

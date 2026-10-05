@@ -110,8 +110,8 @@ impl Platform {
     pub fn here(self) -> bool {
         match self {
             Platform::All => true,
-            Platform::Mac => cfg!(target_os = "macos"),
-            Platform::Unix => cfg!(unix),
+            Platform::Mac => crate::platform::is_mac(),
+            Platform::Unix => cfg!(unix) && !crate::platform::is_windows(),
         }
     }
 

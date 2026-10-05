@@ -157,7 +157,7 @@ pub fn plan(args: &Diagnose, system: &dyn System) -> (SpawnSpec, Vec<u8>) {
             )
         }
         None => {
-            let spec = if cfg!(windows) {
+            let spec = if crate::platform::is_windows() {
                 SpawnSpec {
                     program: "cmd".into(),
                     args: vec!["/c".into(), "set /p x= & echo echo:%x%".into()],
@@ -402,7 +402,7 @@ pub fn run_sessions_elsewhere() -> i32 {
     };
     leon_history::Importer::run(&store, &MachineId::local(), &leon_history::default_roots());
     let started = Instant::now();
-    let spec = leon_remote::processes::scan_command(!cfg!(windows));
+    let spec = leon_remote::processes::scan_command(crate::platform::local_has_posix_shell());
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -721,9 +721,12 @@ mod tests {
     #[test]
     fn without_a_command_a_shell_echoes_one_line() {
         let (spec, input) = plan(&args(&[], None), &Nothing);
-        if cfg!(unix) {
-            assert_eq!(spec.program, "sh");
-        }
+        let program = if crate::platform::is_windows() {
+            "cmd"
+        } else {
+            "sh"
+        };
+        assert_eq!(spec.program, program);
         assert_eq!(input, b"hello\r");
     }
 

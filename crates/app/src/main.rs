@@ -29,6 +29,7 @@ mod launch;
 mod logging;
 mod menus;
 mod pair;
+mod platform;
 mod product;
 mod remote;
 mod schema;

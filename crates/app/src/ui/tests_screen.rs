@@ -76,7 +76,7 @@ fn pressing_secondary_comma_opens_settings_and_escape_restores_focus(cx: &mut Te
         h.shell(cx, |s| s.terminal_focused()),
         "the terminal has the keyboard"
     );
-    if cfg!(target_os = "macos") {
+    if crate::platform::is_mac() {
         h.press("ctrl-,", cx);
     } else {
         // Off macOS a plain Ctrl+, belongs to the program in a terminal and
