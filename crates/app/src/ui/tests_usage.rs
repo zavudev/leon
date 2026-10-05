@@ -659,3 +659,348 @@ fn forgetting_the_history_is_a_button_of_the_settings(cx: &mut TestAppContext) {
         .unwrap()
         .is_empty());
 }
+
+// ----- the network sources, switched live ----------------------------------------------------
+
+use leon_usage::network::{Http, HttpError, Request, Response};
+
+const CLAUDE_ANSWER: &str = r#"{"five_hour":{"utilization":10,"resets_at":1791300000},"seven_day":{"utilization":93,"resets_at":1791300000}}"#;
+
+/// A credential reader that answers as told and counts its reads.
+struct Creds {
+    denied: std::sync::atomic::AtomicBool,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl Creds {
+    fn new(denied: bool) -> Arc<Self> {
+        Arc::new(Self {
+            denied: denied.into(),
+            reads: Default::default(),
+        })
+    }
+}
+
+impl Credentials for Creds {
+    fn claude(&self) -> Read<leon_usage::claude::Credential> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.denied.load(std::sync::atomic::Ordering::SeqCst) {
+            return Read::Denied;
+        }
+        leon_usage::claude::parse_credential(
+            r#"{"claudeAiOauth":{"accessToken":"tok","subscriptionType":"max"}}"#,
+        )
+        .map_or(Read::Missing, Read::Found)
+    }
+    fn opencode_go(&self) -> Read<leon_usage::secret::Secret> {
+        Read::Missing
+    }
+}
+
+/// A client that answers only when the test lets it.
+struct Gate {
+    open: Arc<tokio::sync::Notify>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl Http for Gate {
+    fn get<'a>(
+        &'a self,
+        _: &'a Request<'a>,
+    ) -> leon_usage::network::BoxFuture<'a, Result<Response, HttpError>> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.open.notified().await;
+            Ok(Response {
+                status: 200,
+                body: CLAUDE_ANSWER.to_owned(),
+                retry_after: None,
+            })
+        })
+    }
+}
+
+/// The window with Claude Code installed on this computer and the usage engine
+/// reading through `creds` and `http`.
+fn open_network(cx: &mut TestAppContext, creds: Arc<Creds>, http: Arc<dyn Http>) -> Harness {
+    let mut runner = ScriptedRunner::new();
+    for _ in 0..40 {
+        runner = runner.reply(Output::ok("has=claude\n".to_owned()));
+    }
+    let h = open(cx, runner);
+    h.engine.set_local_posix_shell(true);
+    h.engine.set_usage(creds, http, Arc::new(now));
+    h.shell.update(cx, |_, cx| cx.notify());
+    h.settle(cx);
+    h
+}
+
+fn claude_source(h: &Harness, on: bool, cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        settings::set_value(
+            cx,
+            crate::schema::find("usage_claude_network").unwrap(),
+            crate::schema::Value::Bool(on),
+        )
+    });
+    h.shell.update(cx, |_, cx| cx.notify());
+    h.settle(cx);
+}
+
+fn claude_row(h: &Harness, cx: &mut TestAppContext) -> crate::ui::usage_view::UsageRow {
+    cx.update(|cx| h.shell.read(cx).usage_view_rows(cx))
+        .into_iter()
+        .find(|row| row.view.agent == AgentKind::Claude)
+        .expect("a row for Claude Code")
+}
+
+fn claude_item(h: &Harness, cx: &mut TestAppContext) -> crate::ui::usage_view::BarItem {
+    bar(h, cx)
+        .items
+        .into_iter()
+        .find(|item| item.agent == AgentKind::Claude)
+        .expect("Claude Code is in the bar")
+}
+
+#[gpui_kit::test]
+fn the_network_sources_are_on_by_default_and_a_file_that_set_them_off_stays_off(
+    cx: &mut TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(settings::FILE_NAME),
+        br#"{"usage_opencode_network": false}"#,
+    )
+    .unwrap();
+    let _h = open_with(
+        cx,
+        ScriptedRunner::new(),
+        Some(dir.path().join(settings::FILE_NAME)),
+    );
+    let policy = cx.update(|cx| settings::usage_policy(cx));
+    assert!(policy.claude, "a file without the key gets the default: on");
+    assert!(!policy.opencode, "a file that says off stays off");
+    assert_eq!(cx.update(|cx| settings::usage_interval_seconds(cx)), 60);
+}
+
+#[gpui_kit::test]
+fn turning_the_claude_source_on_reads_at_once_and_shows_the_numbers(cx: &mut TestAppContext) {
+    let http = Arc::new(ScriptedHttp::new().reply(200, CLAUDE_ANSWER));
+    let h = open_network(cx, Creds::new(false), http.clone());
+    claude_source(&h, false, cx);
+    assert_eq!(http.calls().len(), 0, "off: nothing is called");
+    assert_eq!(claude_row(&h, cx).turn_on, Some("usage_claude_network"));
+    claude_source(&h, true, cx);
+    assert_eq!(
+        http.calls().len(),
+        1,
+        "on: read at once, not at the next tick"
+    );
+    let item = claude_item(&h, cx);
+    assert!(
+        item.known,
+        "the footer shows the numbers without reopening anything"
+    );
+    assert_eq!(item.figure, " 93%");
+    assert_eq!(item.glyph, "!!", "93% is critical, with a marker");
+    let row = claude_row(&h, cx);
+    assert!(matches!(row.view.body, leon_usage::Body::Ready { .. }));
+    assert!(row.note.is_none());
+    assert!(h.shell(cx, |s| s.usage.board.collected_at()).is_some());
+}
+
+#[gpui_kit::test]
+fn while_the_first_read_is_in_flight_the_view_says_reading(cx: &mut TestAppContext) {
+    let open = Arc::new(tokio::sync::Notify::new());
+    let http = Arc::new(Gate {
+        open: open.clone(),
+        calls: Default::default(),
+    });
+    let h = open_network(cx, Creds::new(false), http.clone());
+    claude_source(&h, false, cx);
+    claude_source(&h, true, cx);
+    assert!(h.engine.usage_status(AgentKind::Claude).reading);
+    let row = claude_row(&h, cx);
+    let note = row.note.expect("the row says what is going on");
+    assert!(note.starts_with("Reading…"), "{note}");
+    assert!(
+        !note.contains("source is off"),
+        "not the stale 'source is off': {note}"
+    );
+    if crate::platform::is_mac() {
+        assert!(note.contains("macOS may ask for permission to read Claude Code's sign-in"));
+    }
+    assert_eq!(claude_item(&h, cx).label, "reading…");
+    open.notify_one();
+    h.settle(cx);
+    assert!(!h.engine.usage_status(AgentKind::Claude).reading);
+    assert!(
+        claude_item(&h, cx).known,
+        "the numbers replace it when the read ends"
+    );
+}
+
+#[gpui_kit::test]
+fn a_denied_keychain_prompt_is_explained_and_can_be_retried(cx: &mut TestAppContext) {
+    let creds = Creds::new(true);
+    let http = Arc::new(ScriptedHttp::new().reply(200, CLAUDE_ANSWER));
+    let h = open_network(cx, creds.clone(), http.clone());
+    claude_source(&h, false, cx);
+    claude_source(&h, true, cx);
+    let row = claude_row(&h, cx);
+    let note = row.note.clone().expect("the refusal is explained");
+    assert!(note.contains("Try again"), "{note}");
+    assert!(row.try_again);
+    if crate::platform::is_mac() {
+        assert!(note.contains("denied or dismissed"), "{note}");
+    }
+    assert_eq!(http.calls().len(), 0);
+    // Never asked again by itself, however often the schedule comes round.
+    let asked = creds.reads.load(std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..3 {
+        h.engine.submit(crate::engine::Op::CollectUsage);
+        h.settle(cx);
+    }
+    assert_eq!(creds.reads.load(std::sync::atomic::Ordering::SeqCst), asked);
+    // Try again (R in the view) asks once more, and now it is allowed.
+    creds
+        .denied
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    h.press_chord("cmd-shift-u", "ctrl-shift-alt-u", cx);
+    h.press("r", cx);
+    assert_eq!(http.calls().len(), 1);
+    assert!(claude_item(&h, cx).known);
+}
+
+#[gpui_kit::test]
+fn turning_the_source_off_stops_calls_and_says_so(cx: &mut TestAppContext) {
+    let http = Arc::new(ScriptedHttp::new().reply(200, CLAUDE_ANSWER));
+    let h = open_network(cx, Creds::new(false), http.clone());
+    claude_source(&h, false, cx);
+    claude_source(&h, true, cx);
+    assert!(claude_item(&h, cx).known);
+    claude_source(&h, false, cx);
+    h.engine.submit(crate::engine::Op::CollectUsage);
+    h.settle(cx);
+    assert_eq!(http.calls().len(), 1, "no call once it is off");
+    let row = claude_row(&h, cx);
+    assert!(matches!(
+        row.view.body,
+        leon_usage::Body::Unknown(Reason::SourceDisabled)
+    ));
+    assert_eq!(
+        row.turn_on,
+        Some("usage_claude_network"),
+        "the action is offered right there"
+    );
+}
+
+#[gpui_kit::test]
+fn refresh_now_uses_the_setting_in_force(cx: &mut TestAppContext) {
+    let http = Arc::new(
+        ScriptedHttp::new()
+            .reply(200, CLAUDE_ANSWER)
+            .reply(200, CLAUDE_ANSWER),
+    );
+    let h = open_network(cx, Creds::new(false), http.clone());
+    claude_source(&h, false, cx);
+    h.press_chord("cmd-shift-u", "ctrl-shift-alt-u", cx);
+    h.press("r", cx);
+    assert_eq!(
+        http.calls().len(),
+        0,
+        "off: R reads nothing from the network"
+    );
+    cx.update(|cx| {
+        settings::set_value(
+            cx,
+            crate::schema::find("usage_claude_network").unwrap(),
+            crate::schema::Value::Bool(true),
+        )
+    });
+    h.press("r", cx);
+    assert!(!http.calls().is_empty(), "on: R reads");
+    assert!(claude_item(&h, cx).known);
+}
+
+#[gpui_kit::test]
+fn a_failure_shows_its_reason_and_the_retry_time(cx: &mut TestAppContext) {
+    let http = Arc::new(ScriptedHttp::new().reply(503, "down"));
+    let h = open_network(cx, Creds::new(false), http.clone());
+    claude_source(&h, false, cx);
+    claude_source(&h, true, cx);
+    let row = claude_row(&h, cx);
+    let note = row.note.expect("the failure is explained");
+    assert!(note.contains("HTTP 503"), "{note}");
+    assert!(note.contains("Next read in 1m"), "{note}");
+    assert!(row.try_again);
+    let tip = claude_item(&h, cx).tip;
+    assert!(tip.contains("HTTP 503"), "{tip}");
+}
+
+#[gpui_kit::test]
+fn a_rate_limit_says_so_and_when_the_next_read_is(cx: &mut TestAppContext) {
+    let http = Arc::new(ScriptedHttp::new().reply_after(429, "{}", Some(300)));
+    let h = open_network(cx, Creds::new(false), http.clone());
+    claude_source(&h, false, cx);
+    claude_source(&h, true, cx);
+    let note = claude_row(&h, cx).note.expect("explained");
+    assert!(note.starts_with("Rate limited"), "{note}");
+    assert!(note.contains("Next read in 5m"), "{note}");
+    assert!(!note.to_lowercase().contains("error"), "{note}");
+}
+
+#[test]
+fn a_window_at_93_percent_is_critical_with_a_marker_in_the_view_the_bar_and_the_header() {
+    let reading = reading(
+        AgentKind::Claude,
+        &local(),
+        &[
+            (WindowKind::FiveHour, 10.0, 8940),
+            (WindowKind::Weekly, 93.0, 126_000),
+        ],
+    );
+    let board = crate::agent_usage::Board::new(vec![reading]);
+    let thresholds = leon_usage::Thresholds::default();
+    let palette = crate::theme::ThemeId::DEFAULT.theme().dark;
+    let rows = crate::ui::usage_view::usage_rows(
+        &board,
+        &Scope::Context,
+        &local(),
+        &AgentKind::ALL,
+        &|id| id.to_owned(),
+        now(),
+        thresholds,
+        &Default::default(),
+    );
+    let weekly = &rows[0].windows[1].meter;
+    assert_eq!(weekly.level, leon_usage::Level::Critical);
+    assert_eq!(weekly.level.glyph(), "!!");
+    assert!(weekly.text().ends_with("!!"), "{}", weekly.text());
+    assert_eq!(
+        crate::ui::usage_view::level_colour(weekly.level, &palette),
+        palette.error,
+        "a colour of the theme, not the neutral one"
+    );
+    let item = crate::ui::usage_view::bar_model(
+        &board,
+        &local(),
+        "This computer",
+        &AgentKind::ALL,
+        now(),
+        thresholds,
+        1600.0,
+    )
+    .items
+    .remove(0);
+    assert_eq!(
+        (item.level, item.glyph, item.figure.as_str()),
+        (leon_usage::Level::Critical, "!!", " 93%")
+    );
+    let leon_usage::Body::Ready { primary, .. } = &rows[0].view.body else {
+        panic!("numbers expected");
+    };
+    assert!(crate::ui::usage_view::chip_text(primary).contains("93% !!"));
+    // And from 75 a warning, from the settings' own thresholds.
+    assert_eq!(thresholds.classify(75.0).glyph(), "!");
+}

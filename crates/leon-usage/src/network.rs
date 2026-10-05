@@ -76,6 +76,9 @@ pub struct Response {
     pub status: u16,
     /// The body, as text.
     pub body: String,
+    /// The wait the vendor asked for with `Retry-After`, in seconds, when it
+    /// gave one as a number.
+    pub retry_after: Option<u32>,
 }
 
 /// Why nothing came back. It carries no text, so it cannot quote a request.
@@ -136,6 +139,35 @@ pub fn curl_config(request: &Request<'_>) -> String {
     config
 }
 
+/// Reads what `curl --include --write-out '\n%{http_code}'` printed: the
+/// header block(s), the body and the status. `None` when there is no status.
+pub fn parse_curl_output(text: &str) -> Option<Response> {
+    let (rest, status) = text.rsplit_once('\n')?;
+    let status: u16 = status.trim().parse().ok().filter(|status| *status != 0)?;
+    let mut remaining = rest;
+    let mut retry_after = None;
+    // An interim `100 Continue` has a block of its own before the answer's.
+    while remaining.starts_with("HTTP/") {
+        let (head, body) = remaining
+            .split_once("\r\n\r\n")
+            .or_else(|| remaining.split_once("\n\n"))
+            .unwrap_or((remaining, ""));
+        for line in head.lines() {
+            if let Some((name, value)) = line.split_once(':') {
+                if name.trim().eq_ignore_ascii_case("retry-after") {
+                    retry_after = value.trim().parse().ok();
+                }
+            }
+        }
+        remaining = body;
+    }
+    Some(Response {
+        status,
+        body: remaining.to_owned(),
+        retry_after,
+    })
+}
+
 /// Calls with the system's `curl`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CurlHttp;
@@ -149,7 +181,14 @@ impl Http for CurlHttp {
             }
             let mut command = tokio::process::Command::new("curl");
             command
-                .args(["--silent", "--proto", "=https", "--max-redirs", "0"])
+                .args([
+                    "--silent",
+                    "--include",
+                    "--proto",
+                    "=https",
+                    "--max-redirs",
+                    "0",
+                ])
                 .args(["--max-time", &TIMEOUT.as_secs().to_string()])
                 .args(["--max-filesize", &MAX_BYTES.to_string()])
                 .args(["--user-agent", "Leon"])
@@ -172,15 +211,7 @@ impl Http for CurlHttp {
                     .map_err(|_| HttpError::Unreachable)?
                     .map_err(|_| HttpError::Unreachable)?;
             let text = String::from_utf8_lossy(&output.stdout).into_owned();
-            let (body, status) = text.rsplit_once('\n').ok_or(HttpError::Unreachable)?;
-            let status: u16 = status.trim().parse().map_err(|_| HttpError::Unreachable)?;
-            if status == 0 {
-                return Err(HttpError::Unreachable);
-            }
-            Ok(Response {
-                status,
-                body: body.to_owned(),
-            })
+            parse_curl_output(&text).ok_or(HttpError::Unreachable)
         })
     }
 }
@@ -200,9 +231,15 @@ impl ScriptedHttp {
 
     /// Queues an answer.
     pub fn reply(self, status: u16, body: &str) -> Self {
+        self.reply_after(status, body, None)
+    }
+
+    /// Queues an answer that carries a `Retry-After`.
+    pub fn reply_after(self, status: u16, body: &str, retry_after: Option<u32>) -> Self {
         self.replies.lock().unwrap().push(Ok(Response {
             status,
             body: body.to_owned(),
+            retry_after,
         }));
         self
     }
@@ -242,6 +279,43 @@ pub enum Read<T> {
     Missing,
     /// The store could not be read.
     Unavailable,
+    /// The system refused to hand it over (a keychain prompt that was denied
+    /// or dismissed).
+    Denied,
+}
+
+/// What `security find-generic-password` came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeychainOutcome {
+    /// It printed the item.
+    Found,
+    /// There is no such item.
+    NotFound,
+    /// Access was denied, or the permission prompt was dismissed.
+    Denied,
+    /// Anything else.
+    Other,
+}
+
+/// Classifies the end of `security find-generic-password`. The text it printed
+/// is looked at only to tell a refusal from another failure; nothing of it is
+/// kept.
+pub fn classify_security(code: Option<i32>, stderr: &str) -> KeychainOutcome {
+    match code {
+        Some(0) => return KeychainOutcome::Found,
+        Some(44) => return KeychainOutcome::NotFound,
+        Some(128 | 36 | 51) => return KeychainOutcome::Denied,
+        _ => {}
+    }
+    let text = stderr.to_ascii_lowercase();
+    if ["denied", "cancel", "not allowed", "interaction"]
+        .iter()
+        .any(|word| text.contains(word))
+    {
+        KeychainOutcome::Denied
+    } else {
+        KeychainOutcome::Other
+    }
 }
 
 /// Where the agents keep their credentials, read only at the moment of a call.
@@ -261,10 +335,12 @@ pub struct SystemCredentials {
 
 impl Credentials for SystemCredentials {
     fn claude(&self) -> Read<claude::Credential> {
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut denied = false;
         #[cfg(target_os = "macos")]
         {
-            // The keychain item the CLI itself writes. Standard error is
-            // dropped so that nothing the tool says is kept.
+            // The keychain item the CLI itself writes. The first read may make
+            // macOS ask the user for permission.
             let output = std::process::Command::new("security")
                 .args([
                     "find-generic-password",
@@ -273,24 +349,32 @@ impl Credentials for SystemCredentials {
                     "-w",
                 ])
                 .stdin(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
                 .output();
             if let Ok(output) = output {
-                if output.status.success() {
-                    if let Some(found) =
-                        claude::parse_credential(&String::from_utf8_lossy(&output.stdout))
-                    {
-                        return Read::Found(found);
+                match classify_security(
+                    output.status.code(),
+                    &String::from_utf8_lossy(&output.stderr),
+                ) {
+                    KeychainOutcome::Found => {
+                        if let Some(found) =
+                            claude::parse_credential(&String::from_utf8_lossy(&output.stdout))
+                        {
+                            return Read::Found(found);
+                        }
                     }
+                    KeychainOutcome::Denied => denied = true,
+                    KeychainOutcome::NotFound | KeychainOutcome::Other => {}
                 }
             }
         }
         let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| self.home.join(".claude"));
+        let missing = || if denied { Read::Denied } else { Read::Missing };
         match std::fs::read_to_string(dir.join(".credentials.json")) {
-            Ok(text) => claude::parse_credential(&text).map_or(Read::Missing, Read::Found),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Read::Missing,
+            Ok(text) => claude::parse_credential(&text).map_or_else(missing, Read::Found),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => missing(),
             Err(_) => Read::Unavailable,
         }
     }
@@ -308,7 +392,7 @@ impl Credentials for SystemCredentials {
 }
 
 /// Slows a source that keeps failing: after each failure the wait doubles, up
-/// to a limit; a success clears it.
+/// to a limit; a success clears it. A vendor's `Retry-After` is honoured.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Throttle {
     failures: u32,
@@ -318,24 +402,65 @@ pub struct Throttle {
 impl Throttle {
     /// The first wait after a failure, in seconds.
     pub const FIRST: i64 = 60;
-    /// The longest wait, in seconds.
+    /// The longest wait, in seconds, when the vendor named none.
     pub const LONGEST: i64 = 30 * 60;
+    /// The longest `Retry-After` honoured, in seconds.
+    pub const LONGEST_RETRY_AFTER: i64 = 60 * 60;
 
     /// Whether a call may be made at `now`.
     pub fn allows(&self, now: i64) -> bool {
         now >= self.not_before
     }
 
+    /// When the next call may be made, after a failure.
+    pub fn retry_at(&self) -> Option<i64> {
+        (self.failures > 0).then_some(self.not_before)
+    }
+
     /// Notes a call's outcome.
     pub fn record(&mut self, ok: bool, now: i64) {
+        self.record_with(ok, now, None, 0);
+    }
+
+    /// Notes a call's outcome with the wait the vendor asked for and a jitter
+    /// of `jitter_percent` (0 to 10) of the wait, so that many installs do not
+    /// call at the same moment.
+    pub fn record_with(
+        &mut self,
+        ok: bool,
+        now: i64,
+        retry_after: Option<i64>,
+        jitter_percent: i64,
+    ) {
         if ok {
             *self = Self::default();
-        } else {
-            self.failures = self.failures.saturating_add(1);
-            let wait = (Self::FIRST << (self.failures - 1).min(10)).min(Self::LONGEST);
-            self.not_before = now + wait;
+            return;
         }
+        self.failures = self.failures.saturating_add(1);
+        let backoff = (Self::FIRST << (self.failures - 1).min(10)).min(Self::LONGEST);
+        let asked = retry_after.unwrap_or(0).clamp(0, Self::LONGEST_RETRY_AFTER);
+        let wait = backoff.max(asked);
+        self.not_before = now + wait + wait * jitter_percent.clamp(0, 10) / 100;
     }
+
+    /// Forgets a back-off: the user asked again, or the source was switched.
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// What a source answered that is not a success.
+fn failure(agent: AgentKind, machine: &str, answer: Result<Response, HttpError>) -> AgentUsage {
+    let reason = match answer {
+        Ok(response) if matches!(response.status, 401 | 403) => Reason::NotSignedIn,
+        Ok(response) if response.status == 429 => {
+            Reason::RateLimited(response.retry_after.unwrap_or(0))
+        }
+        Ok(response) => Reason::VendorError(response.status),
+        Err(HttpError::Unreachable) => Reason::Offline,
+        Err(HttpError::Refused) => Reason::Unreachable,
+    };
+    AgentUsage::unknown(agent, machine, reason)
 }
 
 /// Claude's usage, if its source is on.
@@ -357,6 +482,9 @@ pub async fn claude_usage(
         Read::Unavailable => {
             return AgentUsage::unknown(AgentKind::Claude, machine, Reason::Unreachable)
         }
+        Read::Denied => {
+            return AgentUsage::unknown(AgentKind::Claude, machine, Reason::KeychainDenied)
+        }
     };
     let request = Request {
         url: claude::URL,
@@ -370,10 +498,7 @@ pub async fn claude_usage(
         Ok(response) if response.status == 200 => {
             claude::parse_usage(&response.body, machine, credential.plan, now)
         }
-        Ok(response) if matches!(response.status, 401 | 403) => {
-            AgentUsage::unknown(AgentKind::Claude, machine, Reason::NotSignedIn)
-        }
-        _ => AgentUsage::unknown(AgentKind::Claude, machine, Reason::Unreachable),
+        other => failure(AgentKind::Claude, machine, other),
     }
 }
 
@@ -396,6 +521,9 @@ pub async fn opencode_usage(
         Read::Unavailable => {
             return AgentUsage::unknown(AgentKind::Opencode, machine, Reason::Unreachable)
         }
+        Read::Denied => {
+            return AgentUsage::unknown(AgentKind::Opencode, machine, Reason::KeychainDenied)
+        }
     };
     let request = Request {
         url: opencode::URL,
@@ -406,10 +534,7 @@ pub async fn opencode_usage(
         Ok(response) if response.status == 200 => {
             opencode::parse_usage(&response.body, machine, now)
         }
-        Ok(response) if matches!(response.status, 401 | 403) => {
-            AgentUsage::unknown(AgentKind::Opencode, machine, Reason::NotSignedIn)
-        }
-        _ => AgentUsage::unknown(AgentKind::Opencode, machine, Reason::Unreachable),
+        other => failure(AgentKind::Opencode, machine, other),
     }
 }
 
@@ -528,11 +653,18 @@ mod tests {
         };
         for (http, reason) in [
             (ScriptedHttp::new().reply(401, "{}"), Reason::NotSignedIn),
-            (ScriptedHttp::new().reply(429, "{}"), Reason::Unreachable),
-            (ScriptedHttp::new().reply(500, "oops"), Reason::Unreachable),
+            (ScriptedHttp::new().reply(429, "{}"), Reason::RateLimited(0)),
+            (
+                ScriptedHttp::new().reply_after(429, "{}", Some(120)),
+                Reason::RateLimited(120),
+            ),
+            (
+                ScriptedHttp::new().reply(500, "oops"),
+                Reason::VendorError(500),
+            ),
             (
                 ScriptedHttp::new().fail(HttpError::Unreachable),
-                Reason::Unreachable,
+                Reason::Offline,
             ),
             (ScriptedHttp::new().reply(200, "<html>"), Reason::ParseError),
         ] {
@@ -625,6 +757,87 @@ mod tests {
             headers: vec![],
         };
         assert!(!format!("{request:?}").contains("tok-very-secret"));
+    }
+
+    #[test]
+    fn a_retry_after_longer_than_the_backoff_is_honoured_and_capped() {
+        let mut throttle = Throttle::default();
+        throttle.record_with(false, 1000, Some(300), 0);
+        assert_eq!(throttle.retry_at(), Some(1300));
+        assert!(!throttle.allows(1299));
+        throttle.record_with(false, 2000, Some(1_000_000), 0);
+        assert_eq!(
+            throttle.retry_at(),
+            Some(2000 + Throttle::LONGEST_RETRY_AFTER)
+        );
+        throttle.clear();
+        assert_eq!(throttle.retry_at(), None);
+        assert!(throttle.allows(0));
+    }
+
+    #[test]
+    fn the_jitter_only_ever_lengthens_the_wait_by_a_tenth_at_most() {
+        let mut throttle = Throttle::default();
+        throttle.record_with(false, 0, None, 10);
+        assert_eq!(throttle.retry_at(), Some(66));
+        throttle.clear();
+        throttle.record_with(false, 0, None, 99);
+        assert_eq!(throttle.retry_at(), Some(66), "capped at ten percent");
+    }
+
+    #[test]
+    fn curl_output_gives_the_status_the_body_and_the_retry_after() {
+        let out = "HTTP/2 429\r\nretry-after: 90\r\ncontent-type: x\r\n\r\n{\"e\":1}\n429";
+        let r = parse_curl_output(out).unwrap();
+        assert_eq!((r.status, r.retry_after), (429, Some(90)));
+        assert_eq!(r.body, "{\"e\":1}");
+        let interim = "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n\r\nbody\n200";
+        let r = parse_curl_output(interim).unwrap();
+        assert_eq!(
+            (r.status, r.body.as_str(), r.retry_after),
+            (200, "body", None)
+        );
+        assert!(parse_curl_output("\n000").is_none());
+        let date = "HTTP/2 503\r\nRetry-After: Wed, 21 Oct 2026 07:28:00 GMT\r\n\r\n\n503";
+        assert_eq!(parse_curl_output(date).unwrap().retry_after, None);
+    }
+
+    #[test]
+    fn a_refused_keychain_is_told_from_a_missing_item() {
+        assert_eq!(classify_security(Some(0), ""), KeychainOutcome::Found);
+        assert_eq!(classify_security(Some(44), ""), KeychainOutcome::NotFound);
+        assert_eq!(classify_security(Some(128), ""), KeychainOutcome::Denied);
+        assert_eq!(
+            classify_security(Some(1), "User interaction is not allowed."),
+            KeychainOutcome::Denied
+        );
+        assert_eq!(classify_security(Some(1), "boom"), KeychainOutcome::Other);
+    }
+
+    #[tokio::test]
+    async fn a_denied_keychain_is_its_own_reason_and_makes_no_call() {
+        struct Denied;
+        impl Credentials for Denied {
+            fn claude(&self) -> Read<claude::Credential> {
+                Read::Denied
+            }
+            fn opencode_go(&self) -> Read<Secret> {
+                Read::Missing
+            }
+        }
+        let http = ScriptedHttp::new();
+        let policy = NetworkPolicy {
+            claude: true,
+            opencode: false,
+        };
+        let usage = claude_usage(policy, &Denied, &http, "local", 1).await;
+        assert_eq!(
+            usage.state,
+            State::Unknown {
+                reason: Reason::KeychainDenied
+            }
+        );
+        assert_eq!(http.calls().len(), 0);
     }
 
     #[test]

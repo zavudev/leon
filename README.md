@@ -865,15 +865,17 @@ SSH machine's limits are the ones of that machine's account).
 | Agent | Source | What is read | Network |
 | --- | --- | --- | --- |
 | Codex | its own session log | the `rate_limits` of the `token_count` events in `~/.codex/sessions` (five-hour and weekly windows, plan) | none |
-| Claude Code | Anthropic's usage endpoint, **opt-in** | the sign-in token Claude Code already holds, sent to `api.anthropic.com` over HTTPS | on this computer only, off by default |
-| opencode | the Go usage endpoint, **opt-in** | the Go API key opencode stored, sent to `opencode.ai` over HTTPS | on this computer only, off by default |
+| Claude Code | Anthropic's usage endpoint | the sign-in token Claude Code already holds, sent to `api.anthropic.com` over HTTPS | on this computer only, **on by default**; turn it off in Settings ▸ Usage |
+| opencode | the Go usage endpoint | the Go API key opencode stored, sent to `opencode.ai` over HTTPS | on this computer only, **on by default**; turn it off in Settings ▸ Usage |
 
 Claude Code writes its limits nowhere on disk and has no command that prints
 them, so its real numbers need its account's usage endpoint, the one the CLI
-itself calls; that reads a credential and is therefore off until you switch on
-**Read Claude Code's limits from Anthropic** in Settings ▸ Usage. The same holds
-for the opencode Go subscription (opencode's other providers have no limits to
-read). When such a source is on: the credential is read at the moment of the call
+itself calls. That reads a credential, so it is stated here plainly: **it is on
+by default and can be turned off in Settings ▸ Usage** (**Read Claude Code's
+limits from Anthropic**; the same holds for the opencode Go subscription, whose
+other providers have no limits to read). On macOS the first read may ask once for
+access to the keychain; if you deny or dismiss that prompt, Leon does not ask
+again in that session until you choose **Try again**. When such a source is on: the credential is read at the moment of the call
 (the macOS keychain item or `~/.claude/.credentials.json`; opencode's
 `auth.json`), held in memory for the request only, and never stored, logged,
 shown or sent to any host but the vendor's own; the request has a time limit,
@@ -886,7 +888,16 @@ times under a local hash; **Forget stored usage history** in Settings deletes it
 `leon --diagnose usage` runs the real collection for this computer and prints,
 per agent, the source, the windows with percentages and reset times, how fresh
 they are or why they are unknown, and nothing that identifies an account. It
-never calls a network source whose setting is off.
+follows the same settings (on unless turned off); `--network <agent>` and
+`--no-network <agent|all>` override them for one run.
+
+**How often.** Every 60 seconds by default (Settings ▸ Usage, at least 30), only
+while the window is focused: it pauses in the background and reads once on
+return when the last reading is older than the interval. A network source has at
+most one request in flight, adds a little jitter, honours `Retry-After` and
+backs off exponentially after HTTP 429, 5xx or a failure (shown as "rate
+limited, next read in …"), and is skipped when the agent is not installed or not
+signed in. The first read happens after the window is up.
 
 ## The sidebar
 

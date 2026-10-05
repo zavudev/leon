@@ -239,7 +239,9 @@ impl Shell {
         if prefs != self.engine.prefs() {
             self.engine.set_prefs(prefs);
         }
+        let before = self.engine.usage_policy();
         self.engine.set_usage_policy(settings::usage_policy(cx));
+        self.usage_settings_changed(before, cx);
         for session in self.live.all() {
             apply_terminal_prefs(&session.view, cx);
         }

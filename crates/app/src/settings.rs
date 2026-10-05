@@ -561,11 +561,17 @@ pub fn usage_agents(cx: &App) -> Vec<leon_core::AgentKind> {
 pub fn start_engine(cx: &App, engine: &crate::engine::Engine) {
     engine.set_prefs(engine_prefs(cx, engine));
     engine.set_usage_policy(usage_policy(cx));
+    // Usage limits are not read here: the window starts them once it is up
+    // (`Engine::start_usage`), so that the first keychain prompt, if any,
+    // never comes before there is a window to read it against.
     if flag(cx, "import_on_start") {
         engine.submit(crate::engine::Op::Refresh);
-    } else {
-        engine.submit(crate::engine::Op::CollectUsage);
     }
+}
+
+/// How many seconds between two scheduled readings of the usage limits.
+pub fn usage_interval_seconds(cx: &App) -> i64 {
+    int(cx, "usage_refresh_seconds").max(30)
 }
 
 /// Changes the window's settings, saves them and applies what changed.

@@ -141,12 +141,20 @@ above: the engine writes the store and the UI reads it.
 * **Sources, least intrusive first.** Local files the agent already writes
   (Codex); the agent's own command line (none gives limits without launching a
   session, so none is used); the vendor's usage endpoint with the agent's own
-  credential (Claude Code, the opencode Go subscription), **opt-in per agent and
-  off by default**. Those run on this computer only and through the `Http` trait
+  credential (Claude Code, the opencode Go subscription), **on by default, off
+  per agent in Settings**. Those run on this computer only and through the `Http` trait
   (`CurlHttp`: the system `curl`, the header on standard input so the token is
   never in a process list, HTTPS to one allowed host, no redirects, a time limit);
   a disabled source reads no credential and makes no call (tested with a
-  scripted client that counts). The credential is a `Secret` (no `Display`, no
+  scripted client that counts). The engine holds the live `NetworkPolicy`
+  (`Engine::set_usage_policy`, applied from the settings on every change, which
+  also asks for a read at once, `Op::CollectUsageNow`), at most one collection
+  at a time (so one request per source), a `Throttle` per source (exponential
+  back-off with jitter, `Retry-After` honoured, cleared when the source is
+  switched or the user chooses Try again), and a keychain refusal remembered for
+  the session. Nothing is read until the window is up (`defer_usage` /
+  `start_usage`); the schedule (`agent_usage::due`) reads every
+  `usage_refresh_seconds` (60, at least 30) in a focused window only. The credential is a `Secret` (no `Display`, no
   `Serialize`, `Debug` prints `***`), read at the moment of the call, dropped with
   the request, and a failed call backs off (`Throttle`) and is shown as unknown,
   never as a number.
@@ -171,8 +179,9 @@ above: the engine writes the store and the UI reads it.
   the exact text of what is read and where it is sent) and "Forget stored usage
   history".
 * **`leon --diagnose usage`** runs the real collection for this computer and
-  prints no account, e-mail, token or path; a network source runs only with
-  `--network <agent>`.
+  prints no account, e-mail, token or path; its network sources follow the
+  settings (on by default), overridden by `--network <agent>` and
+  `--no-network <agent|all>`.
 
 ## Project logos, the filter and the activity dot
 

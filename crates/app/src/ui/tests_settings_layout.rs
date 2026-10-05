@@ -94,12 +94,18 @@ fn every_option_of_every_section_fits_its_row_at_every_width_and_size(cx: &mut T
                     let label = get("label", cx);
                     let desc = get("desc", cx);
                     let control = get("control", cx);
-                    assert!(contains(&row, &label), "{key}: the row holds its label ({at})");
+                    assert!(
+                        contains(&row, &label),
+                        "{key}: the row holds its label ({at})"
+                    );
                     assert!(
                         contains(&row, &desc),
                         "{key}: the row holds its whole description ({at}): row {row:?}, description {desc:?}"
                     );
-                    assert!(contains(&row, &text), "{key}: the row holds its text ({at})");
+                    assert!(
+                        contains(&row, &text),
+                        "{key}: the row holds its text ({at})"
+                    );
                     assert!(
                         contains(&row, &control),
                         "{key}: the row holds its controls ({at})"
@@ -170,12 +176,20 @@ fn the_arrows_bring_a_tall_row_fully_into_view_going_down_and_up(cx: &mut TestAp
     for def in defs.iter().skip(1) {
         h.press("down", cx);
         let (ok, row, list) = visible(&h, def.key, cx);
-        assert!(ok, "{} is fully in view going down: {row:?} in {list:?}", def.key);
+        assert!(
+            ok,
+            "{} is fully in view going down: {row:?} in {list:?}",
+            def.key
+        );
     }
     for def in defs.iter().rev().skip(1) {
         h.press("up", cx);
         let (ok, row, list) = visible(&h, def.key, cx);
-        assert!(ok, "{} is fully in view going up: {row:?} in {list:?}", def.key);
+        assert!(
+            ok,
+            "{} is fully in view going up: {row:?} in {list:?}",
+            def.key
+        );
     }
     crate::theme::set_scale(100);
 }
@@ -195,9 +209,17 @@ fn a_search_result_with_a_tall_description_has_the_same_layout(cx: &mut TestAppC
     for def in defs {
         let row = rect(&h, format!("settings-row-{}", def.key), cx).unwrap();
         let desc = rect(&h, format!("settings-desc-{}", def.key), cx).unwrap();
-        assert!(contains(&row, &desc), "{}: the row holds its description", def.key);
+        assert!(
+            contains(&row, &desc),
+            "{}: the row holds its description",
+            def.key
+        );
         if let Some(above) = previous {
-            assert!(bottom(&above) <= top(&row) + EPS, "{}: rows overlap", def.key);
+            assert!(
+                bottom(&above) <= top(&row) + EPS,
+                "{}: rows overlap",
+                def.key
+            );
         }
         previous = Some(row);
     }

@@ -85,8 +85,12 @@ fn main() {
         Ok(cli::Command::DiagnoseElsewhere) => {
             std::process::exit(diagnose::run_sessions_elsewhere());
         }
-        Ok(cli::Command::DiagnoseUsage { network }) => {
-            std::process::exit(diagnose::run_usage(&network));
+        Ok(cli::Command::DiagnoseUsage {
+            network,
+            no_network,
+        }) => {
+            let file = product::data_dir().join(settings::FILE_NAME);
+            std::process::exit(diagnose::run_usage(&network, &no_network, &file));
         }
         Ok(cli::Command::DiagnoseConnect { destination }) => {
             std::process::exit(diagnose::run_connect(&destination));
@@ -178,6 +182,9 @@ fn main() {
         Arc::new(leon_usage::network::CurlHttp),
         Arc::new(|| chrono::Utc::now().timestamp()),
     );
+    // Nothing is read (and no keychain prompt can appear) before the window
+    // is up: the window starts the reading.
+    engine.defer_usage();
     // Sessions running in another terminal: processes are listed through the
     // same runner as every other command.
     engine.set_process_scanner(runner, Some(std::process::id()));

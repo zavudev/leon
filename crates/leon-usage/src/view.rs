@@ -106,7 +106,7 @@ impl AgentView {
     /// `from Codex's own session log, 3 min ago`, or the reason's sentence.
     pub fn provenance(&self) -> String {
         match (&self.body, self.source, self.age) {
-            (Body::Unknown(reason), ..) => reason.sentence().to_owned(),
+            (Body::Unknown(reason), ..) => reason.text(),
             (_, Some(source), Some(age)) => {
                 format!("from {}, {}", source.describe(self.agent), ago(age))
             }

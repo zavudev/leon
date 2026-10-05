@@ -947,18 +947,18 @@ pub const SETTINGS: &[Def] = &[
         D::Bool(true),
     ),
     def(
-        "usage_interval",
+        "usage_refresh_seconds",
         S::Usage,
         "Refresh interval",
-        "How often, in minutes, the limits are read again while the window is focused.",
-        "poll minutes limits refresh",
+        "How often, in seconds, the limits are read again while the window is focused; it pauses in the background and reads once when you return. Network sources back off by themselves when the service asks for it.",
+        "poll seconds minutes limits refresh",
         K::Number {
-            min: 1,
-            max: 120,
-            step: 1,
-            unit: "min",
+            min: 30,
+            max: 3600,
+            step: 30,
+            unit: "s",
         },
-        D::Int(5),
+        D::Int(60),
     ),
     def(
         "usage_warn",
@@ -1001,19 +1001,19 @@ pub const SETTINGS: &[Def] = &[
         "usage_claude_network",
         S::Usage,
         "Read Claude Code's limits from Anthropic",
-        "When on, Leon reads the sign-in token Claude Code already holds (the macOS keychain, or ~/.claude/.credentials.json), sends it over HTTPS to api.anthropic.com only to ask for your usage, and never stores, logs or shows it. Off by default; macOS may ask for permission the first time.",
+        "Leon reads the sign-in token Claude Code already holds (the macOS keychain, or ~/.claude/.credentials.json) and sends it over HTTPS to api.anthropic.com only to ask for your usage; it is never stored, logged or shown. On by default; macOS may ask once for keychain access.",
         "network anthropic credential token oauth privacy limits",
         K::Toggle,
-        D::Bool(false),
+        D::Bool(true),
     ),
     def(
         "usage_opencode_network",
         S::Usage,
         "Read the opencode Go limits from opencode",
-        "For an opencode Go subscription: when on, Leon reads the API key opencode stored for it (~/.local/share/opencode/auth.json) and sends it over HTTPS to opencode.ai only to ask for the usage; it is never stored, logged or shown. Off by default.",
+        "For an opencode Go subscription, Leon reads the API key opencode stored (~/.local/share/opencode/auth.json) and sends it over HTTPS to opencode.ai only to ask for the usage; it is never stored, logged or shown. On by default.",
         "network go credential key privacy limits",
         K::Toggle,
-        D::Bool(false),
+        D::Bool(true),
     ),
     def(
         "usage_forget_history",
@@ -1500,6 +1500,31 @@ pub fn render_docs() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_usage_network_sources_are_on_by_default_and_the_refresh_is_a_minute() {
+        let store = Store::new();
+        assert_eq!(store.value("usage_claude_network"), Value::Bool(true));
+        assert_eq!(store.value("usage_opencode_network"), Value::Bool(true));
+        assert_eq!(store.value("usage_refresh_seconds"), Value::Int(60));
+        let def = find("usage_refresh_seconds").unwrap();
+        assert!(def.parse_input("30").is_ok(), "30 s is the least");
+        assert!(def.parse_input("29").is_err());
+        let both = ["usage_claude_network", "usage_opencode_network"];
+        for key in both {
+            let text = find(key).unwrap().description;
+            assert!(text.contains("On by default"), "{key}");
+            assert!(text.contains("never stored"), "{key}");
+            assert!(
+                text.matches(". ").count() <= 1,
+                "two sentences at most: {text}"
+            );
+        }
+        assert!(find("usage_claude_network")
+            .unwrap()
+            .description
+            .contains("macOS may ask once"));
+    }
+
     use super::*;
 
     #[test]

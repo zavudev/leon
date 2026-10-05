@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+use crate::engine::SourceStatus;
 use leon_core::{AgentKind, MachineId, Store, UsagePoint};
 use leon_usage::{series_key, AgentUsage, MachineUsage, Reason, State, Thresholds};
 use leon_usage::{view, Body, Level};
@@ -32,11 +33,130 @@ pub fn merge(previous: Option<AgentUsage>, new: AgentUsage) -> AgentUsage {
                 },
             ),
             State::Unknown {
-                reason: Reason::Unreachable | Reason::NoData,
+                reason:
+                    Reason::Unreachable
+                    | Reason::NoData
+                    | Reason::Offline
+                    | Reason::VendorError(_)
+                    | Reason::RateLimited(_)
+                    | Reason::KeychainDenied,
             },
         ) => old,
         _ => new,
     }
+}
+
+/// How often the schedule looks at the clock, in seconds. A read happens only
+/// when [`due`] says so.
+pub const TICK_SECONDS: u64 = 5;
+
+/// Whether a scheduled read is due: only in a focused window, and when the last
+/// one is at least `interval` seconds (plus this install's `jitter`) old, or
+/// there was none. Coming back to the window asks the same question, so a
+/// reading older than the interval is made once on return and none was made
+/// while away.
+pub fn due(last: Option<i64>, now: i64, interval: i64, jitter: i64, focused: bool) -> bool {
+    focused && last.is_none_or(|last| now - last >= interval + jitter)
+}
+
+/// A jitter for the next wait, in seconds: from nothing to a tenth of the
+/// interval, from `entropy`, so that many installs do not read at the same
+/// moment.
+pub fn jitter_seconds(interval: i64, entropy: u32) -> i64 {
+    interval / 10 * i64::from(entropy % 11) / 10
+}
+
+/// What the engine knows of each agent's last read.
+pub type Statuses = HashMap<AgentKind, SourceStatus>;
+
+/// The statuses of every agent now.
+pub fn statuses(engine: &crate::engine::Engine) -> Statuses {
+    AgentKind::ALL
+        .into_iter()
+        .map(|agent| (agent, engine.usage_status(agent)))
+        .collect()
+}
+
+/// What a row says when nothing is known of an agent: why, and what happens
+/// next. A read under way is "Reading…" (with the keychain's heads-up for
+/// Claude Code on macOS), not what the last read said.
+pub fn unknown_text(
+    agent: AgentKind,
+    reason: Reason,
+    status: &SourceStatus,
+    now: i64,
+    next_read: Option<i64>,
+    mac: bool,
+) -> String {
+    let claude = agent == AgentKind::Claude;
+    if status.reading {
+        return if claude && mac {
+            "Reading… macOS may ask for permission to read Claude Code's sign-in.".to_owned()
+        } else {
+            "Reading…".to_owned()
+        };
+    }
+    if reason == Reason::KeychainDenied || status.refused {
+        return if mac {
+            "macOS did not let Leon read Claude Code's sign-in: the permission was denied or dismissed. Leon will not ask again this session; choose Try again to be asked."
+                .to_owned()
+        } else {
+            "The sign-in could not be read. Leon will not try again by itself; choose Try again."
+                .to_owned()
+        };
+    }
+    if reason == Reason::NotSignedIn && claude {
+        return "Not signed in to Claude Code. Sign in there, then choose Try again.".to_owned();
+    }
+    let base = match reason {
+        Reason::RateLimited(_) => "Rate limited: the service asked for fewer calls.".to_owned(),
+        Reason::ParseError => "Unexpected response from the service.".to_owned(),
+        other => other.text(),
+    };
+    if !reason.is_failure() {
+        return base;
+    }
+    format!("{base} {}", retry_clause(status, now, next_read))
+}
+
+/// "Next read in 2m." or, when nothing is scheduled, how to try again.
+pub fn retry_clause(status: &SourceStatus, now: i64, next_read: Option<i64>) -> String {
+    let at = status
+        .retry_at
+        .filter(|at| *at > now)
+        .or(next_read.filter(|at| *at > now));
+    match at {
+        Some(at) => format!(
+            "Next read in {}; or choose Try again.",
+            leon_usage::compact_duration(at - now)
+        ),
+        None => "Choose Try again to read now.".to_owned(),
+    }
+}
+
+/// What a row with numbers says when the last read failed.
+pub fn failure_note(
+    agent: AgentKind,
+    status: &SourceStatus,
+    now: i64,
+    next_read: Option<i64>,
+    mac: bool,
+) -> Option<String> {
+    let reason = status.failed?;
+    Some(format!(
+        "The last read failed. {}",
+        unknown_text(
+            agent,
+            reason,
+            &SourceStatus {
+                reading: false,
+                ..*status
+            },
+            now,
+            next_read,
+            mac
+        )
+    ))
 }
 
 /// The observations of one agent's account: the window key and the point.
@@ -126,11 +246,20 @@ impl Board {
     pub fn load(store: &Store) -> Self {
         let rows = store.usage_readings().unwrap_or_default();
         Self {
-            collected_at: rows.iter().map(|row| row.collected_at).max(),
             readings: rows
-                .into_iter()
+                .iter()
                 .filter_map(|row| serde_json::from_str::<AgentUsage>(&row.payload).ok())
                 .collect(),
+            // The last time numbers were read: a row that only says "source
+            // off", "not installed" or a failure is not a reading.
+            collected_at: rows
+                .iter()
+                .filter(|row| {
+                    serde_json::from_str::<AgentUsage>(&row.payload)
+                        .is_ok_and(|usage| matches!(usage.state, State::Known { .. }))
+                })
+                .map(|row| row.collected_at)
+                .max(),
         }
     }
 
@@ -264,6 +393,177 @@ mod tests {
         let old = known(AgentKind::Codex, "box", 40.0, 3600);
         let new = AgentUsage::unknown(AgentKind::Codex, "box", Reason::Unreachable);
         assert_eq!(merge(Some(old.clone()), new), old);
+    }
+
+    #[test]
+    fn a_failed_network_read_keeps_the_numbers_and_a_switch_or_sign_out_replaces_them() {
+        let old = known(AgentKind::Claude, "box", 40.0, 3600);
+        for reason in [
+            Reason::Offline,
+            Reason::VendorError(500),
+            Reason::RateLimited(60),
+            Reason::KeychainDenied,
+        ] {
+            let new = AgentUsage::unknown(AgentKind::Claude, "box", reason);
+            assert_eq!(merge(Some(old.clone()), new), old, "{reason:?}");
+        }
+        let signed_out = AgentUsage::unknown(AgentKind::Claude, "box", Reason::NotSignedIn);
+        assert_eq!(merge(Some(old), signed_out.clone()), signed_out);
+    }
+
+    #[test]
+    fn the_time_of_the_last_read_ignores_rows_that_only_say_why_nothing_was_read() {
+        let store = Store::open_in_memory().unwrap();
+        let local = MachineId::local();
+        let off = AgentUsage::unknown(AgentKind::Claude, "local", Reason::SourceDisabled);
+        store
+            .put_usage_reading(
+                &local,
+                AgentKind::Claude,
+                &serde_json::to_string(&off).unwrap(),
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(Board::load(&store).collected_at(), None);
+        let codex = known(AgentKind::Codex, "local", 12.0, 100);
+        store
+            .put_usage_reading(
+                &local,
+                AgentKind::Codex,
+                &serde_json::to_string(&codex).unwrap(),
+                NOW - 90,
+            )
+            .unwrap();
+        assert_eq!(Board::load(&store).collected_at(), Some(NOW - 90));
+    }
+
+    #[test]
+    fn the_schedule_is_one_read_a_minute_in_a_focused_window_and_none_in_the_background() {
+        let interval = 60;
+        assert!(due(None, NOW, interval, 0, true), "the first read");
+        assert!(!due(None, NOW, interval, 0, false), "not while away");
+        // A clock ticking every TICK_SECONDS for ten minutes, focused: one
+        // read a minute.
+        let mut last = None;
+        let mut reads = 0;
+        for tick in 0..(600 / TICK_SECONDS as i64) {
+            let now = NOW + tick * TICK_SECONDS as i64;
+            if due(last, now, interval, 0, true) {
+                reads += 1;
+                last = Some(now);
+            }
+        }
+        assert_eq!(reads, 10);
+        // Ten minutes in the background, then back: one read at once, not ten.
+        let mut reads = 0;
+        let mut last = Some(NOW);
+        for tick in 0..(600 / TICK_SECONDS as i64) {
+            let now = NOW + tick * TICK_SECONDS as i64;
+            if due(last, now, interval, 0, false) {
+                reads += 1;
+                last = Some(now);
+            }
+        }
+        assert_eq!(reads, 0, "paused in the background");
+        assert!(due(last, NOW + 600, interval, 0, true), "once on return");
+        assert!(
+            !due(Some(NOW + 580), NOW + 600, interval, 0, true),
+            "a fresh reading is not repeated"
+        );
+    }
+
+    #[test]
+    fn the_jitter_is_a_tenth_of_the_interval_at_most() {
+        assert_eq!(jitter_seconds(60, 0), 0);
+        assert_eq!(jitter_seconds(60, 10), 6);
+        assert_eq!(jitter_seconds(60, 1234), jitter_seconds(60, 1234 % 11));
+        assert!((0..=6).contains(&jitter_seconds(60, 7)));
+        assert!(
+            !due(Some(NOW), NOW + 62, 60, 6, true),
+            "the jitter lengthens the wait"
+        );
+    }
+
+    fn status() -> SourceStatus {
+        SourceStatus::default()
+    }
+
+    #[test]
+    fn a_read_under_way_says_reading_and_warns_of_the_keychain_prompt_on_a_mac() {
+        let reading = SourceStatus {
+            reading: true,
+            ..status()
+        };
+        let on_mac = unknown_text(
+            AgentKind::Claude,
+            Reason::SourceDisabled,
+            &reading,
+            NOW,
+            None,
+            true,
+        );
+        assert!(on_mac.starts_with("Reading…"), "{on_mac}");
+        assert!(on_mac.contains("macOS may ask for permission to read Claude Code's sign-in"));
+        let elsewhere = unknown_text(
+            AgentKind::Claude,
+            Reason::SourceDisabled,
+            &reading,
+            NOW,
+            None,
+            false,
+        );
+        assert_eq!(elsewhere, "Reading…");
+        let opencode = unknown_text(
+            AgentKind::Opencode,
+            Reason::SourceDisabled,
+            &reading,
+            NOW,
+            None,
+            true,
+        );
+        assert_eq!(opencode, "Reading…");
+    }
+
+    #[test]
+    fn each_failure_says_its_reason_and_when_the_next_read_is() {
+        let retry = SourceStatus {
+            retry_at: Some(NOW + 120),
+            ..status()
+        };
+        let text = |reason, status: &SourceStatus, next| {
+            unknown_text(AgentKind::Claude, reason, status, NOW, next, true)
+        };
+        assert!(text(Reason::Offline, &retry, None).contains("Offline"));
+        assert!(text(Reason::Offline, &retry, None).contains("Next read in 2m"));
+        assert!(text(Reason::VendorError(503), &retry, None).contains("HTTP 503"));
+        assert!(text(Reason::ParseError, &retry, None).contains("Unexpected response"));
+        let limited = text(Reason::RateLimited(120), &retry, None);
+        assert!(limited.starts_with("Rate limited"), "{limited}");
+        assert!(limited.contains("Next read in 2m"), "{limited}");
+        assert!(text(Reason::Offline, &status(), Some(NOW + 150)).contains("Next read in 2m"));
+        assert!(text(Reason::Offline, &status(), None).contains("Try again"));
+        assert!(text(Reason::NotSignedIn, &status(), None).contains("Not signed in to Claude Code"));
+        let denied = text(Reason::KeychainDenied, &status(), None);
+        assert!(
+            denied.contains("denied or dismissed") && denied.contains("Try again"),
+            "{denied}"
+        );
+        assert_eq!(
+            text(Reason::SourceDisabled, &status(), None),
+            Reason::SourceDisabled.sentence()
+        );
+    }
+
+    #[test]
+    fn numbers_with_a_failed_read_behind_them_say_so() {
+        let failed = SourceStatus {
+            failed: Some(Reason::Offline),
+            retry_at: Some(NOW + 60),
+            ..status()
+        };
+        let note = failure_note(AgentKind::Claude, &failed, NOW, None, true).unwrap();
+        assert!(note.starts_with("The last read failed."), "{note}");
+        assert!(failure_note(AgentKind::Claude, &status(), NOW, None, true).is_none());
     }
 
     #[test]

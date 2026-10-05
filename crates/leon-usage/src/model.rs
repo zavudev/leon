@@ -131,6 +131,19 @@ pub enum Reason {
     Unreachable,
     /// The agent has not written any limit yet.
     NoData,
+    /// A read is under way. Never stored: the window shows it while a
+    /// collection runs, instead of what the last one said.
+    Reading,
+    /// The computer is offline, or the vendor did not answer in time.
+    Offline,
+    /// The vendor answered with an error; this is its HTTP status.
+    VendorError(u16),
+    /// The vendor asked for fewer calls (HTTP 429); this is the wait it named
+    /// in seconds, 0 when it named none.
+    RateLimited(u32),
+    /// The system refused to hand over the agent's sign-in (a keychain prompt
+    /// that was denied or dismissed).
+    KeychainDenied,
 }
 
 impl Reason {
@@ -145,7 +158,43 @@ impl Reason {
             Reason::ParseError => "The answer was not understood.",
             Reason::Unreachable => "The source could not be reached.",
             Reason::NoData => "No limit has been recorded yet.",
+            Reason::Reading => "Reading the limits now.",
+            Reason::Offline => "Offline: the service did not answer.",
+            Reason::VendorError(_) => "The service answered with an error.",
+            Reason::RateLimited(_) => "Rate limited: the service asked for fewer calls.",
+            Reason::KeychainDenied => "The sign-in could not be read: access was denied.",
         }
+    }
+
+    /// The sentence with what it knows, for a line of its own: the vendor's
+    /// status is part of it.
+    pub fn text(self) -> String {
+        match self {
+            Reason::VendorError(status) => {
+                format!("The service answered with an error (HTTP {status}).")
+            }
+            Reason::RateLimited(0) => "Rate limited: the service asked for fewer calls.".to_owned(),
+            Reason::RateLimited(seconds) => format!(
+                "Rate limited: the service asked to wait {}.",
+                crate::present::compact_duration(i64::from(seconds))
+            ),
+            other => other.sentence().to_owned(),
+        }
+    }
+
+    /// Whether this is a source that failed (as opposed to one that is off,
+    /// absent or not applicable): what backs a source off and what a later
+    /// reading may retry.
+    pub fn is_failure(self) -> bool {
+        matches!(
+            self,
+            Reason::Unreachable
+                | Reason::ParseError
+                | Reason::Offline
+                | Reason::VendorError(_)
+                | Reason::RateLimited(_)
+                | Reason::KeychainDenied
+        )
     }
 
     /// Two or three words for the bar.
@@ -159,6 +208,11 @@ impl Reason {
             Reason::ParseError => "unreadable",
             Reason::Unreachable => "unreachable",
             Reason::NoData => "no data yet",
+            Reason::Reading => "reading…",
+            Reason::Offline => "offline",
+            Reason::VendorError(_) => "error",
+            Reason::RateLimited(_) => "rate limited",
+            Reason::KeychainDenied => "access denied",
         }
     }
 }

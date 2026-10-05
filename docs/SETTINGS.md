@@ -117,12 +117,12 @@ How much of each agent's limits is left, and where the numbers come from.
 | Show Claude Code | `usage_claude` | on, off | `on` | Show Claude Code's limits in the bar and the usage view. |
 | Show Codex | `usage_codex` | on, off | `on` | Show Codex's limits in the bar and the usage view. |
 | Show opencode | `usage_opencode` | on, off | `on` | Show opencode's limits in the bar and the usage view. |
-| Refresh interval | `usage_interval` | 1 to 120min | `5` | How often, in minutes, the limits are read again while the window is focused. |
+| Refresh interval | `usage_refresh_seconds` | 30 to 3600s | `60` | How often, in seconds, the limits are read again while the window is focused; it pauses in the background and reads once when you return. Network sources back off by themselves when the service asks for it. |
 | Warn from | `usage_warn` | 10 to 99% | `75` | From this percentage a limit is shown as high, with a marker as well as a colour. |
 | Critical from | `usage_critical` | 11 to 100% | `90` | From this percentage a limit is shown as near its end, and starting a session says so first. |
 | Say so before starting a session | `usage_warn_before_session` | on, off | `on` | When an agent's limit is nearly used up, a line says so, with when it resets, before the session starts. It never blocks. |
-| Read Claude Code's limits from Anthropic | `usage_claude_network` | on, off | `off` | When on, Leon reads the sign-in token Claude Code already holds (the macOS keychain, or ~/.claude/.credentials.json), sends it over HTTPS to api.anthropic.com only to ask for your usage, and never stores, logs or shows it. Off by default; macOS may ask for permission the first time. |
-| Read the opencode Go limits from opencode | `usage_opencode_network` | on, off | `off` | For an opencode Go subscription: when on, Leon reads the API key opencode stored for it (~/.local/share/opencode/auth.json) and sends it over HTTPS to opencode.ai only to ask for the usage; it is never stored, logged or shown. Off by default. |
+| Read Claude Code's limits from Anthropic | `usage_claude_network` | on, off | `on` | Leon reads the sign-in token Claude Code already holds (the macOS keychain, or ~/.claude/.credentials.json) and sends it over HTTPS to api.anthropic.com only to ask for your usage; it is never stored, logged or shown. On by default; macOS may ask once for keychain access. |
+| Read the opencode Go limits from opencode | `usage_opencode_network` | on, off | `on` | For an opencode Go subscription, Leon reads the API key opencode stored (~/.local/share/opencode/auth.json) and sends it over HTTPS to opencode.ai only to ask for the usage; it is never stored, logged or shown. On by default. |
 | Forget stored usage history |  | button |  | Delete the percentages and times kept for the trend lines and the burn-rate estimate. The latest readings stay. |
 
 ## Sidebar & window

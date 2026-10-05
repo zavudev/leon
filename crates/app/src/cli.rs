@@ -19,11 +19,13 @@
 //! `--diagnose sessions-elsewhere` runs the real detection of sessions that
 //! run in another terminal on this computer and prints, for each agent
 //! process, what it found (see `diagnose.rs`).
-//! `--diagnose usage [--network <claude|opencode>]...` runs the real collection
-//! of the agents' usage limits for this computer and prints, per agent, the
-//! source, the windows, how fresh they are or why they are unknown, and nothing
-//! that identifies an account. A source that needs a credential and a network
-//! call runs only when named with `--network`.
+//! `--diagnose usage [--network <claude|opencode>]... [--no-network <claude|opencode|all>]...`
+//! runs the real collection of the agents' usage limits for this computer and
+//! prints, per agent, the source, the windows, how fresh they are or why they
+//! are unknown, and nothing that identifies an account. The sources that need
+//! a credential and a network call follow the settings (on unless Settings,
+//! Usage turned them off); `--network` and `--no-network` override them for
+//! this run.
 
 use crate::product;
 use crate::settings::AppearanceChoice;
@@ -59,8 +61,10 @@ pub enum Command {
     DiagnoseElsewhere,
     /// Collect the usage limits of this computer and print them.
     DiagnoseUsage {
-        /// The network sources switched on for this run.
+        /// The network sources switched on for this run, whatever the settings say.
         network: Vec<AgentKind>,
+        /// The network sources switched off for this run.
+        no_network: Vec<AgentKind>,
     },
     /// Run the checklist of "Connect a machine" against a destination and
     /// print each check with its diagnosis.
@@ -147,6 +151,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
     let mut elsewhere = false;
     let mut usage = false;
     let mut network: Vec<AgentKind> = Vec::new();
+    let mut no_network: Vec<AgentKind> = Vec::new();
     let mut agent = AgentKind::Claude;
     let mut dialog_timeout = 4u64;
     let mut args = args.into_iter();
@@ -221,6 +226,27 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                     }
                 }
             }
+            "--no-network" => {
+                let text = value("claude, opencode or all")?;
+                if !usage {
+                    return Err("--no-network only goes with --diagnose usage.".to_owned());
+                }
+                match text.as_str() {
+                    "all" => {
+                        no_network.extend([AgentKind::Claude, AgentKind::Opencode]);
+                    }
+                    _ => match AgentKind::parse(&text) {
+                        Some(agent @ (AgentKind::Claude | AgentKind::Opencode)) => {
+                            no_network.push(agent)
+                        }
+                        _ => {
+                            return Err(format!(
+                                "{text:?} has no network source: use claude, opencode or all."
+                            ))
+                        }
+                    },
+                }
+            }
             "--agent" => {
                 let text = value("claude, codex or opencode")?;
                 if !resume {
@@ -274,7 +300,10 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
         }
     }
     if usage {
-        return Ok(Command::DiagnoseUsage { network });
+        return Ok(Command::DiagnoseUsage {
+            network,
+            no_network,
+        });
     }
     if elsewhere {
         return Ok(Command::DiagnoseElsewhere);
@@ -316,10 +345,13 @@ mod tests {
     }
 
     #[test]
-    fn diagnose_usage_leaves_every_network_source_off_unless_named() {
+    fn diagnose_usage_follows_the_settings_and_takes_overrides() {
         assert_eq!(
             parsed(&["--diagnose", "usage"]),
-            Ok(Command::DiagnoseUsage { network: vec![] })
+            Ok(Command::DiagnoseUsage {
+                network: vec![],
+                no_network: vec![]
+            })
         );
         assert_eq!(
             parsed(&[
@@ -327,14 +359,23 @@ mod tests {
                 "usage",
                 "--network",
                 "claude",
-                "--network=opencode"
+                "--no-network=opencode"
             ]),
             Ok(Command::DiagnoseUsage {
-                network: vec![AgentKind::Claude, AgentKind::Opencode]
+                network: vec![AgentKind::Claude],
+                no_network: vec![AgentKind::Opencode]
+            })
+        );
+        assert_eq!(
+            parsed(&["--diagnose", "usage", "--no-network", "all"]),
+            Ok(Command::DiagnoseUsage {
+                network: vec![],
+                no_network: vec![AgentKind::Claude, AgentKind::Opencode]
             })
         );
         assert!(parsed(&["--diagnose", "usage", "--network", "codex"]).is_err());
         assert!(parsed(&["--network", "claude"]).is_err());
+        assert!(parsed(&["--no-network", "all"]).is_err());
     }
 
     #[test]

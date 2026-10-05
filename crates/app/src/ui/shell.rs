@@ -498,6 +498,9 @@ impl Shell {
                 this.window_active = window.is_window_active();
                 if window.is_window_active() {
                     this.scan_elsewhere_now(true, cx);
+                    // Back in front: a reading older than the interval is
+                    // made once.
+                    this.usage_tick(cx);
                 }
                 cx.notify();
             }),

@@ -27,7 +27,8 @@ use leon_usage::{
 
 use super::shell::{Overlay, Shell};
 use super::widgets::{key_cap, mono, section_label};
-use crate::agent_usage::{Board, Scope};
+use crate::agent_usage::{failure_note, unknown_text, Board, Scope, Statuses};
+use crate::engine::SourceStatus;
 use crate::engine::{Op, StatusKind};
 use crate::icons::{agent_icon, icon, IconName};
 use crate::keys::{self, Command};
@@ -98,6 +99,8 @@ pub struct BarItem {
     pub known: bool,
     /// What hovering says: every window, the source and how fresh.
     pub tip: String,
+    /// Why nothing is known, when nothing is.
+    pub reason: Option<leon_usage::Reason>,
 }
 
 /// What the bar shows.
@@ -158,7 +161,8 @@ pub fn bar_model(
                 level: Level::Normal,
                 percent: 0.0,
                 known: false,
-                tip: format!("{name} on {machine_name}\n{}", reason.sentence()),
+                tip: format!("{name} on {machine_name}\n{}", reason.text()),
+                reason: Some(*reason),
             },
             Body::Ready { primary, meters } => {
                 let mut tip = format!("{name} on {machine_name}");
@@ -185,6 +189,7 @@ pub fn bar_model(
                     percent: primary.percent as f32,
                     known: true,
                     tip,
+                    reason: None,
                 }
             }
         };
@@ -247,6 +252,14 @@ pub struct UsageRow {
     pub machine_name: String,
     /// Its windows.
     pub windows: Vec<WindowRow>,
+    /// What to say instead of the reason's sentence, or besides the numbers:
+    /// a read under way, why the last one failed and when the next is.
+    pub note: Option<String>,
+    /// The setting that turns this agent's network source on, when it is the
+    /// only thing missing.
+    pub turn_on: Option<&'static str>,
+    /// Whether choosing "Try again" may help.
+    pub try_again: bool,
 }
 
 /// What the view lists for a scope.
@@ -283,9 +296,130 @@ pub fn usage_rows(
                 machine_name: names(&reading.machine),
                 view: v,
                 windows,
+                note: None,
+                turn_on: None,
+                try_again: false,
             }
         })
         .collect()
+}
+
+/// What the engine and the clock add to a reading: see [`annotate_rows`].
+pub struct Note<'a> {
+    /// What the engine knows of each agent's last read.
+    pub statuses: &'a Statuses,
+    /// The time, in Unix seconds.
+    pub now: i64,
+    /// When the schedule reads next.
+    pub next_read: Option<i64>,
+    /// Whether this is macOS (the keychain's prompt).
+    pub mac: bool,
+    /// The id of this computer: only its readings have a network source.
+    pub local: &'a str,
+}
+
+impl Note<'_> {
+    fn status(&self, agent: AgentKind) -> SourceStatus {
+        self.statuses.get(&agent).copied().unwrap_or_default()
+    }
+}
+
+/// The setting that switches an agent's network source.
+fn source_setting(agent: AgentKind) -> Option<&'static str> {
+    match agent {
+        AgentKind::Claude => Some("usage_claude_network"),
+        AgentKind::Opencode => Some("usage_opencode_network"),
+        AgentKind::Codex => None,
+    }
+}
+
+/// Says what the last read of each network source came to: "Reading…" while
+/// one is under way (not what the last one said), the reason and the time of
+/// the next read after a failure, the setting that turns a source on.
+pub fn annotate_rows(rows: &mut [UsageRow], note: &Note<'_>) {
+    for row in rows {
+        if row.view.machine != note.local {
+            continue;
+        }
+        let agent = row.view.agent;
+        let status = note.status(agent);
+        match &row.view.body {
+            Body::Unknown(reason) => {
+                let reason = *reason;
+                if matches!(
+                    reason,
+                    leon_usage::Reason::NotInstalled | leon_usage::Reason::NotSupported
+                ) {
+                    continue;
+                }
+                if status.reading {
+                    row.note = Some(unknown_text(
+                        agent,
+                        reason,
+                        &status,
+                        note.now,
+                        note.next_read,
+                        note.mac,
+                    ));
+                } else if reason == leon_usage::Reason::SourceDisabled {
+                    row.turn_on = source_setting(agent);
+                } else if reason.is_failure()
+                    || status.refused
+                    || (reason == leon_usage::Reason::NotSignedIn && agent == AgentKind::Claude)
+                {
+                    row.note = Some(unknown_text(
+                        agent,
+                        reason,
+                        &status,
+                        note.now,
+                        note.next_read,
+                        note.mac,
+                    ));
+                    row.try_again = true;
+                }
+            }
+            Body::Ready { .. } => {
+                if !status.reading {
+                    row.note = failure_note(agent, &status, note.now, note.next_read, note.mac);
+                    row.try_again = row.note.is_some();
+                }
+            }
+        }
+    }
+}
+
+/// The same for the footer's meters: an agent with nothing known says
+/// "reading…" or its failure.
+pub fn annotate_bar(model: &mut BarModel, note: &Note<'_>) {
+    for item in &mut model.items {
+        if item.known || item.machine != note.local {
+            continue;
+        }
+        let Some(reason) = item.reason else { continue };
+        let status = note.status(item.agent);
+        let text = if status.reading
+            || status.refused
+            || reason.is_failure()
+            || (reason == leon_usage::Reason::NotSignedIn && item.agent == AgentKind::Claude)
+        {
+            unknown_text(
+                item.agent,
+                reason,
+                &status,
+                note.now,
+                note.next_read,
+                note.mac,
+            )
+        } else {
+            continue;
+        };
+        if status.reading {
+            item.label = "reading…".to_owned();
+        } else if status.refused {
+            item.label = leon_usage::Reason::KeychainDenied.short().to_owned();
+        }
+        item.tip = format!("{}\n{text}", agent_name(item.agent));
+    }
 }
 
 fn window_row(meter: &Meter, points: &[UsagePoint], now: i64) -> WindowRow {
@@ -351,6 +485,15 @@ pub struct UsageUi {
     pub history: HashMap<HistoryKey, Vec<UsagePoint>>,
     /// The timer that reads the limits again, while the window lives.
     pub ticker: Option<Task<()>>,
+    /// When the last read was asked for (Unix seconds).
+    pub last_request: Option<i64>,
+    /// This install's jitter for the wait to the next one, in seconds.
+    pub jitter: i64,
+    /// When the schedule reads next, as far as it knows.
+    pub next_at: Option<i64>,
+    /// The settings the schedule was last given: which agents are shown and
+    /// the interval, to tell what changed.
+    pub applied: Option<(Vec<AgentKind>, i64)>,
 }
 
 impl Default for UsageUi {
@@ -361,13 +504,12 @@ impl Default for UsageUi {
             detailed: true,
             history: HashMap::new(),
             ticker: None,
+            last_request: None,
+            jitter: 0,
+            next_at: None,
+            applied: None,
         }
     }
-}
-
-/// How many minutes between two readings, from the settings.
-fn interval(cx: &gpui_kit::App) -> std::time::Duration {
-    std::time::Duration::from_secs(60 * settings::int(cx, "usage_interval").max(1) as u64)
 }
 
 impl Shell {
@@ -411,11 +553,23 @@ impl Shell {
         (self.options.now)().timestamp()
     }
 
+    /// What the engine and the clock add to the readings.
+    fn usage_note<'a>(&self, statuses: &'a Statuses) -> Note<'a> {
+        Note {
+            statuses,
+            now: self.usage_now(),
+            next_read: self.usage.next_at,
+            mac: crate::platform::is_mac(),
+            local: "local",
+        }
+    }
+
     /// What the bar shows now, for the machine in context.
     pub(super) fn usage_bar_model(&self, cx: &gpui_kit::App) -> BarModel {
         let context = self.current_machine();
         let name = self.machine_name_of(context.as_str());
-        bar_model(
+        let statuses = crate::agent_usage::statuses(&self.engine);
+        let mut model = bar_model(
             &self.usage.board,
             &context,
             &name,
@@ -423,7 +577,9 @@ impl Shell {
             self.usage_now(),
             settings::usage_thresholds(cx),
             self.strip_width(cx),
-        )
+        );
+        annotate_bar(&mut model, &self.usage_note(&statuses));
+        model
     }
 
     /// The width of the footer strip: the window's, less the sidebar's.
@@ -447,7 +603,8 @@ impl Shell {
 
     /// What the view lists now.
     pub(super) fn usage_view_rows(&self, cx: &gpui_kit::App) -> Vec<UsageRow> {
-        usage_rows(
+        let statuses = crate::agent_usage::statuses(&self.engine);
+        let mut rows = usage_rows(
             &self.usage.board,
             &self.usage.scope,
             &self.current_machine(),
@@ -456,30 +613,109 @@ impl Shell {
             self.usage_now(),
             settings::usage_thresholds(cx),
             &self.usage.history,
-        )
+        );
+        annotate_rows(&mut rows, &self.usage_note(&statuses));
+        rows
     }
 
-    /// The timer: while the window is focused, the limits are read again every
-    /// `usage_interval` minutes. It exists only when the engine collects at all.
+    /// The schedule: while the window is up, the limits are read every
+    /// `usage_refresh_seconds` (with a little jitter), only while it is
+    /// focused. It exists only when the engine collects at all, and the first
+    /// read waits a second so that the window is on screen before anything,
+    /// a keychain prompt included, can ask for attention.
     pub(super) fn watch_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.options.usage_timer || !self.engine.collects_usage() {
             return;
         }
-        self.usage.ticker = Some(cx.spawn_in(window, async move |this, cx| loop {
-            let Ok(wait) = this.read_with(cx, |_, cx| interval(cx)) else {
-                return;
-            };
-            cx.background_executor().timer(wait).await;
-            let alive = this.update(cx, |this, cx| {
-                if this.window_active {
-                    this.engine.submit(Op::CollectUsage);
+        self.usage.ticker = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(1))
+                .await;
+            loop {
+                if this.update(cx, |this, cx| this.usage_tick(cx)).is_err() {
+                    return;
                 }
-                cx.notify();
-            });
-            if alive.is_err() {
-                return;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(
+                        crate::agent_usage::TICK_SECONDS,
+                    ))
+                    .await;
             }
         }));
+    }
+
+    /// One look at the clock: starts the reading the first time, then reads
+    /// when [`crate::agent_usage::due`] says so. Also asked when the window
+    /// comes back to the front.
+    pub(super) fn usage_tick(&mut self, cx: &mut Context<Self>) {
+        if !self.engine.collects_usage() {
+            return;
+        }
+        if self.engine.start_usage() {
+            self.usage_request(Op::CollectUsage, cx);
+            return;
+        }
+        let interval = settings::usage_interval_seconds(cx);
+        if crate::agent_usage::due(
+            self.usage.last_request,
+            self.usage_now(),
+            interval,
+            self.usage.jitter,
+            self.window_active,
+        ) {
+            self.usage_request(Op::CollectUsage, cx);
+        }
+    }
+
+    /// Asks the engine for a read and notes when, so that the next scheduled
+    /// one is an interval (and a jitter) later.
+    fn usage_request(&mut self, op: Op, cx: &mut Context<Self>) {
+        let now = self.usage_now();
+        let interval = settings::usage_interval_seconds(cx);
+        let entropy = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        self.usage.jitter = crate::agent_usage::jitter_seconds(interval, entropy);
+        self.usage.last_request = Some(now);
+        self.usage.next_at = Some(now + interval + self.usage.jitter);
+        self.engine.submit(op);
+    }
+
+    /// What a changed setting asks of the readings: a network source switched
+    /// on or off, an agent shown that was hidden, another interval. Each reads
+    /// at once for the agent concerned, not at the next tick.
+    pub(super) fn usage_settings_changed(
+        &mut self,
+        before: leon_usage::network::NetworkPolicy,
+        cx: &mut Context<Self>,
+    ) {
+        let policy = settings::usage_policy(cx);
+        let shown = settings::usage_agents(cx);
+        let interval = settings::usage_interval_seconds(cx);
+        let previous = self.usage.applied.replace((shown.clone(), interval));
+        let mut affected: Vec<AgentKind> = Vec::new();
+        if before.claude != policy.claude {
+            affected.push(AgentKind::Claude);
+        }
+        if before.opencode != policy.opencode {
+            affected.push(AgentKind::Opencode);
+        }
+        let mut changed = !affected.is_empty();
+        if let Some((was_shown, was_interval)) = previous {
+            for agent in &shown {
+                if !was_shown.contains(agent) {
+                    changed = true;
+                    if !affected.contains(agent) {
+                        affected.push(*agent);
+                    }
+                }
+            }
+            changed |= was_interval != interval;
+        }
+        if changed && self.engine.collects_usage() {
+            self.usage_request(Op::CollectUsageNow(affected), cx);
+        }
     }
 
     // ----- commands -------------------------------------------------------------------------
@@ -501,7 +737,11 @@ impl Shell {
     /// Reads the limits again now.
     pub(super) fn refresh_usage(&mut self, cx: &mut Context<Self>) {
         if self.engine.collects_usage() {
-            self.engine.submit(Op::CollectUsage);
+            // The setting in force now, even if the window has not drawn since
+            // it changed; a source that backed off or was refused is asked
+            // again.
+            self.engine.set_usage_policy(settings::usage_policy(cx));
+            self.usage_request(Op::CollectUsageNow(Vec::new()), cx);
         } else {
             self.engine
                 .report(StatusKind::Info, "Usage limits are not read in this run.");
@@ -528,6 +768,13 @@ impl Shell {
             "s" => {
                 self.open_settings(window, cx);
                 self.settings_pick_section(Section::Usage, cx);
+            }
+            "o" => {
+                let target = self.usage_view_rows(cx).iter().find_map(|row| row.turn_on);
+                match target {
+                    Some(key) => self.settings_goto(key, window, cx),
+                    None => return false,
+                }
             }
             _ => return false,
         }
@@ -779,17 +1026,7 @@ impl Shell {
             return None;
         };
         let colour = level_colour(primary.level, colours);
-        let text = format!(
-            "{} {}{}{}",
-            primary.kind.short(),
-            leon_usage::percent_fixed(primary.percent).trim_start(),
-            glyph_tail(primary.level.glyph()),
-            primary
-                .resets_in
-                .filter(|_| !primary.reset_since_seen)
-                .map(|s| format!(" · {}", compact_duration(s)))
-                .unwrap_or_default()
-        );
+        let text = chip_text(primary);
         Some(
             div()
                 .id("header-usage")
@@ -879,7 +1116,7 @@ impl Shell {
             );
         }
         for (index, row) in rows.iter().enumerate() {
-            body = body.child(self.render_usage_row(index, row, detailed, colours));
+            body = body.child(self.render_usage_row(index, row, detailed, colours, cx));
         }
         self.card("usage-view", colours)
             .w(px(680.))
@@ -949,6 +1186,11 @@ impl Shell {
                     ))
                     .child(div().flex_1())
                     .child(hint("R", "Refresh now", colours))
+                    .children(
+                        rows.iter()
+                            .any(|row| row.turn_on.is_some())
+                            .then(|| hint("O", "Turn on", colours)),
+                    )
                     .child(hint("M", "Mode", colours))
                     .child(hint("←/→", "Machine", colours))
                     .child(
@@ -970,6 +1212,7 @@ impl Shell {
         row: &UsageRow,
         detailed: bool,
         colours: &Palette,
+        cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let v = &row.view;
         let name = format!(
@@ -1087,13 +1330,60 @@ impl Shell {
                 );
             }
         }
-        block.child(
+        let mut block = block.child(
             div()
                 .text_size(metrics::TEXT_SMALL())
                 .text_color(colours.text_faint)
                 .child(v.provenance()),
-        )
+        );
+        if let Some(note) = &row.note {
+            block = block.child(
+                div()
+                    .debug_selector(move || format!("usage-note-{index}"))
+                    .text_size(metrics::TEXT_SMALL())
+                    .text_color(colours.text_muted)
+                    .child(note.clone()),
+            );
+            if row.try_again {
+                block = block.child(self.try_again_hint(index, colours, cx));
+            }
+        }
+        block
     }
+
+    /// "R Try again", under a row whose last read failed.
+    fn try_again_hint(
+        &self,
+        index: usize,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        hint("R", "Try again", colours)
+            .id(("usage-try-again", index))
+            .debug_selector(move || format!("usage-try-again-{index}"))
+            .text_size(metrics::TEXT_SMALL())
+            .text_color(colours.text_muted)
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.refresh_usage(cx);
+            }))
+    }
+}
+
+/// What the header's chip says of a window: `wk 93 % !! · 1d 11h`, with the
+/// marker of its level as well as its colour.
+pub fn chip_text(primary: &Meter) -> String {
+    format!(
+        "{} {}{}{}",
+        primary.kind.short(),
+        leon_usage::percent_fixed(primary.percent).trim_start(),
+        glyph_tail(primary.level.glyph()),
+        primary
+            .resets_in
+            .filter(|_| !primary.reset_since_seen)
+            .map(|s| format!(" · {}", compact_duration(s)))
+            .unwrap_or_default()
+    )
 }
 
 /// ` !` or ` !!`, or nothing.

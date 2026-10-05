@@ -436,6 +436,27 @@ impl Shell {
         cx.notify();
     }
 
+    /// Opens the screen on one setting, with the keyboard on it: what "turn it
+    /// on in Settings" leads to.
+    pub(super) fn settings_goto(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(def) = schema::find(key) else {
+            return;
+        };
+        self.open_settings(window, cx);
+        self.settings_pick_section(def.section, cx);
+        if let Some(at) = self
+            .settings_entries()
+            .iter()
+            .position(|entry| matches!(entry, Entry::Setting(found) if found.key == key))
+        {
+            self.settings_ui.cursor = at;
+            self.settings_ui.scroll.scroll_to_item(at);
+        }
+        self.settings_ui.zone = Zone::Options;
+        self.settings_focus(window, cx);
+        cx.notify();
+    }
+
     fn settings_option_key(
         &mut self,
         key: &str,

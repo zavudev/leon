@@ -185,8 +185,14 @@ pub enum Op {
     },
     /// Forget the user's choice of logo; detection's shows again.
     ResetIcon(ProjectId),
-    /// Read the usage limits of every machine now.
+    /// Read the usage limits of every machine, as the schedule does: a source
+    /// that is backing off, or whose sign-in was refused, is left alone.
     CollectUsage,
+    /// Read the usage limits now because the user asked, or because a setting
+    /// changed: for these agents (every network source when empty) the
+    /// back-off and the refusal remembered for the session are forgotten. A
+    /// request that comes while a read is under way is run right after it.
+    CollectUsageNow(Vec<leon_core::AgentKind>),
     /// Delete the stored usage observations.
     ForgetUsageHistory,
 }
@@ -289,12 +295,56 @@ struct UsageSetup {
     http: Arc<dyn leon_usage::network::Http>,
     /// The time, in Unix seconds; injected so tests control it.
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
-    /// Which network sources are switched on.
-    policy: leon_usage::network::NetworkPolicy,
     /// The back-off of each network source.
     throttle: HashMap<leon_core::AgentKind, leon_usage::network::Throttle>,
-    /// Whether a collection is running.
+    /// Whether a collection is running: at most one request per source is in
+    /// flight at any time.
     collecting: bool,
+    /// Whether another collection was asked for while one was running.
+    rerun: bool,
+    /// The agents whose network source is being read right now.
+    reading: std::collections::HashSet<leon_core::AgentKind>,
+    /// Why the last read of a source failed, until one succeeds.
+    failed: HashMap<leon_core::AgentKind, leon_usage::Reason>,
+    /// The sources whose sign-in the system refused: not asked again this
+    /// session until the user says so.
+    refused: std::collections::HashSet<leon_core::AgentKind>,
+    /// Whether nothing is read yet: the application starts reading only once
+    /// its window is up.
+    deferred: bool,
+}
+
+/// What the engine knows of the last read of one agent's network source.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SourceStatus {
+    /// A read is under way.
+    pub reading: bool,
+    /// Why the last read failed, when it did.
+    pub failed: Option<leon_usage::Reason>,
+    /// When the source may be called again after a failure (Unix seconds).
+    pub retry_at: Option<i64>,
+    /// Whether the system refused the sign-in and the source waits for the
+    /// user to try again.
+    pub refused: bool,
+}
+
+/// Whether the network source of `agent` is switched on in `policy`.
+fn asked_on(policy: leon_usage::network::NetworkPolicy, agent: leon_core::AgentKind) -> bool {
+    match agent {
+        leon_core::AgentKind::Claude => policy.claude,
+        leon_core::AgentKind::Opencode => policy.opencode,
+        leon_core::AgentKind::Codex => false,
+    }
+}
+
+/// A jitter of 0 to 10 percent, so that many installs do not call a vendor at
+/// the same moment.
+fn jitter_percent() -> i64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    i64::from(nanos % 11)
 }
 
 /// How processes are listed: through a runner, on this computer or over SSH.
@@ -345,6 +395,8 @@ struct Inner {
     fetcher: Mutex<Arc<dyn IconFetcher>>,
     scanner: Mutex<Option<Arc<Scanner>>>,
     usage: Mutex<Option<UsageSetup>>,
+    /// Which network sources are switched on.
+    usage_policy: Mutex<leon_usage::network::NetworkPolicy>,
     /// How many jobs run on the blocking pool right now. They run on threads
     /// of their own, outside any scheduler a test controls, so a test waits for
     /// this to reach zero before it looks at what they stored.
@@ -397,6 +449,7 @@ impl Engine {
                 fetcher: Mutex::new(Arc::new(NoFetch)),
                 scanner: Mutex::new(None),
                 usage: Mutex::new(None),
+                usage_policy: Mutex::new(leon_usage::network::NetworkPolicy::default()),
                 blocking: std::sync::atomic::AtomicUsize::new(0),
                 local_posix_shell: std::sync::atomic::AtomicBool::new(
                     crate::platform::local_has_posix_shell(),
@@ -574,23 +627,86 @@ impl Engine {
         http: Arc<dyn leon_usage::network::Http>,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) {
-        let mut usage = self.usage_setup();
-        let policy = usage.as_ref().map(|u| u.policy).unwrap_or_default();
-        *usage = Some(UsageSetup {
+        *self.usage_setup() = Some(UsageSetup {
             credentials,
             http,
             clock,
-            policy,
             throttle: HashMap::new(),
             collecting: false,
+            rerun: false,
+            reading: Default::default(),
+            failed: HashMap::new(),
+            refused: Default::default(),
+            deferred: false,
         });
     }
 
-    /// Which network sources are switched on. Kept even before
-    /// [`Engine::set_usage`], so the setting wins whichever comes first.
-    pub fn set_usage_policy(&self, policy: leon_usage::network::NetworkPolicy) {
+    /// Holds the reading back until [`Engine::start_usage`]: the application
+    /// reads nothing (and so asks for no keychain access) before its window is
+    /// up.
+    pub fn defer_usage(&self) {
         if let Some(setup) = self.usage_setup().as_mut() {
-            setup.policy = policy;
+            setup.deferred = true;
+        }
+    }
+
+    /// Lets the reading begin. `true` when it had been held back.
+    pub fn start_usage(&self) -> bool {
+        self.usage_setup()
+            .as_mut()
+            .is_some_and(|setup| std::mem::take(&mut setup.deferred))
+    }
+
+    /// Which network sources are switched on.
+    pub fn usage_policy(&self) -> leon_usage::network::NetworkPolicy {
+        *self
+            .inner
+            .usage_policy
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Changes which network sources are switched on, live: the next
+    /// collection reads it. A source that was switched on or off starts clean:
+    /// no back-off or refusal left from before is held against it.
+    pub fn set_usage_policy(&self, policy: leon_usage::network::NetworkPolicy) {
+        let before = std::mem::replace(
+            &mut *self
+                .inner
+                .usage_policy
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            policy,
+        );
+        if let Some(setup) = self.usage_setup().as_mut() {
+            for (agent, was, is) in [
+                (leon_core::AgentKind::Claude, before.claude, policy.claude),
+                (
+                    leon_core::AgentKind::Opencode,
+                    before.opencode,
+                    policy.opencode,
+                ),
+            ] {
+                if was != is {
+                    setup.throttle.remove(&agent);
+                    setup.refused.remove(&agent);
+                    setup.failed.remove(&agent);
+                }
+            }
+        }
+    }
+
+    /// What the engine knows of the last read of `agent`'s source.
+    pub fn usage_status(&self, agent: leon_core::AgentKind) -> SourceStatus {
+        let usage = self.usage_setup();
+        let Some(setup) = usage.as_ref() else {
+            return SourceStatus::default();
+        };
+        SourceStatus {
+            reading: setup.reading.contains(&agent),
+            failed: setup.failed.get(&agent).copied(),
+            retry_at: setup.throttle.get(&agent).and_then(|t| t.retry_at()),
+            refused: setup.refused.contains(&agent),
         }
     }
 
@@ -627,36 +743,116 @@ impl Engine {
         let _ = self.inner.events.send(EngineEvent::Usage);
     }
 
+    /// Takes the right to read: `false` when a read is already under way (so
+    /// no source ever has two requests in flight). With `again`, the request
+    /// is remembered and run when the one under way ends.
+    fn begin_usage(&self, again: bool) -> bool {
+        let mut usage = self.usage_setup();
+        let Some(setup) = usage.as_mut() else {
+            return false;
+        };
+        if setup.deferred {
+            return false;
+        }
+        if setup.collecting {
+            setup.rerun |= again;
+            return false;
+        }
+        setup.collecting = true;
+        true
+    }
+
+    /// Gives the right to read back.
+    fn end_usage(&self) {
+        self.set_usage_collecting(false);
+    }
+
     /// Reads the usage limits of every machine that answers, a few at a time.
     async fn collect_usage(&self) {
-        if !self.collects_usage() || self.usage_collecting() {
+        if !self.begin_usage(false) {
             return;
         }
-        self.set_usage_collecting(true);
-        let machines = self.inner.store.machines().unwrap_or_default();
-        let mut jobs = JoinSet::new();
-        for machine in machines {
-            let engine = self.clone();
-            jobs.spawn_on(
-                async move { engine.collect_usage_machine(&machine).await },
-                &self.inner.handle,
-            );
+        self.collect_usage_passes().await;
+    }
+
+    /// A read the user, or a changed setting, asked for.
+    async fn collect_usage_now(&self, agents: &[leon_core::AgentKind]) {
+        {
+            let mut usage = self.usage_setup();
+            let Some(setup) = usage.as_mut() else {
+                return;
+            };
+            let all = [leon_core::AgentKind::Claude, leon_core::AgentKind::Opencode];
+            for agent in if agents.is_empty() { &all[..] } else { agents } {
+                setup.throttle.remove(agent);
+                setup.refused.remove(agent);
+                setup.failed.remove(agent);
+            }
         }
-        while jobs.join_next().await.is_some() {}
-        self.set_usage_collecting(false);
+        if !self.begin_usage(true) {
+            return;
+        }
+        self.collect_usage_passes().await;
+    }
+
+    /// Runs passes while another one is asked for; `collecting` is held.
+    async fn collect_usage_passes(&self) {
+        loop {
+            let policy = self.usage_policy();
+            {
+                let mut usage = self.usage_setup();
+                if let Some(setup) = usage.as_mut() {
+                    setup.reading.clear();
+                    for (agent, on) in [
+                        (leon_core::AgentKind::Claude, policy.claude),
+                        (leon_core::AgentKind::Opencode, policy.opencode),
+                    ] {
+                        if on && !setup.refused.contains(&agent) {
+                            setup.reading.insert(agent);
+                        }
+                    }
+                }
+            }
+            let _ = self.inner.events.send(EngineEvent::Usage);
+            let machines = self.inner.store.machines().unwrap_or_default();
+            let mut jobs = JoinSet::new();
+            for machine in machines {
+                let engine = self.clone();
+                jobs.spawn_on(
+                    async move { engine.collect_usage_machine(&machine).await },
+                    &self.inner.handle,
+                );
+            }
+            while jobs.join_next().await.is_some() {}
+            let again = {
+                let mut usage = self.usage_setup();
+                usage.as_mut().is_some_and(|setup| {
+                    setup.reading.clear();
+                    std::mem::take(&mut setup.rerun)
+                })
+            };
+            if !again {
+                break;
+            }
+        }
+        self.end_usage();
     }
 
     /// One bounded command on the machine, then the network sources that are
     /// on (this computer only). What came back is stored: the latest reading
     /// of each agent and the observations for the history.
     async fn collect_usage_machine(&self, machine: &Machine) {
-        let (credentials, http, clock, mut policy, throttled) = {
+        let asked = self.usage_policy();
+        let (credentials, http, clock, held, refused) = {
             let usage = self.usage_setup();
             let Some(setup) = usage.as_ref() else {
                 return;
             };
+            if setup.deferred {
+                return;
+            }
             let now = (setup.clock)();
-            let throttled: Vec<leon_core::AgentKind> = setup
+            let held: Vec<leon_core::AgentKind> = setup
                 .throttle
                 .iter()
                 .filter(|(_, throttle)| !throttle.allows(now))
@@ -666,21 +862,24 @@ impl Engine {
                 setup.credentials.clone(),
                 setup.http.clone(),
                 setup.clock.clone(),
-                setup.policy,
-                throttled,
+                held,
+                setup.refused.clone(),
             )
         };
-        let asked = policy;
-        // A source that is backing off is not called again yet.
-        if throttled.contains(&leon_core::AgentKind::Claude) {
+        // A source that is backing off, or whose sign-in was refused, is not
+        // called again yet.
+        let mut policy = asked;
+        let blocked =
+            |agent: leon_core::AgentKind| held.contains(&agent) || refused.contains(&agent);
+        if blocked(leon_core::AgentKind::Claude) {
             policy.claude = false;
         }
-        if throttled.contains(&leon_core::AgentKind::Opencode) {
+        if blocked(leon_core::AgentKind::Opencode) {
             policy.opencode = false;
         }
         let now = clock();
         let runner = SharedRunner(self.inner.runner.clone());
-        let collected = leon_usage::collect_machine_on(
+        let mut collected = leon_usage::collect_machine_on(
             &runner,
             machine,
             self.inner
@@ -706,42 +905,69 @@ impl Engine {
                     .map(|usage| (row.agent, usage))
             })
             .collect();
+        let local = machine.kind == MachineKind::Local;
         // Back-off bookkeeping for the sources that were really called.
-        if machine.kind == MachineKind::Local {
+        if local {
             let mut usage = self.usage_setup();
             if let Some(setup) = usage.as_mut() {
                 for (agent, called) in [
-                    (leon_core::AgentKind::Claude, policy.claude && asked.claude),
-                    (
-                        leon_core::AgentKind::Opencode,
-                        policy.opencode && asked.opencode,
-                    ),
+                    (leon_core::AgentKind::Claude, policy.claude),
+                    (leon_core::AgentKind::Opencode, policy.opencode),
                 ] {
                     if !called {
                         continue;
                     }
-                    let failed = collected.readings.iter().any(|r| {
-                        r.agent == agent
-                            && matches!(
-                                r.state,
-                                leon_usage::State::Unknown {
-                                    reason: leon_usage::Reason::Unreachable
-                                        | leon_usage::Reason::ParseError
-                                }
-                            )
+                    let reason = collected.readings.iter().find_map(|r| match r.state {
+                        leon_usage::State::Unknown { reason } if r.agent == agent => Some(reason),
+                        _ => None,
                     });
-                    setup
-                        .throttle
-                        .entry(agent)
-                        .or_default()
-                        .record(!failed, now);
+                    match reason {
+                        Some(reason) if reason.is_failure() => {
+                            setup.failed.insert(agent, reason);
+                            if reason == leon_usage::Reason::KeychainDenied {
+                                // Asked once: not again this session, whatever
+                                // the schedule says.
+                                setup.refused.insert(agent);
+                            } else {
+                                let after = match reason {
+                                    leon_usage::Reason::RateLimited(seconds) if seconds > 0 => {
+                                        Some(i64::from(seconds))
+                                    }
+                                    _ => None,
+                                };
+                                setup.throttle.entry(agent).or_default().record_with(
+                                    false,
+                                    now,
+                                    after,
+                                    jitter_percent(),
+                                );
+                            }
+                        }
+                        _ => {
+                            setup.failed.remove(&agent);
+                            setup.throttle.entry(agent).or_default().record(true, now);
+                        }
+                    }
+                }
+            }
+        }
+        // A refused sign-in is said, not replaced by "off".
+        if local {
+            for reading in &mut collected.readings {
+                if asked_on(asked, reading.agent) && refused.contains(&reading.agent) {
+                    *reading = leon_usage::AgentUsage::unknown(
+                        reading.agent,
+                        &reading.machine,
+                        leon_usage::Reason::KeychainDenied,
+                    );
                 }
             }
         }
         let store = &self.inner.store;
         for (agent, reading) in crate::agent_usage::payloads(&collected, &previous) {
-            // A source held back keeps what it showed.
-            let reading = if throttled.contains(&agent)
+            // A source held back keeps what it showed, unless it is off.
+            let reading = if asked_on(asked, agent)
+                && held.contains(&agent)
                 && matches!(reading.state, leon_usage::State::Unknown { .. })
             {
                 previous.get(&agent).cloned().unwrap_or(reading)
@@ -903,6 +1129,10 @@ impl Engine {
             Op::ResetIcon(project) => self.reset_icon(&project).map(Some),
             Op::CollectUsage => {
                 self.collect_usage().await;
+                Ok(None)
+            }
+            Op::CollectUsageNow(agents) => {
+                self.collect_usage_now(&agents).await;
                 Ok(None)
             }
             Op::ForgetUsageHistory => {
@@ -1502,7 +1732,14 @@ impl Engine {
         // and how much of each agent's limits is left, in another.
         self.scan_machine(&machine.id).await;
         if self.collects_usage() {
-            self.collect_usage_machine(machine).await;
+            // This computer's reading may call a network source: never while a
+            // read is already under way.
+            if machine.kind != MachineKind::Local {
+                self.collect_usage_machine(machine).await;
+            } else if self.begin_usage(false) {
+                self.collect_usage_machine(machine).await;
+                self.end_usage();
+            }
         }
         let discovery = if !self.prefs().discover_projects {
             Ok(Discovery::default())
@@ -3506,5 +3743,278 @@ branch refs/heads/feature/login
         // run: every agent is unreachable, but it was attempted.
         let rows = rig.store.usage_readings().unwrap();
         assert_eq!(rows.len(), 3);
+    }
+
+    // ----- the network sources, live
+
+    /// A credential reader that answers as told and counts its reads.
+    struct Scripted {
+        mode: Mutex<Mode>,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+    #[derive(Clone, Copy)]
+    enum Mode {
+        Found,
+        Denied,
+    }
+    impl Scripted {
+        fn new(mode: Mode) -> Arc<Self> {
+            Arc::new(Self {
+                mode: Mutex::new(mode),
+                reads: Default::default(),
+            })
+        }
+        fn reads(&self) -> usize {
+            self.reads.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+    impl leon_usage::network::Credentials for Scripted {
+        fn claude(&self) -> leon_usage::network::Read<leon_usage::claude::Credential> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match *self.mode.lock().unwrap() {
+                Mode::Found => leon_usage::claude::parse_credential(
+                    r#"{"claudeAiOauth":{"accessToken":"tok","subscriptionType":"max"}}"#,
+                )
+                .map_or(
+                    leon_usage::network::Read::Missing,
+                    leon_usage::network::Read::Found,
+                ),
+                Mode::Denied => leon_usage::network::Read::Denied,
+            }
+        }
+        fn opencode_go(&self) -> leon_usage::network::Read<leon_usage::secret::Secret> {
+            leon_usage::network::Read::Missing
+        }
+    }
+
+    const CLAUDE_ANSWER: &str = r#"{"five_hour":{"utilization":10,"resets_at":1791300000},"seven_day":{"utilization":91,"resets_at":1791300000}}"#;
+
+    fn network_rig(
+        mode: Mode,
+        http: leon_usage::network::ScriptedHttp,
+        passes: usize,
+    ) -> (Rig, Arc<Scripted>, Arc<leon_usage::network::ScriptedHttp>) {
+        let mut runner = ScriptedRunner::new();
+        for _ in 0..passes {
+            runner = runner.reply(found_output());
+        }
+        let rig = rig(runner);
+        rig.engine.set_local_posix_shell(true);
+        let credentials = Scripted::new(mode);
+        let http = Arc::new(http);
+        rig.engine
+            .set_usage(credentials.clone(), http.clone(), Arc::new(|| USAGE_NOW));
+        (rig, credentials, http)
+    }
+
+    fn claude_row(rig: &Rig) -> String {
+        rig.store
+            .usage_readings()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.agent == leon_core::AgentKind::Claude)
+            .unwrap()
+            .payload
+    }
+
+    const ON: leon_usage::network::NetworkPolicy = leon_usage::network::NetworkPolicy {
+        claude: true,
+        opencode: false,
+    };
+
+    #[tokio::test]
+    async fn the_live_preference_reaches_the_collector() {
+        let (rig, _, http) = network_rig(
+            Mode::Found,
+            leon_usage::network::ScriptedHttp::new().reply(200, CLAUDE_ANSWER),
+            2,
+        );
+        rig.engine.run(Op::CollectUsageNow(vec![])).await;
+        assert_eq!(http.calls().len(), 0, "off: nothing is called");
+        assert!(claude_row(&rig).contains("source_disabled"));
+        rig.engine.set_usage_policy(ON);
+        rig.engine
+            .run(Op::CollectUsageNow(vec![leon_core::AgentKind::Claude]))
+            .await;
+        assert_eq!(http.calls().len(), 1, "on: read at once");
+        assert!(claude_row(&rig).contains("\"known\""));
+    }
+
+    #[tokio::test]
+    async fn turning_a_source_off_stops_the_calls_and_replaces_the_numbers() {
+        let (rig, _, http) = network_rig(
+            Mode::Found,
+            leon_usage::network::ScriptedHttp::new().reply(200, CLAUDE_ANSWER),
+            2,
+        );
+        rig.engine.set_usage_policy(ON);
+        rig.engine.run(Op::CollectUsageNow(vec![])).await;
+        assert!(claude_row(&rig).contains("\"known\""));
+        rig.engine
+            .set_usage_policy(leon_usage::network::NetworkPolicy::default());
+        rig.engine.run(Op::CollectUsage).await;
+        assert_eq!(http.calls().len(), 1);
+        assert!(claude_row(&rig).contains("source_disabled"));
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_waits_as_long_as_the_service_asked_and_a_manual_read_goes_through() {
+        let (rig, _, http) = network_rig(
+            Mode::Found,
+            leon_usage::network::ScriptedHttp::new()
+                .reply_after(429, "{}", Some(300))
+                .reply(200, CLAUDE_ANSWER),
+            3,
+        );
+        rig.engine.set_usage_policy(ON);
+        rig.engine.run(Op::CollectUsage).await;
+        assert_eq!(http.calls().len(), 1);
+        let status = rig.engine.usage_status(leon_core::AgentKind::Claude);
+        assert_eq!(status.failed, Some(leon_usage::Reason::RateLimited(300)));
+        let wait = status.retry_at.unwrap() - USAGE_NOW;
+        assert!((300..=330).contains(&wait), "{wait}");
+        rig.engine.run(Op::CollectUsage).await;
+        assert_eq!(http.calls().len(), 1, "the schedule keeps off the service");
+        rig.engine.run(Op::CollectUsageNow(vec![])).await;
+        assert_eq!(http.calls().len(), 2, "a manual read is not held back");
+        assert!(rig
+            .engine
+            .usage_status(leon_core::AgentKind::Claude)
+            .failed
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_source_switched_on_again_is_not_held_back_by_an_old_back_off() {
+        let (rig, _, http) = network_rig(
+            Mode::Found,
+            leon_usage::network::ScriptedHttp::new()
+                .reply(500, "oops")
+                .reply(200, CLAUDE_ANSWER),
+            3,
+        );
+        rig.engine.set_usage_policy(ON);
+        rig.engine.run(Op::CollectUsage).await;
+        assert!(rig
+            .engine
+            .usage_status(leon_core::AgentKind::Claude)
+            .retry_at
+            .is_some());
+        rig.engine
+            .set_usage_policy(leon_usage::network::NetworkPolicy::default());
+        rig.engine.set_usage_policy(ON);
+        rig.engine.run(Op::CollectUsage).await;
+        assert_eq!(http.calls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_refused_keychain_is_asked_once_a_session_until_the_user_tries_again() {
+        let (rig, credentials, http) = network_rig(
+            Mode::Denied,
+            leon_usage::network::ScriptedHttp::new().reply(200, CLAUDE_ANSWER),
+            6,
+        );
+        rig.engine.set_usage_policy(ON);
+        rig.engine.run(Op::CollectUsage).await;
+        assert_eq!(credentials.reads(), 1);
+        assert!(claude_row(&rig).contains("keychain_denied"));
+        assert!(
+            rig.engine
+                .usage_status(leon_core::AgentKind::Claude)
+                .refused
+        );
+        for _ in 0..3 {
+            rig.engine.run(Op::CollectUsage).await;
+        }
+        assert_eq!(credentials.reads(), 1, "never asked again by the schedule");
+        assert!(
+            claude_row(&rig).contains("keychain_denied"),
+            "still said, not 'off'"
+        );
+        *credentials.mode.lock().unwrap() = Mode::Found;
+        rig.engine
+            .run(Op::CollectUsageNow(vec![leon_core::AgentKind::Claude]))
+            .await;
+        assert_eq!(credentials.reads(), 2);
+        assert_eq!(http.calls().len(), 1);
+        assert!(claude_row(&rig).contains("\"known\""));
+    }
+
+    /// A client that takes a while to answer and notes how many calls overlap.
+    #[derive(Default)]
+    struct SlowHttp {
+        now: std::sync::atomic::AtomicUsize,
+        most: std::sync::atomic::AtomicUsize,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl leon_usage::network::Http for SlowHttp {
+        fn get<'a>(
+            &'a self,
+            _: &'a leon_usage::network::Request<'a>,
+        ) -> leon_usage::network::BoxFuture<
+            'a,
+            Result<leon_usage::network::Response, leon_usage::network::HttpError>,
+        > {
+            use std::sync::atomic::Ordering::SeqCst;
+            Box::pin(async move {
+                self.calls.fetch_add(1, SeqCst);
+                let inside = self.now.fetch_add(1, SeqCst) + 1;
+                self.most.fetch_max(inside, SeqCst);
+                for _ in 0..50 {
+                    tokio::task::yield_now().await;
+                }
+                self.now.fetch_sub(1, SeqCst);
+                Ok(leon_usage::network::Response {
+                    status: 200,
+                    body: CLAUDE_ANSWER.to_owned(),
+                    retry_after: None,
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn at_most_one_request_per_source_is_in_flight() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let mut runner = ScriptedRunner::new();
+        for _ in 0..4 {
+            runner = runner.reply(found_output());
+        }
+        let rig = rig(runner);
+        rig.engine.set_local_posix_shell(true);
+        let http = Arc::new(SlowHttp::default());
+        rig.engine.set_usage(
+            Scripted::new(Mode::Found),
+            http.clone(),
+            Arc::new(|| USAGE_NOW),
+        );
+        rig.engine.set_usage_policy(ON);
+        tokio::join!(
+            rig.engine.run(Op::CollectUsage),
+            rig.engine.run(Op::CollectUsage),
+            rig.engine.run(Op::CollectUsageNow(vec![])),
+            rig.engine.run(Op::Refresh),
+        );
+        assert_eq!(http.most.load(SeqCst), 1, "never two at once");
+        assert!(http.calls.load(SeqCst) >= 1);
+    }
+
+    #[tokio::test]
+    async fn nothing_is_read_while_the_application_defers_it() {
+        let (rig, _, http) = network_rig(
+            Mode::Found,
+            leon_usage::network::ScriptedHttp::new().reply(200, CLAUDE_ANSWER),
+            2,
+        );
+        rig.engine.set_usage_policy(ON);
+        rig.engine.defer_usage();
+        rig.engine.run(Op::CollectUsage).await;
+        rig.engine.run(Op::Refresh).await;
+        assert_eq!(http.calls().len(), 0);
+        assert!(rig.store.usage_readings().unwrap().is_empty());
+        assert!(rig.engine.start_usage());
+        assert!(!rig.engine.start_usage());
+        rig.engine.run(Op::CollectUsage).await;
+        assert_eq!(http.calls().len(), 1);
     }
 }

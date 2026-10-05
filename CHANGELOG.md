@@ -9,8 +9,10 @@
   Detailed and Compact modes, per-machine readings, a burn-rate estimate, a
   notice before starting an agent that is nearly at its limit, and
   `leon --diagnose usage`. Codex is read from its own session log; Claude Code
-  and the opencode Go subscription need an opt-in network source (Settings,
-  Usage), off by default.
+  and the opencode Go subscription use a network source that is on by default
+  and can be turned off in Settings, Usage (macOS may ask once for keychain
+  access). Limits are read every 60 seconds (at least 30) while the window is
+  focused, with back-off, `Retry-After` and jitter.
 * **Connect a machine, with a code.** Install Leon on the other computer, choose
   Share this machine, type the short code it shows: both computers dial out to a
   relay, so there is no SSH setup and nothing to open on any network. SSH stays
@@ -23,6 +25,19 @@
   without gaps or duplicates. See `docs/REMOTE.md`.
 * New crates `leon-wire`, `leon-link`, `leon-pty` and `leon-host`; settings for
   the relay address, the device name, sharing and approval.
+
+### Fixed
+
+* Settings: an option with a long description is as tall as its text; it was
+  drawn at a fixed height and overlapped the next one.
+* Usage: switching a network source on reads at once and the view and the
+  footer update when it ends, with "Reading…", the specific reason of a failure
+  and when the next read is, and a "Try again" for a refused keychain prompt.
+
+### Changed
+
+* The default relay address is `wss://relay.getleon.dev`.
+* `usage_interval` (minutes) is replaced by `usage_refresh_seconds`.
 
 ### Not yet
 

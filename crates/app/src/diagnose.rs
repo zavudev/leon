@@ -465,7 +465,7 @@ pub fn usage_lines(collected: &leon_usage::MachineUsage, now: i64) -> Vec<String
         match &v.body {
             Body::Unknown(reason) => {
                 lines.push(format!("{name}: unknown: {}", reason.short()));
-                lines.push(format!("    {}", reason.sentence()));
+                lines.push(format!("    {}", reason.text()));
             }
             Body::Ready { meters, .. } => {
                 let plan = v
@@ -491,16 +491,42 @@ pub fn usage_lines(collected: &leon_usage::MachineUsage, now: i64) -> Vec<String
     lines
 }
 
-/// Runs `--diagnose usage`: the real collection for this computer, through the
-/// real runner. A network source is called only for an agent in `network`
-/// (the opt-in of this run); otherwise it reports "source off".
-pub fn run_usage(network: &[AgentKind]) -> i32 {
-    use leon_usage::network::{CurlHttp, NetworkPolicy, SystemCredentials};
-    println!("leon diagnose usage");
-    let policy = NetworkPolicy {
-        claude: network.contains(&AgentKind::Claude),
-        opencode: network.contains(&AgentKind::Opencode),
+/// Which network sources a `--diagnose usage` run calls: what the settings
+/// file says (on by default) with the run's own overrides on top.
+pub fn usage_policy_of(
+    file: &std::path::Path,
+    network: &[AgentKind],
+    no_network: &[AgentKind],
+) -> leon_usage::network::NetworkPolicy {
+    let store = std::fs::read(file)
+        .ok()
+        .and_then(|bytes| crate::schema::Store::parse(&bytes).ok())
+        .unwrap_or_default();
+    let from_settings = |key: &str| matches!(store.value(key), crate::schema::Value::Bool(true));
+    let decide = |agent: AgentKind, key: &str| {
+        if no_network.contains(&agent) {
+            false
+        } else {
+            network.contains(&agent) || from_settings(key)
+        }
     };
+    leon_usage::network::NetworkPolicy {
+        claude: decide(AgentKind::Claude, "usage_claude_network"),
+        opencode: decide(AgentKind::Opencode, "usage_opencode_network"),
+    }
+}
+
+/// Runs `--diagnose usage`: the real collection for this computer, through the
+/// real runner. A network source is called as the settings file says (on by
+/// default), `network` and `no_network` overriding it for this run.
+pub fn run_usage(
+    network: &[AgentKind],
+    no_network: &[AgentKind],
+    settings_file: &std::path::Path,
+) -> i32 {
+    use leon_usage::network::{CurlHttp, SystemCredentials};
+    println!("leon diagnose usage");
+    let policy = usage_policy_of(settings_file, network, no_network);
     for (agent, on) in [
         (AgentKind::Claude, policy.claude),
         (AgentKind::Opencode, policy.opencode),
@@ -509,9 +535,9 @@ pub fn run_usage(network: &[AgentKind]) -> i32 {
             "network source of {}: {}",
             crate::ui::agent_display_name(agent),
             if on {
-                "ON for this run (--network)"
+                "on (settings, or --network)"
             } else {
-                "off"
+                "off (settings, or --no-network)"
             }
         );
     }
@@ -626,6 +652,25 @@ fn run_with(args: &Diagnose, system: &dyn System, settle: Duration) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_usage_report_follows_the_settings_file_and_the_overrides() {
+        use leon_core::AgentKind::{Claude, Opencode};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        // No file: the defaults, on.
+        let policy = super::usage_policy_of(&file, &[], &[]);
+        assert!(policy.claude && policy.opencode);
+        std::fs::write(&file, br#"{"usage_claude_network": false}"#).unwrap();
+        let policy = super::usage_policy_of(&file, &[], &[]);
+        assert!(!policy.claude && policy.opencode, "the file's off is kept");
+        assert!(
+            super::usage_policy_of(&file, &[Claude], &[]).claude,
+            "--network wins"
+        );
+        let policy = super::usage_policy_of(&file, &[], &[Opencode]);
+        assert!(!policy.opencode, "--no-network wins");
+    }
+
     #[test]
     fn the_usage_report_names_the_source_the_windows_and_the_reasons_and_nothing_else() {
         use leon_usage::{
