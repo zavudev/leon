@@ -128,8 +128,10 @@ pub enum Command {
     OpenShell,
     /// Adds a git worktree to a project.
     NewWorktree,
-    /// Adds an SSH machine.
+    /// Adds a machine: with a code (the relay) or over SSH.
     AddMachine,
+    /// Shares this computer: the code, the paired computers, the switch.
+    ShareMachine,
     /// Opens a folder as a project: the system's folder picker on this
     /// computer, the palette's questions on another machine.
     OpenProject,
@@ -1054,6 +1056,14 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::ShareMachine,
+        "Share this machine…",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::OpenProject,
         "Open project…",
         S::Create,
@@ -1692,7 +1702,10 @@ pub fn keywords(command: Command) -> &'static str {
         C::SaveOutput | C::SaveOutputAnsi => "export write log terminal file",
         C::CopyAll | C::CopyScreen => "clipboard terminal output",
         C::ToggleSidebar => "hide show panel tree",
-        C::AddMachine => "add machine remote server ssh connect computer host login",
+        C::AddMachine => {
+            "add machine remote server code relay ssh connect computer host login pair"
+        }
+        C::ShareMachine => "share host pair code relay devices revoke remote access let connect",
         C::EditMachine => "ssh host user port identity key server remote change connect",
         C::WhyOffline => "offline unreachable diagnose test connection ssh remote server",
         C::Settings => "preferences options configuration config",
@@ -1880,6 +1893,7 @@ mod tests {
             C::ScrollPageUp,
             C::ScrollPageDown,
             C::AddMachine,
+            C::ShareMachine,
             C::OpenProject,
             C::AddProject,
             C::RemoveProject,
@@ -1991,6 +2005,7 @@ mod tests {
                 | C::ScrollPageUp
                 | C::ScrollPageDown
                 | C::AddMachine
+                | C::ShareMachine
                 | C::OpenProject
                 | C::AddProject
                 | C::RemoveProject

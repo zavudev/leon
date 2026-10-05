@@ -112,6 +112,9 @@ impl Shell {
             "add_machine" => {
                 self.run_command(C::AddMachine, window, cx);
             }
+            "share_machine" => {
+                self.run_command(C::ShareMachine, window, cx);
+            }
             "probe_machine" => {
                 self.run_command(C::ProbeMachine, window, cx);
             }
@@ -230,6 +233,7 @@ impl Shell {
             return;
         }
         self.applied_settings = generation;
+        self.sync_share(cx);
         let prefs = settings::engine_prefs(cx, &self.engine);
         if prefs != self.engine.prefs() {
             self.engine.set_prefs(prefs);

@@ -23,6 +23,10 @@ leon-mark ── gpui-kit only (no other Leon crate)
 | `leon-core` | Machines, projects, worktrees, sessions and messages, and the `Store` (SQLite) with change notification. No UI, no processes. |
 | `leon-history` | Reads the history Claude Code, Codex and opencode keep on disk and turns it into sessions and messages. |
 | `leon-remote` | A `CommandSpec` says what to run and where; `run_on` and `interactive_on` place it on a machine (unchanged locally, `ssh` remotely, with shell quoting and optional connection sharing). Git worktree operations, how each agent starts and resumes, the machine probe and the connection checklist (`connect`, `diagnosis`) are built on it. A scripted runner makes all of it testable without a process. |
+| `leon-wire` | The wire protocol: versioned length-prefixed frames, the application messages (run a command, terminals, re-attach) and the relay rendezvous messages. Pure (`postcard` over `serde`); every decoder is bounded and fuzz-style tested. |
+| `leon-link` | Everything that keeps a remote session private: identity, the short pairing code (SPAKE2 then Noise `XXpsk3`), the Noise `IK` session with fragmentation and rekeying, the device registry, the relay WebSocket adapter, the durable `Client` (reconnection, exact terminal re-attach) and, behind `test-support`, an in-process test relay. |
+| `leon-pty` | The GPUI-free part of terminals: `SpawnSpec`, grid maths and `PtyProcess` (a child in a pseudo-terminal driven by channels). `leon-term` re-exports it. |
+| `leon-host` | The sharing service: executes commands, owns durable terminals with a replay ring, serves pairing and sessions through a relay, reconnects, cuts off revoked devices; the `leon host` command line. |
 | `leon-term` | A terminal for GPUI: `Terminal` (PTY, emulator, child) and `TerminalView` (the GPUI entity). Depends on `gpui-kit` and nothing of Leon; the application maps its own command type onto `SpawnSpec`. |
 | `leon-mark` | The Leon lion, always animated: `geometry` (the glare's four contours as point lists, exactly the owner's SVG at rest), `motion` (a pure, deterministic time-to-pose function: blink, glare, glance, breath, nose twitch, intro, and a `Mood` that biases them), `element` (`AnimatedMark`, a GPUI element painted from vector paths) and `svg` (the same gestures written as animated SVG for the web). Depends on `gpui-kit` and nothing of Leon. |
 | `app` (`leon`) | The window (`ui/`, with `panes.rs` and `workspace.rs` for the terminal layout and `menu.rs` for the context menu), the engine that keeps the store fresh (`engine.rs`), the one shortcut registry (`keys.rs`), the themes and their design tokens (`theme/`), what a live session runs (`launch.rs`), the hidden `--diagnose` run (`diagnose.rs`). |
@@ -66,6 +70,33 @@ the old two-step palette flow; `Command::AddMachine`, `EditMachine` and
   one. The start folder is not stored; it only tells the search for repositories
   (offered as folders by "Add a project", through `World::repositories`) where to
   start.
+
+## Remote machines through a relay
+
+Leon drives a machine through two primitives: run a command, and an interactive
+terminal. A host offers just those over an encrypted channel; everything above
+them (git, probing, icons, the process scan, history) is unchanged.
+
+* `MachineKind::Relay { host_id, host_key, relay_url, name }` is stored in
+  three extra columns of `machine` (migration 4; existing rows are untouched).
+* `run_on` / `interactive_on` mark a relay machine's command with a route (host,
+  pinned key, relay) and leave it as written. `leon_remote::RoutingRunner`, the
+  engine's one runner, starts unmarked commands here and sends marked ones
+  through the machine's durable `leon_link::client::Client` in a
+  `leon_remote::RelayHub`. SSH and local machines are untouched.
+* The terminal `Backend` of the application, `remote::RoutingBackend`, starts
+  unmarked commands in a PTY and marked ones as `Terminal::remote`: the same
+  emulator fed by the client's ordered, de-duplicated output stream, with input,
+  resizes and hang-up sent to the host. Dropping or quitting detaches (the
+  program keeps running on the host); closing a tab hangs it up.
+* `pair.rs` (what "With a code" says and does), `share.rs` (the in-process host
+  behind "Share this machine"), `ui/pair.rs` and `ui/share.rs` are the two
+  overlays. Connection state per machine comes from the hub and is explained by
+  `Why is it offline?`.
+
+The relay server is operated by Zavu and is not part of this repository; the
+protocol it speaks is specified in `docs/REMOTE.md` and `leon-wire`'s `relay`
+module. See `docs/REMOTE.md` for the security model.
 
 ## Rules
 
@@ -635,9 +666,12 @@ child <-> PTY <-> reader thread --chunks--> parser thread --> Term (grid, scroll
   button and the chord do it), and a sparse dotted grid in empty states (they
   are framed by corner ticks and a dimension line instead).
 * Dragging a pane to rearrange it, broadcasting input to several panes, saved layouts.
-* Sessions do not survive quitting Leon (the processes are hung up with the
-  window); reattaching to a remote session needs `tmux` or `screen` on the
-  server and is not wired up.
+* Local sessions do not survive quitting Leon (the processes are hung up with
+  the window). Terminals on a relay machine do survive on the host, and
+  `Client::pty_list`/`pty_attach` can re-attach to them, but listing the ones
+  still alive in the tree after a restart is not built.
+* Sharing runs inside the open application; a background service that survives
+  the window (launchd, systemd, a Windows service) is the next stage.
 * Remote Windows hosts (a POSIX shell is assumed).
 * Windows terminals are built but not exercised by the test suite here: the
   PTY round-trip tests run on Unix.

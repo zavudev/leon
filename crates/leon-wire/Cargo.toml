@@ -1,0 +1,14 @@
+[package]
+name = "leon-wire"
+description = "The wire protocol Leon speaks between computers: frames, messages and the relay rendezvous."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+postcard.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true

@@ -13,7 +13,8 @@ use crate::error::{Result, StoreError};
 use crate::ids::MachineId;
 use crate::model::{Machine, MachineKind};
 
-const COLUMNS: &str = "id, name, kind, host, user, port, identity_file";
+const COLUMNS: &str =
+    "id, name, kind, host, user, port, identity_file, relay_host_key, relay_url, relay_name";
 
 impl Store {
     /// Every machine, the local one first and the rest by name.
@@ -55,18 +56,23 @@ impl Store {
             kind,
         };
         self.write(StoreChange::Machines, |tx| {
-            let (host, user, port, identity_file) = ssh_columns(&machine.kind);
+            let columns = columns(&machine.kind);
             tx.prepare_cached(
-                "INSERT INTO machine (id, name, kind, host, user, port, identity_file)
-                 VALUES (?1, ?2, 'ssh', ?3, ?4, ?5, ?6)",
+                "INSERT INTO machine (id, name, kind, host, user, port, identity_file,
+                                      relay_host_key, relay_url, relay_name)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?
             .execute(params![
                 machine.id.as_str(),
                 machine.name,
-                host,
-                user,
-                port,
-                identity_file
+                columns.tag,
+                columns.host,
+                columns.user,
+                columns.port,
+                columns.identity_file,
+                columns.relay_host_key,
+                columns.relay_url,
+                columns.relay_name
             ])?;
             Ok(())
         })?;
@@ -83,20 +89,25 @@ impl Store {
             ));
         }
         self.write(StoreChange::Machines, |tx| {
-            let (host, user, port, identity_file) = ssh_columns(&machine.kind);
+            let columns = columns(&machine.kind);
             let updated = tx
                 .prepare_cached(
                     "UPDATE machine
-                     SET name = ?2, host = ?3, user = ?4, port = ?5, identity_file = ?6
-                     WHERE id = ?1",
+                     SET name = ?2, host = ?3, user = ?4, port = ?5, identity_file = ?6,
+                         relay_host_key = ?7, relay_url = ?8, relay_name = ?9
+                     WHERE id = ?1 AND kind = ?10",
                 )?
                 .execute(params![
                     machine.id.as_str(),
                     machine.name,
-                    host,
-                    user,
-                    port,
-                    identity_file
+                    columns.host,
+                    columns.user,
+                    columns.port,
+                    columns.identity_file,
+                    columns.relay_host_key,
+                    columns.relay_url,
+                    columns.relay_name,
+                    columns.tag
                 ])?;
             if updated == 0 {
                 return Err(StoreError::NotFound("machine"));
@@ -125,27 +136,57 @@ impl Store {
     }
 }
 
-type SshColumns<'a> = (
-    Option<&'a str>,
-    Option<&'a str>,
-    Option<u16>,
-    Option<&'a str>,
-);
+/// A machine's kind as database columns.
+struct Columns<'a> {
+    tag: &'static str,
+    host: Option<&'a str>,
+    user: Option<&'a str>,
+    port: Option<u16>,
+    identity_file: Option<&'a str>,
+    relay_host_key: Option<&'a str>,
+    relay_url: Option<&'a str>,
+    relay_name: Option<&'a str>,
+}
 
-fn ssh_columns(kind: &MachineKind) -> SshColumns<'_> {
+fn columns(kind: &MachineKind) -> Columns<'_> {
+    let none = Columns {
+        tag: "local",
+        host: None,
+        user: None,
+        port: None,
+        identity_file: None,
+        relay_host_key: None,
+        relay_url: None,
+        relay_name: None,
+    };
     match kind {
-        MachineKind::Local => (None, None, None, None),
+        MachineKind::Local => none,
         MachineKind::Ssh {
             host,
             user,
             port,
             identity_file,
-        } => (
-            Some(host.as_str()),
-            user.as_deref(),
-            *port,
-            identity_file.as_deref(),
-        ),
+        } => Columns {
+            tag: "ssh",
+            host: Some(host.as_str()),
+            user: user.as_deref(),
+            port: *port,
+            identity_file: identity_file.as_deref(),
+            ..none
+        },
+        MachineKind::Relay {
+            host_id,
+            host_key,
+            relay_url,
+            name,
+        } => Columns {
+            tag: "relay",
+            host: Some(host_id.as_str()),
+            relay_host_key: Some(host_key.as_str()),
+            relay_url: Some(relay_url.as_str()),
+            relay_name: Some(name.as_str()),
+            ..none
+        },
     }
 }
 
@@ -158,6 +199,12 @@ fn machine_from_row(row: &Row<'_>) -> rusqlite::Result<Machine> {
             user: row.get(4)?,
             port: row.get(5)?,
             identity_file: row.get(6)?,
+        },
+        "relay" => MachineKind::Relay {
+            host_id: row.get(3)?,
+            host_key: row.get(7)?,
+            relay_url: row.get(8)?,
+            name: row.get(9)?,
         },
         other => return Err(bad_tag(2, other)),
     };
@@ -188,6 +235,23 @@ mod tests {
             .add_machine("build box", ssh("build.example"))
             .unwrap();
         assert_eq!(store.machine(&added.id).unwrap(), added);
+    }
+
+    #[test]
+    fn a_relay_machine_is_read_back_with_its_pinned_key_and_relay() {
+        let store = Store::open_in_memory().unwrap();
+        let kind = MachineKind::Relay {
+            host_id: "ABCDEFGH".into(),
+            host_key: "00ff".into(),
+            relay_url: "wss://relay.example".into(),
+            name: "build-box".into(),
+        };
+        let added = store.add_machine("build box", kind).unwrap();
+        assert_eq!(store.machine(&added.id).unwrap(), added);
+        let mut renamed = added.clone();
+        renamed.name = "renamed".into();
+        store.update_machine(&renamed).unwrap();
+        assert_eq!(store.machine(&added.id).unwrap().kind, added.kind);
     }
 
     #[test]

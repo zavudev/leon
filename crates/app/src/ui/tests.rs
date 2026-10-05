@@ -372,6 +372,7 @@ fn open_full(
         open_file: Rc::new(move |_, path| opened_in.borrow_mut().push(path.to_path_buf())),
         pick_key: Rc::new(move |_| Task::ready(key_answer_in.borrow().clone())),
         ssh_dir: ssh.clone(),
+        remote: None,
     };
     let (window, shell) = cx.update(|cx| {
         let engine = engine.clone();
@@ -1520,6 +1521,11 @@ fn adding_a_machine_from_the_connect_screen_saves_it_to_the_store(cx: &mut TestA
             .reply(Output::ok(PROBE_OUTPUT)),
     );
     h.press("ctrl-shift-m", cx);
+    h.mouse_on(
+        "pair-method-ssh".to_owned(),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
     assert!(h.shows("connect", cx), "the screen is on screen");
     answer_field(&h, "staging", cx);
     h.type_text("dev@staging.example:2222", cx);
@@ -1563,6 +1569,11 @@ fn answer_field(h: &Harness, text: &str, cx: &mut TestAppContext) {
 fn a_bad_destination_is_refused_in_place_and_nothing_is_saved(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
     h.press("ctrl-shift-m", cx);
+    h.mouse_on(
+        "pair-method-ssh".to_owned(),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
     answer_field(&h, "staging", cx);
     h.type_text("dev@host:notaport", cx);
     h.press("ctrl-s", cx);
@@ -1583,6 +1594,11 @@ fn a_machine_that_does_not_answer_is_saved_and_its_light_turns_red(cx: &mut Test
             .reply(Output::failed(255, "ssh: connection refused")),
     );
     h.press("ctrl-shift-m", cx);
+    h.mouse_on(
+        "pair-method-ssh".to_owned(),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
     answer_field(&h, "down", cx);
     h.type_text("down.example", cx);
     h.press("ctrl-s", cx);

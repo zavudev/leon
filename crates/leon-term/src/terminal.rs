@@ -48,7 +48,7 @@ use std::time::{Duration, Instant};
 
 mod scripted;
 
-pub use scripted::{Script, Scripted};
+pub use scripted::{RemoteFeed, RemoteLink, Script, Scripted};
 
 /// How many lines of scrollback a terminal keeps.
 pub const SCROLLBACK_LINES: usize = 10_000;
@@ -483,7 +483,8 @@ impl Terminal {
     /// cannot say (Windows) or the process has no pid.
     pub fn shell_is_foreground(&self) -> Option<bool> {
         if let Some(script) = &self.script {
-            return Some(script.shell_is_foreground());
+            // Nothing is claimed about a program on another computer.
+            return (!script.is_remote()).then(|| script.shell_is_foreground());
         }
         #[cfg(unix)]
         {
@@ -614,6 +615,9 @@ impl Terminal {
         // A child that is gone cannot be told; that is not an error.
         if let Some(master) = self.master.lock().as_ref() {
             let _ = master.resize(size.pty_size());
+        }
+        if let Some(script) = &self.script {
+            script.resized(size);
         }
         self.shared.wake_once();
     }
@@ -761,6 +765,14 @@ impl Drop for Terminal {
         // Closing the input channel ends the writer; the PTY's own drop and
         // the hang-up end the rest.
         self.input = None;
+        if let Some(script) = &self.script {
+            if script.is_remote() {
+                // Dropping a view lets go of the connection; it does not end
+                // the program on the other computer. Closing it is `kill`.
+                script.detach();
+                return;
+            }
+        }
         if self.shared.exit.lock().is_none() {
             self.kill();
         }
@@ -1215,6 +1227,7 @@ mod windows_pty_tests {
             args: vec!["/c".into(), script.into()],
             env: Vec::new(),
             cwd: None,
+            route: None,
         }
     }
 

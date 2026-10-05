@@ -77,7 +77,9 @@ impl Section {
             Section::Agents => "How each coding agent is started and resumed.",
             Section::Sessions => "What is imported and shown of the agents' history.",
             Section::Projects => "How projects are found and what they show.",
-            Section::Machines => "SSH machines and how Leon talks to them.",
+            Section::Machines => {
+                "Other computers: relay machines, SSH machines and sharing this one."
+            }
             Section::Window => "The sidebar and what quitting asks.",
             Section::Keyboard => "Every command and its shortcuts.",
             Section::Advanced => "Folders, logging and starting over.",
@@ -832,6 +834,55 @@ pub const SETTINGS: &[Def] = &[
             unit: "s",
         },
         D::Int(0),
+    ),
+    def(
+        "remote_relay_url",
+        S::Machines,
+        "Relay server",
+        "The relay that connects two computers that reach it from behind their routers. The default service is operated by Zavu and is not live yet.",
+        "relay server url websocket wss connect code share network",
+        K::Text {
+            placeholder: "wss://relay.zavu.dev",
+        },
+        D::Text("wss://relay.zavu.dev"),
+    ),
+    def(
+        "remote_device_name",
+        S::Machines,
+        "Name of this computer",
+        "The name other computers see when you share this one or connect from it. Empty uses the computer's own name.",
+        "device name hostname share pair",
+        K::Text {
+            placeholder: "this computer's name",
+        },
+        D::Text(""),
+    ),
+    def(
+        "remote_share",
+        S::Machines,
+        "Share this machine",
+        "While Leon is open, let computers you pair with a code open terminals and run commands here. A paired computer gets a terminal as you.",
+        "share host service pair code relay remote access",
+        K::Toggle,
+        D::Bool(false),
+    ),
+    def(
+        "remote_require_approval",
+        S::Machines,
+        "Ask before pairing",
+        "When a computer pairs with the code, show its name and fingerprint here and wait for your answer. Turning this off makes the code itself the approval.",
+        "approve pairing confirm security",
+        K::Toggle,
+        D::Bool(true),
+    ),
+    def(
+        "share_machine",
+        S::Machines,
+        "Share this machine…",
+        "Open the Share screen: the pairing code, the computers paired with this one and a switch to start or stop sharing.",
+        "share host pair code devices revoke relay",
+        K::Action,
+        D::None,
     ),
     def(
         "add_machine",

@@ -138,6 +138,7 @@ impl Shell {
                     .child(Scrollbar::vertical(&self.tree_scroll)),
             )
             .child(self.render_connect_row(colours, cx))
+            .child(self.render_share_row(colours, cx))
             .child(self.render_tools(colours, cx))
     }
 
@@ -171,6 +172,36 @@ impl Shell {
                     .child("Connect a machine"),
             )
             .children(keys::keys_label(Command::AddMachine).map(|text| key_cap(text, colours)))
+    }
+
+    /// The row under it: share this computer.
+    fn render_share_row(&self, colours: &Palette, cx: &mut Context<Self>) -> Stateful<Div> {
+        let hover = colours.surface;
+        div()
+            .id("sidebar-share")
+            .debug_selector(|| "sidebar-share".into())
+            .flex_none()
+            .h(metrics::ROW_HEIGHT())
+            .px(px(12.))
+            .border_t_1()
+            .border_color(colours.border)
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.run_command(Command::ShareMachine, window, cx);
+            }))
+            .child(mono("\u{2197}").text_color(colours.text_muted))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(colours.text_muted)
+                    .child("Share this machine"),
+            )
     }
 
     /// The button that shows or hides the sidebar, with its chord in its

@@ -998,6 +998,10 @@ impl Shell {
                 }
                 text
             }
+            MachineKind::Relay { host_id, name, .. } => {
+                let short = host_id.get(..12).unwrap_or(host_id);
+                format!("{name} · relay · {short}")
+            }
             MachineKind::Local => "this computer".to_owned(),
         };
         let state = match self.engine.machine_state(&machine.id) {
@@ -1211,6 +1215,7 @@ impl Shell {
                         "reset_all" => "RESET…",
                         "open_data_folder" | "open_themes_folder" => "REVEAL",
                         "add_machine" => "ADD…",
+                        "share_machine" => "SHARE…",
                         "probe_machine" => "PROBE",
                         _ => "RUN",
                     };

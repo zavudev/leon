@@ -742,6 +742,46 @@ impl Engine {
         }
     }
 
+    /// Saves a machine reached through a relay after pairing with a code. A
+    /// machine already paired with the same host is updated, not duplicated.
+    pub fn save_relay_machine(
+        &self,
+        name: &str,
+        host_id: &str,
+        host_key: &str,
+        relay_url: &str,
+        host_name: &str,
+    ) -> Result<Machine, EngineError> {
+        let name = name.trim();
+        let name = if name.is_empty() {
+            host_name.trim()
+        } else {
+            name
+        };
+        if name.is_empty() {
+            return Err(EngineError::Invalid("A machine needs a name.".to_owned()));
+        }
+        let kind = MachineKind::Relay {
+            host_id: host_id.to_owned(),
+            host_key: host_key.to_owned(),
+            relay_url: relay_url.to_owned(),
+            name: host_name.to_owned(),
+        };
+        let existing =
+            self.inner.store.machines()?.into_iter().find(
+                |m| matches!(&m.kind, MachineKind::Relay { host_id: id, .. } if id == host_id),
+            );
+        match existing {
+            Some(mut machine) => {
+                machine.name = name.to_owned();
+                machine.kind = kind;
+                self.inner.store.update_machine(&machine)?;
+                Ok(machine)
+            }
+            None => Ok(self.inner.store.add_machine(name, kind)?),
+        }
+    }
+
     /// Records that a machine answered, with what a test found out about it.
     pub fn mark_online(&self, id: &MachineId, report: ProbeReport) {
         self.set_machine(id, MachineState::Online(Some(report)));

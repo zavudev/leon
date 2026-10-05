@@ -528,6 +528,13 @@ impl Shell {
         };
         let was_open = matches!(self.main, Main::Live(open) if open == id);
         let closed = self.workspaces.close(id);
+        if let Some(session) = self.live.get(id) {
+            let terminal = session.view.read(cx).terminal();
+            if terminal.is_remote() {
+                // Closing is an explicit end: hang the program up over there.
+                terminal.kill();
+            }
+        }
         self.live.remove(id);
         self.find.remove(&id);
         self.refresh_live();
