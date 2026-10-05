@@ -21,6 +21,7 @@ use crate::size::GridSize;
 use crate::spec::{command_builder, SpawnSpec};
 
 /// How long a hung-up child has to exit before its process group is killed.
+#[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_millis(1_500);
 /// How long, after the child exits, the last of its output may still arrive.
 const DRAIN_GRACE: Duration = Duration::from_millis(250);
