@@ -121,6 +121,11 @@ fn relay_unreachable(url: &str, detail: &str) -> Failure {
 fn from_dial(url: &str, error: &DialError) -> Failure {
     match error {
         DialError::Unreachable(detail) => relay_unreachable(url, detail),
+        DialError::Secure(detail) => Failure {
+            step: Step::Relay,
+            headline: format!("The secure connection could not be set up: {detail}."),
+            advice: "This is about this computer's TLS setup, not about the relay. Try again; if it keeps happening, restart Leon and report it.".into(),
+        },
         DialError::Refused(e) if e.code == RelayErrorCode::HostNotFound => Failure {
             step: Step::Find,
             headline: "No computer is showing that code.".into(),

@@ -62,6 +62,10 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+# One TLS crypto provider, chosen on purpose: ring, which snow already builds on
+# every platform (aws-lc-rs would need cmake and NASM on Windows).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
 
 # Where the per-user data directory lives on each platform.
 dirs = "6"

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Fixed
+
+* **`wss://` relays work.** The first connection to a TLS relay panicked in the
+  TLS library (no process-level crypto provider was installed), leaving the
+  host and the Connect screens at "connecting" for ever; this shipped in 0.1.0,
+  so "With a code" could not reach `wss://relay.getleon.dev`. The crypto
+  provider is now chosen on purpose (`ring`), the client configuration is built
+  with it explicitly, it is also installed once at the start of the app and of
+  `leon host`, and a failure while setting up TLS is reported as "The secure
+  connection could not be set up" and retried instead of hanging. Tests now run
+  the whole path (pairing, a command, a terminal) over TLS.
+
 ### Added
 
 * Usage limits: a footer with each agent's primary window (five-hour, weekly,

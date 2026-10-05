@@ -41,6 +41,7 @@ pub mod relay_client;
 pub mod session;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+pub mod tls;
 
 pub use channel::{accept, connect, LinkError, Rejection, SecureChannel};
 pub use code::{CodeShape, PairingCode};

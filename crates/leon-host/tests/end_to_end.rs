@@ -88,6 +88,11 @@ fn client_for(url: &str, host: &Identity, me: &Arc<Identity>) -> Client {
 async fn paired() -> World {
     let relay = TestRelay::start().await;
     let url = relay.url();
+    paired_on(relay, url).await
+}
+
+/// [`paired`] on a relay that is already running, at `url`.
+async fn paired_on(relay: TestRelay, url: String) -> World {
     let dir = tempfile::tempdir().unwrap();
     let host_identity = Arc::new(Identity::load_or_create(&dir.path().join("host")).unwrap());
     let client_identity = Arc::new(Identity::generate());
@@ -246,6 +251,37 @@ async fn a_command_runs_on_the_host_and_its_output_comes_back() {
     assert_eq!(out.stdout, b"hello\n");
     assert_eq!(out.stderr, b"oops\n");
     assert_eq!(out.status, Some(2));
+}
+
+/// The whole path over TLS: a `wss://` relay with a throwaway certificate for
+/// `localhost` (trusted through the test seam only), pairing with a code, a
+/// command, and a terminal that echoes. The first real relay panicked here, in
+/// the TLS setup, while every other test used `ws://`.
+#[tokio::test]
+async fn pairing_a_command_and_a_terminal_work_over_a_wss_relay() {
+    let relay = TestRelay::start_tls_self_signed().await;
+    let url = relay.tls_url();
+    let world = paired_on(relay, url).await;
+    assert!(world.relay_url.starts_with("wss://"));
+    assert_eq!(world.host.devices().len(), 1);
+    let out = world
+        .client
+        .exec(
+            ExecSpec {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "echo over-tls".into()],
+                env: vec![],
+                cwd: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.stdout, b"over-tls\n");
+    let mut pty = open(&world.client, "shell").await;
+    pty.expect("LEON> ").await;
+    pty.write("echo tls-echo-$((20+22))\n");
+    pty.expect("tls-echo-42").await;
 }
 
 #[tokio::test]

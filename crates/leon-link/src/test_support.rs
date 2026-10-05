@@ -90,7 +90,7 @@ mod relay {
         RelayErrorCode, RelayLimits, RelayToClient, RelayToHost,
     };
     use leon_wire::HostId;
-    use tokio::net::{TcpListener, TcpStream};
+    use tokio::net::TcpListener;
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
     use tokio_tungstenite::tungstenite::Message;
@@ -168,6 +168,68 @@ mod relay {
             format!("ws://{}", self.addr)
         }
 
+        /// Starts on an ephemeral port behind TLS: every connection is first
+        /// accepted by `acceptor` (a rustls server of the test's own).
+        pub async fn start_tls(acceptor: tokio_rustls::TlsAcceptor) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind the test relay");
+            let addr = listener.local_addr().unwrap();
+            let state: Shared = Arc::default();
+            let tasks: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::default();
+            let spawned = tasks.clone();
+            let accept = tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let (acceptor, state) = (acceptor.clone(), state.clone());
+                    let handle = tokio::spawn(async move {
+                        if let Ok(tls) = acceptor.accept(stream).await {
+                            connection(tls, state).await;
+                        }
+                    });
+                    spawned.lock().unwrap().push(handle);
+                }
+            });
+            Self {
+                addr,
+                tasks,
+                accept,
+            }
+        }
+
+        /// Starts behind TLS with a throwaway self-signed certificate for
+        /// `localhost`, made now, and makes this process trust it (see
+        /// [`crate::tls::trust_for_tests`]): `wss://` clients connect to
+        /// [`TestRelay::tls_url`] with the production client configuration.
+        pub async fn start_tls_self_signed() -> Self {
+            let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+                .expect("generate a certificate");
+            let cert = tokio_rustls::rustls::pki_types::CertificateDer::from(
+                certified.cert.der().to_vec(),
+            );
+            let key = tokio_rustls::rustls::pki_types::PrivateKeyDer::try_from(
+                certified.key_pair.serialize_der(),
+            )
+            .expect("a private key");
+            crate::tls::trust_for_tests(cert.clone());
+            let config =
+                tokio_rustls::rustls::ServerConfig::builder_with_provider(crate::tls::provider())
+                    .with_safe_default_protocol_versions()
+                    .expect("protocol versions")
+                    .with_no_client_auth()
+                    .with_single_cert(vec![cert], key)
+                    .expect("a server certificate");
+            Self::start_tls(tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config))).await
+        }
+
+        /// Its `wss://` base URL, on `localhost` (the name a test certificate
+        /// is issued for).
+        pub fn tls_url(&self) -> String {
+            format!("wss://localhost:{}", self.addr.port())
+        }
+
         /// Stops it and drops every connection, as a crash would.
         pub async fn stop(self) {
             self.accept.abort();
@@ -197,7 +259,7 @@ mod relay {
         }
     }
 
-    async fn connection(stream: TcpStream, state: Shared) {
+    async fn connection<S: Io>(stream: S, state: Shared) {
         let mut path = String::new();
         let callback =
             |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
@@ -221,9 +283,13 @@ mod relay {
         }
     }
 
-    type Socket = tokio_tungstenite::WebSocketStream<TcpStream>;
+    type Socket<S> = tokio_tungstenite::WebSocketStream<S>;
 
-    async fn host_connection(mut socket: Socket, state: Shared) {
+    /// What a test relay can talk over: a plain TCP stream or a TLS one.
+    pub trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static {}
+    impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static> Io for T {}
+
+    async fn host_connection<S: Io>(mut socket: Socket<S>, state: Shared) {
         let nonce: [u8; 32] = {
             use rand_core::RngCore;
             let mut n = [0u8; 32];
@@ -358,8 +424,8 @@ mod relay {
         }
     }
 
-    async fn client_connection(
-        mut socket: Socket,
+    async fn client_connection<S: Io>(
+        mut socket: Socket<S>,
         state: Shared,
         host: Option<HostId>,
         room: Option<String>,
