@@ -5794,6 +5794,9 @@ mod tests_connect;
 #[path = "tests_settings.rs"]
 mod tests_settings;
 
+#[path = "tests_settings_layout.rs"]
+mod tests_settings_layout;
+
 #[path = "tests_themes.rs"]
 mod themes_files;
 

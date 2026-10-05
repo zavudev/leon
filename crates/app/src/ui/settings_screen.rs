@@ -230,6 +230,15 @@ impl Shell {
             .collect();
     }
 
+    /// Whether the controls of an option go under its text: the card is too
+    /// narrow (the window, or the interface size) to give the text a readable
+    /// column beside them.
+    pub(super) fn settings_stacked(&self) -> bool {
+        let card = metrics::SETTINGS_WIDTH().min(self.viewport.width - px(32.));
+        let text = card - metrics::SETTINGS_NAV() - metrics::SETTINGS_CONTROL() - px(64.);
+        text < metrics::SETTINGS_TEXT_MIN()
+    }
+
     /// The setting of the line the keyboard is on.
     fn settings_current(&self) -> Option<&'static Def> {
         match self.settings_entries().get(self.settings_ui.cursor) {
@@ -878,9 +887,13 @@ impl Shell {
         let base = div()
             .id(("settings-row", index))
             .relative()
+            // As tall as its content, never squeezed by the list: a row that
+            // shrinks to fit paints its text over the next one.
+            .flex_none()
+            .w_full()
             .min_h(metrics::SETTINGS_ROW())
             .px_4()
-            .py(px(10.))
+            .py(metrics::SETTINGS_ROW_PAD())
             .flex()
             .items_center()
             .justify_between()
@@ -1117,7 +1130,7 @@ impl Shell {
             div()
                 .id(("settings-value", index))
                 .debug_selector(move || format!("settings-value-{key}"))
-                .max_w(px(300.))
+                .max_w(metrics::SETTINGS_CONTROL() - px(76.))
                 .truncate()
                 .px(px(8.))
                 .py(px(3.))
@@ -1142,7 +1155,7 @@ impl Shell {
                 .gap(px(2.))
                 .child(
                     div()
-                        .w(px(300.))
+                        .w(metrics::SETTINGS_CONTROL())
                         .px(px(8.))
                         .border_1()
                         .border_color(colours.signal)
@@ -1237,9 +1250,12 @@ impl Shell {
                 }
             }
         };
+        let stacked = self.settings_stacked();
         base.debug_selector(move || format!("settings-row-{key}"))
+            .when(stacked, |this| this.flex_col().items_stretch().gap_2())
             .child(
                 div()
+                    .debug_selector(move || format!("settings-text-{key}"))
                     .flex_1()
                     .min_w_0()
                     .flex()
@@ -1247,9 +1263,11 @@ impl Shell {
                     .gap(px(2.))
                     .child(
                         div()
+                            .debug_selector(move || format!("settings-label-{key}"))
                             .flex()
+                            .flex_wrap()
                             .items_center()
-                            .gap_2()
+                            .gap_x_2()
                             .child(div().child(def.label))
                             .when(searching, |this| {
                                 this.child(
@@ -1271,6 +1289,7 @@ impl Shell {
                     )
                     .child(
                         div()
+                            .debug_selector(move || format!("settings-desc-{key}"))
                             .text_size(metrics::TEXT_SMALL())
                             .text_color(colours.text_muted)
                             .child(def.description),
@@ -1278,10 +1297,15 @@ impl Shell {
             )
             .child(
                 div()
+                    .debug_selector(move || format!("settings-control-{key}"))
                     .flex_none()
+                    .w(metrics::SETTINGS_CONTROL())
+                    .when(stacked, |this| this.self_end())
                     .flex()
-                    .items_center()
-                    .gap_3()
+                    .flex_col()
+                    .items_end()
+                    .justify_center()
+                    .gap_2()
                     .when(modified, |this| {
                         this.child(
                             button("settings-reset", "RESET TO DEFAULT".to_owned())
