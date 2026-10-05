@@ -120,6 +120,7 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
             Cmd(C::NewWorktree),
             Cmd(C::OpenProject),
             Cmd(C::AddMachine),
+            Cmd(C::ShareMachine),
             Sep,
             Cmd(C::SaveOutput),
             Cmd(C::SaveOutputAnsi),

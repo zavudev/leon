@@ -98,7 +98,7 @@ pub struct Options {
 pub fn usage() -> String {
     format!(
         "{name} {version}\n\n\
-         Usage: {slug} [options]\n\n\
+         Usage: {slug} [options]\n       {slug} host [--pair] | pair | devices | status | revoke <device>   (share this computer; see `{slug} host --help`)\n\n\
          Options:\n  \
          --data-dir <path>              Keep the database and settings here\n  \
          --theme <light|dark|system>    Use this appearance for this run\n  \

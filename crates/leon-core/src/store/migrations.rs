@@ -20,7 +20,12 @@ use crate::error::{Result, StoreError};
 
 /// Every migration, oldest first. The index of an entry plus one is the
 /// schema version it produces.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
+///
+/// Versions 4 (usage limits) and 5 (relay machines) were developed on separate
+/// branches that both wanted "version 4". Neither was ever released: the only
+/// public schema is version 3, so version 4 never existed in the wild and this
+/// order (usage, then relay) is the one every database goes through.
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
 
 const V1: &str = r#"
 CREATE TABLE machine (
@@ -183,6 +188,15 @@ CREATE TABLE usage_history (
 ) WITHOUT ROWID;
 "#;
 
+/// Version 5: machines reached through a relay: the pinned host key, the relay's address
+/// and the name the host gave itself. Existing rows are untouched (the columns
+/// are NULL for them); the host's id lives in the existing `host` column.
+const V5: &str = r#"
+ALTER TABLE machine ADD COLUMN relay_host_key TEXT;
+ALTER TABLE machine ADD COLUMN relay_url TEXT;
+ALTER TABLE machine ADD COLUMN relay_name TEXT;
+"#;
+
 /// Brings the database up to the latest schema version.
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     let supported = MIGRATIONS.len() as u32;
@@ -209,6 +223,33 @@ mod tests {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn a_version_3_database_gains_the_relay_columns_and_keeps_its_machines() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        for (index, sql) in [V1, V2, V3].iter().enumerate() {
+            connection.execute_batch(sql).unwrap();
+            connection
+                .pragma_update(None, "user_version", index as u32 + 1)
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO machine (id, name, kind, host) VALUES ('m1', 'box', 'ssh', 'box.example')",
+                [],
+            )
+            .unwrap();
+        migrate(&mut connection).unwrap();
+        assert_eq!(version(&connection), 5);
+        let (host, key): (String, Option<String>) = connection
+            .query_row(
+                "SELECT host, relay_host_key FROM machine WHERE id = 'm1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((host.as_str(), key), ("box.example", None));
     }
 
     #[test]
@@ -286,6 +327,27 @@ mod tests {
             .execute(
                 "INSERT INTO usage_reading (machine_id, agent, payload, collected_at)
                  VALUES ('local', 'codex', '{}', 0)",
+                [],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_fresh_database_has_both_the_usage_tables_and_the_relay_columns() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        assert_eq!(version(&connection), 5);
+        connection
+            .execute(
+                "INSERT INTO usage_history (machine_id, agent, account, window, observed_at, used_percent)
+                 VALUES ('local', 'codex', 'a', 'w', 0, 1.0)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO machine (id, name, kind, host, relay_host_key, relay_url, relay_name)
+                 VALUES ('r', 'box', 'relay', 'h', 'k', 'wss://x', 'n')",
                 [],
             )
             .unwrap();

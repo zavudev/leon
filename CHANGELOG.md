@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+### Added
+
 * Usage limits: a footer with each agent's primary window (five-hour, weekly,
   per-model) for the machine in context, a usage view (`Show usage`) with
   Detailed and Compact modes, per-machine readings, a burn-rate estimate, a
@@ -9,6 +11,23 @@
   `leon --diagnose usage`. Codex is read from its own session log; Claude Code
   and the opencode Go subscription need an opt-in network source (Settings,
   Usage), off by default.
+* **Connect a machine, with a code.** Install Leon on the other computer, choose
+  Share this machine, type the short code it shows: both computers dial out to a
+  relay, so there is no SSH setup and nothing to open on any network. SSH stays
+  as the second, advanced method.
+* **Share this machine** (File menu, palette, Settings, sidebar) and
+  `leon host` (`pair`, `devices`, `revoke`, `status`): the pairing code with its
+  countdown, paired computers with Revoke, an approval prompt.
+* End-to-end encryption (Noise `IK`, pairing with SPAKE2), pinned keys, revocable
+  devices, durable terminals on the shared computer that can be re-attached
+  without gaps or duplicates. See `docs/REMOTE.md`.
+* New crates `leon-wire`, `leon-link`, `leon-pty` and `leon-host`; settings for
+  the relay address, the device name, sharing and approval.
+
+### Not yet
+
+* The relay service at `wss://relay.zavu.dev` is not deployed.
+* Sharing stops when Leon closes (a background service is the next stage).
 
 ## [0.1.0]
 

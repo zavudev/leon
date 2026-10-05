@@ -203,15 +203,34 @@ sidebar.
 
 A machine is another computer (a server, a desktop at the office, a spare
 laptop) whose projects, worktrees and agent sessions you drive from Leon.
-Leon reaches it with your system's SSH, signing in as you; Leon installs
-nothing on the other computer.
+There are two ways to connect, and **With a code** is the default.
+
+* **With a code (recommended).** Install Leon on the other computer, choose
+  **Share this machine** (File menu, palette, Settings ▸ Machines, or the foot of
+  the sidebar) and it shows a short code. On your computer choose **Connect a
+  machine ▸ With a code** and type it. Both computers dial out to a relay
+  server operated by Zavu, which pairs them and passes bytes along: no open
+  ports, no SSH setup, and it works behind NAT. The connection is end-to-end
+  encrypted with keys only your two computers hold, so the relay cannot read it.
+  Terminals keep running on the shared computer when you close the window and
+  can be re-attached. See [docs/REMOTE.md](docs/REMOTE.md) for the threat
+  model and the protocol. **The relay service is not live yet**: until it is,
+  Leon says exactly that, with the address it tried, instead of hanging.
+* **SSH (advanced).** Leon reaches the computer with your system's SSH, signing
+  in as you; Leon installs nothing on the other computer. The rest of this
+  section describes this method.
+
+Sharing runs as you: a paired computer gets a terminal as you on the shared
+one. Pair only your own devices. `leon host` runs the sharing service without a
+window (`leon host --pair`, `leon host pair`, `leon host devices`,
+`leon host revoke <device>`, `leon host status`); it refuses to run as root.
 
 Open the **Connect a machine** screen with `Cmd+Shift+M` (`Ctrl+Shift+M`), File
-▸ Connect a machine…, the command palette (`remote`, `server`, `ssh` and
-`connect` find it), Settings ▸ Machines, the context menu of a machine, or the
-`Connect a machine` row at the foot of the sidebar. Editing a machine opens the
-same screen, filled in. `Esc` closes it and gives the keyboard back to where it
-was.
+▸ Connect a machine…, the command palette (`remote`, `server`, `code` and
+`connect` find it), Settings ▸ Machines, or the `Connect a machine` row at the
+foot of the sidebar; **SSH (advanced)** in its header switches to the SSH
+screen. Editing an SSH machine opens that screen, filled in. `Esc` closes it and
+gives the keyboard back to where it was.
 
 Three things must be true on the other computer. The screen explains each in a
 "How do I…?" row, for the platform you pick (macOS, Linux; Windows is not
@@ -313,6 +332,7 @@ platform (see below).
 | Open a shell here | `⌘T` `⇧⌘T` | `Ctrl+T` `Ctrl+Shift+T` |
 | New worktree | `⇧⌘N` | `Ctrl+Shift+N` |
 | Connect a machine… | `⇧⌘M` | `Ctrl+Shift+M` |
+| Share this machine… | palette only | palette only |
 | Open project… | `⌘O` | `Ctrl+O` |
 | Add a remote project by path… | palette only | palette only |
 | Remove a project | palette only | palette only |
@@ -448,6 +468,7 @@ macOS:
 * Open a shell here `⇧⌘T`
 * New worktree `⇧⌘N`
 * Connect a machine… `⇧⌘M`
+* Share this machine… palette only
 * Open project… `⌘O`
 * Open the transcript `⇧⌘L`
 * Focus the terminal `⌘E`
@@ -505,6 +526,7 @@ Linux and Windows:
 * Open a shell here `Ctrl+Shift+T`
 * New worktree `Ctrl+Shift+N`
 * Connect a machine… `Ctrl+Shift+M`
+* Share this machine… palette only
 * Open the transcript `Ctrl+Shift+L`
 * Split the pane to the right `Ctrl+Shift+D`
 * Split the pane downwards `Ctrl+Shift+O`

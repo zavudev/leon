@@ -239,6 +239,19 @@ mod tests {
         }
     }
 
+    fn relayed() -> Machine {
+        Machine {
+            id: MachineId::from_string("relayed"),
+            name: "relayed".into(),
+            kind: MachineKind::Relay {
+                host_id: "host-id".into(),
+                host_key: "00".repeat(32),
+                relay_url: "wss://relay.example".into(),
+                name: "Their computer".into(),
+            },
+        }
+    }
+
     const CODEX_LINE: &str = r#"{"timestamp":"2026-10-04T18:59:06.753Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":97.0,"window_minutes":300,"resets_at":1791154068},"secondary":{"used_percent":15.0,"window_minutes":10080,"resets_at":1791678919},"plan_type":"plus"}}}"#;
 
     fn output(has: &[&str], go: bool, codex: Option<&str>) -> Output {
@@ -338,6 +351,36 @@ mod tests {
         );
         assert!(matches!(by(AgentKind::Codex).state, State::Known { .. }));
         assert_eq!(got.readings[1].machine, "box");
+        assert_eq!(http.calls().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_relay_machine_is_read_through_its_route_and_never_calls_a_vendor() {
+        let http = ScriptedHttp::new();
+        let policy = NetworkPolicy {
+            claude: true,
+            opencode: true,
+        };
+        let (got, runner) = run(
+            &relayed(),
+            output(&["claude", "codex"], false, Some(CODEX_LINE)),
+            policy,
+            &http,
+        )
+        .await;
+        let call = &runner.calls()[0];
+        assert!(
+            call.route.is_some(),
+            "the command must go through the relay"
+        );
+        let by = |a| got.readings.iter().find(|r| r.agent == a).unwrap();
+        assert!(matches!(by(AgentKind::Codex).state, State::Known { .. }));
+        assert_eq!(
+            by(AgentKind::Claude).state,
+            State::Unknown {
+                reason: Reason::NotSupported
+            }
+        );
         assert_eq!(http.calls().len(), 0);
     }
 

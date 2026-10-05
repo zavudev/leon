@@ -30,6 +30,14 @@ THIRD-PARTY DEPENDENCIES
   bundled SQLite, tokio and others), each under its own licence, which
   `cargo metadata` lists. SQLite is in the public domain.
 
+  The remote feature uses these audited crates (licences are the crates' own and
+  are listed by `cargo metadata`; the BSD-3-Clause ones require this
+  attribution): snow (Apache-2.0 OR MIT), spake2 (MIT OR Apache-2.0),
+  ed25519-dalek, x25519-dalek and curve25519-dalek (BSD-3-Clause, Copyright (c)
+  Isis Agora Lovecruft, Henry de Valence and contributors), subtle
+  (BSD-3-Clause, Copyright (c) Isis Agora Lovecruft, Henry de Valence),
+  zeroize, postcard and tokio-tungstenite (MIT OR Apache-2.0).
+
 BUNDLED ASSETS (sources and licences: crates/app/assets/ASSETS.md)
   Fonts, each with its licence text next to it in crates/app/assets/fonts:
     Space Grotesk   Copyright 2020 The Space Grotesk Project Authors.

@@ -28,6 +28,8 @@ struct Inner {
     handler: Mutex<Option<Handler>>,
     foreground: AtomicBool,
     hung_up: AtomicBool,
+    /// Where a remote terminal's input, resizes and hang-up go.
+    link: Mutex<Option<Arc<dyn RemoteLink>>>,
 }
 
 /// The child of a scripted terminal, as the test sees it.
@@ -47,8 +49,13 @@ impl Script {
             bytes.push(byte);
             last = byte;
         }
+        self.feed_raw(&bytes);
+    }
+
+    /// Feeds output bytes exactly as they are.
+    pub(super) fn feed_raw(&self, bytes: &[u8]) {
         let inner = &self.0;
-        feed(&mut inner.parser.lock(), &mut inner.term.lock(), &bytes);
+        feed(&mut inner.parser.lock(), &mut inner.term.lock(), bytes);
         inner.shared.has_output.store(true, Ordering::Release);
         inner.shared.generation.fetch_add(1, Ordering::AcqRel);
         let elapsed = inner.shared.started.elapsed().as_millis() as u64;
@@ -113,6 +120,10 @@ impl Script {
     }
 
     pub(super) fn input(&self, bytes: Vec<u8>) {
+        if let Some(link) = self.link() {
+            link.write(bytes);
+            return;
+        }
         self.0.written.lock().extend_from_slice(&bytes);
         let handler = self.0.handler.lock().clone();
         if let Some(handler) = handler {
@@ -120,7 +131,34 @@ impl Script {
         }
     }
 
+    fn link(&self) -> Option<Arc<dyn RemoteLink>> {
+        self.0.link.lock().clone()
+    }
+
+    pub(super) fn is_remote(&self) -> bool {
+        self.0.link.lock().is_some()
+    }
+
+    pub(super) fn resized(&self, size: GridSize) {
+        if let Some(link) = self.link() {
+            link.resize(size);
+        }
+    }
+
+    /// Lets go of a remote terminal without ending its program.
+    pub(super) fn detach(&self) {
+        if let Some(link) = self.link() {
+            link.detach();
+        }
+    }
+
     pub(super) fn hang_up(&self) {
+        if let Some(link) = self.link() {
+            // The program on the other computer is hung up; its end arrives
+            // as the host's report.
+            link.close();
+            return;
+        }
         self.0.hung_up.store(true, Ordering::Release);
         self.end(ExitInfo {
             code: 1,
@@ -181,6 +219,7 @@ impl Terminal {
             handler: Mutex::new(None),
             foreground: AtomicBool::new(true),
             hung_up: AtomicBool::new(false),
+            link: Mutex::new(None),
         }));
         let terminal = Self {
             term,
@@ -193,6 +232,81 @@ impl Terminal {
             script: Some(script.clone()),
         };
         (terminal, script)
+    }
+}
+
+/// Where a terminal whose program runs on another computer sends what the
+/// user does. The terminal itself is the same emulator as for a local PTY; only
+/// its two ends differ: bytes arrive through a [`RemoteFeed`] and leave through
+/// this link.
+pub trait RemoteLink: Send + Sync {
+    /// Keystrokes, pastes and the emulator's replies.
+    fn write(&self, bytes: Vec<u8>);
+    /// The grid changed size.
+    fn resize(&self, size: GridSize);
+    /// The user closed the terminal: hang the remote program up.
+    fn close(&self);
+    /// The application lets go (it is quitting): the remote program keeps
+    /// running and can be attached to again.
+    fn detach(&self);
+}
+
+/// The producing end of a remote terminal: what arrives from the other
+/// computer is fed in here.
+#[derive(Clone)]
+pub struct RemoteFeed(Script);
+
+impl RemoteFeed {
+    /// Output bytes from the remote program, in order.
+    pub fn data(&self, bytes: &[u8]) {
+        self.0.feed_raw(bytes);
+    }
+
+    /// The other computer no longer had some output: start the screen over.
+    pub fn gap(&self) {
+        // RIS: full reset, so a half-received screen does not linger.
+        self.0.feed_raw(b"\x1bc");
+    }
+
+    /// Text for the person, in the terminal's own scrollback (connection
+    /// notices). A bare `\n` becomes `\r\n`.
+    pub fn notice(&self, text: &str) {
+        self.0.print(text);
+    }
+
+    /// The remote program ended.
+    pub fn exit(&self, code: u32, signal: Option<String>) {
+        self.0.end(ExitInfo { code, signal });
+    }
+}
+
+impl Terminal {
+    /// A terminal whose program runs on another computer. Returns the terminal
+    /// and the feed through which the other computer's output is delivered;
+    /// what the user does goes to `link`.
+    pub fn remote(
+        spec: &SpawnSpec,
+        size: GridSize,
+        theme: TerminalTheme,
+        wake: Wake,
+        link: Arc<dyn RemoteLink>,
+    ) -> (Self, RemoteFeed) {
+        let (terminal, script) = Self::scripted(spec, size, theme, wake);
+        *script.0.link.lock() = Some(link);
+        (terminal, RemoteFeed(script))
+    }
+
+    /// Whether the program runs on another computer.
+    pub fn is_remote(&self) -> bool {
+        self.script.as_ref().is_some_and(Script::is_remote)
+    }
+
+    /// Lets go of a remote terminal without ending its program (the
+    /// application is quitting). Does nothing for a local one.
+    pub fn detach(&self) {
+        if let Some(script) = &self.script {
+            script.detach();
+        }
     }
 }
 
@@ -378,5 +492,98 @@ mod tests {
         terminal.set_cursor_shape(CursorShape::Block);
         script.print("\x1b[0 q"); // and then for the default again
         assert_eq!(shape(&terminal), CursorShape::Block);
+    }
+
+    #[derive(Default)]
+    struct Recording {
+        events: Mutex<Vec<String>>,
+    }
+
+    impl RemoteLink for Recording {
+        fn write(&self, bytes: Vec<u8>) {
+            self.events
+                .lock()
+                .push(format!("write {}", String::from_utf8_lossy(&bytes)));
+        }
+        fn resize(&self, size: GridSize) {
+            self.events
+                .lock()
+                .push(format!("resize {}x{}", size.cols, size.rows));
+        }
+        fn close(&self) {
+            self.events.lock().push("close".into());
+        }
+        fn detach(&self) {
+            self.events.lock().push("detach".into());
+        }
+    }
+
+    fn remote() -> (Terminal, RemoteFeed, Arc<Recording>) {
+        let link = Arc::new(Recording::default());
+        let (terminal, feed) = Terminal::remote(
+            &SpawnSpec::new("claude"),
+            GridSize::new(40, 5),
+            crate::testing::theme(),
+            Box::new(|| {}),
+            link.clone(),
+        );
+        (terminal, feed, link)
+    }
+
+    #[test]
+    fn a_remote_terminal_draws_what_arrives_and_sends_what_the_user_does() {
+        let (terminal, feed, link) = remote();
+        assert!(terminal.is_remote());
+        feed.data(b"hello\r\nworld");
+        assert_eq!(terminal.screen_text(), "hello\nworld");
+        terminal.write(&b"ls\r"[..]);
+        terminal.resize(GridSize::new(100, 30));
+        assert_eq!(*link.events.lock(), ["write ls\r", "resize 100x30"]);
+    }
+
+    #[test]
+    fn closing_a_remote_terminal_hangs_the_remote_program_up_and_waits_for_its_report() {
+        let (terminal, feed, link) = remote();
+        terminal.kill();
+        assert_eq!(*link.events.lock(), ["close"]);
+        assert!(
+            terminal.exit_info().is_none(),
+            "the end is the host's to report"
+        );
+        feed.exit(1, Some("Hangup".into()));
+        assert_eq!(
+            terminal.exit_info().and_then(|i| i.signal).as_deref(),
+            Some("Hangup")
+        );
+    }
+
+    #[test]
+    fn dropping_a_remote_terminal_detaches_instead_of_ending_the_program() {
+        let (terminal, _feed, link) = remote();
+        drop(terminal);
+        assert_eq!(*link.events.lock(), ["detach"]);
+    }
+
+    #[test]
+    fn nothing_is_claimed_about_the_foreground_of_a_remote_program() {
+        let (terminal, ..) = remote();
+        assert_eq!(terminal.shell_is_foreground(), None);
+    }
+
+    #[test]
+    fn a_gap_starts_the_screen_over() {
+        let (terminal, feed, _link) = remote();
+        feed.data(b"stale screen");
+        feed.gap();
+        feed.data(b"fresh");
+        assert_eq!(terminal.screen_text(), "fresh");
+    }
+
+    #[test]
+    fn a_remote_terminal_does_not_keep_a_log_of_what_it_was_sent() {
+        let (terminal, ..) = remote();
+        terminal.write(&b"secret"[..]);
+        terminal.with_term(|_| ());
+        assert!(terminal.script.as_ref().unwrap().written().is_empty());
     }
 }

@@ -93,10 +93,14 @@ pub enum Overlay {
     Problems,
     /// The Settings screen.
     Settings,
-    /// The "Connect a machine" screen.
+    /// The "Connect a machine" screen (SSH).
     Connect,
     /// The usage view: how much of each agent's limits is left.
     Usage,
+    /// "Connect a machine, with a code".
+    Pair,
+    /// "Share this machine".
+    Share,
 }
 
 /// What the folder picker answered.
@@ -190,6 +194,9 @@ pub struct Options {
     pub pick_key: PickFolder,
     /// The user's `~/.ssh`, as far as Leon looks at it.
     pub ssh_dir: Arc<dyn leon_remote::connect::SshDir>,
+    /// Connections to other computers and sharing this one; absent in tests
+    /// that do not need them.
+    pub remote: Option<Arc<crate::remote::Remote>>,
 }
 
 /// A `~/.ssh` that is not there: the home folder is unknown.
@@ -239,6 +246,7 @@ impl Default for Options {
                 Some(dir) => Arc::new(dir),
                 None => Arc::new(NoSshDir),
             },
+            remote: None,
             reveal_app: Rc::new(|_, bundle| {
                 // `open` on a running application brings it forward.
                 #[cfg(target_os = "macos")]
@@ -355,6 +363,10 @@ pub struct Shell {
     pub(super) connect_ui: super::connect::ConnectUi,
     /// The usage bar and view.
     pub(super) usage: super::usage_view::UsageUi,
+    /// "Connect a machine, with a code".
+    pub(super) pair_ui: super::pair::PairUi,
+    /// "Share this machine".
+    pub(super) share_ui: super::share::ShareUi,
     /// The sidebar's filter field, the text it holds, and what that leaves of
     /// the tree (`None` while it is empty).
     pub(super) filter_input: Entity<InputState>,
@@ -428,6 +440,7 @@ impl Shell {
         let palette = PaletteState::new(window, cx);
         let settings_ui = SettingsUi::new(window, cx);
         let connect_ui = super::connect::ConnectUi::new(window, cx);
+        let pair_ui = super::pair::PairUi::new(window, cx);
         let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter projects"));
         let labels = filter::project_labels(&snapshot);
         let find_input = find::new_input(window, cx);
@@ -498,6 +511,7 @@ impl Shell {
                     .update(cx, |field, cx| field.focus(window, cx)),
                 Overlay::Settings => this.settings_focus(window, cx),
                 Overlay::Connect => this.connect_focus(window, cx),
+                Overlay::Pair => this.pair_focus(window, cx),
                 _ => {
                     this.focus.focus(window, cx);
                     this.sync_focus(window, cx);
@@ -561,6 +575,8 @@ impl Shell {
             settings_ui,
             connect_ui,
             usage: super::usage_view::UsageUi::default(),
+            pair_ui,
+            share_ui: super::share::ShareUi::default(),
             filter_input,
             filter_query: String::new(),
             filter: None,
@@ -1452,6 +1468,12 @@ impl Shell {
         if self.overlay == Overlay::Usage && self.usage_key(stroke, window, cx) {
             return true;
         }
+        if self.overlay == Overlay::Pair && self.pair_key(stroke, window, cx) {
+            return true;
+        }
+        if self.overlay == Overlay::Share && self.share_key(stroke, window, cx) {
+            return true;
+        }
         let filtering = self.overlay == Overlay::None && self.filter_focused(window, cx);
         if filtering && self.filter_key(stroke, window, cx) {
             return true;
@@ -1462,7 +1484,7 @@ impl Shell {
         }
         let typing = matches!(
             self.overlay,
-            Overlay::Palette | Overlay::Settings | Overlay::Connect
+            Overlay::Palette | Overlay::Settings | Overlay::Connect | Overlay::Pair
         ) || filtering
             || finding;
         if self.overlay == Overlay::Palette && self.palette_key(stroke, window, cx) {
@@ -1588,7 +1610,13 @@ impl Shell {
             | C::SetAppearance
             | C::ChooseTheme
             | C::SetInterfaceSize => self.begin_flow(command, window, cx),
-            C::AddMachine => self.open_connect(None, false, window, cx),
+            C::AddMachine => self.open_pair(window, cx),
+            C::ShareMachine => self.open_share(window, cx),
+            C::WhyOffline if self.relay_machine_here().is_some() => {
+                if let Some(machine) = self.relay_machine_here() {
+                    self.open_pair_why(machine, window, cx);
+                }
+            }
             C::EditMachine | C::WhyOffline => match self.ssh_machine_here() {
                 Some(machine) => {
                     self.open_connect(Some(machine), command == C::WhyOffline, window, cx)
@@ -1678,6 +1706,8 @@ impl Shell {
                 | Overlay::Problems
                 | Overlay::Connect
                 | Overlay::Usage
+                | Overlay::Pair
+                | Overlay::Share
                 | Overlay::Settings => self.close_overlay(window, cx),
                 Overlay::None => {
                     if self.pane == Pane::Sidebar {
@@ -1707,6 +1737,8 @@ impl Shell {
             Overlay::Menu => self.close_menu(window, cx),
             Overlay::Settings => self.close_settings(window, cx),
             Overlay::Connect => self.close_connect(window, cx),
+            Overlay::Pair => self.close_pair(window, cx),
+            Overlay::Share => self.close_share(window, cx),
             Overlay::About | Overlay::Problems | Overlay::Usage => {
                 self.overlay = Overlay::None;
                 self.focus.focus(window, cx);
@@ -2089,7 +2121,9 @@ impl Shell {
         false
     }
 
-    /// Hangs every terminal up, saves what is kept, and ends the application.
+    /// Hangs every terminal up (those on other computers are let go of: their
+    /// programs keep running there), saves what is kept, and ends the
+    /// application.
     pub(super) fn quit_now(&mut self, cx: &mut Context<Self>) {
         self.flush(cx);
         (self.options.quit)(cx);
@@ -2102,7 +2136,14 @@ impl Shell {
     pub(super) fn flush(&mut self, cx: &mut Context<Self>) {
         for id in self.live.ids() {
             if let Some(session) = self.live.get(id) {
-                session.view.read(cx).terminal().kill();
+                let terminal = session.view.read(cx).terminal();
+                if terminal.is_remote() {
+                    // The program on the other computer keeps running; it can
+                    // be attached to again.
+                    terminal.detach();
+                } else {
+                    terminal.kill();
+                }
             }
         }
         if let Some(path) = &self.expansion_file {
@@ -2170,6 +2211,8 @@ impl Shell {
             Overlay::Settings => self.render_settings(colours, cx).into_any_element(),
             Overlay::Connect => self.render_connect(colours, cx).into_any_element(),
             Overlay::Usage => self.render_usage(colours, cx).into_any_element(),
+            Overlay::Pair => self.render_pair(colours, cx).into_any_element(),
+            Overlay::Share => self.render_share(colours, cx).into_any_element(),
         };
         let top = match self.overlay {
             Overlay::Palette => self.palette_top(),

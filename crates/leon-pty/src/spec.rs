@@ -23,6 +23,10 @@ pub struct SpawnSpec {
     pub env: Vec<(String, String)>,
     /// Working directory; the inherited one when absent.
     pub cwd: Option<String>,
+    /// For a machine reached through a relay: where to run it instead of on
+    /// this computer (host id, key and relay), or `None` to start it here. The PTY layer ignores it; the application's
+    /// backend routes on it.
+    pub route: Option<String>,
 }
 
 impl SpawnSpec {
@@ -63,6 +67,7 @@ mod tests {
             args: vec!["--resume".into(), "abc".into()],
             env: vec![("FOO".into(), "bar".into())],
             cwd: Some("/srv/api".into()),
+            route: None,
         }
     }
 

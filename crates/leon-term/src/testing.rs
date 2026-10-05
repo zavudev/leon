@@ -32,6 +32,7 @@ pub fn sh(args: &[&str]) -> SpawnSpec {
             ("PS1".into(), "READY> ".into()),
         ],
         cwd: None,
+        route: None,
     }
 }
 

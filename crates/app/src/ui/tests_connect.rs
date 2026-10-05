@@ -42,6 +42,12 @@ const SUCCESS: &str = "os=Linux\narch=x86_64\nhome=/home/dev\ntool=git=/usr/bin/
 
 fn open_screen(h: &Harness, cx: &mut TestAppContext) {
     h.press("ctrl-shift-m", cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Pair);
+    h.mouse_on(
+        "pair-method-ssh".to_owned(),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
     assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Connect);
 }
 
@@ -109,7 +115,7 @@ fn every_way_in_opens_the_same_screen(cx: &mut TestAppContext) {
         gpui_kit::MouseButton::Left,
         cx,
     );
-    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Connect);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Pair);
     h.press("escape", cx);
     // The palette.
     h.press("ctrl-shift-p", cx);
@@ -118,7 +124,7 @@ fn every_way_in_opens_the_same_screen(cx: &mut TestAppContext) {
         .palette_titles(cx)
         .contains(&"Connect a machine…".to_owned()));
     h.press("enter", cx);
-    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Connect);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Pair);
     h.press("escape", cx);
     // The empty state says remote computers can be added.
     assert!(h.shows("main-empty-remote", cx));
@@ -604,4 +610,60 @@ fn the_explanation_is_per_platform_and_collapses_into_rows(cx: &mut TestAppConte
     // One row at a time.
     h.mouse_on("connect-how-1".to_owned(), gpui_kit::MouseButton::Left, cx);
     assert!(!h.shows("connect-how-body-0", cx) && h.shows("connect-how-body-1", cx));
+}
+
+#[gpui_kit::test]
+fn connect_a_machine_opens_with_a_code_first_and_ssh_is_the_second_method(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    h.press("ctrl-shift-m", cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Pair);
+    for selector in [
+        "pair-intro",
+        "pair-code",
+        "pair-name",
+        "pair-hint",
+        "pair-method-code",
+        "pair-method-ssh",
+    ] {
+        assert!(h.shows(selector, cx), "{selector}");
+    }
+    // The hint follows the typing.
+    h.type_text("AB2", cx);
+    h.settle(cx);
+    let typed = h.shell(cx, |s| s.pair_ui.in_name);
+    assert!(!typed, "the code field has the keyboard first");
+    // Tab goes to the optional name, Escape closes.
+    h.press("tab", cx);
+    assert!(h.shell(cx, |s| s.pair_ui.in_name));
+    h.press("escape", cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+    // The second method is the SSH screen, unchanged.
+    h.press("ctrl-shift-m", cx);
+    h.mouse_on(
+        "pair-method-ssh".to_owned(),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Connect);
+}
+
+#[gpui_kit::test]
+fn share_this_machine_opens_from_the_sidebar_and_states_the_risk(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    assert!(h.shows("sidebar-share", cx));
+    h.mouse_on("sidebar-share".to_owned(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Share);
+    for selector in ["share-intro", "share-risk", "share-switch", "share-devices"] {
+        assert!(h.shows(selector, cx), "{selector}");
+    }
+    h.press("escape", cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+    // The palette finds it too.
+    h.press("ctrl-shift-p", cx);
+    h.set_palette_text(">share", cx);
+    assert!(h
+        .palette_titles(cx)
+        .contains(&"Share this machine…".to_owned()));
+    h.press("enter", cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Share);
 }

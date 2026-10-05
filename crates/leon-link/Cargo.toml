@@ -1,0 +1,37 @@
+[package]
+name = "leon-link"
+description = "Leon's end-to-end secure channel: identity, pairing with a short code, Noise sessions and relay transports."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# An in-process relay for tests of the crates that use this one. A test
+# double: it has no limits and no accounts, and is never part of a shipped
+# binary.
+test-support = []
+
+[dependencies]
+leon-wire.workspace = true
+
+ed25519-dalek.workspace = true
+futures-util.workspace = true
+postcard.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+snow.workspace = true
+spake2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+x25519-dalek.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

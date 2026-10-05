@@ -1005,6 +1005,46 @@ impl Engine {
         }
     }
 
+    /// Saves a machine reached through a relay after pairing with a code. A
+    /// machine already paired with the same host is updated, not duplicated.
+    pub fn save_relay_machine(
+        &self,
+        name: &str,
+        host_id: &str,
+        host_key: &str,
+        relay_url: &str,
+        host_name: &str,
+    ) -> Result<Machine, EngineError> {
+        let name = name.trim();
+        let name = if name.is_empty() {
+            host_name.trim()
+        } else {
+            name
+        };
+        if name.is_empty() {
+            return Err(EngineError::Invalid("A machine needs a name.".to_owned()));
+        }
+        let kind = MachineKind::Relay {
+            host_id: host_id.to_owned(),
+            host_key: host_key.to_owned(),
+            relay_url: relay_url.to_owned(),
+            name: host_name.to_owned(),
+        };
+        let existing =
+            self.inner.store.machines()?.into_iter().find(
+                |m| matches!(&m.kind, MachineKind::Relay { host_id: id, .. } if id == host_id),
+            );
+        match existing {
+            Some(mut machine) => {
+                machine.name = name.to_owned();
+                machine.kind = kind;
+                self.inner.store.update_machine(&machine)?;
+                Ok(machine)
+            }
+            None => Ok(self.inner.store.add_machine(name, kind)?),
+        }
+    }
+
     /// Records that a machine answered, with what a test found out about it.
     pub fn mark_online(&self, id: &MachineId, report: ProbeReport) {
         self.set_machine(id, MachineState::Online(Some(report)));
@@ -2999,6 +3039,28 @@ branch refs/heads/feature/login
         // This computer's scan is a shell script, and PowerShell on Windows.
         let program = if cfg!(windows) { "powershell" } else { "sh" };
         assert_eq!(rig.runner.calls()[0].program, program);
+    }
+
+    #[tokio::test]
+    async fn a_relay_machine_is_scanned_through_its_route() {
+        let rig = scanning_rig(vec![Output::ok(scan_output(""))]);
+        let machine = rig
+            .store
+            .add_machine(
+                "relayed",
+                MachineKind::Relay {
+                    host_id: "ABCDEFGH".into(),
+                    host_key: "00".repeat(32),
+                    relay_url: "wss://relay.example".into(),
+                    name: "their computer".into(),
+                },
+            )
+            .unwrap();
+        rig.engine.run(Op::Scan(machine.id.clone())).await;
+        assert!(rig.engine.elsewhere(&machine.id).is_some());
+        let call = &rig.runner.calls()[0];
+        assert!(call.route.is_some(), "the scan must go through the relay");
+        assert_eq!(call.program, "sh");
     }
 
     #[tokio::test]

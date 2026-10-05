@@ -345,7 +345,7 @@ impl Shell {
                     .text_size(metrics::TEXT_SMALL())
                     .text_color(colours.text_muted)
                     .child(format!(
-                        "Projects on another computer work too: connect a machine ({}) and drive it over SSH.",
+                        "Projects on another computer work too: connect a machine ({}) with a code, no network setup needed, or over SSH.",
                         keys::keys_label(Command::AddMachine).unwrap_or_default()
                     )),
             )

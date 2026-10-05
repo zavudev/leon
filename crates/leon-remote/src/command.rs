@@ -42,6 +42,10 @@ pub struct CommandSpec {
     pub env: Vec<(String, String)>,
     /// Working directory; the default of the machine when absent.
     pub cwd: Option<String>,
+    /// For a machine reached through a relay: where to send the command (see
+    /// [`crate::relay::route`]). The runner that starts the process routes on
+    /// it; `None` means "start it here".
+    pub route: Option<String>,
 }
 
 impl CommandSpec {
@@ -157,7 +161,18 @@ fn place(
         identity_file,
     } = &machine.kind
     else {
-        return command.clone();
+        let mut placed = command.clone();
+        if let MachineKind::Relay {
+            host_id,
+            host_key,
+            relay_url,
+            ..
+        } = &machine.kind
+        {
+            // The host runs it as written; the runner sends it there.
+            placed.route = Some(crate::relay::route(host_id, host_key, relay_url));
+        }
+        return placed;
     };
 
     let mut args: Vec<String> = vec!["-o".into(), "BatchMode=yes".into()];
@@ -195,6 +210,7 @@ fn place(
         args,
         env: Vec::new(),
         cwd: None,
+        route: None,
     }
 }
 

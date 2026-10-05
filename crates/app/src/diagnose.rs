@@ -149,6 +149,7 @@ pub fn plan(args: &Diagnose, system: &dyn System) -> (SpawnSpec, Vec<u8>) {
                 args: rest.to_vec(),
                 env: Vec::new(),
                 cwd: None,
+                route: None,
             };
             (
                 spec,
@@ -162,6 +163,7 @@ pub fn plan(args: &Diagnose, system: &dyn System) -> (SpawnSpec, Vec<u8>) {
                     args: vec!["/c".into(), "set /p x= & echo echo:%x%".into()],
                     env: Vec::new(),
                     cwd: None,
+                    route: None,
                 }
             } else {
                 SpawnSpec {
@@ -169,6 +171,7 @@ pub fn plan(args: &Diagnose, system: &dyn System) -> (SpawnSpec, Vec<u8>) {
                     args: vec!["-c".into(), r#"read x; printf 'echo:%s\n' "$x""#.into()],
                     env: Vec::new(),
                     cwd: None,
+                    route: None,
                 }
             };
             let input = args
