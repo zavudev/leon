@@ -422,8 +422,9 @@ fn the_find_chord_means_filter_projects_in_the_sidebar_and_find_in_a_terminal(
     cx: &mut TestAppContext,
 ) {
     let (h, _dir, _) = terminal_with(cx, 3);
-    // From the sidebar: the filter.
-    h.press("ctrl-l", cx);
+    // From the sidebar: the filter. (A plain Ctrl+L belongs to the terminal
+    // off macOS, so the sidebar is reached with its Ctrl+Shift chord there.)
+    h.press_chord("cmd-l", "ctrl-shift-s", cx);
     h.press_chord("cmd-f", "ctrl-f", cx);
     assert!(!h.shows("find-bar", cx));
     let filtering = cx.update_window(h.window.into(), |_, window, cx| {

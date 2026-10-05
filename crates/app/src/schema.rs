@@ -1483,7 +1483,11 @@ mod tests {
         if std::env::var_os("LEON_BLESS").is_some() {
             std::fs::write(&file, &expected).unwrap();
         }
-        let actual = std::fs::read_to_string(&file).unwrap_or_default();
+        // A checkout may have turned the line endings into CRLF (Git on
+        // Windows does by default); the text is the same.
+        let actual = std::fs::read_to_string(&file)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
         assert!(
             actual == expected,
             "docs/SETTINGS.md is stale: run `LEON_BLESS=1 cargo test -p leon the_settings_reference_is_current`"

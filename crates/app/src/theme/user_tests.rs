@@ -476,7 +476,9 @@ fn the_template_for_a_new_theme_loads_as_the_theme_it_extends() {
 
 /// The part of `docs/THEMES.md` between its markers.
 fn reference_in_the_docs() -> String {
-    let docs = include_str!("../../../../docs/THEMES.md");
+    // A checkout may have turned the line endings into CRLF (Git on Windows
+    // does by default); the text is the same.
+    let docs = include_str!("../../../../docs/THEMES.md").replace("\r\n", "\n");
     let begin = docs.find("<!-- tokens:begin -->").expect("a begin marker");
     let end = docs.find("<!-- tokens:end -->").expect("an end marker");
     docs[begin + "<!-- tokens:begin -->".len()..end]

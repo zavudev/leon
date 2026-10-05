@@ -130,7 +130,7 @@ fn the_scrollback_setting_bounds_the_buffer_of_live_and_new_terminals(cx: &mut T
     set(&h, cx, "terminal_scrollback", Value::Int(50));
     assert!(history(&h, cx, 1) <= 50);
     // A terminal started afterwards has the bound from its first line.
-    h.press("ctrl-t", cx);
+    h.press_chord("cmd-t", "ctrl-shift-t", cx);
     wait_until(&h, cx, "the second shell", |h, cx| {
         terminal_of(h, cx, 2).is_some_and(|t| t.screen_text().contains("READY>"))
     });
@@ -307,7 +307,7 @@ fn a_chosen_shell_and_extra_environment_start_new_terminals(cx: &mut TestAppCont
 #[gpui_kit::test]
 fn a_bell_marks_a_background_session_only_when_the_setting_says_so(cx: &mut TestAppContext) {
     let (h, _dir, _) = shell_open(cx);
-    h.press("ctrl-t", cx);
+    h.press_chord("cmd-t", "ctrl-shift-t", cx);
     wait_until(&h, cx, "the second shell", |h, cx| {
         terminal_of(h, cx, 2).is_some()
     });

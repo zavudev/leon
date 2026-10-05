@@ -410,19 +410,41 @@ impl Harness {
     /// Lets the engine's background tasks run to completion, then lets the UI
     /// react to what they stored.
     fn settle(&self, cx: &mut TestAppContext) {
-        self.runtime.block_on(async {
-            for _ in 0..64 {
-                tokio::task::yield_now().await;
-            }
-        });
+        self.drain();
         cx.run_until_parked();
         // The UI may have asked for more work while reacting.
+        self.drain();
+        cx.run_until_parked();
+    }
+
+    /// Runs the engine's tasks until they have nothing left to do. The jobs
+    /// on the blocking pool (the history import, reading a chosen image) run
+    /// on threads of their own, so yielding alone is a race with them that a
+    /// slow machine loses: wait for them, up to a generous limit.
+    fn drain(&self) {
+        let limit = std::time::Instant::now() + std::time::Duration::from_secs(30);
         self.runtime.block_on(async {
-            for _ in 0..64 {
-                tokio::task::yield_now().await;
+            loop {
+                for _ in 0..64 {
+                    tokio::task::yield_now().await;
+                }
+                if std::time::Instant::now() > limit {
+                    break;
+                }
+                if self.engine.blocking_jobs() > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    continue;
+                }
+                // A job that just ended hands its result to a task that runs
+                // now, and that task may start the next job: look once more.
+                for _ in 0..64 {
+                    tokio::task::yield_now().await;
+                }
+                if self.engine.blocking_jobs() == 0 {
+                    break;
+                }
             }
         });
-        cx.run_until_parked();
     }
 
     fn press(&self, key: &str, cx: &mut TestAppContext) {
@@ -1418,7 +1440,7 @@ fn searching_history_from_the_palette_opens_the_matching_session(cx: &mut TestAp
     let h = open(cx, ScriptedRunner::new());
     many_messages(&h.store, 80, 57);
     h.settle(cx);
-    h.press("ctrl-shift-f", cx);
+    h.press_chord("cmd-shift-f", "ctrl-shift-i", cx);
     assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Palette);
     h.type_text("migrate users", cx);
     h.settle(cx);
@@ -1461,7 +1483,7 @@ fn the_slash_prefix_in_the_go_to_palette_searches_the_history_too(cx: &mut TestA
 #[gpui_kit::test]
 fn a_hit_on_another_machine_switches_to_that_machine(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
-    h.press("ctrl-shift-f", cx);
+    h.press_chord("cmd-shift-f", "ctrl-shift-i", cx);
     h.type_text("deploy keys", cx);
     h.settle(cx);
     h.press("enter", cx);
@@ -1474,7 +1496,7 @@ fn a_hit_on_another_machine_switches_to_that_machine(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn an_empty_history_search_says_what_to_type_and_a_miss_finds_nothing(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
-    h.press("ctrl-shift-f", cx);
+    h.press_chord("cmd-shift-f", "ctrl-shift-i", cx);
     let titles = h.palette_titles(cx);
     assert!(titles[0].starts_with("line:Type to search"), "{titles:?}");
     h.type_text("qqqqqqqq", cx);
@@ -2635,7 +2657,7 @@ fn the_secondary_f_chord_focuses_the_filter_and_the_history_search_keeps_its_own
     h.type_text("web", cx);
     assert_eq!(h.outline(cx).len(), 4);
     h.press("escape", cx);
-    h.press("ctrl-shift-f", cx);
+    h.press_chord("cmd-shift-f", "ctrl-shift-i", cx);
     assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Palette);
     let typed = cx.update(|cx| h.shell.read(cx).palette.input.read(cx).value().to_string());
     assert_eq!(typed, "/");
@@ -3526,8 +3548,9 @@ mod live {
         assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Palette);
         h.press("escape", cx);
         assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
-        // ctrl-shift-b leaves the terminal for the sidebar.
-        h.press("ctrl-shift-b", cx);
+        // The focus-the-sidebar chord leaves the terminal for the sidebar
+        // (Cmd+Shift+B on macOS, Ctrl+Shift+S elsewhere).
+        h.press_chord("cmd-shift-b", "ctrl-shift-s", cx);
         assert_eq!(h.shell(cx, |s| s.pane), Pane::Sidebar);
         assert_eq!(h.main_kind(cx), "live:1", "the terminal stays on screen");
         // And ctrl-shift-j... is not bound; ctrl-j focuses the main pane again.
@@ -3687,7 +3710,7 @@ mod live {
         let h = open_live(cx);
         let (_dir, _) = real_worktree(&h, cx);
         h.press("ctrl-t", cx);
-        h.press("ctrl-t", cx);
+        h.press_chord("cmd-t", "ctrl-shift-t", cx);
         assert_eq!(h.main_kind(cx), "live:2", "the new tab is shown");
         h.press_chord("cmd-shift-]", "ctrl-shift-pagedown", cx);
         assert_eq!(h.main_kind(cx), "live:1", "wraps round");
@@ -4017,7 +4040,7 @@ mod live {
     #[gpui_kit::test]
     fn a_new_tab_keeps_its_own_panes_and_the_strip_names_the_tabs(cx: &mut TestAppContext) {
         let (h, _dir, _) = two_panes(cx);
-        h.press("ctrl-t", cx); // a new tab
+        h.press_chord("cmd-t", "ctrl-shift-t", cx); // a new tab
         assert_eq!(h.main_kind(cx), "live:3");
         assert!(h.shows("terminal-tabs", cx));
         assert!(h.shows("terminal-tab-0", cx) && h.shows("terminal-tab-1", cx));
@@ -4748,7 +4771,7 @@ mod live {
         wait_until(&h, cx, "the shell", |h, cx| {
             screen(h, cx, 1).contains("READY>")
         });
-        h.press("ctrl-t", cx); // terminal 2: another one
+        h.press_chord("cmd-t", "ctrl-shift-t", cx); // terminal 2: another one
         wait_until(&h, cx, "the second shell", |h, cx| {
             screen(h, cx, 2).contains("READY>")
         });
@@ -5376,7 +5399,7 @@ mod live {
             .unwrap();
         h.settle(cx);
         // A message hit shows the transcript, scrolled to the message.
-        h.press("ctrl-shift-f", cx);
+        h.press_chord("cmd-shift-f", "ctrl-shift-i", cx);
         h.type_text("quokka", cx);
         h.settle(cx);
         h.press("enter", cx);

@@ -323,6 +323,10 @@ struct Inner {
     events: broadcast::Sender<EngineEvent>,
     fetcher: Mutex<Arc<dyn IconFetcher>>,
     scanner: Mutex<Option<Arc<Scanner>>>,
+    /// How many jobs run on the blocking pool right now. They run on threads
+    /// of their own, outside any scheduler a test controls, so a test waits for
+    /// this to reach zero before it looks at what they stored.
+    blocking: std::sync::atomic::AtomicUsize,
 }
 
 /// The background half of the application. Cheap to clone.
@@ -366,8 +370,40 @@ impl Engine {
                 events,
                 fetcher: Mutex::new(Arc::new(NoFetch)),
                 scanner: Mutex::new(None),
+                blocking: std::sync::atomic::AtomicUsize::new(0),
             }),
         }
+    }
+
+    /// Runs `job` on the blocking pool and counts it while it runs.
+    async fn blocking<T: Send + 'static>(
+        &self,
+        job: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, EngineError> {
+        use std::sync::atomic::Ordering;
+        /// Takes the job off the count wherever the closure ends.
+        struct Running(Arc<Inner>);
+        impl Drop for Running {
+            fn drop(&mut self) {
+                self.0.blocking.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        self.inner.blocking.fetch_add(1, Ordering::SeqCst);
+        let running = Running(self.inner.clone());
+        tokio::task::spawn_blocking(move || {
+            let _running = running;
+            job()
+        })
+        .await
+        .map_err(|error| EngineError::Job(error.to_string()))
+    }
+
+    /// How many blocking jobs are running (tests wait for zero).
+    #[cfg(test)]
+    pub(crate) fn blocking_jobs(&self) -> usize {
+        self.inner
+            .blocking
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Lets the engine download owner avatars with `fetcher`. Without one it
@@ -630,10 +666,9 @@ impl Engine {
         self.set_status(StatusKind::Busy, "Importing history...".to_owned());
         let store = self.inner.store.clone();
         let roots = self.prefs().roots;
-        let report =
-            tokio::task::spawn_blocking(move || Importer::run(&store, &MachineId::local(), &roots))
-                .await
-                .map_err(|error| EngineError::Job(error.to_string()))?;
+        let report = self
+            .blocking(move || Importer::run(&store, &MachineId::local(), &roots))
+            .await?;
         Ok(describe_import(&report))
     }
 
@@ -1341,16 +1376,18 @@ impl Engine {
     ) -> Result<String, EngineError> {
         let name = self.inner.store.project(id)?.name;
         let file = path.clone();
-        let bytes = tokio::task::spawn_blocking(move || {
-            let size = std::fs::metadata(&file)?.len();
-            if size > leon_core::icon::MAX_ICON_BYTES as u64 {
-                return Err(std::io::Error::other("that image is larger than 256 KiB"));
-            }
-            std::fs::read(&file)
-        })
-        .await
-        .map_err(|error| EngineError::Job(error.to_string()))?
-        .map_err(|error| EngineError::Invalid(format!("cannot use {}: {error}", path.display())))?;
+        let bytes = self
+            .blocking(move || {
+                let size = std::fs::metadata(&file)?.len();
+                if size > leon_core::icon::MAX_ICON_BYTES as u64 {
+                    return Err(std::io::Error::other("that image is larger than 256 KiB"));
+                }
+                std::fs::read(&file)
+            })
+            .await?
+            .map_err(|error| {
+                EngineError::Invalid(format!("cannot use {}: {error}", path.display()))
+            })?;
         let image = IconImage::from_bytes(bytes).ok_or_else(|| {
             EngineError::Invalid(format!(
                 "{} is not a PNG, WebP, ICO, JPEG or SVG image.",
@@ -2727,7 +2764,9 @@ branch refs/heads/feature/login
         assert!(found.is_certain());
         assert!(found.session.is_some());
         assert!(!found.leon_child);
-        assert_eq!(rig.runner.calls()[0].program, "sh");
+        // This computer's scan is a shell script, and PowerShell on Windows.
+        let program = if cfg!(windows) { "powershell" } else { "sh" };
+        assert_eq!(rig.runner.calls()[0].program, program);
     }
 
     #[tokio::test]

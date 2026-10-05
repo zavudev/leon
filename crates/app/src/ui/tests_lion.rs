@@ -88,7 +88,7 @@ fn the_lion_is_the_fitted_drawing_at_twenty_pixels_and_the_full_one_in_the_about
 fn the_main_header_keeps_the_lion_when_the_sidebar_is_away(cx: &mut TestAppContext) {
     let h = lit(cx);
     assert!(!h.shows("main-header-mark", cx), "the sidebar has it");
-    h.press("ctrl-b", cx);
+    h.press_chord("cmd-b", "ctrl-shift-b", cx);
     assert!(
         h.shows("main-header-mark", cx),
         "the main pane header has it now"
@@ -203,8 +203,8 @@ fn the_entrance_plays_once_when_the_window_first_has_the_focus(cx: &mut TestAppC
     );
 
     // Hiding and showing the sidebar makes a new mark, which does not play it.
-    h.press("ctrl-b", cx);
-    h.press("ctrl-b", cx);
+    h.press_chord("cmd-b", "ctrl-shift-b", cx);
+    h.press_chord("cmd-b", "ctrl-shift-b", cx);
     let painted = lion("header-mark");
     assert_eq!(
         (painted.pose.plate, painted.pose.glow),
