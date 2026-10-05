@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+* Usage limits: a footer with each agent's primary window (five-hour, weekly,
+  per-model) for the machine in context, a usage view (`Show usage`) with
+  Detailed and Compact modes, per-machine readings, a burn-rate estimate, a
+  notice before starting an agent that is nearly at its limit, and
+  `leon --diagnose usage`. Codex is read from its own session log; Claude Code
+  and the opencode Go subscription need an opt-in network source (Settings,
+  Usage), off by default.
+
 ## [0.1.0]
 
 First public release.

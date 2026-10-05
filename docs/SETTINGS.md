@@ -102,6 +102,24 @@ SSH machines and how Leon talks to them.
 | Connect a machine… |  | button |  | Open the Connect screen: what a machine is, a form and a test of the connection. |
 | Probe the machine on screen |  | button |  | Check that the machine answers and which agents it has. |
 
+## Usage
+
+How much of each agent's limits is left, and where the numbers come from.
+
+| Setting | Key | Values | Default | Description |
+| --- | --- | --- | --- | --- |
+| Show the usage bar | `usage_bar` | on, off | `on` | A bar at the bottom of the window with each agent's limits. |
+| Show Claude Code | `usage_claude` | on, off | `on` | Show Claude Code's limits in the bar and the usage view. |
+| Show Codex | `usage_codex` | on, off | `on` | Show Codex's limits in the bar and the usage view. |
+| Show opencode | `usage_opencode` | on, off | `on` | Show opencode's limits in the bar and the usage view. |
+| Refresh interval | `usage_interval` | 1 to 120min | `5` | How often, in minutes, the limits are read again while the window is focused. |
+| Warn from | `usage_warn` | 10 to 99% | `75` | From this percentage a limit is shown as high, with a marker as well as a colour. |
+| Critical from | `usage_critical` | 11 to 100% | `90` | From this percentage a limit is shown as near its end, and starting a session says so first. |
+| Say so before starting a session | `usage_warn_before_session` | on, off | `on` | When an agent's limit is nearly used up, a line says so, with when it resets, before the session starts. It never blocks. |
+| Read Claude Code's limits from Anthropic | `usage_claude_network` | on, off | `off` | Claude Code keeps its limits nowhere on disk. When on, Leon reads the sign-in token Claude Code already holds (the macOS keychain or ~/.claude/.credentials.json) when it refreshes and sends it over HTTPS to api.anthropic.com only, asking for the account's usage. The token is never stored, logged or shown, and only this computer does it. Off by default. |
+| Read the opencode Go limits from opencode | `usage_opencode_network` | on, off | `off` | Only for an opencode Go subscription. When on, Leon reads the API key opencode stored for it (~/.local/share/opencode/auth.json) when it refreshes and sends it over HTTPS to opencode.ai only, asking for the subscription's usage. The key is never stored, logged or shown, and only this computer does it. Off by default. |
+| Forget stored usage history |  | button |  | Delete the percentages and times kept for the trend lines and the burn-rate estimate. The latest readings stay. |
+
 ## Sidebar & window
 
 The sidebar and what quitting asks.

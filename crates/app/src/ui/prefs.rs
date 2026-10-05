@@ -109,6 +109,7 @@ impl Shell {
         use crate::keys::Command as C;
         match key {
             "reimport" => self.engine.submit(crate::engine::Op::Refresh),
+            "usage_forget_history" => self.engine.submit(crate::engine::Op::ForgetUsageHistory),
             "add_machine" => {
                 self.run_command(C::AddMachine, window, cx);
             }
@@ -234,6 +235,7 @@ impl Shell {
         if prefs != self.engine.prefs() {
             self.engine.set_prefs(prefs);
         }
+        self.engine.set_usage_policy(settings::usage_policy(cx));
         for session in self.live.all() {
             apply_terminal_prefs(&session.view, cx);
         }

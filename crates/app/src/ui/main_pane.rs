@@ -6,7 +6,6 @@ use super::lines::{empty_frame, frame_ticks};
 use super::shell::{Main, Pane, Shell, Transcript};
 use super::tree::worktree_label;
 use super::widgets::{focus_rule, key_cap, mono, section_label};
-use crate::engine::StatusKind;
 use crate::format;
 use crate::icons::agent_icon;
 use crate::keys::{self, Command};
@@ -92,7 +91,8 @@ impl Shell {
                                     .truncate()
                                     .font_weight(FontWeight::MEDIUM)
                                     .child(title),
-                            ),
+                            )
+                            .children(self.header_usage_chip(colours, cx)),
                     )
                     .child({
                         // What it is, where, and how it is doing: the path gives
@@ -129,7 +129,7 @@ impl Shell {
                     .when(focused, |this| this.child(focus_rule(colours))),
             )
             .child(div().flex_1().min_h_0().flex().flex_col().child(body))
-            .child(self.render_status(colours))
+            .child(self.render_status_bar(colours, cx))
     }
 
     /// The header's metadata as one line, for tests.
@@ -652,37 +652,6 @@ impl Shell {
             )
             .child(Scrollbar::vertical(&transcript.list))
             .into_any_element()
-    }
-
-    fn render_status(&self, colours: &Palette) -> Div {
-        let status = self.engine.status();
-        let (text, colour) = match &status {
-            Some(line) if line.kind == StatusKind::Error => (line.text.clone(), colours.error),
-            Some(line) if line.kind == StatusKind::Busy => (line.text.clone(), colours.info),
-            Some(line) => (line.text.clone(), colours.text_muted),
-            None => ("Ready.".to_owned(), colours.text_faint),
-        };
-        div()
-            .debug_selector(|| "status-strip".into())
-            .flex_none()
-            .h(metrics::FOOTER_HEIGHT())
-            .px_4()
-            .border_t_1()
-            .border_color(colours.border)
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(section_label("Status", colours))
-            .child(
-                div()
-                    .debug_selector(|| "status-line".into())
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(metrics::TEXT_SMALL())
-                    .text_color(colour)
-                    .child(text),
-            )
     }
 }
 

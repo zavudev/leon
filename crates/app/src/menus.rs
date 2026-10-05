@@ -160,6 +160,8 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
             Cmd(C::GoTo),
             Sep,
             Cmd(C::ToggleSidebar),
+            Cmd(C::ShowUsage),
+            Cmd(C::RefreshUsage),
             Cmd(C::FocusSidebar),
             Cmd(C::FocusMain),
             Cmd(C::FocusTerminal),

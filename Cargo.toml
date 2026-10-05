@@ -5,6 +5,7 @@ members = [
     "crates/leon-core",
     "crates/leon-history",
     "crates/leon-remote",
+    "crates/leon-usage",
     "crates/leon-term",
     "crates/app",
     "crates/xtask",
@@ -21,6 +22,7 @@ publish = false
 leon-core = { path = "crates/leon-core" }
 leon-history = { path = "crates/leon-history" }
 leon-remote = { path = "crates/leon-remote" }
+leon-usage = { path = "crates/leon-usage" }
 leon-term = { path = "crates/leon-term" }
 leon-mark = { path = "crates/leon-mark" }
 
