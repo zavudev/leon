@@ -1,4 +1,8 @@
-# Leon
+<p align="center">
+  <img src="brand/logo/final/app-icon-animated.svg" alt="Leon" width="128" height="128">
+</p>
+
+<h1 align="center">Leon</h1>
 
 [![CI](https://github.com/zavudev/leon/actions/workflows/ci.yml/badge.svg)](https://github.com/zavudev/leon/actions/workflows/ci.yml)
 [![Release](https://github.com/zavudev/leon/actions/workflows/release.yml/badge.svg)](https://github.com/zavudev/leon/actions/workflows/release.yml)
