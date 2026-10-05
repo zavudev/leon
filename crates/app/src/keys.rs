@@ -243,6 +243,10 @@ pub enum Command {
     SetInterfaceSize,
     /// The Settings screen.
     Settings,
+    /// The usage view: how much of each agent's limits is left.
+    ShowUsage,
+    /// Reads the agents' usage limits again now.
+    RefreshUsage,
     /// Opens `settings.json` in the system's editor.
     OpenSettingsFile,
     /// Shows the folder that holds `settings.json` in the file manager.
@@ -1591,6 +1595,25 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::ShowUsage,
+        "Show usage",
+        S::View,
+        W::Anywhere,
+        &[
+            mac(secondary_shift("u")),
+            other(with_alt(secondary_shift("u"))),
+        ],
+        true,
+    ),
+    bind(
+        C::RefreshUsage,
+        "Refresh usage now",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::Larger,
         "Larger interface",
         S::View,
@@ -1696,6 +1719,7 @@ pub fn keywords(command: Command) -> &'static str {
         C::EditMachine => "ssh host user port identity key server remote change connect",
         C::WhyOffline => "offline unreachable diagnose test connection ssh remote server",
         C::Settings => "preferences options configuration config",
+        C::ShowUsage | C::RefreshUsage => "limits quota rate tokens credits remaining percent reset five hour weekly claude codex opencode",
         C::OpenSettingsFile => "preferences json edit configuration config file",
         C::RevealSettingsFolder => "preferences json configuration config finder directory data",
         _ => "",
@@ -1893,6 +1917,8 @@ mod tests {
             C::PreviousTheme,
             C::SetInterfaceSize,
             C::Settings,
+            C::ShowUsage,
+            C::RefreshUsage,
             C::OpenSettingsFile,
             C::RevealSettingsFolder,
             C::Larger,
@@ -2004,6 +2030,8 @@ mod tests {
                 | C::PreviousTheme
                 | C::SetInterfaceSize
                 | C::Settings
+                | C::ShowUsage
+                | C::RefreshUsage
                 | C::OpenSettingsFile
                 | C::RevealSettingsFolder
                 | C::Larger

@@ -13,6 +13,7 @@ leon-mark.workspace = true
 leon-history.workspace = true
 leon-remote.workspace = true
 leon-term.workspace = true
+leon-usage.workspace = true
 
 chrono.workspace = true
 dirs.workspace = true

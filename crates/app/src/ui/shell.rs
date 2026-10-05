@@ -95,6 +95,8 @@ pub enum Overlay {
     Settings,
     /// The "Connect a machine" screen.
     Connect,
+    /// The usage view: how much of each agent's limits is left.
+    Usage,
 }
 
 /// What the folder picker answered.
@@ -176,6 +178,9 @@ pub struct Options {
     /// computer are listed for sessions running in another terminal; none for
     /// no timer (tests ask).
     pub elsewhere_poll: Option<Duration>,
+    /// Whether the usage limits are read again on a timer (the setting names
+    /// the interval). Tests turn it off.
+    pub usage_timer: bool,
     /// Brings an application forward: the terminal a session runs in, given
     /// the path of its bundle (macOS).
     pub reveal_app: RevealApp,
@@ -227,6 +232,7 @@ impl Default for Options {
             quit: Rc::new(|cx| cx.quit()),
             theme_poll: Some(crate::theme::watch::POLL),
             elsewhere_poll: Some(Duration::from_secs(5)),
+            usage_timer: true,
             open_file: Rc::new(|cx, path| cx.open_with_system(path)),
             pick_key: Rc::new(super::connect::system_key_picker),
             ssh_dir: match leon_remote::connect::RealSshDir::home() {
@@ -347,6 +353,8 @@ pub struct Shell {
     pub(super) settings_ui: SettingsUi,
     /// The "Connect a machine" screen.
     pub(super) connect_ui: super::connect::ConnectUi,
+    /// The usage bar and view.
+    pub(super) usage: super::usage_view::UsageUi,
     /// The sidebar's filter field, the text it holds, and what that leaves of
     /// the tree (`None` while it is empty).
     pub(super) filter_input: Entity<InputState>,
@@ -552,6 +560,7 @@ impl Shell {
             applied_settings: 0,
             settings_ui,
             connect_ui,
+            usage: super::usage_view::UsageUi::default(),
             filter_input,
             filter_query: String::new(),
             filter: None,
@@ -585,6 +594,8 @@ impl Shell {
         shell.load_logos(cx);
         shell.watch_themes(cx);
         shell.watch_elsewhere(window, cx);
+        shell.usage_reload();
+        shell.watch_usage(window, cx);
         // Values of settings.json that could not be used were read as defaults.
         let problems = settings::take_problems(cx);
         shell.report_problems(&problems);
@@ -705,6 +716,7 @@ impl Shell {
         self.refilter();
         self.rebuild_rows();
         self.load_logos(cx);
+        self.usage_reload();
         // What was open may be gone.
         let gone = match &self.main {
             Main::Project(id) => self.snapshot.project(id).is_none(),
@@ -1437,6 +1449,9 @@ impl Shell {
         if self.overlay == Overlay::Connect && self.connect_key(stroke, window, cx) {
             return true;
         }
+        if self.overlay == Overlay::Usage && self.usage_key(stroke, window, cx) {
+            return true;
+        }
         let filtering = self.overlay == Overlay::None && self.filter_focused(window, cx);
         if filtering && self.filter_key(stroke, window, cx) {
             return true;
@@ -1584,6 +1599,8 @@ impl Shell {
                 ),
             },
             C::Settings => self.open_settings(window, cx),
+            C::ShowUsage => self.toggle_usage(window, cx),
+            C::RefreshUsage => self.refresh_usage(cx),
             C::Refresh => self.engine.submit(crate::engine::Op::Refresh),
             C::ProbeMachine => {
                 let machine = self.current_machine();
@@ -1660,6 +1677,7 @@ impl Shell {
                 | Overlay::About
                 | Overlay::Problems
                 | Overlay::Connect
+                | Overlay::Usage
                 | Overlay::Settings => self.close_overlay(window, cx),
                 Overlay::None => {
                     if self.pane == Pane::Sidebar {
@@ -1689,7 +1707,7 @@ impl Shell {
             Overlay::Menu => self.close_menu(window, cx),
             Overlay::Settings => self.close_settings(window, cx),
             Overlay::Connect => self.close_connect(window, cx),
-            Overlay::About | Overlay::Problems => {
+            Overlay::About | Overlay::Problems | Overlay::Usage => {
                 self.overlay = Overlay::None;
                 self.focus.focus(window, cx);
             }
@@ -2151,6 +2169,7 @@ impl Shell {
             Overlay::Problems => self.render_problems(colours).into_any_element(),
             Overlay::Settings => self.render_settings(colours, cx).into_any_element(),
             Overlay::Connect => self.render_connect(colours, cx).into_any_element(),
+            Overlay::Usage => self.render_usage(colours, cx).into_any_element(),
         };
         let top = match self.overlay {
             Overlay::Palette => self.palette_top(),

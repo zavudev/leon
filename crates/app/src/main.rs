@@ -13,6 +13,7 @@
 )]
 
 mod address;
+mod agent_usage;
 mod avatar;
 mod brand;
 mod cli;
@@ -70,6 +71,9 @@ fn main() {
         Ok(cli::Command::DiagnoseElsewhere) => {
             std::process::exit(diagnose::run_sessions_elsewhere());
         }
+        Ok(cli::Command::DiagnoseUsage { network }) => {
+            std::process::exit(diagnose::run_usage(&network));
+        }
         Ok(cli::Command::DiagnoseConnect { destination }) => {
             std::process::exit(diagnose::run_connect(&destination));
         }
@@ -126,6 +130,15 @@ fn main() {
         runtime.handle().clone(),
     );
     engine.set_icon_fetcher(Arc::new(avatar::CurlFetcher));
+    // Usage limits: the files the agents keep are read through the runner; the
+    // two network sources run only when their settings are on.
+    engine.set_usage(
+        Arc::new(leon_usage::network::SystemCredentials {
+            home: dirs::home_dir().unwrap_or_default(),
+        }),
+        Arc::new(leon_usage::network::CurlHttp),
+        Arc::new(|| chrono::Utc::now().timestamp()),
+    );
     // Sessions running in another terminal: processes are listed through the
     // same runner as every other command.
     engine.set_process_scanner(

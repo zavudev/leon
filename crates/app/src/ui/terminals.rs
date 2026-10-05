@@ -301,6 +301,34 @@ impl Shell {
         }
         self.refresh_live();
         self.open_live(id, window, cx);
+        self.warn_before_session(agent, machine, cx);
+    }
+
+    /// A line in the status bar when the agent that was just started is near
+    /// the end of a limit, with when it resets. It never stops anything: the
+    /// session is already starting.
+    fn warn_before_session(
+        &mut self,
+        agent: Option<leon_core::AgentKind>,
+        machine: &MachineId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(agent) = agent else {
+            return;
+        };
+        if !crate::settings::flag(cx, "usage_warn_before_session") {
+            return;
+        }
+        let notice = crate::agent_usage::start_notice(
+            &self.usage.board,
+            machine,
+            agent,
+            (self.options.now)().timestamp(),
+            crate::settings::usage_thresholds(cx),
+        );
+        if let Some(notice) = notice {
+            self.engine.report(StatusKind::Info, notice);
+        }
     }
 
     /// Starts the session of a flow's answer.

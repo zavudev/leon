@@ -20,7 +20,7 @@ use crate::error::{Result, StoreError};
 
 /// Every migration, oldest first. The index of an entry plus one is the
 /// schema version it produces.
-const MIGRATIONS: &[&str] = &[V1, V2, V3];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
 
 const V1: &str = r#"
 CREATE TABLE machine (
@@ -159,6 +159,30 @@ CREATE TABLE project_icon (
 CREATE INDEX project_icon_by_hash ON project_icon (hash);
 "#;
 
+/// Version 4: usage limits. `usage_reading` keeps the latest reading of each
+/// agent on each machine (one JSON document, so the model can grow without a
+/// migration); `usage_history` keeps bounded observations, only percentages
+/// and times, under a local hash of the account and never an identifier.
+const V4: &str = r#"
+CREATE TABLE usage_reading (
+    machine_id   TEXT NOT NULL REFERENCES machine(id) ON DELETE CASCADE,
+    agent        TEXT NOT NULL,
+    payload      TEXT NOT NULL,
+    collected_at INTEGER NOT NULL,
+    PRIMARY KEY (machine_id, agent)
+) WITHOUT ROWID;
+
+CREATE TABLE usage_history (
+    machine_id   TEXT NOT NULL REFERENCES machine(id) ON DELETE CASCADE,
+    agent        TEXT NOT NULL,
+    account      TEXT NOT NULL,
+    window       TEXT NOT NULL,
+    observed_at  INTEGER NOT NULL,
+    used_percent REAL NOT NULL,
+    PRIMARY KEY (machine_id, agent, account, window, observed_at)
+) WITHOUT ROWID;
+"#;
+
 /// Brings the database up to the latest schema version.
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     let supported = MIGRATIONS.len() as u32;
@@ -233,7 +257,7 @@ mod tests {
 
         migrate(&mut connection).unwrap();
 
-        assert_eq!(version(&connection), 3);
+        assert_eq!(version(&connection), MIGRATIONS.len() as u32);
         connection
             .execute(
                 "INSERT INTO project_icon (project_id, origin, kind, source, set_at)
@@ -245,6 +269,26 @@ mod tests {
             .query_row("SELECT count(*) FROM project", [], |row| row.get(0))
             .unwrap();
         assert_eq!(projects, 1);
+    }
+
+    #[test]
+    fn a_version_3_database_gains_the_usage_tables() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        for sql in [V1, V2, V3] {
+            connection.execute_batch(sql).unwrap();
+        }
+        connection.pragma_update(None, "user_version", 3).unwrap();
+
+        migrate(&mut connection).unwrap();
+
+        assert_eq!(version(&connection), MIGRATIONS.len() as u32);
+        connection
+            .execute(
+                "INSERT INTO usage_reading (machine_id, agent, payload, collected_at)
+                 VALUES ('local', 'codex', '{}', 0)",
+                [],
+            )
+            .unwrap();
     }
 
     #[test]

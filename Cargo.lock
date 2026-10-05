@@ -3752,6 +3752,7 @@ dependencies = [
  "leon-mark",
  "leon-remote",
  "leon-term",
+ "leon-usage",
  "libc",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -3829,6 +3830,20 @@ dependencies = [
  "parking_lot",
  "portable-pty",
  "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "leon-usage"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "leon-core",
+ "leon-remote",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
  "tracing",
 ]
 

@@ -368,6 +368,7 @@ fn open_full(
         quit: Rc::new(|_| {}),
         theme_poll: None,
         elsewhere_poll: None,
+        usage_timer: false,
         reveal_app: Rc::new(move |_, bundle| revealed_apps_in.borrow_mut().push(bundle.to_owned())),
         open_file: Rc::new(move |_, path| opened_in.borrow_mut().push(path.to_path_buf())),
         pick_key: Rc::new(move |_| Task::ready(key_answer_in.borrow().clone())),
@@ -5759,6 +5760,10 @@ mod tests_prefs;
 #[cfg(unix)]
 #[path = "tests_screen.rs"]
 mod tests_screen;
+
+#[cfg(unix)]
+#[path = "tests_usage.rs"]
+mod tests_usage;
 
 #[cfg(test)]
 #[path = "tests_connect.rs"]

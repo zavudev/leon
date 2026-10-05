@@ -22,6 +22,13 @@
 //! runs below a running Leon, the session id it holds (ids only: no titles,
 //! no content), how sure that is and which signal said so, then how long the
 //! scan took.
+//!
+//! `--diagnose usage` runs the engine's own collection of the agents' usage
+//! limits for this computer and prints, per agent, the source, the windows
+//! with their percentages and reset times, how fresh they are, or why nothing
+//! is known. It prints nothing that identifies an account or a place (no
+//! account, no e-mail, no token, no path), and it calls a network source only
+//! when `--network <agent>` names it.
 
 use crate::cli::Diagnose;
 use crate::launch::{self, Launch, RealSystem, System};
@@ -444,6 +451,102 @@ pub fn run_sessions_elsewhere() -> i32 {
     0
 }
 
+/// The report of `--diagnose usage` for one machine's readings, one block per
+/// agent. Nothing in it identifies an account or a place.
+pub fn usage_lines(collected: &leon_usage::MachineUsage, now: i64) -> Vec<String> {
+    use leon_usage::{view, Body, Thresholds};
+    let mut lines = Vec::new();
+    for reading in &collected.readings {
+        let v = view(reading, now, Thresholds::default());
+        let name = crate::ui::agent_display_name(reading.agent);
+        match &v.body {
+            Body::Unknown(reason) => {
+                lines.push(format!("{name}: unknown: {}", reason.short()));
+                lines.push(format!("    {}", reason.sentence()));
+            }
+            Body::Ready { meters, .. } => {
+                let plan = v
+                    .plan
+                    .as_deref()
+                    .map(|p| format!(", plan {p}"))
+                    .unwrap_or_default();
+                lines.push(format!("{name}: {}{plan}", v.provenance()));
+                for meter in meters {
+                    let reset = meter
+                        .reset_text()
+                        .map(|text| format!(", {}", text.to_lowercase()))
+                        .unwrap_or_default();
+                    lines.push(format!(
+                        "    {:<14} {:>3.0}% used{reset}",
+                        meter.kind.long(),
+                        meter.percent
+                    ));
+                }
+            }
+        }
+    }
+    lines
+}
+
+/// Runs `--diagnose usage`: the real collection for this computer, through the
+/// real runner. A network source is called only for an agent in `network`
+/// (the opt-in of this run); otherwise it reports "source off".
+pub fn run_usage(network: &[AgentKind]) -> i32 {
+    use leon_usage::network::{CurlHttp, NetworkPolicy, SystemCredentials};
+    println!("leon diagnose usage");
+    let policy = NetworkPolicy {
+        claude: network.contains(&AgentKind::Claude),
+        opencode: network.contains(&AgentKind::Opencode),
+    };
+    for (agent, on) in [
+        (AgentKind::Claude, policy.claude),
+        (AgentKind::Opencode, policy.opencode),
+    ] {
+        println!(
+            "network source of {}: {}",
+            crate::ui::agent_display_name(agent),
+            if on {
+                "ON for this run (--network)"
+            } else {
+                "off"
+            }
+        );
+    }
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            println!("cannot start a runtime: {error}");
+            return 1;
+        }
+    };
+    let machine = leon_core::Machine {
+        id: MachineId::local(),
+        name: "This computer".to_owned(),
+        kind: leon_core::MachineKind::Local,
+    };
+    let now = chrono::Utc::now().timestamp();
+    let started = Instant::now();
+    let collected = runtime.block_on(leon_usage::collect_machine(
+        &leon_remote::ProcessRunner::with_time_limit(Duration::from_secs(30)),
+        &machine,
+        &SshOptions::without_multiplexing(),
+        policy,
+        &SystemCredentials {
+            home: dirs::home_dir().unwrap_or_default(),
+        },
+        &CurlHttp,
+        now,
+    ));
+    for line in usage_lines(&collected, now) {
+        println!("{line}");
+    }
+    println!("took {} ms", started.elapsed().as_millis());
+    0
+}
+
 /// Runs the diagnostic and prints its report. The exit code is 0 when the
 /// program ran to its end, whatever its own code was, and 1 when it could not
 /// be started or did not end in time.
@@ -520,6 +623,58 @@ fn run_with(args: &Diagnose, system: &dyn System, settle: Duration) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_usage_report_names_the_source_the_windows_and_the_reasons_and_nothing_else() {
+        use leon_usage::{
+            AgentUsage, MachineUsage, Reason, Source, State, UsageWindow, WindowKind,
+        };
+        const NOW: i64 = 1_790_000_000;
+        let known = AgentUsage {
+            agent: AgentKind::Codex,
+            machine: "local".into(),
+            account_label: Some("secret-label@example.com".into()),
+            plan: Some("plus".into()),
+            source: Some(Source::Local),
+            observed_at: Some(NOW - 180),
+            state: State::Known {
+                windows: vec![
+                    UsageWindow {
+                        kind: WindowKind::FiveHour,
+                        used_percent: 38.0,
+                        resets_at: Some(NOW + 8940),
+                        window_length: None,
+                    },
+                    UsageWindow {
+                        kind: WindowKind::Weekly,
+                        used_percent: 97.0,
+                        resets_at: Some(NOW - 5),
+                        window_length: None,
+                    },
+                ],
+            },
+        };
+        let collected = MachineUsage {
+            readings: vec![
+                AgentUsage::unknown(AgentKind::Claude, "local", Reason::SourceDisabled),
+                known,
+            ],
+            samples: vec![],
+        };
+        let text = super::usage_lines(&collected, NOW).join("\n");
+        assert!(text.contains("Claude Code: unknown: source off"), "{text}");
+        assert!(
+            text.contains("Codex: from Codex's own session log, 3 min ago, plan plus"),
+            "{text}"
+        );
+        assert!(text.contains("38% used, resets in 2h 29m"), "{text}");
+        assert!(
+            text.contains("Weekly") && text.contains("0% used, reset since last seen"),
+            "{text}"
+        );
+        assert!(!text.contains("secret-label"), "{text}");
+        assert!(!text.contains('@') && !text.contains("/Users"), "{text}");
+    }
+
     use super::*;
     use std::path::PathBuf;
 

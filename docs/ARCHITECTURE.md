@@ -11,9 +11,11 @@ app (leon)  ── ui, engine, keys, theme, launch, diagnose
  │   ├── leon-mark     the animated lion (GPUI)
  │   ├── leon-remote   commands on this machine or over SSH
  │   ├── leon-history  importers for the agents' own session files
+│   ├── leon-usage    the agents' usage limits, per machine
  │   └── leon-core     the model and the SQLite store
 leon-remote ── leon-core
 leon-history ── leon-core
+leon-usage ── leon-core, leon-remote
 leon-term ── gpui-kit only (no other Leon crate)
 leon-mark ── gpui-kit only (no other Leon crate)
 ```
@@ -23,6 +25,7 @@ leon-mark ── gpui-kit only (no other Leon crate)
 | `leon-core` | Machines, projects, worktrees, sessions and messages, and the `Store` (SQLite) with change notification. No UI, no processes. |
 | `leon-history` | Reads the history Claude Code, Codex and opencode keep on disk and turns it into sessions and messages. |
 | `leon-remote` | A `CommandSpec` says what to run and where; `run_on` and `interactive_on` place it on a machine (unchanged locally, `ssh` remotely, with shell quoting and optional connection sharing). Git worktree operations, how each agent starts and resumes, the machine probe and the connection checklist (`connect`, `diagnosis`) are built on it. A scripted runner makes all of it testable without a process. |
+| `leon-usage` | How much of each agent's limits is left. A provider-neutral model (`AgentUsage`: windows with a used percentage, a reset time and a length, or an explicit `Reason` why nothing is known; staleness is part of it), pure parsers for each source (`codex`, `claude`, `opencode`), the burn-rate `forecast`, the wording (`present`, `view`), `collect_machine` (one bounded command per machine through a `Runner`) and the opt-in `network` sources behind an `Http` trait. No UI. |
 | `leon-term` | A terminal for GPUI: `Terminal` (PTY, emulator, child) and `TerminalView` (the GPUI entity). Depends on `gpui-kit` and nothing of Leon; the application maps its own command type onto `SpawnSpec`. |
 | `leon-mark` | The Leon lion, always animated: `geometry` (the glare's four contours as point lists, exactly the owner's SVG at rest), `motion` (a pure, deterministic time-to-pose function: blink, glare, glance, breath, nose twitch, intro, and a `Mood` that biases them), `element` (`AnimatedMark`, a GPUI element painted from vector paths) and `svg` (the same gestures written as animated SVG for the web). Depends on `gpui-kit` and nothing of Leon. |
 | `app` (`leon`) | The window (`ui/`, with `panes.rs` and `workspace.rs` for the terminal layout and `menu.rs` for the context menu), the engine that keeps the store fresh (`engine.rs`), the one shortcut registry (`keys.rs`), the themes and their design tokens (`theme/`), what a live session runs (`launch.rs`), the hidden `--diagnose` run (`diagnose.rs`). |
@@ -90,6 +93,55 @@ the old two-step palette flow; `Command::AddMachine`, `EditMachine` and
    a session runs (`launch::plan`), key to bytes (`leon_term::keys`), cells to
    runs (`leon_term::layout`), resize maths (`leon_term::size`).
 6. **English everywhere, prose `//!` header on every file.**
+
+## Usage limits
+
+How much of each agent's limit is left is read **per machine**, because usage
+belongs to the account on the machine where the agent runs. It follows the rules
+above: the engine writes the store and the UI reads it.
+
+* **Collection.** `Engine::collect_usage` (`Op::CollectUsage`, also run in each
+  machine's refresh) calls `leon_usage::collect_machine` through the engine's
+  runner: one POSIX command per machine prints which agents are there and the
+  newest `token_count` lines of Codex's own session log (a bounded read, no
+  credential, no path, no conversation text beyond those lines). Remote machines
+  take the same path through `ssh`. A machine that cannot be reached keeps its
+  earlier reading (`agent_usage::merge`), whose age is shown and judged.
+* **Sources, least intrusive first.** Local files the agent already writes
+  (Codex); the agent's own command line (none gives limits without launching a
+  session, so none is used); the vendor's usage endpoint with the agent's own
+  credential (Claude Code, the opencode Go subscription), **opt-in per agent and
+  off by default**. Those run on this computer only and through the `Http` trait
+  (`CurlHttp`: the system `curl`, the header on standard input so the token is
+  never in a process list, HTTPS to one allowed host, no redirects, a time limit);
+  a disabled source reads no credential and makes no call (tested with a
+  scripted client that counts). The credential is a `Secret` (no `Display`, no
+  `Serialize`, `Debug` prints `***`), read at the moment of the call, dropped with
+  the request, and a failed call backs off (`Throttle`) and is shown as unknown,
+  never as a number.
+* **Staleness.** `AgentUsage::effective(now)` turns a reading into what it means
+  now: a window whose reset time has passed reads 0% and says it reset since it
+  was last seen; a window with no reset time is trusted for two hours; a reading
+  older than eight days is unknown (`DataTooOld`). Time is always injected.
+* **Store.** Migration 4: `usage_reading` (the latest reading per machine and
+  agent, one JSON document) and `usage_history` (window key, time, percentage,
+  under a local hash of the account, bounded to 14 days and 300 points a series;
+  `Store::forget_usage_history`). `StoreChange::Usage` announces both.
+* **UI.** `agent_usage::Board` is what the window reads. `ui/usage_view.rs` holds
+  the pure model (`bar_model`, `density`, `usage_rows`, `step_scope`, tested
+  without a window) and the drawing: the footer strip under the main pane (it
+  absorbs the status line, and sits level with the sidebar's tools), the usage
+  view overlay (`Overlay::Usage`, `Command::ShowUsage`) and the chip in a live
+  session's header. A level is a colour token of the theme **and** a marker.
+  `agent_usage::start_notice` words the line shown when a session of an agent at
+  its critical limit starts.
+* **Settings.** The `Usage` section of the schema: the bar, the agents shown,
+  the interval, the thresholds, the notice, the two network opt-ins (each with
+  the exact text of what is read and where it is sent) and "Forget stored usage
+  history".
+* **`leon --diagnose usage`** runs the real collection for this computer and
+  prints no account, e-mail, token or path; a network source runs only with
+  `--network <agent>`.
 
 ## Project logos, the filter and the activity dot
 
