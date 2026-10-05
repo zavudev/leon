@@ -23,6 +23,8 @@ pub enum StoreChange {
     Worktrees,
     /// Sessions or their messages were added, changed or removed.
     Sessions,
+    /// Usage readings or their history changed.
+    Usage,
     /// Anything may have changed; re-read everything that is displayed.
     Everything,
 }

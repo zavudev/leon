@@ -26,12 +26,14 @@ mod logos;
 mod main_pane;
 mod menu;
 mod model;
+mod pair;
 mod palette;
 mod panes;
 mod paste;
 mod prefs;
 mod projects;
 mod settings_screen;
+mod share;
 mod sheet;
 mod shell;
 mod sidebar;
@@ -40,12 +42,14 @@ mod terminal_tools;
 mod terminals;
 mod themes;
 mod tree;
+mod usage_view;
 mod widgets;
 mod workspace;
 
 pub use shell::{system_picker, Options, Picked, Shell};
 pub use themes::FOLDER as THEMES_FOLDER;
 pub use tree::DEFAULT as DEFAULT_SESSIONS_SHOWN;
+pub use usage_view::agent_name as agent_display_name;
 
 #[cfg(test)]
 mod tests;

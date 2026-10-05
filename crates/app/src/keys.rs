@@ -128,8 +128,10 @@ pub enum Command {
     OpenShell,
     /// Adds a git worktree to a project.
     NewWorktree,
-    /// Adds an SSH machine.
+    /// Adds a machine: with a code (the relay) or over SSH.
     AddMachine,
+    /// Shares this computer: the code, the paired computers, the switch.
+    ShareMachine,
     /// Opens a folder as a project: the system's folder picker on this
     /// computer, the palette's questions on another machine.
     OpenProject,
@@ -243,6 +245,10 @@ pub enum Command {
     SetInterfaceSize,
     /// The Settings screen.
     Settings,
+    /// The usage view: how much of each agent's limits is left.
+    ShowUsage,
+    /// Reads the agents' usage limits again now.
+    RefreshUsage,
     /// Opens `settings.json` in the system's editor.
     OpenSettingsFile,
     /// Shows the folder that holds `settings.json` in the file manager.
@@ -532,7 +538,7 @@ impl Chord {
     /// The chord as the platform writes it: `⇧⌘K` on macOS, `Ctrl+Shift+K`
     /// elsewhere.
     pub fn label(&self) -> String {
-        self.label_for(cfg!(target_os = "macos"))
+        self.label_for(crate::platform::is_mac())
     }
 
     /// [`Self::label`] for a platform that is, or is not, macOS.
@@ -575,7 +581,7 @@ impl Chord {
 
 /// A key's name as this platform prints it (`Esc`, `↩`).
 pub fn key_label(key: &str) -> String {
-    key_name(key, cfg!(target_os = "macos"))
+    key_name(key, crate::platform::is_mac())
 }
 
 /// A key's name as it is printed on the key.
@@ -1051,6 +1057,14 @@ pub const BINDINGS: &[Binding] = &[
         S::Create,
         W::Anywhere,
         &[secondary_shift("m")],
+        true,
+    ),
+    bind(
+        C::ShareMachine,
+        "Share this machine…",
+        S::Create,
+        W::Anywhere,
+        &[],
         true,
     ),
     bind(
@@ -1591,6 +1605,25 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::ShowUsage,
+        "Show usage",
+        S::View,
+        W::Anywhere,
+        &[
+            mac(secondary_shift("u")),
+            other(with_alt(secondary_shift("u"))),
+        ],
+        true,
+    ),
+    bind(
+        C::RefreshUsage,
+        "Refresh usage now",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::Larger,
         "Larger interface",
         S::View,
@@ -1692,10 +1725,14 @@ pub fn keywords(command: Command) -> &'static str {
         C::SaveOutput | C::SaveOutputAnsi => "export write log terminal file",
         C::CopyAll | C::CopyScreen => "clipboard terminal output",
         C::ToggleSidebar => "hide show panel tree",
-        C::AddMachine => "add machine remote server ssh connect computer host login",
+        C::AddMachine => {
+            "add machine remote server code relay ssh connect computer host login pair"
+        }
+        C::ShareMachine => "share host pair code relay devices revoke remote access let connect",
         C::EditMachine => "ssh host user port identity key server remote change connect",
         C::WhyOffline => "offline unreachable diagnose test connection ssh remote server",
         C::Settings => "preferences options configuration config",
+        C::ShowUsage | C::RefreshUsage => "limits quota rate tokens credits remaining percent reset five hour weekly claude codex opencode",
         C::OpenSettingsFile => "preferences json edit configuration config file",
         C::RevealSettingsFolder => "preferences json configuration config finder directory data",
         _ => "",
@@ -1710,7 +1747,7 @@ pub fn label(command: Command) -> &'static str {
 /// The keys shown next to a command, written as this platform does; `None`
 /// for a command without keys.
 pub fn keys_label(command: Command) -> Option<String> {
-    chords_on(binding(command)?, cfg!(target_os = "macos"))
+    chords_on(binding(command)?, crate::platform::is_mac())
         .first()
         .map(Chord::label)
 }
@@ -1765,7 +1802,7 @@ pub fn terminal_chords(mac: bool) -> Vec<(Command, Chord)> {
 
 /// The command a keystroke stands for, given what is true of the window.
 pub fn resolve(stroke: &Keystroke, context: Context) -> Option<Command> {
-    resolve_on(stroke, context, cfg!(target_os = "macos"))
+    resolve_on(stroke, context, crate::platform::is_mac())
 }
 
 /// [`resolve`] for a platform that is, or is not, macOS.
@@ -1880,6 +1917,7 @@ mod tests {
             C::ScrollPageUp,
             C::ScrollPageDown,
             C::AddMachine,
+            C::ShareMachine,
             C::OpenProject,
             C::AddProject,
             C::RemoveProject,
@@ -1893,6 +1931,8 @@ mod tests {
             C::PreviousTheme,
             C::SetInterfaceSize,
             C::Settings,
+            C::ShowUsage,
+            C::RefreshUsage,
             C::OpenSettingsFile,
             C::RevealSettingsFolder,
             C::Larger,
@@ -1991,6 +2031,7 @@ mod tests {
                 | C::ScrollPageUp
                 | C::ScrollPageDown
                 | C::AddMachine
+                | C::ShareMachine
                 | C::OpenProject
                 | C::AddProject
                 | C::RemoveProject
@@ -2004,6 +2045,8 @@ mod tests {
                 | C::PreviousTheme
                 | C::SetInterfaceSize
                 | C::Settings
+                | C::ShowUsage
+                | C::RefreshUsage
                 | C::OpenSettingsFile
                 | C::RevealSettingsFolder
                 | C::Larger

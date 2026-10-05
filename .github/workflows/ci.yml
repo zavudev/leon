@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+    # `ready_for_review` starts the run a draft skipped.
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -22,13 +24,44 @@ env:
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   # Every job's runner comes from a repository variable (Settings, Secrets and
   # variables, Actions, Variables), with a standard GitHub runner as the
-  # fallback. docs/RELEASING.md lists the options to go faster.
+  # fallback. docs/RELEASING.md lists the options to go faster. Ubuntu is named
+  # by its version, not `ubuntu-latest`, so that a change of what "latest"
+  # means never changes the build by itself.
 
 jobs:
+  # Decides whether anything but documentation changed. A workflow-level path
+  # filter would leave the required checks "pending" for a documentation-only
+  # change; here every job reports, and the build jobs are skipped (which a
+  # required check accepts). Drafts skip everything: mark the pull request
+  # ready for review to run the matrix.
+  changes:
+    name: Changes
+    runs-on: ${{ vars.RUNNER_LINUX || 'ubuntu-24.04' }}
+    timeout-minutes: 5
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!brand/**'
+              - '!docs/**'
+
   # Fails in seconds, before anything is built: no toolchain beyond rustfmt.
   fmt:
     name: Format
-    runs-on: ${{ vars.RUNNER_LINUX || 'ubuntu-latest' }}
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.changes.outputs.code == 'true'
+    needs: changes
+    runs-on: ${{ vars.RUNNER_LINUX || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -41,16 +74,22 @@ jobs:
   # jobs: it runs beside the tests and not in front of them.
   clippy:
     name: Clippy (${{ matrix.name }})
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.changes.outputs.code == 'true'
+    needs: changes
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    # The job takes about 6 minutes; a Windows runner that hung sat for 40.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: Linux x86_64
-            os: ${{ vars.RUNNER_LINUX || 'ubuntu-latest' }}
+            os: ${{ vars.RUNNER_LINUX || 'ubuntu-24.04' }}
           - name: macOS aarch64
             os: ${{ vars.RUNNER_MACOS_ARM || 'macos-latest' }}
+          # The code under `cfg(windows)` is not seen by any other job's lint.
+          - name: Windows x86_64
+            os: ${{ vars.RUNNER_WINDOWS || 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -66,12 +105,14 @@ jobs:
         with:
           components: clippy
 
-      # One cache for the check builds of this job, kept after a failed run
-      # too (a build from nothing is most of the time), and written from main
-      # only: a pull request reads main's cache and never fills the quota.
+      # One cache for the check builds of this job on each system (clippy's
+      # artifacts are not the tests', so the two jobs do not share one), kept
+      # after a failed run too (a build from nothing is most of the time), and
+      # written from main only: a pull request reads main's cache and never
+      # fills the quota.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-clippy
+          shared-key: ci-clippy-${{ runner.os }}
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -79,18 +120,25 @@ jobs:
 
   test:
     name: Test (${{ matrix.name }})
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.changes.outputs.code == 'true'
+    needs: changes
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    # A build from nothing took 12 minutes on macOS and 19 on Windows; a job
+    # that is still going after this is stuck, and fails instead of waiting
+    # for the platform's six-hour limit.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: Linux x86_64
-            os: ${{ vars.RUNNER_LINUX || 'ubuntu-latest' }}
+            os: ${{ vars.RUNNER_LINUX || 'ubuntu-24.04' }}
           - name: macOS aarch64
             os: ${{ vars.RUNNER_MACOS_ARM || 'macos-latest' }}
-          - name: macOS x86_64
-            os: ${{ vars.RUNNER_MACOS_INTEL || 'macos-15-intel' }}
+          # The Intel Mac has no job of its own to run tests: the hosted
+          # runner is small and slow, and lost its connection after 52
+          # minutes. The `check-intel` job type-checks the code for it instead
+          # and the release cross-compiles it.
           - name: Windows x86_64
             os: ${{ vars.RUNNER_WINDOWS || 'windows-latest' }}
     steps:
@@ -110,12 +158,56 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-test
+          shared-key: ci-test-${{ runner.os }}
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # The window tests run without a display on every system: the toolkit's
-      # test platform draws nothing. The tests that start a real child in a
-      # real PTY are Unix-only and use /bin/sh, never the runner's $SHELL.
+      # One command builds each test binary once and runs it. The window tests
+      # run without a display on every system: the toolkit's test platform
+      # draws nothing. The tests that start a real child in a real PTY are
+      # Unix-only (`cfg(unix)`, so Windows never compiles them) and use
+      # /bin/sh, never the runner's $SHELL. `--no-fail-fast` reports every
+      # failing test of every crate in one run.
       - name: Test
         run: cargo test --workspace --locked --no-fail-fast
+
+  # The Intel Mac is checked, not tested: the same code, type-checked for
+  # x86_64-apple-darwin on the Apple-silicon runner, which is a cross build
+  # with the Apple compiler and costs a few minutes. Its C dependencies (the
+  # bundled SQLite) are compiled for the target too.
+  check-intel:
+    name: Check (macOS x86_64, cross)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.changes.outputs.code == 'true'
+    needs: changes
+    runs-on: ${{ vars.RUNNER_MACOS_ARM || 'macos-latest' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-check-intel
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo check --workspace --all-targets --locked --target x86_64-apple-darwin
+
+  # The one check to require in the branch protection: it always runs (unless
+  # the pull request is a draft), passes when the build jobs passed or were
+  # skipped because only documentation changed, and fails otherwise.
+  ci:
+    name: CI
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    needs: [changes, fmt, clippy, test, check-intel]
+    runs-on: ${{ vars.RUNNER_LINUX || 'ubuntu-24.04' }}
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed or was skipped
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          case "$RESULTS" in
+            *failure*|*cancelled*) exit 1 ;;
+          esac

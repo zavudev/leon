@@ -192,6 +192,7 @@ pub fn spawn_spec(command: CommandSpec) -> SpawnSpec {
         args: command.args,
         env: command.env,
         cwd: command.cwd,
+        route: command.route,
     }
 }
 

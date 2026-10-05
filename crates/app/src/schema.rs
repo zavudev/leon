@@ -32,6 +32,8 @@ pub enum Section {
     Projects,
     /// SSH machines.
     Machines,
+    /// How much of each agent's limits is left.
+    Usage,
     /// The sidebar and quitting.
     Window,
     /// Every command with its chords (read-only).
@@ -42,13 +44,14 @@ pub enum Section {
 
 impl Section {
     /// Every section, in order.
-    pub const ALL: [Section; 9] = [
+    pub const ALL: [Section; 10] = [
         Section::Appearance,
         Section::Terminal,
         Section::Agents,
         Section::Sessions,
         Section::Projects,
         Section::Machines,
+        Section::Usage,
         Section::Window,
         Section::Keyboard,
         Section::Advanced,
@@ -63,6 +66,7 @@ impl Section {
             Section::Sessions => "Sessions & history",
             Section::Projects => "Projects",
             Section::Machines => "Machines",
+            Section::Usage => "Usage",
             Section::Window => "Sidebar & window",
             Section::Keyboard => "Keyboard",
             Section::Advanced => "Advanced & About",
@@ -77,7 +81,12 @@ impl Section {
             Section::Agents => "How each coding agent is started and resumed.",
             Section::Sessions => "What is imported and shown of the agents' history.",
             Section::Projects => "How projects are found and what they show.",
-            Section::Machines => "SSH machines and how Leon talks to them.",
+            Section::Machines => {
+                "Other computers: relay machines, SSH machines and sharing this one."
+            }
+            Section::Usage => {
+                "How much of each agent's limits is left, and where the numbers come from."
+            }
             Section::Window => "The sidebar and what quitting asks.",
             Section::Keyboard => "Every command and its shortcuts.",
             Section::Advanced => "Folders, logging and starting over.",
@@ -101,8 +110,8 @@ impl Platform {
     pub fn here(self) -> bool {
         match self {
             Platform::All => true,
-            Platform::Mac => cfg!(target_os = "macos"),
-            Platform::Unix => cfg!(unix),
+            Platform::Mac => crate::platform::is_mac(),
+            Platform::Unix => cfg!(unix) && !crate::platform::is_windows(),
         }
     }
 
@@ -834,6 +843,55 @@ pub const SETTINGS: &[Def] = &[
         D::Int(0),
     ),
     def(
+        "remote_relay_url",
+        S::Machines,
+        "Relay server",
+        "The relay that connects two computers that reach it from behind their routers. The default service is operated by Zavu and is not live yet.",
+        "relay server url websocket wss connect code share network",
+        K::Text {
+            placeholder: "wss://relay.zavu.dev",
+        },
+        D::Text("wss://relay.zavu.dev"),
+    ),
+    def(
+        "remote_device_name",
+        S::Machines,
+        "Name of this computer",
+        "The name other computers see when you share this one or connect from it. Empty uses the computer's own name.",
+        "device name hostname share pair",
+        K::Text {
+            placeholder: "this computer's name",
+        },
+        D::Text(""),
+    ),
+    def(
+        "remote_share",
+        S::Machines,
+        "Share this machine",
+        "While Leon is open, let computers you pair with a code open terminals and run commands here. A paired computer gets a terminal as you.",
+        "share host service pair code relay remote access",
+        K::Toggle,
+        D::Bool(false),
+    ),
+    def(
+        "remote_require_approval",
+        S::Machines,
+        "Ask before pairing",
+        "When a computer pairs with the code, show its name and fingerprint here and wait for your answer. Turning this off makes the code itself the approval.",
+        "approve pairing confirm security",
+        K::Toggle,
+        D::Bool(true),
+    ),
+    def(
+        "share_machine",
+        S::Machines,
+        "Share this machine…",
+        "Open the Share screen: the pairing code, the computers paired with this one and a switch to start or stop sharing.",
+        "share host pair code devices revoke relay",
+        K::Action,
+        D::None,
+    ),
+    def(
         "add_machine",
         S::Machines,
         "Connect a machine…",
@@ -848,6 +906,121 @@ pub const SETTINGS: &[Def] = &[
         "Probe the machine on screen",
         "Check that the machine answers and which agents it has.",
         "ssh check refresh",
+        K::Action,
+        D::None,
+    ),
+    // ----- usage
+    def(
+        "usage_bar",
+        S::Usage,
+        "Show the usage bar",
+        "A bar at the bottom of the window with each agent's limits.",
+        "limits quota status bar rate",
+        K::Toggle,
+        D::Bool(true),
+    ),
+    def(
+        "usage_claude",
+        S::Usage,
+        "Show Claude Code",
+        "Show Claude Code's limits in the bar and the usage view.",
+        "limits anthropic quota",
+        K::Toggle,
+        D::Bool(true),
+    ),
+    def(
+        "usage_codex",
+        S::Usage,
+        "Show Codex",
+        "Show Codex's limits in the bar and the usage view.",
+        "limits openai quota",
+        K::Toggle,
+        D::Bool(true),
+    ),
+    def(
+        "usage_opencode",
+        S::Usage,
+        "Show opencode",
+        "Show opencode's limits in the bar and the usage view.",
+        "limits go quota",
+        K::Toggle,
+        D::Bool(true),
+    ),
+    def(
+        "usage_interval",
+        S::Usage,
+        "Refresh interval",
+        "How often, in minutes, the limits are read again while the window is focused.",
+        "poll minutes limits refresh",
+        K::Number {
+            min: 1,
+            max: 120,
+            step: 1,
+            unit: "min",
+        },
+        D::Int(5),
+    ),
+    def(
+        "usage_warn",
+        S::Usage,
+        "Warn from",
+        "From this percentage a limit is shown as high, with a marker as well as a colour.",
+        "threshold warning percent limits",
+        K::Number {
+            min: 10,
+            max: 99,
+            step: 5,
+            unit: "%",
+        },
+        D::Int(75),
+    ),
+    def(
+        "usage_critical",
+        S::Usage,
+        "Critical from",
+        "From this percentage a limit is shown as near its end, and starting a session says so first.",
+        "threshold error percent limits",
+        K::Number {
+            min: 11,
+            max: 100,
+            step: 5,
+            unit: "%",
+        },
+        D::Int(90),
+    ),
+    def(
+        "usage_warn_before_session",
+        S::Usage,
+        "Say so before starting a session",
+        "When an agent's limit is nearly used up, a line says so, with when it resets, before the session starts. It never blocks.",
+        "notice warning start resume limits",
+        K::Toggle,
+        D::Bool(true),
+    ),
+    def(
+        "usage_claude_network",
+        S::Usage,
+        "Read Claude Code's limits from Anthropic",
+        "Claude Code keeps its limits nowhere on disk. When on, Leon reads the sign-in token Claude Code already holds (the macOS keychain or ~/.claude/.credentials.json) when it refreshes and sends it over HTTPS to api.anthropic.com only, asking for the account's usage. The token is never stored, logged or shown, and only this computer does it. Off by default.",
+        "network anthropic credential token oauth privacy limits",
+        K::Toggle,
+        D::Bool(false),
+    ),
+    def(
+        "usage_opencode_network",
+        S::Usage,
+        "Read the opencode Go limits from opencode",
+        "Only for an opencode Go subscription. When on, Leon reads the API key opencode stored for it (~/.local/share/opencode/auth.json) when it refreshes and sends it over HTTPS to opencode.ai only, asking for the subscription's usage. The key is never stored, logged or shown, and only this computer does it. Off by default.",
+        "network go credential key privacy limits",
+        K::Toggle,
+        D::Bool(false),
+    ),
+    def(
+        "usage_forget_history",
+        S::Usage,
+        "Forget stored usage history",
+        "Delete the percentages and times kept for the trend lines and the burn-rate estimate. The latest readings stay.",
+        "clear delete sparkline history limits",
         K::Action,
         D::None,
     ),
@@ -1483,7 +1656,11 @@ mod tests {
         if std::env::var_os("LEON_BLESS").is_some() {
             std::fs::write(&file, &expected).unwrap();
         }
-        let actual = std::fs::read_to_string(&file).unwrap_or_default();
+        // A checkout may have turned the line endings into CRLF (Git on
+        // Windows does by default); the text is the same.
+        let actual = std::fs::read_to_string(&file)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
         assert!(
             actual == expected,
             "docs/SETTINGS.md is stale: run `LEON_BLESS=1 cargo test -p leon the_settings_reference_is_current`"

@@ -5,7 +5,12 @@ members = [
     "crates/leon-core",
     "crates/leon-history",
     "crates/leon-remote",
+    "crates/leon-usage",
     "crates/leon-term",
+    "crates/leon-pty",
+    "crates/leon-host",
+    "crates/leon-wire",
+    "crates/leon-link",
     "crates/app",
     "crates/xtask",
 ]
@@ -21,8 +26,13 @@ publish = false
 leon-core = { path = "crates/leon-core" }
 leon-history = { path = "crates/leon-history" }
 leon-remote = { path = "crates/leon-remote" }
+leon-usage = { path = "crates/leon-usage" }
 leon-term = { path = "crates/leon-term" }
 leon-mark = { path = "crates/leon-mark" }
+leon-pty = { path = "crates/leon-pty" }
+leon-host = { path = "crates/leon-host" }
+leon-wire = { path = "crates/leon-wire" }
+leon-link = { path = "crates/leon-link" }
 
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -30,13 +40,28 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 tempfile = "3"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "process", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "process", "io-util", "net", "signal"] }
 # Theme files are TOML. Already in the build (a dependency of the GPUI stack),
 # so it adds nothing to compile.
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "v7"] }
+
+# Wire encoding (compact, serde-based, stable format).
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+sha2 = "0.10"
+
+# End-to-end security (all audited, mainstream crates; see docs/REMOTE.md).
+snow = "0.10"
+spake2 = "0.4"
+ed25519-dalek = "2"
+rand_core = { version = "0.6", features = ["getrandom"] }
+subtle = "2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+zeroize = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 
 # Where the per-user data directory lives on each platform.
 dirs = "6"

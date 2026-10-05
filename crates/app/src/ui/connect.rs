@@ -292,7 +292,7 @@ impl ConnectUi {
 }
 
 fn secondary(stroke: &Keystroke) -> bool {
-    if cfg!(target_os = "macos") {
+    if crate::platform::is_mac() {
         stroke.modifiers.platform
     } else {
         stroke.modifiers.control
@@ -987,6 +987,13 @@ impl Shell {
 
     /// The SSH machine the keyboard is on, for the commands that explain or
     /// edit one.
+    /// The machine the keyboard is on, when it is reached through a relay.
+    pub(super) fn relay_machine_here(&self) -> Option<MachineId> {
+        let id = self.current_machine();
+        let machine = self.snapshot.machine(&id)?;
+        matches!(machine.kind, MachineKind::Relay { .. }).then_some(id)
+    }
+
     pub(super) fn ssh_machine_here(&self) -> Option<MachineId> {
         let id = self.current_machine();
         let machine = self.snapshot.machine(&id)?;

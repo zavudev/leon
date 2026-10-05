@@ -11,10 +11,14 @@ publish.workspace = true
 base64 = "0.22"
 sha2 = "0.10"
 leon-core.workspace = true
+leon-link.workspace = true
+leon-wire.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+leon-host.workspace = true
+leon-link = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

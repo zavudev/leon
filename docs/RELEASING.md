@@ -9,6 +9,10 @@ The version lives in one place: `version` under `[workspace.package]` in the roo
 `Cargo.toml`. Every crate inherits it, and the tag has to be `v` followed by it
 (`cargo xtask check-tag` and the workflow both enforce that).
 
+Run `scripts/check.sh` first (and before every push, release or not): CI is a
+confirmation, not the first test. `scripts/install-hooks.sh` installs it as an
+opt-in `pre-push` hook.
+
 ```sh
 cargo xtask bump patch        # or minor, major, or an explicit X.Y.Z
 git diff                      # Cargo.toml and Cargo.lock
@@ -33,7 +37,7 @@ Other commands: `cargo xtask version`, `cargo xtask check-tag <TAG>`,
 | File | Built on | Contents |
 | --- | --- | --- |
 | `leon-<v>-macos-aarch64.dmg` | macOS (Apple Silicon) | `Leon.app` and an Applications link |
-| `leon-<v>-macos-x86_64.dmg` | macOS (Intel) | the same |
+| `leon-<v>-macos-x86_64.dmg` | macOS (Apple silicon, cross build for Intel) | the same |
 | `leon-<v>-linux-x86_64.tar.gz` | Ubuntu 22.04 | binary, desktop entry, icons, `INSTALL.txt`, `LICENSE`, `NOTICE` |
 | `leon-<v>-windows-x86_64.zip` | Windows | `leon.exe` (icon embedded), `LICENSE`, `NOTICE` |
 | `SHA256SUMS` | | checksum of every file above |
@@ -79,10 +83,28 @@ variables, Actions, Variables:
 
 | Variable | Fallback | Used by |
 | --- | --- | --- |
-| `RUNNER_LINUX` | `ubuntu-latest` (`ubuntu-22.04` in the release) | fmt, clippy, tests, release build, publish |
-| `RUNNER_MACOS_ARM` | `macos-latest` | clippy, tests, release build |
-| `RUNNER_MACOS_INTEL` | `macos-15-intel` | tests, release build |
-| `RUNNER_WINDOWS` | `windows-latest` | tests, release build |
+| `RUNNER_LINUX` | `ubuntu-24.04` (`ubuntu-22.04` in the release build) | fmt, clippy, tests, release build, publish |
+| `RUNNER_MACOS_ARM` | `macos-latest` | clippy, tests, the Intel check, release build of both Macs |
+| `RUNNER_WINDOWS` | `windows-latest` | clippy, tests, release build |
+
+There is no Intel runner variable: the Intel Mac is never built on an Intel
+machine. The hosted Intel runner is small and slow (a test run on it lost its
+connection to GitHub after 52 minutes). Instead the CI job "Check (macOS
+x86_64, cross)" type-checks the whole workspace for `x86_64-apple-darwin` on the
+Apple-silicon runner (`cargo check --workspace --all-targets --target
+x86_64-apple-darwin`), and the release builds the Intel binary there too, with
+`cargo build --release --target x86_64-apple-darwin` (the Apple compiler
+compiles the C dependencies, the bundled SQLite, for Intel). The bundle, the
+signature and the disk image are made from `target/x86_64-apple-darwin/release/leon`
+exactly as for the native build, and the step prints `lipo -archs` of the
+result. The Intel build is therefore compiled and linked on every release, but
+the test suite does not run on an Intel processor; the code is the same as the
+Apple-silicon build except for the compiler target.
+
+Ubuntu is pinned to `ubuntu-24.04` in CI so that the move of the `ubuntu-latest`
+label to a newer image never changes a build by itself. Every job has a
+`timeout-minutes`, well above a cold run, so a job that never gets a machine or
+hangs fails early.
 
 Note: the release's Linux binary links against the glibc of the machine that
 builds it. The `ubuntu-22.04` fallback is deliberate (it runs on any distribution

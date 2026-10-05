@@ -42,6 +42,20 @@ pub enum MachineKind {
         /// Private key file on the machine Leon runs on.
         identity_file: Option<String>,
     },
+    /// A machine reached through a relay: both computers dial out to it, so
+    /// nothing needs to be opened or set up on the network. Everything between
+    /// the two Leon installations is end-to-end encrypted.
+    Relay {
+        /// The host's id (base32), which the relay routes on.
+        host_id: String,
+        /// The host's pinned static public key, hex. Connections are accepted
+        /// only from the host that holds the matching private key.
+        host_key: String,
+        /// The relay used when the machine was paired (`wss://…`).
+        relay_url: String,
+        /// The name the host gave itself.
+        name: String,
+    },
 }
 
 /// A code base on a machine.

@@ -185,6 +185,10 @@ pub enum Op {
     },
     /// Forget the user's choice of logo; detection's shows again.
     ResetIcon(ProjectId),
+    /// Read the usage limits of every machine now.
+    CollectUsage,
+    /// Delete the stored usage observations.
+    ForgetUsageHistory,
 }
 
 /// Whether the status line reports something done, something under way or
@@ -244,6 +248,8 @@ pub enum EngineEvent {
     Machines,
     /// What runs in other terminals changed.
     Elsewhere,
+    /// A usage collection started or ended.
+    Usage,
 }
 
 /// Why an operation failed. The text is what the status line says.
@@ -274,6 +280,21 @@ pub struct Elsewhere {
     pub found: Vec<Found>,
     /// How long the scan took, command and matching.
     pub took: std::time::Duration,
+}
+
+/// What collecting usage limits needs. Absent until the application supplies
+/// it, so an engine in a test never reads a credential or calls a network.
+struct UsageSetup {
+    credentials: Arc<dyn leon_usage::network::Credentials>,
+    http: Arc<dyn leon_usage::network::Http>,
+    /// The time, in Unix seconds; injected so tests control it.
+    clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Which network sources are switched on.
+    policy: leon_usage::network::NetworkPolicy,
+    /// The back-off of each network source.
+    throttle: HashMap<leon_core::AgentKind, leon_usage::network::Throttle>,
+    /// Whether a collection is running.
+    collecting: bool,
 }
 
 /// How processes are listed: through a runner, on this computer or over SSH.
@@ -323,6 +344,15 @@ struct Inner {
     events: broadcast::Sender<EngineEvent>,
     fetcher: Mutex<Arc<dyn IconFetcher>>,
     scanner: Mutex<Option<Arc<Scanner>>>,
+    usage: Mutex<Option<UsageSetup>>,
+    /// How many jobs run on the blocking pool right now. They run on threads
+    /// of their own, outside any scheduler a test controls, so a test waits for
+    /// this to reach zero before it looks at what they stored.
+    blocking: std::sync::atomic::AtomicUsize,
+    /// Whether this computer has a POSIX shell of its own: false on Windows,
+    /// where its usage is not collected and its processes are listed with
+    /// PowerShell. Decided once from the platform; only tests change it.
+    local_posix_shell: std::sync::atomic::AtomicBool,
 }
 
 /// The background half of the application. Cheap to clone.
@@ -366,8 +396,44 @@ impl Engine {
                 events,
                 fetcher: Mutex::new(Arc::new(NoFetch)),
                 scanner: Mutex::new(None),
+                usage: Mutex::new(None),
+                blocking: std::sync::atomic::AtomicUsize::new(0),
+                local_posix_shell: std::sync::atomic::AtomicBool::new(
+                    crate::platform::local_has_posix_shell(),
+                ),
             }),
         }
+    }
+
+    /// Runs `job` on the blocking pool and counts it while it runs.
+    async fn blocking<T: Send + 'static>(
+        &self,
+        job: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, EngineError> {
+        use std::sync::atomic::Ordering;
+        /// Takes the job off the count wherever the closure ends.
+        struct Running(Arc<Inner>);
+        impl Drop for Running {
+            fn drop(&mut self) {
+                self.0.blocking.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        self.inner.blocking.fetch_add(1, Ordering::SeqCst);
+        let running = Running(self.inner.clone());
+        tokio::task::spawn_blocking(move || {
+            let _running = running;
+            job()
+        })
+        .await
+        .map_err(|error| EngineError::Job(error.to_string()))
+    }
+
+    /// How many blocking jobs are running (tests wait for zero).
+    #[cfg(test)]
+    pub(crate) fn blocking_jobs(&self) -> usize {
+        self.inner
+            .blocking
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Lets the engine download owner avatars with `fetcher`. Without one it
@@ -430,7 +496,15 @@ impl Engine {
         let machine = self.inner.store.machine(id).ok()?;
         let started = std::time::Instant::now();
         let local = machine.kind == MachineKind::Local;
-        let spec = leon_remote::processes::scan_command(!local || !cfg!(windows));
+        // PowerShell only for this computer when it is Windows; every remote
+        // machine is POSIX wherever Leon runs.
+        let spec = leon_remote::processes::scan_command(
+            !local
+                || self
+                    .inner
+                    .local_posix_shell
+                    .load(std::sync::atomic::Ordering::Relaxed),
+        );
         let runner = SharedRunner(scanner.exec.clone());
         let found = match runner
             .run(&leon_remote::run_on(&machine, &spec, &self.ssh()))
@@ -486,6 +560,212 @@ impl Engine {
         };
         if changed {
             let _ = self.inner.events.send(EngineEvent::Elsewhere);
+        }
+    }
+
+    // ----- usage limits ----------------------------------------------------
+
+    /// Lets the engine collect usage limits: `credentials` and `http` serve
+    /// the opt-in network sources, `clock` gives the time in Unix seconds.
+    /// Without this the engine collects nothing.
+    pub fn set_usage(
+        &self,
+        credentials: Arc<dyn leon_usage::network::Credentials>,
+        http: Arc<dyn leon_usage::network::Http>,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) {
+        let mut usage = self.usage_setup();
+        let policy = usage.as_ref().map(|u| u.policy).unwrap_or_default();
+        *usage = Some(UsageSetup {
+            credentials,
+            http,
+            clock,
+            policy,
+            throttle: HashMap::new(),
+            collecting: false,
+        });
+    }
+
+    /// Which network sources are switched on. Kept even before
+    /// [`Engine::set_usage`], so the setting wins whichever comes first.
+    pub fn set_usage_policy(&self, policy: leon_usage::network::NetworkPolicy) {
+        if let Some(setup) = self.usage_setup().as_mut() {
+            setup.policy = policy;
+        }
+    }
+
+    /// Makes the engine treat this computer as one with, or without, a POSIX
+    /// shell of its own, whatever it is (tests only).
+    #[cfg(test)]
+    pub fn set_local_posix_shell(&self, posix: bool) {
+        self.inner
+            .local_posix_shell
+            .store(posix, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether usage is collected at all.
+    pub fn collects_usage(&self) -> bool {
+        self.usage_setup().is_some()
+    }
+
+    /// Whether a collection is running right now.
+    pub fn usage_collecting(&self) -> bool {
+        self.usage_setup().as_ref().is_some_and(|u| u.collecting)
+    }
+
+    fn usage_setup(&self) -> std::sync::MutexGuard<'_, Option<UsageSetup>> {
+        self.inner
+            .usage
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn set_usage_collecting(&self, collecting: bool) {
+        if let Some(setup) = self.usage_setup().as_mut() {
+            setup.collecting = collecting;
+        }
+        let _ = self.inner.events.send(EngineEvent::Usage);
+    }
+
+    /// Reads the usage limits of every machine that answers, a few at a time.
+    async fn collect_usage(&self) {
+        if !self.collects_usage() || self.usage_collecting() {
+            return;
+        }
+        self.set_usage_collecting(true);
+        let machines = self.inner.store.machines().unwrap_or_default();
+        let mut jobs = JoinSet::new();
+        for machine in machines {
+            let engine = self.clone();
+            jobs.spawn_on(
+                async move { engine.collect_usage_machine(&machine).await },
+                &self.inner.handle,
+            );
+        }
+        while jobs.join_next().await.is_some() {}
+        self.set_usage_collecting(false);
+    }
+
+    /// One bounded command on the machine, then the network sources that are
+    /// on (this computer only). What came back is stored: the latest reading
+    /// of each agent and the observations for the history.
+    async fn collect_usage_machine(&self, machine: &Machine) {
+        let (credentials, http, clock, mut policy, throttled) = {
+            let usage = self.usage_setup();
+            let Some(setup) = usage.as_ref() else {
+                return;
+            };
+            let now = (setup.clock)();
+            let throttled: Vec<leon_core::AgentKind> = setup
+                .throttle
+                .iter()
+                .filter(|(_, throttle)| !throttle.allows(now))
+                .map(|(agent, _)| *agent)
+                .collect();
+            (
+                setup.credentials.clone(),
+                setup.http.clone(),
+                setup.clock.clone(),
+                setup.policy,
+                throttled,
+            )
+        };
+        let asked = policy;
+        // A source that is backing off is not called again yet.
+        if throttled.contains(&leon_core::AgentKind::Claude) {
+            policy.claude = false;
+        }
+        if throttled.contains(&leon_core::AgentKind::Opencode) {
+            policy.opencode = false;
+        }
+        let now = clock();
+        let runner = SharedRunner(self.inner.runner.clone());
+        let collected = leon_usage::collect_machine_on(
+            &runner,
+            machine,
+            self.inner
+                .local_posix_shell
+                .load(std::sync::atomic::Ordering::Relaxed),
+            &self.ssh(),
+            policy,
+            credentials.as_ref(),
+            http.as_ref(),
+            now,
+        )
+        .await;
+        let previous: HashMap<leon_core::AgentKind, leon_usage::AgentUsage> = self
+            .inner
+            .store
+            .usage_readings()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| row.machine == machine.id)
+            .filter_map(|row| {
+                serde_json::from_str::<leon_usage::AgentUsage>(&row.payload)
+                    .ok()
+                    .map(|usage| (row.agent, usage))
+            })
+            .collect();
+        // Back-off bookkeeping for the sources that were really called.
+        if machine.kind == MachineKind::Local {
+            let mut usage = self.usage_setup();
+            if let Some(setup) = usage.as_mut() {
+                for (agent, called) in [
+                    (leon_core::AgentKind::Claude, policy.claude && asked.claude),
+                    (
+                        leon_core::AgentKind::Opencode,
+                        policy.opencode && asked.opencode,
+                    ),
+                ] {
+                    if !called {
+                        continue;
+                    }
+                    let failed = collected.readings.iter().any(|r| {
+                        r.agent == agent
+                            && matches!(
+                                r.state,
+                                leon_usage::State::Unknown {
+                                    reason: leon_usage::Reason::Unreachable
+                                        | leon_usage::Reason::ParseError
+                                }
+                            )
+                    });
+                    setup
+                        .throttle
+                        .entry(agent)
+                        .or_default()
+                        .record(!failed, now);
+                }
+            }
+        }
+        let store = &self.inner.store;
+        for (agent, reading) in crate::agent_usage::payloads(&collected, &previous) {
+            // A source held back keeps what it showed.
+            let reading = if throttled.contains(&agent)
+                && matches!(reading.state, leon_usage::State::Unknown { .. })
+            {
+                previous.get(&agent).cloned().unwrap_or(reading)
+            } else {
+                reading
+            };
+            if let Ok(json) = serde_json::to_string(&reading) {
+                if let Err(error) = store.put_usage_reading(&machine.id, agent, &json, now) {
+                    tracing::warn!(%error, "could not store a usage reading");
+                }
+            }
+        }
+        for (agent, account, points) in
+            crate::agent_usage::history_points(&collected, machine.id.as_str())
+        {
+            if let Err(error) = store.record_usage_points(
+                &machine.id,
+                agent,
+                &account,
+                &points,
+                now - crate::agent_usage::HISTORY_HORIZON,
+            ) {
+                tracing::warn!(%error, "could not store usage history");
+            }
         }
     }
 
@@ -621,6 +901,17 @@ impl Engine {
             Op::DetectIcon(project) => self.detect_icon_reported(&project).await.map(Some),
             Op::SetIcon { project, path } => self.set_icon(&project, path).await.map(Some),
             Op::ResetIcon(project) => self.reset_icon(&project).map(Some),
+            Op::CollectUsage => {
+                self.collect_usage().await;
+                Ok(None)
+            }
+            Op::ForgetUsageHistory => {
+                let removed = self.inner.store.forget_usage_history()?;
+                Ok(Some(format!(
+                    "Forgot {} of usage history.",
+                    plural(removed, "observation")
+                )))
+            }
         }
     }
 
@@ -630,10 +921,9 @@ impl Engine {
         self.set_status(StatusKind::Busy, "Importing history...".to_owned());
         let store = self.inner.store.clone();
         let roots = self.prefs().roots;
-        let report =
-            tokio::task::spawn_blocking(move || Importer::run(&store, &MachineId::local(), &roots))
-                .await
-                .map_err(|error| EngineError::Job(error.to_string()))?;
+        let report = self
+            .blocking(move || Importer::run(&store, &MachineId::local(), &roots))
+            .await?;
         Ok(describe_import(&report))
     }
 
@@ -739,6 +1029,46 @@ impl Engine {
                 self.inner.store.update_machine(&machine)?;
                 Ok(machine)
             }
+        }
+    }
+
+    /// Saves a machine reached through a relay after pairing with a code. A
+    /// machine already paired with the same host is updated, not duplicated.
+    pub fn save_relay_machine(
+        &self,
+        name: &str,
+        host_id: &str,
+        host_key: &str,
+        relay_url: &str,
+        host_name: &str,
+    ) -> Result<Machine, EngineError> {
+        let name = name.trim();
+        let name = if name.is_empty() {
+            host_name.trim()
+        } else {
+            name
+        };
+        if name.is_empty() {
+            return Err(EngineError::Invalid("A machine needs a name.".to_owned()));
+        }
+        let kind = MachineKind::Relay {
+            host_id: host_id.to_owned(),
+            host_key: host_key.to_owned(),
+            relay_url: relay_url.to_owned(),
+            name: host_name.to_owned(),
+        };
+        let existing =
+            self.inner.store.machines()?.into_iter().find(
+                |m| matches!(&m.kind, MachineKind::Relay { host_id: id, .. } if id == host_id),
+            );
+        match existing {
+            Some(mut machine) => {
+                machine.name = name.to_owned();
+                machine.kind = kind;
+                self.inner.store.update_machine(&machine)?;
+                Ok(machine)
+            }
+            None => Ok(self.inner.store.add_machine(name, kind)?),
         }
     }
 
@@ -1168,8 +1498,12 @@ impl Engine {
             self.set_elsewhere(&machine.id, None);
             return done;
         }
-        // The machine answers: what runs in other terminals, in one command.
+        // The machine answers: what runs in other terminals, in one command,
+        // and how much of each agent's limits is left, in another.
         self.scan_machine(&machine.id).await;
+        if self.collects_usage() {
+            self.collect_usage_machine(machine).await;
+        }
         let discovery = if !self.prefs().discover_projects {
             Ok(Discovery::default())
         } else {
@@ -1341,16 +1675,18 @@ impl Engine {
     ) -> Result<String, EngineError> {
         let name = self.inner.store.project(id)?.name;
         let file = path.clone();
-        let bytes = tokio::task::spawn_blocking(move || {
-            let size = std::fs::metadata(&file)?.len();
-            if size > leon_core::icon::MAX_ICON_BYTES as u64 {
-                return Err(std::io::Error::other("that image is larger than 256 KiB"));
-            }
-            std::fs::read(&file)
-        })
-        .await
-        .map_err(|error| EngineError::Job(error.to_string()))?
-        .map_err(|error| EngineError::Invalid(format!("cannot use {}: {error}", path.display())))?;
+        let bytes = self
+            .blocking(move || {
+                let size = std::fs::metadata(&file)?.len();
+                if size > leon_core::icon::MAX_ICON_BYTES as u64 {
+                    return Err(std::io::Error::other("that image is larger than 256 KiB"));
+                }
+                std::fs::read(&file)
+            })
+            .await?
+            .map_err(|error| {
+                EngineError::Invalid(format!("cannot use {}: {error}", path.display()))
+            })?;
         let image = IconImage::from_bytes(bytes).ok_or_else(|| {
             EngineError::Invalid(format!(
                 "{} is not a PNG, WebP, ICO, JPEG or SVG image.",
@@ -2727,7 +3063,35 @@ branch refs/heads/feature/login
         assert!(found.is_certain());
         assert!(found.session.is_some());
         assert!(!found.leon_child);
-        assert_eq!(rig.runner.calls()[0].program, "sh");
+        // This computer's scan is a shell script, and PowerShell on Windows.
+        let program = if crate::platform::is_windows() {
+            "powershell"
+        } else {
+            "sh"
+        };
+        assert_eq!(rig.runner.calls()[0].program, program);
+    }
+
+    #[tokio::test]
+    async fn a_relay_machine_is_scanned_through_its_route() {
+        let rig = scanning_rig(vec![Output::ok(scan_output(""))]);
+        let machine = rig
+            .store
+            .add_machine(
+                "relayed",
+                MachineKind::Relay {
+                    host_id: "ABCDEFGH".into(),
+                    host_key: "00".repeat(32),
+                    relay_url: "wss://relay.example".into(),
+                    name: "their computer".into(),
+                },
+            )
+            .unwrap();
+        rig.engine.run(Op::Scan(machine.id.clone())).await;
+        assert!(rig.engine.elsewhere(&machine.id).is_some());
+        let call = &rig.runner.calls()[0];
+        assert!(call.route.is_some(), "the scan must go through the relay");
+        assert_eq!(call.program, "sh");
     }
 
     #[tokio::test]
@@ -2941,5 +3305,206 @@ branch refs/heads/feature/login
         assert!(status(&rig.engine).text.contains("again"));
         rig.engine.run(Op::Refresh).await;
         assert_eq!(roots(&rig.store, &local), ["/srv/api"]);
+    }
+
+    // ----- usage limits
+
+    struct NoCredentials;
+    impl leon_usage::network::Credentials for NoCredentials {
+        fn claude(&self) -> leon_usage::network::Read<leon_usage::claude::Credential> {
+            leon_usage::network::Read::Missing
+        }
+        fn opencode_go(&self) -> leon_usage::network::Read<leon_usage::secret::Secret> {
+            leon_usage::network::Read::Missing
+        }
+    }
+
+    const CODEX_EVENT: &str = r#"{"timestamp":"2026-10-04T18:59:06.753Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":42.0,"window_minutes":300,"resets_at":1791154068},"secondary":{"used_percent":15.0,"window_minutes":10080,"resets_at":1791678919},"plan_type":"plus"}}}"#;
+    const USAGE_NOW: i64 = 1_791_140_000;
+
+    fn usage_rig(runner: ScriptedRunner) -> (Rig, Arc<leon_usage::network::ScriptedHttp>) {
+        let rig = rig(runner);
+        // The scripted runner needs no shell: these tests read this computer
+        // as one that has a POSIX shell, on every platform. Windows has its
+        // own test below.
+        rig.engine.set_local_posix_shell(true);
+        let http = Arc::new(leon_usage::network::ScriptedHttp::new());
+        rig.engine.set_usage(
+            Arc::new(NoCredentials),
+            http.clone(),
+            Arc::new(|| USAGE_NOW),
+        );
+        (rig, http)
+    }
+
+    fn found_output() -> Output {
+        Output::ok(format!("has=codex\nhas=claude\n@codex\n{CODEX_EVENT}\n"))
+    }
+
+    #[tokio::test]
+    async fn collecting_stores_each_agents_latest_reading_and_the_history() {
+        let (rig, http) = usage_rig(ScriptedRunner::new().reply(found_output()));
+        rig.engine.run(Op::CollectUsage).await;
+        let rows = rig.store.usage_readings().unwrap();
+        assert_eq!(rows.len(), 3);
+        let codex = rows
+            .iter()
+            .find(|r| r.agent == leon_core::AgentKind::Codex)
+            .unwrap();
+        let reading: leon_usage::AgentUsage = serde_json::from_str(&codex.payload).unwrap();
+        assert!(matches!(reading.state, leon_usage::State::Known { .. }));
+        let account = leon_usage::series_key("local", leon_core::AgentKind::Codex, Some("plus"));
+        let history = rig
+            .store
+            .usage_history(
+                &MachineId::local(),
+                leon_core::AgentKind::Codex,
+                &account,
+                "five_hour",
+                0,
+            )
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].used_percent, 42.0);
+        assert_eq!(http.calls().len(), 0);
+        assert!(!rig.engine.usage_collecting());
+    }
+
+    #[tokio::test]
+    async fn this_computer_without_a_posix_shell_is_unsupported_but_a_server_is_read() {
+        let (rig, http) = usage_rig(ScriptedRunner::new().reply(found_output()));
+        rig.engine.set_local_posix_shell(false);
+        rig.store
+            .add_machine(
+                "box",
+                MachineKind::Ssh {
+                    host: "box.example".into(),
+                    user: None,
+                    port: None,
+                    identity_file: None,
+                },
+            )
+            .unwrap();
+        rig.engine.run(Op::CollectUsage).await;
+        let calls = rig.runner.calls();
+        assert_eq!(calls.len(), 1, "only the server is asked");
+        assert_eq!(calls[0].program, "ssh");
+        let rows = rig.store.usage_readings().unwrap();
+        let of = |machine: &MachineId, agent| {
+            rows.iter()
+                .find(|r| &r.machine == machine && r.agent == agent)
+                .map(|r| r.payload.clone())
+                .unwrap_or_default()
+        };
+        let local = MachineId::local();
+        assert!(of(&local, leon_core::AgentKind::Codex).contains("not_supported"));
+        let server = rows
+            .iter()
+            .find(|r| r.machine != local)
+            .unwrap()
+            .machine
+            .clone();
+        assert!(of(&server, leon_core::AgentKind::Codex).contains("\"known\""));
+        assert_eq!(http.calls().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_disabled_network_source_makes_no_call_through_the_engine() {
+        let (rig, http) = usage_rig(ScriptedRunner::new().reply(found_output()));
+        rig.engine.run(Op::CollectUsage).await;
+        assert_eq!(http.calls().len(), 0);
+        let rows = rig.store.usage_readings().unwrap();
+        let claude = rows
+            .iter()
+            .find(|r| r.agent == leon_core::AgentKind::Claude)
+            .unwrap();
+        assert!(claude.payload.contains("source_disabled"));
+    }
+
+    #[tokio::test]
+    async fn an_engine_without_usage_setup_collects_nothing() {
+        let rig = rig(ScriptedRunner::new());
+        rig.engine.run(Op::CollectUsage).await;
+        assert!(rig.runner.calls().is_empty());
+        assert!(rig.store.usage_readings().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_machine_keeps_the_reading_it_had() {
+        let (rig, _) = usage_rig(
+            ScriptedRunner::new()
+                .reply(found_output())
+                .reply(Output::failed(255, "connection refused")),
+        );
+        rig.engine.run(Op::CollectUsage).await;
+        rig.engine.run(Op::CollectUsage).await;
+        let rows = rig.store.usage_readings().unwrap();
+        let codex = rows
+            .iter()
+            .find(|r| r.agent == leon_core::AgentKind::Codex)
+            .unwrap();
+        assert!(codex.payload.contains("\"known\""));
+    }
+
+    #[tokio::test]
+    async fn each_machine_is_collected_with_its_own_command() {
+        let (rig, _) = usage_rig(
+            ScriptedRunner::new()
+                .reply(found_output())
+                .reply(found_output()),
+        );
+        rig.store
+            .add_machine(
+                "box",
+                MachineKind::Ssh {
+                    host: "box.example".into(),
+                    user: None,
+                    port: None,
+                    identity_file: None,
+                },
+            )
+            .unwrap();
+        rig.engine.run(Op::CollectUsage).await;
+        let programs: Vec<String> = rig.runner.calls().into_iter().map(|c| c.program).collect();
+        assert_eq!(programs.len(), 2);
+        assert!(programs.contains(&"ssh".to_owned()));
+        let machines: std::collections::HashSet<_> = rig
+            .store
+            .usage_readings()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.machine)
+            .collect();
+        assert_eq!(machines.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn forgetting_the_history_reports_how_much_it_removed() {
+        let (rig, _) = usage_rig(ScriptedRunner::new().reply(found_output()));
+        rig.engine.run(Op::CollectUsage).await;
+        rig.engine.run(Op::ForgetUsageHistory).await;
+        assert!(status(&rig.engine).text.starts_with("Forgot "));
+        let account = leon_usage::series_key("local", leon_core::AgentKind::Codex, Some("plus"));
+        assert!(rig
+            .store
+            .usage_history(
+                &MachineId::local(),
+                leon_core::AgentKind::Codex,
+                &account,
+                "five_hour",
+                0
+            )
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn refreshing_collects_usage_when_it_is_set_up() {
+        let (rig, _) = usage_rig(ScriptedRunner::new());
+        rig.engine.run(Op::Refresh).await;
+        // The scripted runner has nothing queued, so the collection failed to
+        // run: every agent is unreachable, but it was attempted.
+        let rows = rig.store.usage_readings().unwrap();
+        assert_eq!(rows.len(), 3);
     }
 }

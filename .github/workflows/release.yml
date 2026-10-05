@@ -96,13 +96,24 @@ jobs:
             os: ${{ vars.RUNNER_LINUX || 'ubuntu-22.04' }}
           - platform: macos-aarch64
             os: ${{ vars.RUNNER_MACOS_ARM || 'macos-latest' }}
+          # The Intel Mac is built on the Apple-silicon runner, as a cross
+          # build for x86_64-apple-darwin with the Apple compiler: the hosted
+          # Intel runner is small and slow. It is bundled and signed on this
+          # machine like the native one, which is possible because the
+          # signing tools do not care which architecture the code is for.
           - platform: macos-x86_64
-            os: ${{ vars.RUNNER_MACOS_INTEL || 'macos-15-intel' }}
+            os: ${{ vars.RUNNER_MACOS_ARM || 'macos-latest' }}
+            target: x86_64-apple-darwin
           - platform: windows-x86_64
             os: ${{ vars.RUNNER_WINDOWS || 'windows-latest' }}
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       PLATFORM: ${{ matrix.platform }}
+      # Empty for a native build; the Rust target of a cross build.
+      TARGET: ${{ matrix.target }}
+      # Where cargo leaves the binaries: under the target's own folder when
+      # the build is a cross build.
+      BIN_DIR: ${{ matrix.target && format('target/{0}/release', matrix.target) || 'target/release' }}
       HAS_MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12 != '' && secrets.MACOS_CERTIFICATE_PASSWORD != '' && secrets.MACOS_SIGNING_IDENTITY != '' }}
       HAS_APPLE_NOTARY: ${{ secrets.APPLE_ID != '' && secrets.APPLE_APP_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
       HAS_WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE_PFX != '' && secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
@@ -118,22 +129,33 @@ jobs:
             libxkbcommon-x11-dev libxcb1-dev libx11-xcb-dev
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-${{ matrix.platform }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # The packaging tool (xtask) is for the system the job runs on, so a
+      # cross build builds only the application, and macOS packages with the
+      # shell and the system tools.
       - name: Build
-        run: cargo build --release --locked --package leon --package xtask
+        shell: bash
+        run: |
+          if [ -n "$TARGET" ]; then
+            cargo build --release --locked --package leon --target "$TARGET"
+          else
+            cargo build --release --locked --package leon --package xtask
+          fi
 
       # ----- Linux: the binary, with what a desktop needs to list it.
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
-          strip target/release/leon
+          strip "$BIN_DIR/leon"
           mkdir -p dist work
-          packaging/linux/stage.sh target/release/leon work/stage
+          packaging/linux/stage.sh "$BIN_DIR/leon" work/stage
           cd work/stage
           ../../target/release/xtask package --platform "$PLATFORM" --out-dir ../../dist \
             --input leon --input share --input INSTALL.txt --input LICENSE --input NOTICE
@@ -143,7 +165,9 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           mkdir -p dist work
-          packaging/macos/bundle.sh target/release/leon "$VERSION" work
+          packaging/macos/bundle.sh "$BIN_DIR/leon" "$VERSION" work
+          # Say what was built: the architecture of the code in the bundle.
+          lipo -archs work/Leon.app/Contents/MacOS/Leon
 
       # Hardened runtime and a secure timestamp, which notarization demands. No
       # entitlements: Leon starts shells and agents as ordinary child

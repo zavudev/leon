@@ -67,7 +67,7 @@ fn the_mark_under_the_tab_strip_is_centred_on_its_rule(cx: &mut TestAppContext) 
     let h = open_live(cx);
     let (_dir, _) = real_worktree(&h, cx);
     h.press("ctrl-t", cx);
-    h.press("ctrl-t", cx);
+    h.press_chord("cmd-t", "ctrl-shift-t", cx);
     assert!(h.shows("terminal-tabs", cx), "two tabs: a strip");
     let tabs = h.bounds_of("terminal-tabs".to_owned(), cx).unwrap();
     near(

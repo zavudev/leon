@@ -530,12 +530,41 @@ pub fn engine_prefs(cx: &App, engine: &crate::engine::Engine) -> crate::engine::
     }
 }
 
+/// Which network sources of the usage limits the settings switched on.
+pub fn usage_policy(cx: &App) -> leon_usage::network::NetworkPolicy {
+    leon_usage::network::NetworkPolicy {
+        claude: flag(cx, "usage_claude_network"),
+        opencode: flag(cx, "usage_opencode_network"),
+    }
+}
+
+/// Where a limit turns to a warning and to critical, from the settings. The
+/// critical level is never below the warning one.
+pub fn usage_thresholds(cx: &App) -> leon_usage::Thresholds {
+    let warning = int(cx, "usage_warn") as f64;
+    leon_usage::Thresholds {
+        warning,
+        critical: (int(cx, "usage_critical") as f64).max(warning),
+    }
+}
+
+/// The agents whose limits the settings show.
+pub fn usage_agents(cx: &App) -> Vec<leon_core::AgentKind> {
+    leon_core::AgentKind::ALL
+        .into_iter()
+        .filter(|agent| flag(cx, &format!("usage_{}", agent.as_str())))
+        .collect()
+}
+
 /// Tells the engine what the settings ask and, unless they say not to, brings
 /// the store up to date: what happens when the application starts.
 pub fn start_engine(cx: &App, engine: &crate::engine::Engine) {
     engine.set_prefs(engine_prefs(cx, engine));
+    engine.set_usage_policy(usage_policy(cx));
     if flag(cx, "import_on_start") {
         engine.submit(crate::engine::Op::Refresh);
+    } else {
+        engine.submit(crate::engine::Op::CollectUsage);
     }
 }
 

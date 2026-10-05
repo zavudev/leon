@@ -13,7 +13,10 @@ const FULL_SVG: &str = concat!(
 );
 
 fn read(path: &str) -> String {
-    std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{path}: {error}"))
+    // Line endings as `\n`, whatever the checkout made of them.
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("{path}: {error}"))
+        .replace("\r\n", "\n")
 }
 
 /// The colours the final app icon is drawn with: the accent and the ink.

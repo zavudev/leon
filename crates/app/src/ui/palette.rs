@@ -798,7 +798,7 @@ impl Shell {
         if modified {
             return false;
         }
-        let secondary = if cfg!(target_os = "macos") {
+        let secondary = if crate::platform::is_mac() {
             stroke.modifiers.platform
         } else {
             stroke.modifiers.control
@@ -1372,7 +1372,7 @@ impl Shell {
             (None, Scope::Help) => "ENTER CHOOSE   ESC CLOSE",
             (None, _) => "ENTER OPEN   > COMMANDS   @ MACHINES   # PROJECTS   / HISTORY   ? HELP",
         };
-        let hints = if cfg!(target_os = "macos") {
+        let hints = if crate::platform::is_mac() {
             hints.replace("CTRL+ENTER", "CMD+ENTER")
         } else {
             hints.to_owned()

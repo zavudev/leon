@@ -203,15 +203,34 @@ sidebar.
 
 A machine is another computer (a server, a desktop at the office, a spare
 laptop) whose projects, worktrees and agent sessions you drive from Leon.
-Leon reaches it with your system's SSH, signing in as you; Leon installs
-nothing on the other computer.
+There are two ways to connect, and **With a code** is the default.
+
+* **With a code (recommended).** Install Leon on the other computer, choose
+  **Share this machine** (File menu, palette, Settings ▸ Machines, or the foot of
+  the sidebar) and it shows a short code. On your computer choose **Connect a
+  machine ▸ With a code** and type it. Both computers dial out to a relay
+  server operated by Zavu, which pairs them and passes bytes along: no open
+  ports, no SSH setup, and it works behind NAT. The connection is end-to-end
+  encrypted with keys only your two computers hold, so the relay cannot read it.
+  Terminals keep running on the shared computer when you close the window and
+  can be re-attached. See [docs/REMOTE.md](docs/REMOTE.md) for the threat
+  model and the protocol. **The relay service is not live yet**: until it is,
+  Leon says exactly that, with the address it tried, instead of hanging.
+* **SSH (advanced).** Leon reaches the computer with your system's SSH, signing
+  in as you; Leon installs nothing on the other computer. The rest of this
+  section describes this method.
+
+Sharing runs as you: a paired computer gets a terminal as you on the shared
+one. Pair only your own devices. `leon host` runs the sharing service without a
+window (`leon host --pair`, `leon host pair`, `leon host devices`,
+`leon host revoke <device>`, `leon host status`); it refuses to run as root.
 
 Open the **Connect a machine** screen with `Cmd+Shift+M` (`Ctrl+Shift+M`), File
-▸ Connect a machine…, the command palette (`remote`, `server`, `ssh` and
-`connect` find it), Settings ▸ Machines, the context menu of a machine, or the
-`Connect a machine` row at the foot of the sidebar. Editing a machine opens the
-same screen, filled in. `Esc` closes it and gives the keyboard back to where it
-was.
+▸ Connect a machine…, the command palette (`remote`, `server`, `code` and
+`connect` find it), Settings ▸ Machines, or the `Connect a machine` row at the
+foot of the sidebar; **SSH (advanced)** in its header switches to the SSH
+screen. Editing an SSH machine opens that screen, filled in. `Esc` closes it and
+gives the keyboard back to where it was.
 
 Three things must be true on the other computer. The screen explains each in a
 "How do I…?" row, for the platform you pick (macOS, Linux; Windows is not
@@ -313,6 +332,7 @@ platform (see below).
 | Open a shell here | `⌘T` `⇧⌘T` | `Ctrl+T` `Ctrl+Shift+T` |
 | New worktree | `⇧⌘N` | `Ctrl+Shift+N` |
 | Connect a machine… | `⇧⌘M` | `Ctrl+Shift+M` |
+| Share this machine… | palette only | palette only |
 | Open project… | `⌘O` | `Ctrl+O` |
 | Add a remote project by path… | palette only | palette only |
 | Remove a project | palette only | palette only |
@@ -390,6 +410,8 @@ platform (see below).
 | Show theme problems | palette only | palette only |
 | Choose the interface size | palette only | palette only |
 | Settings | `⌘,` | `Ctrl+,` |
+| Show usage | `⇧⌘U` | `Ctrl+Shift+Alt+U` |
+| Refresh usage now | palette only | palette only |
 | Open settings.json | palette only | palette only |
 | Reveal settings folder | palette only | palette only |
 | Larger interface | `⌘=` `⌘+` | `Ctrl+=` `Ctrl++` |
@@ -446,6 +468,7 @@ macOS:
 * Open a shell here `⇧⌘T`
 * New worktree `⇧⌘N`
 * Connect a machine… `⇧⌘M`
+* Share this machine… palette only
 * Open project… `⌘O`
 * Open the transcript `⇧⌘L`
 * Focus the terminal `⌘E`
@@ -503,6 +526,7 @@ Linux and Windows:
 * Open a shell here `Ctrl+Shift+T`
 * New worktree `Ctrl+Shift+N`
 * Connect a machine… `Ctrl+Shift+M`
+* Share this machine… palette only
 * Open the transcript `Ctrl+Shift+L`
 * Split the pane to the right `Ctrl+Shift+D`
 * Split the pane downwards `Ctrl+Shift+O`
@@ -773,7 +797,7 @@ it) with the sections on the left, a search field on top and the options on the
 right. Every option shows its name, what it does, its value, a `MODIFIED`
 marker and `RESET TO DEFAULT` once it differs from the default, and applies at
 once; there is no Save button. Sections: Appearance, Terminal, Agents,
-Sessions & history, Projects, Machines, Sidebar & window, Keyboard (every
+Sessions & history, Projects, Machines, Usage, Sidebar & window, Keyboard (every
 command and its chords, read-only: shortcuts are not customisable yet) and
 Advanced & About.
 
@@ -802,6 +826,67 @@ Advanced & About.
   back by itself, with a button to let it.
 * **The only network call** Leon makes is the project avatar from the Git host
   (GitHub); `Fetch owner avatars from the Git host` turns it off.
+
+## Usage
+
+How much of each agent's limits is left, per machine. The footer under the main
+pane (level with the sidebar's tools, the whole width when the sidebar is
+hidden) shows, for every agent that is installed on the machine in context, its
+logo, a small meter and **one primary number**: the window closest to its limit,
+with the time to reset (`wk  91% !!  1d 11h`). The other windows (the five-hour
+one, the weekly one, a per-model bucket) are in the tooltip. A level is a colour
+**and** a marker, never a colour alone: `!` from the warning threshold (75% by
+default), `!!` from the critical one (90%). A window that has already reset
+since the numbers were read shows 0% and says so; one with no usable reading says
+why (`signed out`, `source off`, `too old`, `no data yet`) instead of a number.
+On a narrow window the bar gives up detail in steps: logo, meter, figure and
+time; then logo and figure; then a single indicator for the agent closest to
+its limit. The refresh button reads the limits again and says when they were
+last read.
+
+`⇧⌘U` (`Ctrl+Shift+Alt+U`), a click on the bar and the palette's **Show usage**
+open the usage view: one row per agent and machine with `Resets in …`, a labelled
+bar per window, the plan when known, **where the numbers came from and how
+fresh they are** ("from Codex's own session log, 3 min ago"), a small history
+line per window and, when at least two observations of the current window exist,
+a **burn-rate estimate** ("At this pace: limit in ~1h 10m (estimate)", or "you
+will not hit the limit before the reset"). `M` switches Detailed and Compact,
+`←`/`→` choose this machine, another machine or all of them, `R` reads again,
+`S` opens Settings ▸ Usage, `Esc` closes. The header of a live agent session
+shows that agent's primary window, and starting a session of an agent that is
+at or above the critical threshold says so in the status line, with the reset
+time. It never blocks anything.
+
+**Where the numbers come from.** Usage belongs to the account on the machine
+where the agent runs, so Leon reads it per machine, in the same refresh and
+through the same runner as everything else (one bounded command per machine; an
+SSH machine's limits are the ones of that machine's account).
+
+| Agent | Source | What is read | Network |
+| --- | --- | --- | --- |
+| Codex | its own session log | the `rate_limits` of the `token_count` events in `~/.codex/sessions` (five-hour and weekly windows, plan) | none |
+| Claude Code | Anthropic's usage endpoint, **opt-in** | the sign-in token Claude Code already holds, sent to `api.anthropic.com` over HTTPS | on this computer only, off by default |
+| opencode | the Go usage endpoint, **opt-in** | the Go API key opencode stored, sent to `opencode.ai` over HTTPS | on this computer only, off by default |
+
+Claude Code writes its limits nowhere on disk and has no command that prints
+them, so its real numbers need its account's usage endpoint, the one the CLI
+itself calls; that reads a credential and is therefore off until you switch on
+**Read Claude Code's limits from Anthropic** in Settings ▸ Usage. The same holds
+for the opencode Go subscription (opencode's other providers have no limits to
+read). When such a source is on: the credential is read at the moment of the call
+(the macOS keychain item or `~/.claude/.credentials.json`; opencode's
+`auth.json`), held in memory for the request only, and never stored, logged,
+shown or sent to any host but the vendor's own; the request has a time limit,
+follows no redirect and backs off after a failure; and any failure is shown as
+unknown, never as a made-up number. Nothing runs on a remote machine for these
+sources and no credential is ever copied between machines: a remote Claude Code
+or opencode shows `unsupported`. The stored history is only percentages and
+times under a local hash; **Forget stored usage history** in Settings deletes it.
+
+`leon --diagnose usage` runs the real collection for this computer and prints,
+per agent, the source, the windows with percentages and reset times, how fresh
+they are or why they are unknown, and nothing that identifies an account. It
+never calls a network source whose setting is off.
 
 ## The sidebar
 

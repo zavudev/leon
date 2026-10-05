@@ -76,7 +76,15 @@ fn pressing_secondary_comma_opens_settings_and_escape_restores_focus(cx: &mut Te
         h.shell(cx, |s| s.terminal_focused()),
         "the terminal has the keyboard"
     );
-    h.press_chord("cmd-,", "ctrl-,", cx);
+    if crate::platform::is_mac() {
+        h.press("ctrl-,", cx);
+    } else {
+        // Off macOS a plain Ctrl+, belongs to the program in a terminal and
+        // Settings has no Ctrl+Shift chord: it is reached through the palette.
+        h.press("ctrl-shift-p", cx);
+        h.type_text("Settings", cx);
+        h.press("enter", cx);
+    }
     assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Settings);
     assert!(h.shows("settings", cx));
     assert!(

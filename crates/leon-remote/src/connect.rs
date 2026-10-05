@@ -72,7 +72,7 @@ impl Target {
                 port: *port,
                 identity: identity_file.clone(),
             }),
-            MachineKind::Local => None,
+            MachineKind::Local | MachineKind::Relay { .. } => None,
         }
     }
 

@@ -92,15 +92,38 @@ How projects are found and what they show.
 
 ## Machines
 
-SSH machines and how Leon talks to them.
+Other computers: relay machines, SSH machines and sharing this one.
 
 | Setting | Key | Values | Default | Description |
 | --- | --- | --- | --- | --- |
 | Share SSH connections | `ssh_multiplex` | on, off | `on` | Reuse one connection per machine for every command instead of a handshake each time. (macOS and Linux only.) |
 | Keep a shared connection open | `ssh_persist_minutes` | 1 to 240min | `10` | How long an idle shared SSH connection stays open, in minutes. (macOS and Linux only.) |
 | Connect timeout | `ssh_connect_timeout` | 0 to 120s | `0` | How long ssh waits to connect, in seconds. Zero leaves it to ssh. |
+| Relay server | `remote_relay_url` | text | `wss://relay.zavu.dev` | The relay that connects two computers that reach it from behind their routers. The default service is operated by Zavu and is not live yet. |
+| Name of this computer | `remote_device_name` | text | empty | The name other computers see when you share this one or connect from it. Empty uses the computer's own name. |
+| Share this machine | `remote_share` | on, off | `off` | While Leon is open, let computers you pair with a code open terminals and run commands here. A paired computer gets a terminal as you. |
+| Ask before pairing | `remote_require_approval` | on, off | `on` | When a computer pairs with the code, show its name and fingerprint here and wait for your answer. Turning this off makes the code itself the approval. |
+| Share this machine… |  | button |  | Open the Share screen: the pairing code, the computers paired with this one and a switch to start or stop sharing. |
 | Connect a machine… |  | button |  | Open the Connect screen: what a machine is, a form and a test of the connection. |
 | Probe the machine on screen |  | button |  | Check that the machine answers and which agents it has. |
+
+## Usage
+
+How much of each agent's limits is left, and where the numbers come from.
+
+| Setting | Key | Values | Default | Description |
+| --- | --- | --- | --- | --- |
+| Show the usage bar | `usage_bar` | on, off | `on` | A bar at the bottom of the window with each agent's limits. |
+| Show Claude Code | `usage_claude` | on, off | `on` | Show Claude Code's limits in the bar and the usage view. |
+| Show Codex | `usage_codex` | on, off | `on` | Show Codex's limits in the bar and the usage view. |
+| Show opencode | `usage_opencode` | on, off | `on` | Show opencode's limits in the bar and the usage view. |
+| Refresh interval | `usage_interval` | 1 to 120min | `5` | How often, in minutes, the limits are read again while the window is focused. |
+| Warn from | `usage_warn` | 10 to 99% | `75` | From this percentage a limit is shown as high, with a marker as well as a colour. |
+| Critical from | `usage_critical` | 11 to 100% | `90` | From this percentage a limit is shown as near its end, and starting a session says so first. |
+| Say so before starting a session | `usage_warn_before_session` | on, off | `on` | When an agent's limit is nearly used up, a line says so, with when it resets, before the session starts. It never blocks. |
+| Read Claude Code's limits from Anthropic | `usage_claude_network` | on, off | `off` | Claude Code keeps its limits nowhere on disk. When on, Leon reads the sign-in token Claude Code already holds (the macOS keychain or ~/.claude/.credentials.json) when it refreshes and sends it over HTTPS to api.anthropic.com only, asking for the account's usage. The token is never stored, logged or shown, and only this computer does it. Off by default. |
+| Read the opencode Go limits from opencode | `usage_opencode_network` | on, off | `off` | Only for an opencode Go subscription. When on, Leon reads the API key opencode stored for it (~/.local/share/opencode/auth.json) when it refreshes and sends it over HTTPS to opencode.ai only, asking for the subscription's usage. The key is never stored, logged or shown, and only this computer does it. Off by default. |
+| Forget stored usage history |  | button |  | Delete the percentages and times kept for the trend lines and the burn-rate estimate. The latest readings stay. |
 
 ## Sidebar & window
 

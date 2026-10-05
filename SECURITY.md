@@ -28,7 +28,16 @@ are by design and worth knowing when you assess a report:
   opencode's data directory) into a local SQLite database in Leon's data
   directory. Those files can contain anything an agent saw, so treat that
   database like the originals.
-* **It has no server, account or telemetry.**
+* **It can share this computer, and reach others, through a relay.** When you
+  switch on **Share this machine** (or run `leon host`), computers you pair
+  with a code get a terminal as you. That is the feature, not a hole: pair only
+  your own devices and revoke what you lose. Connections are end-to-end
+  encrypted (Noise, with keys pinned at pairing; see `docs/REMOTE.md`), so the
+  relay operated by Zavu sees only metadata and ciphertext. The code in
+  `leon-wire`, `leon-link` and `leon-host` has had no independent security
+  review yet; reports about it are especially welcome.
+* **It has no account or telemetry.** The only server is the optional relay, used
+  only when you connect or share with a code.
 
 Reports about a shell command, a path or a host name from stored data or from a
 remote machine that Leon quotes or executes unsafely are in scope and welcome.

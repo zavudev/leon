@@ -11,9 +11,11 @@ app (leon)  ── ui, engine, keys, theme, launch, diagnose
  │   ├── leon-mark     the animated lion (GPUI)
  │   ├── leon-remote   commands on this machine or over SSH
  │   ├── leon-history  importers for the agents' own session files
+│   ├── leon-usage    the agents' usage limits, per machine
  │   └── leon-core     the model and the SQLite store
 leon-remote ── leon-core
 leon-history ── leon-core
+leon-usage ── leon-core, leon-remote
 leon-term ── gpui-kit only (no other Leon crate)
 leon-mark ── gpui-kit only (no other Leon crate)
 ```
@@ -23,6 +25,11 @@ leon-mark ── gpui-kit only (no other Leon crate)
 | `leon-core` | Machines, projects, worktrees, sessions and messages, and the `Store` (SQLite) with change notification. No UI, no processes. |
 | `leon-history` | Reads the history Claude Code, Codex and opencode keep on disk and turns it into sessions and messages. |
 | `leon-remote` | A `CommandSpec` says what to run and where; `run_on` and `interactive_on` place it on a machine (unchanged locally, `ssh` remotely, with shell quoting and optional connection sharing). Git worktree operations, how each agent starts and resumes, the machine probe and the connection checklist (`connect`, `diagnosis`) are built on it. A scripted runner makes all of it testable without a process. |
+| `leon-usage` | How much of each agent's limits is left. A provider-neutral model (`AgentUsage`: windows with a used percentage, a reset time and a length, or an explicit `Reason` why nothing is known; staleness is part of it), pure parsers for each source (`codex`, `claude`, `opencode`), the burn-rate `forecast`, the wording (`present`, `view`), `collect_machine` (one bounded command per machine through a `Runner`) and the opt-in `network` sources behind an `Http` trait. No UI. |
+| `leon-wire` | The wire protocol: versioned length-prefixed frames, the application messages (run a command, terminals, re-attach) and the relay rendezvous messages. Pure (`postcard` over `serde`); every decoder is bounded and fuzz-style tested. |
+| `leon-link` | Everything that keeps a remote session private: identity, the short pairing code (SPAKE2 then Noise `XXpsk3`), the Noise `IK` session with fragmentation and rekeying, the device registry, the relay WebSocket adapter, the durable `Client` (reconnection, exact terminal re-attach) and, behind `test-support`, an in-process test relay. |
+| `leon-pty` | The GPUI-free part of terminals: `SpawnSpec`, grid maths and `PtyProcess` (a child in a pseudo-terminal driven by channels). `leon-term` re-exports it. |
+| `leon-host` | The sharing service: executes commands, owns durable terminals with a replay ring, serves pairing and sessions through a relay, reconnects, cuts off revoked devices; the `leon host` command line. |
 | `leon-term` | A terminal for GPUI: `Terminal` (PTY, emulator, child) and `TerminalView` (the GPUI entity). Depends on `gpui-kit` and nothing of Leon; the application maps its own command type onto `SpawnSpec`. |
 | `leon-mark` | The Leon lion, always animated: `geometry` (the glare's four contours as point lists, exactly the owner's SVG at rest), `motion` (a pure, deterministic time-to-pose function: blink, glare, glance, breath, nose twitch, intro, and a `Mood` that biases them), `element` (`AnimatedMark`, a GPUI element painted from vector paths) and `svg` (the same gestures written as animated SVG for the web). Depends on `gpui-kit` and nothing of Leon. |
 | `app` (`leon`) | The window (`ui/`, with `panes.rs` and `workspace.rs` for the terminal layout and `menu.rs` for the context menu), the engine that keeps the store fresh (`engine.rs`), the one shortcut registry (`keys.rs`), the themes and their design tokens (`theme/`), what a live session runs (`launch.rs`), the hidden `--diagnose` run (`diagnose.rs`). |
@@ -67,6 +74,33 @@ the old two-step palette flow; `Command::AddMachine`, `EditMachine` and
   (offered as folders by "Add a project", through `World::repositories`) where to
   start.
 
+## Remote machines through a relay
+
+Leon drives a machine through two primitives: run a command, and an interactive
+terminal. A host offers just those over an encrypted channel; everything above
+them (git, probing, icons, the process scan, history) is unchanged.
+
+* `MachineKind::Relay { host_id, host_key, relay_url, name }` is stored in
+  three extra columns of `machine` (migration 4; existing rows are untouched).
+* `run_on` / `interactive_on` mark a relay machine's command with a route (host,
+  pinned key, relay) and leave it as written. `leon_remote::RoutingRunner`, the
+  engine's one runner, starts unmarked commands here and sends marked ones
+  through the machine's durable `leon_link::client::Client` in a
+  `leon_remote::RelayHub`. SSH and local machines are untouched.
+* The terminal `Backend` of the application, `remote::RoutingBackend`, starts
+  unmarked commands in a PTY and marked ones as `Terminal::remote`: the same
+  emulator fed by the client's ordered, de-duplicated output stream, with input,
+  resizes and hang-up sent to the host. Dropping or quitting detaches (the
+  program keeps running on the host); closing a tab hangs it up.
+* `pair.rs` (what "With a code" says and does), `share.rs` (the in-process host
+  behind "Share this machine"), `ui/pair.rs` and `ui/share.rs` are the two
+  overlays. Connection state per machine comes from the hub and is explained by
+  `Why is it offline?`.
+
+The relay server is operated by Zavu and is not part of this repository; the
+protocol it speaks is specified in `docs/REMOTE.md` and `leon-wire`'s `relay`
+module. See `docs/REMOTE.md` for the security model.
+
 ## Rules
 
 1. **The UI only reads the local store.** `Snapshot::load` reads machines,
@@ -90,6 +124,55 @@ the old two-step palette flow; `Command::AddMachine`, `EditMachine` and
    a session runs (`launch::plan`), key to bytes (`leon_term::keys`), cells to
    runs (`leon_term::layout`), resize maths (`leon_term::size`).
 6. **English everywhere, prose `//!` header on every file.**
+
+## Usage limits
+
+How much of each agent's limit is left is read **per machine**, because usage
+belongs to the account on the machine where the agent runs. It follows the rules
+above: the engine writes the store and the UI reads it.
+
+* **Collection.** `Engine::collect_usage` (`Op::CollectUsage`, also run in each
+  machine's refresh) calls `leon_usage::collect_machine` through the engine's
+  runner: one POSIX command per machine prints which agents are there and the
+  newest `token_count` lines of Codex's own session log (a bounded read, no
+  credential, no path, no conversation text beyond those lines). Remote machines
+  take the same path through `ssh`. A machine that cannot be reached keeps its
+  earlier reading (`agent_usage::merge`), whose age is shown and judged.
+* **Sources, least intrusive first.** Local files the agent already writes
+  (Codex); the agent's own command line (none gives limits without launching a
+  session, so none is used); the vendor's usage endpoint with the agent's own
+  credential (Claude Code, the opencode Go subscription), **opt-in per agent and
+  off by default**. Those run on this computer only and through the `Http` trait
+  (`CurlHttp`: the system `curl`, the header on standard input so the token is
+  never in a process list, HTTPS to one allowed host, no redirects, a time limit);
+  a disabled source reads no credential and makes no call (tested with a
+  scripted client that counts). The credential is a `Secret` (no `Display`, no
+  `Serialize`, `Debug` prints `***`), read at the moment of the call, dropped with
+  the request, and a failed call backs off (`Throttle`) and is shown as unknown,
+  never as a number.
+* **Staleness.** `AgentUsage::effective(now)` turns a reading into what it means
+  now: a window whose reset time has passed reads 0% and says it reset since it
+  was last seen; a window with no reset time is trusted for two hours; a reading
+  older than eight days is unknown (`DataTooOld`). Time is always injected.
+* **Store.** Migration 4: `usage_reading` (the latest reading per machine and
+  agent, one JSON document) and `usage_history` (window key, time, percentage,
+  under a local hash of the account, bounded to 14 days and 300 points a series;
+  `Store::forget_usage_history`). `StoreChange::Usage` announces both.
+* **UI.** `agent_usage::Board` is what the window reads. `ui/usage_view.rs` holds
+  the pure model (`bar_model`, `density`, `usage_rows`, `step_scope`, tested
+  without a window) and the drawing: the footer strip under the main pane (it
+  absorbs the status line, and sits level with the sidebar's tools), the usage
+  view overlay (`Overlay::Usage`, `Command::ShowUsage`) and the chip in a live
+  session's header. A level is a colour token of the theme **and** a marker.
+  `agent_usage::start_notice` words the line shown when a session of an agent at
+  its critical limit starts.
+* **Settings.** The `Usage` section of the schema: the bar, the agents shown,
+  the interval, the thresholds, the notice, the two network opt-ins (each with
+  the exact text of what is read and where it is sent) and "Forget stored usage
+  history".
+* **`leon --diagnose usage`** runs the real collection for this computer and
+  prints no account, e-mail, token or path; a network source runs only with
+  `--network <agent>`.
 
 ## Project logos, the filter and the activity dot
 
@@ -635,9 +718,12 @@ child <-> PTY <-> reader thread --chunks--> parser thread --> Term (grid, scroll
   button and the chord do it), and a sparse dotted grid in empty states (they
   are framed by corner ticks and a dimension line instead).
 * Dragging a pane to rearrange it, broadcasting input to several panes, saved layouts.
-* Sessions do not survive quitting Leon (the processes are hung up with the
-  window); reattaching to a remote session needs `tmux` or `screen` on the
-  server and is not wired up.
+* Local sessions do not survive quitting Leon (the processes are hung up with
+  the window). Terminals on a relay machine do survive on the host, and
+  `Client::pty_list`/`pty_attach` can re-attach to them, but listing the ones
+  still alive in the tree after a restart is not built.
+* Sharing runs inside the open application; a background service that survives
+  the window (launchd, systemd, a Windows service) is the next stage.
 * Remote Windows hosts (a POSIX shell is assumed).
 * Windows terminals are built but not exercised by the test suite here: the
   PTY round-trip tests run on Unix.

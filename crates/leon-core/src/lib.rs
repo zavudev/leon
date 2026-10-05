@@ -31,7 +31,9 @@ pub use store::search::{
     fts_query, snippet_segments, SearchHit, SearchQuery, SNIPPET_ELLIPSIS, SNIPPET_END,
     SNIPPET_START,
 };
-pub use store::{set_import_cursor_in, upsert_session_in, SessionFilter, Store};
+pub use store::{
+    set_import_cursor_in, upsert_session_in, SessionFilter, Store, UsagePoint, UsageRow,
+};
 
 /// The SQLite binding the store is built on, re-exported so that code using
 /// [`Store::read`] and [`Store::write`] names the same version of its types.

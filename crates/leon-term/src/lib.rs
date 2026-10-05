@@ -52,8 +52,7 @@ pub mod colors;
 pub mod find;
 pub mod keys;
 pub mod layout;
-pub mod size;
-pub mod spec;
+pub use leon_pty::{size, spec};
 mod terminal;
 #[cfg(test)]
 mod testing;
@@ -63,10 +62,9 @@ pub use alacritty_terminal::vte::ansi::CursorShape;
 pub use buffer::{Cleared, Extent};
 pub use colors::TerminalTheme;
 pub use find::{FindOptions, FindState, Highlights};
-pub use size::GridSize;
-pub use spec::SpawnSpec;
+pub use leon_pty::{GridSize, SpawnSpec};
 pub use terminal::{
-    feed, Backend, EventProxy, ExitInfo, GridPoint, Headless, Pty, Script, Scripted, SpawnError,
-    Terminal, TerminalEvent, Timings, Wake, SCROLLBACK_LINES,
+    feed, Backend, EventProxy, ExitInfo, GridPoint, Headless, Pty, RemoteFeed, RemoteLink, Script,
+    Scripted, SpawnError, Terminal, TerminalEvent, Timings, Wake, SCROLLBACK_LINES,
 };
 pub use view::{FontSettings, TerminalView, ViewEvent};

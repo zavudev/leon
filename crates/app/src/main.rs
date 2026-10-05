@@ -13,6 +13,7 @@
 )]
 
 mod address;
+mod agent_usage;
 mod avatar;
 mod brand;
 mod cli;
@@ -27,9 +28,13 @@ mod keys;
 mod launch;
 mod logging;
 mod menus;
+mod pair;
+mod platform;
 mod product;
+mod remote;
 mod schema;
 mod settings;
+mod share;
 mod theme;
 mod ui;
 mod usage;
@@ -39,6 +44,7 @@ use gpui_kit::{
 };
 use leon_core::Store;
 use leon_remote::{ProcessRunner, SshOptions};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,7 +57,16 @@ fn main() {
     brand::set_process_name();
     logging::init();
 
-    let options = match cli::parse(std::env::args().skip(1)) {
+    // `leon host ...` runs the sharing service without a window.
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments.first().map(String::as_str) == Some("host") {
+        std::process::exit(leon_host::cli::run(
+            arguments[1..].to_vec(),
+            product::data_dir(),
+        ));
+    }
+
+    let options = match cli::parse(arguments) {
         Ok(cli::Command::Run(options)) => options,
         Ok(cli::Command::Help) => {
             println!("{}", cli::usage());
@@ -69,6 +84,9 @@ fn main() {
         }
         Ok(cli::Command::DiagnoseElsewhere) => {
             std::process::exit(diagnose::run_sessions_elsewhere());
+        }
+        Ok(cli::Command::DiagnoseUsage { network }) => {
+            std::process::exit(diagnose::run_usage(&network));
         }
         Ok(cli::Command::DiagnoseConnect { destination }) => {
             std::process::exit(diagnose::run_connect(&destination));
@@ -118,20 +136,57 @@ fn main() {
             SshOptions::without_multiplexing()
         }
     };
+    // This installation's long-term keys (for machines reached through a
+    // relay) and the one place that decides where a command starts: here, or
+    // through a relay on the other computer.
+    let identity = match leon_link::Identity::load_or_create(&data_dir) {
+        Ok(identity) => Arc::new(identity),
+        Err(error) => {
+            eprintln!(
+                "{}: cannot load the identity: {error}",
+                product::PRODUCT_NAME
+            );
+            std::process::exit(1);
+        }
+    };
+    let hub = leon_remote::RelayHub::new(
+        identity.clone(),
+        leon_host::cli::computer_name(),
+        runtime.handle().clone(),
+    );
+    let runner = Arc::new(
+        leon_remote::RoutingRunner::new(
+            ProcessRunner::with_time_limit(COMMAND_TIME_LIMIT),
+            hub.clone(),
+        )
+        .with_time_limit(COMMAND_TIME_LIMIT),
+    );
     let engine = engine::Engine::new(
         store,
-        Arc::new(ProcessRunner::with_time_limit(COMMAND_TIME_LIMIT)),
+        runner.clone(),
         ssh,
         leon_history::default_roots(),
         runtime.handle().clone(),
     );
     engine.set_icon_fetcher(Arc::new(avatar::CurlFetcher));
+    // Usage limits: the files the agents keep are read through the runner; the
+    // two network sources run only when their settings are on.
+    engine.set_usage(
+        Arc::new(leon_usage::network::SystemCredentials {
+            home: dirs::home_dir().unwrap_or_default(),
+        }),
+        Arc::new(leon_usage::network::CurlHttp),
+        Arc::new(|| chrono::Utc::now().timestamp()),
+    );
     // Sessions running in another terminal: processes are listed through the
     // same runner as every other command.
-    engine.set_process_scanner(
-        Arc::new(ProcessRunner::with_time_limit(COMMAND_TIME_LIMIT)),
-        Some(std::process::id()),
-    );
+    engine.set_process_scanner(runner, Some(std::process::id()));
+    let remote_services = Arc::new(remote::Remote {
+        hub: hub.clone(),
+        share: share::ShareService::new(identity, runtime.handle().clone(), &data_dir),
+        handle: runtime.handle().clone(),
+    });
+    let backend = Rc::new(remote::RoutingBackend::new(hub, runtime.handle().clone()));
     // What the store holds is shown at once; once the settings are read (they
     // may say not to) the engine brings it up to date.
     let started = engine.clone();
@@ -192,7 +247,14 @@ fn main() {
                 tracing::warn!("the Dock icon could not be set");
             }
             gpui_kit::open_window(window, cx, |window, cx| {
-                cx.new(|cx| ui::Shell::new(engine, ui::Options::default(), window, cx))
+                cx.new(|cx| {
+                    let options = ui::Options {
+                        backend: backend.clone(),
+                        remote: Some(remote_services.clone()),
+                        ..ui::Options::default()
+                    };
+                    ui::Shell::new(engine, options, window, cx)
+                })
             })
             .expect("the main window opens");
 

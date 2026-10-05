@@ -168,7 +168,7 @@ pub fn entries(section: Section, query: &str, mac: bool) -> Vec<Entry> {
 }
 
 fn secondary(stroke: &Keystroke) -> bool {
-    if cfg!(target_os = "macos") {
+    if crate::platform::is_mac() {
         stroke.modifiers.platform
     } else {
         stroke.modifiers.control
@@ -180,7 +180,7 @@ impl Shell {
     /// then the machines and the removed project roots where they belong.
     pub(super) fn settings_entries(&self) -> Vec<Entry> {
         let ui = &self.settings_ui;
-        let mut list = entries(ui.section, &ui.query, cfg!(target_os = "macos"));
+        let mut list = entries(ui.section, &ui.query, crate::platform::is_mac());
         let query = ui.query.trim();
         let wanted = |label: &str| query.is_empty() || score(query, label).is_some();
         let here = |section: Section| !query.is_empty() || ui.section == section;
@@ -998,6 +998,10 @@ impl Shell {
                 }
                 text
             }
+            MachineKind::Relay { host_id, name, .. } => {
+                let short = host_id.get(..12).unwrap_or(host_id);
+                format!("{name} · relay · {short}")
+            }
             MachineKind::Local => "this computer".to_owned(),
         };
         let state = match self.engine.machine_state(&machine.id) {
@@ -1211,6 +1215,7 @@ impl Shell {
                         "reset_all" => "RESET…",
                         "open_data_folder" | "open_themes_folder" => "REVEAL",
                         "add_machine" => "ADD…",
+                        "share_machine" => "SHARE…",
                         "probe_machine" => "PROBE",
                         _ => "RUN",
                     };

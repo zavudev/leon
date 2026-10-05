@@ -19,6 +19,11 @@
 //! `--diagnose sessions-elsewhere` runs the real detection of sessions that
 //! run in another terminal on this computer and prints, for each agent
 //! process, what it found (see `diagnose.rs`).
+//! `--diagnose usage [--network <claude|opencode>]...` runs the real collection
+//! of the agents' usage limits for this computer and prints, per agent, the
+//! source, the windows, how fresh they are or why they are unknown, and nothing
+//! that identifies an account. A source that needs a credential and a network
+//! call runs only when named with `--network`.
 
 use crate::product;
 use crate::settings::AppearanceChoice;
@@ -52,6 +57,11 @@ pub enum Command {
     /// Run the real detection of sessions running in another terminal on this
     /// computer and print what it found.
     DiagnoseElsewhere,
+    /// Collect the usage limits of this computer and print them.
+    DiagnoseUsage {
+        /// The network sources switched on for this run.
+        network: Vec<AgentKind>,
+    },
     /// Run the checklist of "Connect a machine" against a destination and
     /// print each check with its diagnosis.
     DiagnoseConnect {
@@ -88,7 +98,7 @@ pub struct Options {
 pub fn usage() -> String {
     format!(
         "{name} {version}\n\n\
-         Usage: {slug} [options]\n\n\
+         Usage: {slug} [options]\n       {slug} host [--pair] | pair | devices | status | revoke <device>   (share this computer; see `{slug} host --help`)\n\n\
          Options:\n  \
          --data-dir <path>              Keep the database and settings here\n  \
          --theme <light|dark|system>    Use this appearance for this run\n  \
@@ -135,6 +145,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
     let mut folder_dialog = false;
     let mut resume = false;
     let mut elsewhere = false;
+    let mut usage = false;
+    let mut network: Vec<AgentKind> = Vec::new();
     let mut agent = AgentKind::Claude;
     let mut dialog_timeout = 4u64;
     let mut args = args.into_iter();
@@ -175,6 +187,10 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                     elsewhere = true;
                     continue;
                 }
+                if what == "usage" {
+                    usage = true;
+                    continue;
+                }
                 if what == "connect" {
                     let destination = value("user@host[:port]")?;
                     connect = Some(destination);
@@ -182,7 +198,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                 }
                 if what != "terminal" {
                     return Err(format!(
-                        "Cannot diagnose {what:?}: only \"terminal\", \"folder-dialog\", \"resume\", \"sessions-elsewhere\" and \"connect\"."
+                        "Cannot diagnose {what:?}: only \"terminal\", \"folder-dialog\", \"resume\", \"sessions-elsewhere\", \"usage\" and \"connect\"."
                     ));
                 }
                 diagnose = Some(Diagnose {
@@ -190,6 +206,20 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                     input: None,
                     timeout: 10,
                 });
+            }
+            "--network" => {
+                let text = value("claude or opencode")?;
+                if !usage {
+                    return Err("--network only goes with --diagnose usage.".to_owned());
+                }
+                match AgentKind::parse(&text) {
+                    Some(agent @ (AgentKind::Claude | AgentKind::Opencode)) => network.push(agent),
+                    _ => {
+                        return Err(format!(
+                            "{text:?} has no network source: use claude or opencode."
+                        ))
+                    }
+                }
             }
             "--agent" => {
                 let text = value("claude, codex or opencode")?;
@@ -243,6 +273,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
             other => return Err(format!("Unknown option {other:?}.")),
         }
     }
+    if usage {
+        return Ok(Command::DiagnoseUsage { network });
+    }
     if elsewhere {
         return Ok(Command::DiagnoseElsewhere);
     }
@@ -280,6 +313,28 @@ mod tests {
             })
         );
         assert!(parsed(&["--diagnose", "connect"]).is_err());
+    }
+
+    #[test]
+    fn diagnose_usage_leaves_every_network_source_off_unless_named() {
+        assert_eq!(
+            parsed(&["--diagnose", "usage"]),
+            Ok(Command::DiagnoseUsage { network: vec![] })
+        );
+        assert_eq!(
+            parsed(&[
+                "--diagnose",
+                "usage",
+                "--network",
+                "claude",
+                "--network=opencode"
+            ]),
+            Ok(Command::DiagnoseUsage {
+                network: vec![AgentKind::Claude, AgentKind::Opencode]
+            })
+        );
+        assert!(parsed(&["--diagnose", "usage", "--network", "codex"]).is_err());
+        assert!(parsed(&["--network", "claude"]).is_err());
     }
 
     #[test]

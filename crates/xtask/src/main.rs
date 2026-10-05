@@ -6,6 +6,7 @@
 //! cargo xtask package --platform ...        one platform's release archive
 //! cargo xtask checksums --dir dist          SHA256SUMS of the files in a directory
 //! cargo xtask bump patch                    the next version, in one command
+//! cargo xtask check [--quick]               the local gate (scripts/check.sh)
 //! ```
 //!
 //! `docs/RELEASING.md` says when each is used.
@@ -40,7 +41,9 @@ Commands:
       Writes <DIR>/SHA256SUMS for every file in <DIR>.
   bump <major|minor|patch|X.Y.Z> [--no-lock]
       Sets the workspace version in Cargo.toml, refreshes Cargo.lock and
-      prints the tag to create. Pre-release versions are refused.";
+      prints the tag to create. Pre-release versions are refused.
+  check [--quick]
+      Runs scripts/check.sh: what CI runs, locally, before every push.";
 
 /// The arguments after a command: `--flag value` pairs and bare words.
 struct Args {
@@ -135,8 +138,24 @@ fn run(args: &[String]) -> Result<String, String> {
         "package" => package(&Args::parse(rest, &[])?).map(|path| path.display().to_string()),
         "checksums" => checksums(&Args::parse(rest, &[])?),
         "bump" => bump_command(&Args::parse(rest, &["no-lock"])?),
+        "check" => check_command(rest),
         "help" | "--help" | "-h" => Ok(USAGE.to_owned()),
         other => Err(format!("unknown command `{other}`\n\n{USAGE}")),
+    }
+}
+
+/// Runs `scripts/check.sh` with `rest` and reports how it ended.
+fn check_command(rest: &[String]) -> Result<String, String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let status = std::process::Command::new("sh")
+        .arg(root.join("scripts/check.sh"))
+        .args(rest)
+        .status()
+        .map_err(|error| format!("cannot run scripts/check.sh: {error}"))?;
+    if status.success() {
+        Ok("check passed".to_owned())
+    } else {
+        Err("check failed".to_owned())
     }
 }
 

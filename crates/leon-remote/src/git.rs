@@ -624,6 +624,29 @@ prunable gitdir file points to non-existent location
         assert!(output.success(), "git {args:?} failed: {}", output.stderr);
     }
 
+    /// A path without the `\\?\` prefix Windows puts on a canonical one.
+    fn plain_path(path: std::path::PathBuf) -> std::path::PathBuf {
+        let text = path.to_string_lossy();
+        match text.strip_prefix(r"\\?\") {
+            Some(rest) if !rest.starts_with("UNC\\") => rest.into(),
+            _ => path,
+        }
+    }
+
+    #[test]
+    fn a_verbatim_windows_path_loses_its_prefix_and_other_paths_stay() {
+        use std::path::PathBuf;
+        assert_eq!(
+            plain_path(PathBuf::from(r"\\?\C:\Users\a\Temp")),
+            PathBuf::from(r"C:\Users\a\Temp")
+        );
+        assert_eq!(
+            plain_path(PathBuf::from(r"\\?\UNC\host\share")),
+            PathBuf::from(r"\\?\UNC\host\share")
+        );
+        assert_eq!(plain_path(PathBuf::from("/tmp/x")), PathBuf::from("/tmp/x"));
+    }
+
     #[tokio::test]
     async fn worktrees_are_added_listed_and_removed_in_a_real_repository() {
         let runner = ProcessRunner::new();
@@ -637,8 +660,10 @@ prunable gitdir file points to non-existent location
         }
 
         let scratch = tempfile::tempdir().unwrap();
-        // Resolve symlinks so the paths match what git prints.
-        let base = scratch.path().canonicalize().unwrap();
+        // Resolve symlinks so the paths match what git prints. On Windows
+        // `canonicalize` answers a verbatim path (`\\?\C:\...`), a form git
+        // cannot create directories under, so the prefix is taken off.
+        let base = plain_path(scratch.path().canonicalize().unwrap());
         let root = base.join("repo");
         std::fs::create_dir(&root).unwrap();
         let root = root.to_string_lossy().into_owned();
