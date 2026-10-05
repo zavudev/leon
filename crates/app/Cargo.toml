@@ -1,0 +1,46 @@
+[package]
+name = "leon"
+description = "Leon: a keyboard-first desktop orchestrator for coding agents."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+leon-core.workspace = true
+leon-mark.workspace = true
+leon-history.workspace = true
+leon-remote.workspace = true
+leon-term.workspace = true
+
+chrono.workspace = true
+dirs.workspace = true
+gpui-kit.workspace = true
+# Decodes the bundled application icon: the `image` GPUI already uses.
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# The Dock icon of an unbundled run: the Objective-C bridge GPUI already uses.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSProcessInfo", "NSString"] }
+
+# Embeds the application icon in the Windows executable (build.rs).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+leon-mark = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Leon
+Comment=A keyboard-first desktop orchestrator for coding agents
+Exec=leon
+Icon=dev.zavu.leon
+Terminal=false
+Categories=Development;
+StartupWMClass=dev.zavu.leon

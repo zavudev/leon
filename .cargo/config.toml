@@ -1,0 +1,12 @@
+# On macOS `cargo run -p leon` starts Leon from a development bundle
+# (target/<profile>/Leon.app) so the system names it "Leon" and shows its icon;
+# every other executable is run as it is. Not set for Linux or Windows.
+[target.aarch64-apple-darwin]
+runner = "scripts/cargo-runner-macos.sh"
+
+[target.x86_64-apple-darwin]
+runner = "scripts/cargo-runner-macos.sh"
+
+# `cargo xtask <command>`: the release tooling (crates/xtask, docs/RELEASING.md).
+[alias]
+xtask = "run --quiet --package xtask --"

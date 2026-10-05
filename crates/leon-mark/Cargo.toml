@@ -1,0 +1,19 @@
+[package]
+name = "leon-mark"
+description = "The animated Leon mark for GPUI: the glare lion that blinks, narrows its eyes and glances"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# Lets tests of other crates read what a mark painted (see `probe`).
+test-support = []
+
+[dependencies]
+gpui-kit.workspace = true
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+roxmltree = "0.21"

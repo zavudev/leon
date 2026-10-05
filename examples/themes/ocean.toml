@@ -1,0 +1,24 @@
+# Leon with a different accent: the whole example is these few lines.
+#
+# Copy this file into the `themes` folder of Leon's data directory ("Open
+# themes folder" in the command palette shows where), keep or change the id,
+# and choose it with "Choose theme…". Everything not written here is Leon's.
+id = "ocean"
+name = "Ocean"
+author = "Leon examples"
+extends = "leon"
+
+# Setting only `accent` is enough: the terminal's cursor and selection, the
+# find highlight, the logo and the primary button follow it.
+[dark]
+accent = "#4DA3FF"
+
+[light]
+accent = "#0B5CAD"
+
+# A little rounder than Leon, and without the blueprint's corner ticks.
+[shape]
+radius = 8.0
+
+[lines]
+corner_ticks = false

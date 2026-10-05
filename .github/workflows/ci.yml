@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  # Line numbers in backtraces, none of the rest of the debug information:
+  # the build directory is smaller, so the cache is faster to save and restore.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # Every job's runner comes from a repository variable (Settings, Secrets and
+  # variables, Actions, Variables), with a standard GitHub runner as the
+  # fallback. docs/RELEASING.md lists the options to go faster.
+
+jobs:
+  # Fails in seconds, before anything is built: no toolchain beyond rustfmt.
+  fmt:
+    name: Format
+    runs-on: ${{ vars.RUNNER_LINUX || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  # Clippy checks the workspace, which is a build of its own, so it has its own
+  # jobs: it runs beside the tests and not in front of them.
+  clippy:
+    name: Clippy (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ${{ vars.RUNNER_LINUX || 'ubuntu-latest' }}
+          - name: macOS aarch64
+            os: ${{ vars.RUNNER_MACOS_ARM || 'macos-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libfontconfig1-dev libwayland-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libxcb1-dev libx11-xcb-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # One cache for the check builds of this job, kept after a failed run
+      # too (a build from nothing is most of the time), and written from main
+      # only: a pull request reads main's cache and never fills the quota.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-clippy
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ${{ vars.RUNNER_LINUX || 'ubuntu-latest' }}
+          - name: macOS aarch64
+            os: ${{ vars.RUNNER_MACOS_ARM || 'macos-latest' }}
+          - name: macOS x86_64
+            os: ${{ vars.RUNNER_MACOS_INTEL || 'macos-15-intel' }}
+          - name: Windows x86_64
+            os: ${{ vars.RUNNER_WINDOWS || 'windows-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # What the toolkit links against. SQLite is built from source by cargo
+      # (bundled), and nothing here needs OpenSSL or ALSA.
+      - name: Install the system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libfontconfig1-dev libwayland-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libxcb1-dev libx11-xcb-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-test
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # The window tests run without a display on every system: the toolkit's
+      # test platform draws nothing. The tests that start a real child in a
+      # real PTY are Unix-only and use /bin/sh, never the runner's $SHELL.
+      - name: Test
+        run: cargo test --workspace --locked --no-fail-fast

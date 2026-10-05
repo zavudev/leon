@@ -1,0 +1,744 @@
+//! The sidebar: the Leon glare and the product's name on top, the tree of
+//! machines, projects, worktrees and sessions as one virtualised list, and the
+//! tools at the bottom.
+//!
+//! Every row has the same height and is drawn from the flat list the shell
+//! keeps (see `tree.rs`), so only the rows in view cost anything however long
+//! the history is. Long names give way with an ellipsis; the tags and ages
+//! never move.
+
+use super::activity::Activity;
+use super::live::LiveState;
+use super::shell::{Pane, Shell};
+use super::tree::{folder_name, worktree_label, Kind, Row};
+use super::widgets::{
+    activity_dot, elsewhere_mark, focus_rule, key_cap, led, mark, mono, section_label, Lion,
+};
+use crate::engine::MachineState;
+use crate::format;
+use crate::fuzzy::matched_chars;
+use crate::icons::{agent_icon, icon, IconName};
+use crate::keys::{self, Command};
+use crate::product;
+use crate::theme::{fonts, metrics, px, Appearance, Palette};
+use gpui_kit::component::input::Input;
+use gpui_kit::component::scroll::Scrollbar;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::prelude::*;
+use gpui_kit::{
+    div, uniform_list, AnyElement, Context, Div, FontWeight, Hsla, SharedString, Stateful,
+};
+use gpui_kit::{HighlightStyle, StyledText};
+
+/// The colour of a machine's status light: green while it is reachable,
+/// amber while it is being probed, red when it is not, grey when nobody has
+/// asked yet.
+pub fn state_colour(state: &MachineState, colours: &Palette) -> Hsla {
+    match state {
+        MachineState::Online(_) => colours.success,
+        MachineState::Probing => colours.warning,
+        MachineState::Offline(_) => colours.error,
+        MachineState::Unknown => colours.text_faint,
+    }
+}
+
+/// The word next to a machine's light.
+pub fn state_label(state: &MachineState) -> &'static str {
+    match state {
+        MachineState::Online(_) => "ONLINE",
+        MachineState::Probing => "PROBING",
+        MachineState::Offline(_) => "OFFLINE",
+        MachineState::Unknown => "UNKNOWN",
+    }
+}
+
+/// The colour of the light of a live terminal: its state, never the icon.
+fn live_light(state: LiveState, colours: &Palette) -> Hsla {
+    match state {
+        LiveState::Running => colours.success,
+        LiveState::Starting => colours.warning,
+        LiveState::Exited(0) => colours.text_faint,
+        LiveState::Exited(_) => colours.error,
+    }
+}
+
+/// What a tool's tooltip says: what it does and the keys that do the same.
+pub fn tooltip_text(command: Command) -> String {
+    match keys::keys_label(command) {
+        Some(keys) => format!("{}  {keys}", keys::label(command)),
+        None => keys::label(command).to_owned(),
+    }
+}
+
+impl Shell {
+    pub(super) fn render_sidebar(&self, colours: &Palette, cx: &mut Context<Self>) -> Div {
+        let focused = self.pane == Pane::Sidebar;
+        let palette = *colours;
+        div()
+            .debug_selector(|| "sidebar".into())
+            .relative()
+            .flex_none()
+            .w(metrics::SIDEBAR_WIDTH())
+            .h_full()
+            .border_r_1()
+            .border_color(colours.border)
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .debug_selector(|| "sidebar-header".into())
+                    .relative()
+                    .flex_none()
+                    .h(metrics::HEADER_HEIGHT())
+                    .px_4()
+                    .border_b_1()
+                    .border_color(colours.border)
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(mark(
+                        px(20.),
+                        colours,
+                        cx,
+                        Lion::new("header-mark")
+                            .mood(self.mark_mood())
+                            .hover()
+                            // The entrance plays once, when the window opens.
+                            .intro(!self.intro_played.replace(true)),
+                    ))
+                    .child(
+                        div()
+                            .debug_selector(|| "sidebar-title".into())
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(product::PRODUCT_NAME),
+                    )
+                    .when(focused, |this| this.child(focus_rule(colours))),
+            )
+            .child(self.render_filter(colours))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        uniform_list(
+                            "tree",
+                            self.rows.len(),
+                            cx.processor(
+                                move |this, range: std::ops::Range<usize>, _window, cx| {
+                                    range
+                                        .filter_map(|index| this.render_row(index, &palette, cx))
+                                        .collect::<Vec<_>>()
+                                },
+                            ),
+                        )
+                        .track_scroll(&self.tree_scroll)
+                        .size_full(),
+                    )
+                    .child(Scrollbar::vertical(&self.tree_scroll)),
+            )
+            .child(self.render_connect_row(colours, cx))
+            .child(self.render_tools(colours, cx))
+    }
+
+    /// The row after the tree that says remote computers can be added, with
+    /// its chord: discoverable without knowing the shortcut.
+    fn render_connect_row(&self, colours: &Palette, cx: &mut Context<Self>) -> Stateful<Div> {
+        let hover = colours.surface;
+        div()
+            .id("sidebar-connect")
+            .debug_selector(|| "sidebar-connect".into())
+            .flex_none()
+            .h(metrics::ROW_HEIGHT())
+            .px(px(12.))
+            .border_t_1()
+            .border_color(colours.border)
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.run_command(Command::AddMachine, window, cx);
+            }))
+            .child(mono("+").text_color(colours.text_muted))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(colours.text_muted)
+                    .child("Connect a machine"),
+            )
+            .children(keys::keys_label(Command::AddMachine).map(|text| key_cap(text, colours)))
+    }
+
+    /// The button that shows or hides the sidebar, with its chord in its
+    /// tooltip. It is in the main pane's header only, open or hidden.
+    pub(super) fn sidebar_toggle_button(
+        &self,
+        id: &'static str,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let hover = colours.surface;
+        let tip: SharedString = tooltip_text(Command::ToggleSidebar).into();
+        div()
+            .id(id)
+            .debug_selector(move || id.into())
+            .flex_none()
+            .size(metrics::HEADER_TITLE_LINE())
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(metrics::RADIUS())
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.run_command(Command::ToggleSidebar, window, cx);
+            }))
+            .child(icon(
+                if crate::settings::get(cx).sidebar_visible {
+                    IconName::PanelLeftClose
+                } else {
+                    IconName::PanelLeft
+                },
+                px(14.),
+                colours.text_muted,
+            ))
+    }
+
+    /// The field above the tree that filters the projects.
+    fn render_filter(&self, colours: &Palette) -> Div {
+        let empty = self.filter_query.is_empty();
+        div()
+            .debug_selector(|| "sidebar-filter".into())
+            .flex_none()
+            .h(metrics::CONTROL())
+            .px_4()
+            .border_b_1()
+            .border_color(colours.border)
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(icon(IconName::Search, px(14.), colours.text_muted))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Input::new(&self.filter_input).appearance(false)),
+            )
+            .when(empty, |this| {
+                this.children(
+                    keys::keys_label(Command::FilterProjects)
+                        .and_then(|text| text.split(" / ").next().map(str::to_owned))
+                        .map(|text| key_cap(text, colours)),
+                )
+            })
+    }
+
+    /// The tools at the foot of the sidebar, each with its shortcut in its
+    /// tooltip.
+    fn render_tools(&self, colours: &Palette, cx: &mut Context<Self>) -> Div {
+        let tool = |id: &'static str, glyph: IconName, command: Command| {
+            let hover = colours.surface;
+            let tip: SharedString = tooltip_text(command).into();
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .flex_none()
+                .size(metrics::CONTROL())
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover))
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.run_command(command, window, cx);
+                }))
+                .child(icon(glyph, px(16.), colours.text_muted))
+        };
+        div()
+            .debug_selector(|| "sidebar-tools".into())
+            .flex_none()
+            .h(metrics::TOOLS_HEIGHT())
+            .px(px(8.))
+            .border_t_1()
+            .border_color(colours.border)
+            .flex()
+            .items_center()
+            .child(tool(
+                "tool-theme",
+                match colours.appearance {
+                    Appearance::Dark => IconName::Sun,
+                    Appearance::Light => IconName::Moon,
+                },
+                Command::ToggleAppearance,
+            ))
+            .child(tool(
+                "tool-shortcuts",
+                IconName::Keyboard,
+                Command::Shortcuts,
+            ))
+            .child(tool("tool-settings", IconName::Settings, Command::Settings))
+    }
+
+    /// The row at `index` of the tree.
+    fn render_row(
+        &self,
+        index: usize,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let row = self.rows.get(index)?;
+        let on = self.cursor == Some(index);
+        let focused = self.pane == Pane::Sidebar;
+        let hover = colours.surface;
+        let base = div()
+            .id(("row", index))
+            .debug_selector(move || format!("tree-row-{index}"))
+            .relative()
+            .h(metrics::ROW_HEIGHT())
+            .w_full()
+            .pl(px(12.) + metrics::INDENT() * f32::from(row.depth))
+            .pr(px(12.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .overflow_hidden()
+            .cursor_pointer()
+            .when(on, |this| this.bg(colours.surface_2))
+            .when(!on, |this| this.hover(move |style| style.bg(hover)))
+            // The row the keyboard is on carries the accent as a bar.
+            .when(on && focused, |this| {
+                this.child(
+                    div()
+                        .debug_selector(|| "tree-cursor".into())
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(2.))
+                        .bg(colours.signal),
+                )
+            })
+            .on_mouse_down(
+                gpui_kit::MouseButton::Right,
+                cx.listener(move |this, event: &gpui_kit::MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_menu_at(index, Some(event.position), window, cx);
+                }),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.cursor = Some(index);
+                this.pane = Pane::Sidebar;
+                // A click in the tree takes the keyboard out of the filter.
+                this.focus.focus(window, cx);
+                this.activate(index, window, cx);
+                cx.notify();
+            }));
+        Some(self.render_row_content(index, row, base, colours, cx))
+    }
+
+    fn render_row_content(
+        &self,
+        index: usize,
+        row: &Row,
+        base: Stateful<Div>,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // The slot before every label: a chevron where the row has children, so
+        // that the labels of rows of one level line up.
+        let slot = || {
+            div()
+                .flex_none()
+                .size(px(16.))
+                .flex()
+                .items_center()
+                .justify_center()
+        };
+        let chevron = match row.open {
+            Some(open) => slot()
+                .id(("chevron", index))
+                .debug_selector(move || format!("tree-chevron-{index}"))
+                .cursor_pointer()
+                .child(icon(
+                    if open {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    },
+                    px(12.),
+                    colours.text_faint,
+                ))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.cursor = Some(index);
+                    this.toggle(index);
+                    cx.notify();
+                }))
+                .into_any_element(),
+            None => slot().into_any_element(),
+        };
+        let count = |sessions: usize| {
+            mono(sessions.to_string())
+                .when(sessions == 0, |this| this.invisible())
+                .text_color(colours.text_faint)
+        };
+        let label = || div().flex_1().min_w_0().truncate();
+        match &row.kind {
+            Kind::Machine(machine) => {
+                let state = self.engine.machine_state(&machine.id);
+                base.child(chevron)
+                    .child(
+                        label()
+                            .font_family(fonts::mono())
+                            .font_features(fonts::mono_features())
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(metrics::TEXT_LABEL())
+                            .text_color(colours.text_muted)
+                            .child(machine.name.to_uppercase()),
+                    )
+                    .child(led(state_colour(&state, colours)))
+                    .child(mono(state_label(&state)).text_color(colours.text_faint))
+                    .into_any_element()
+            }
+            Kind::Project { project, sessions } => base
+                .child(chevron)
+                .child(self.logo(
+                    &project.id,
+                    metrics::PROJECT_ICON(),
+                    &format!("tree-{index}"),
+                    colours,
+                ))
+                .child(
+                    label()
+                        .debug_selector(move || format!("tree-label-{index}"))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(self.emphasised(&self.project_label(project), colours)),
+                )
+                .child(self.dot(index, self.project_activity(&project.id), colours))
+                .child(count(*sessions))
+                .into_any_element(),
+            Kind::Worktree { worktree, .. } => base
+                .child(chevron)
+                .child(self.dot(index, self.worktree_activity(&worktree.id), colours))
+                .child(icon(IconName::GitBranch, px(13.), colours.text_muted))
+                .child(
+                    label()
+                        .debug_selector(move || format!("tree-label-{index}"))
+                        .child(self.emphasised(&worktree_label(worktree), colours)),
+                )
+                .when(worktree.is_main, |this| {
+                    this.child(mono("MAIN").text_color(colours.text_faint))
+                })
+                .into_any_element(),
+            Kind::Session(session) => {
+                let name: SharedString = format::agent_name(session.agent).into();
+                // A session with a terminal of its own folder is that
+                // terminal's row: it shows the terminal's state, not its age.
+                let running = self
+                    .live
+                    .of_history(&session.id)
+                    .filter(|_| self.placement.merged.contains(&session.id))
+                    .map(|live| (live.id, live.state(cx)));
+                base.tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
+                    .child(chevron)
+                    .child(
+                        div()
+                            .debug_selector(move || format!("tree-agent-{index}"))
+                            .flex_none()
+                            .size(px(16.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(agent_icon(session.agent, px(14.), colours)),
+                    )
+                    .child(
+                        label()
+                            .debug_selector(move || format!("tree-label-{index}"))
+                            .when(running.is_some(), |this| {
+                                this.font_weight(FontWeight::MEDIUM)
+                            })
+                            .child(session.title.clone()),
+                    )
+                    .children(self.elsewhere_light(index, session, running.is_some(), colours))
+                    .children(match running {
+                        Some((id, state)) => {
+                            let light = live_light(state, colours);
+                            let state_label = (!matches!(state, LiveState::Running)).then(|| {
+                                mono(state.label())
+                                    .debug_selector(move || format!("tree-live-state-{id}"))
+                                    .text_color(colours.text_faint)
+                                    .into_any_element()
+                            });
+                            let led = div()
+                                .debug_selector(move || format!("tree-live-led-{id}"))
+                                .child(led(light))
+                                .into_any_element();
+                            state_label.into_iter().chain([led]).collect()
+                        }
+                        None => vec![mono(format::age(self.now(), session.updated_at))
+                            .text_color(colours.text_faint)
+                            .into_any_element()],
+                    })
+                    .into_any_element()
+            }
+            Kind::Live(entry) => {
+                let session = self.live.get(entry.id);
+                let state = session.map_or(LiveState::Starting, |session| session.state(cx));
+                let text = session.map_or_else(String::new, |session| session.label());
+                let name: SharedString = entry.agent.map_or("Shell", format::agent_name).into();
+                let lead = match entry.agent {
+                    Some(agent) => agent_icon(agent, px(14.), colours).into_any_element(),
+                    None => {
+                        icon(IconName::Terminal, px(14.), colours.text_muted).into_any_element()
+                    }
+                };
+                // The state is the light's colour, never the icon's.
+                let light = live_light(state, colours);
+                let id = entry.id;
+                base.tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
+                    .child(chevron)
+                    .child(
+                        div()
+                            .debug_selector(move || format!("tree-agent-{index}"))
+                            .flex_none()
+                            .size(px(16.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(lead),
+                    )
+                    .child(label().font_weight(FontWeight::MEDIUM).child(text))
+                    .when(!matches!(state, LiveState::Running), |this| {
+                        this.child(
+                            mono(state.label())
+                                .debug_selector(move || format!("tree-live-state-{id}"))
+                                .text_color(colours.text_faint),
+                        )
+                    })
+                    .child(
+                        div()
+                            .debug_selector(move || format!("tree-live-led-{id}"))
+                            .child(led(light)),
+                    )
+                    .into_any_element()
+            }
+            Kind::More { hidden } => base
+                .child(chevron)
+                .child(mono(format!("SHOW {hidden} MORE")).text_color(colours.text_muted))
+                .into_any_element(),
+            Kind::Unsorted { sessions } => base
+                .child(chevron)
+                .child(label().child(section_label("Unsorted", colours)))
+                .child(count(*sessions))
+                .into_any_element(),
+            Kind::Folder { cwd, sessions } => base
+                .child(chevron)
+                .child(icon(IconName::Folder, px(14.), colours.text_muted))
+                .child(
+                    label()
+                        .text_color(colours.text_muted)
+                        .child(folder_name(cwd).to_owned()),
+                )
+                .child(count(*sessions))
+                .into_any_element(),
+            Kind::NoMatch => base
+                .child(chevron)
+                .child(
+                    label()
+                        .debug_selector(|| "tree-no-match".into())
+                        .text_color(colours.text_muted)
+                        .child("No projects match"),
+                )
+                .into_any_element(),
+            Kind::Open => base
+                .child(chevron)
+                .child(
+                    label()
+                        .text_color(colours.text_muted)
+                        .child("Open a project"),
+                )
+                .children(keys::keys_label(Command::OpenProject).map(|text| key_cap(text, colours)))
+                .into_any_element(),
+        }
+    }
+}
+
+/// How a project is called: its label, unless it is told apart another way.
+impl Shell {
+    /// What a project is called in the tree and the palette.
+    pub(super) fn project_label(&self, project: &leon_core::Project) -> String {
+        self.labels
+            .get(&project.id)
+            .cloned()
+            .unwrap_or_else(|| project.name.clone())
+    }
+
+    /// A text with the characters that answer the filter emphasised in the
+    /// text tokens: the text colour, in bold, over the muted row.
+    fn emphasised(&self, text: &str, colours: &Palette) -> AnyElement {
+        let Some(filter) = &self.filter else {
+            return text.to_owned().into_any_element();
+        };
+        let places = matched_chars(&filter.query, text);
+        if places.is_empty() {
+            return text.to_owned().into_any_element();
+        }
+        let offsets: Vec<(usize, char)> = text.char_indices().collect();
+        let style = HighlightStyle {
+            color: Some(colours.text),
+            font_weight: Some(FontWeight::BOLD),
+            ..HighlightStyle::default()
+        };
+        let highlights = places
+            .into_iter()
+            .filter_map(|at| offsets.get(at))
+            .map(|(start, c)| (*start..*start + c.len_utf8(), style))
+            .collect::<Vec<_>>();
+        StyledText::new(text.to_owned())
+            .with_highlights(highlights)
+            .into_any_element()
+    }
+
+    /// How the terminals of a worktree are doing: the most urgent state.
+    pub(super) fn worktree_activity(&self, worktree: &leon_core::WorktreeId) -> Activity {
+        self.placement
+            .live_of_worktree(worktree)
+            .iter()
+            .filter_map(|place| self.live.get(self.placement.live[*place].id))
+            .fold(Activity::Off, |all, session| {
+                all.most_urgent(session.activity)
+            })
+    }
+
+    /// How the terminals of a project are doing: the most urgent state of its
+    /// worktrees and of the terminals no worktree holds.
+    pub(super) fn project_activity(&self, project: &leon_core::ProjectId) -> Activity {
+        let Some(entry) = self.snapshot.project(project) else {
+            return Activity::Off;
+        };
+        let loose = self
+            .placement
+            .live_in_project
+            .get(project)
+            .into_iter()
+            .flatten()
+            .filter_map(|place| self.live.get(self.placement.live[*place].id))
+            .fold(Activity::Off, |all, session| {
+                all.most_urgent(session.activity)
+            });
+        entry
+            .worktrees
+            .iter()
+            .map(|worktree| self.worktree_activity(&worktree.id))
+            .fold(loose, Activity::most_urgent)
+    }
+
+    /// The activity a row's dot shows, for the rows that have one.
+    #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))] // used by the Unix-only tests
+    pub(super) fn row_activity(&self, row: &Row) -> Option<Activity> {
+        match &row.kind {
+            Kind::Worktree { worktree, .. } => Some(self.worktree_activity(&worktree.id)),
+            Kind::Project { project, .. } => Some(self.project_activity(&project.id)),
+            _ => None,
+        }
+    }
+
+    /// The mark of a history session that a process in another terminal
+    /// holds, with what it says on hover. A session live in Leon and also held
+    /// elsewhere says that too.
+    fn elsewhere_light(
+        &self,
+        index: usize,
+        session: &leon_core::Session,
+        live_here: bool,
+        colours: &Palette,
+    ) -> Option<AnyElement> {
+        let found = self.elsewhere_of(session)?;
+        let certain = found.is_certain();
+        let tip: SharedString = match (live_here, certain) {
+            (false, true) => format!("Running in another terminal \u{b7} pid {}", found.pid),
+            (false, false) => "Probably running in another terminal".to_owned(),
+            (true, true) => format!(
+                "Another process holds this session too \u{b7} pid {}",
+                found.pid
+            ),
+            (true, false) => "Another process probably holds this session too".to_owned(),
+        }
+        .into();
+        let key = session.id.to_string();
+        Some(
+            div()
+                .id(("elsewhere", index))
+                .debug_selector(move || format!("tree-elsewhere-{key}"))
+                .flex_none()
+                .child(elsewhere_mark(certain, colours))
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                .into_any_element(),
+        )
+    }
+
+    fn dot(&self, index: usize, activity: Activity, colours: &Palette) -> AnyElement {
+        let tip: SharedString = activity.tooltip().into();
+        activity_dot(activity, colours)
+            .id(("activity", index))
+            .debug_selector(move || format!("tree-activity-{index}"))
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_machine_says_in_a_word_whether_it_answers() {
+        assert_eq!(state_label(&MachineState::Online(None)), "ONLINE");
+        assert_eq!(state_label(&MachineState::Offline("x".into())), "OFFLINE");
+        assert_eq!(state_label(&MachineState::Unknown), "UNKNOWN");
+        assert_eq!(state_label(&MachineState::Probing), "PROBING");
+    }
+
+    #[test]
+    fn each_state_has_its_own_colour_and_only_the_unknown_is_grey() {
+        let colours = crate::theme::ThemeId::DEFAULT.palette(crate::theme::Appearance::Dark);
+        let online = state_colour(&MachineState::Online(None), &colours);
+        let offline = state_colour(&MachineState::Offline(String::new()), &colours);
+        assert_ne!(online, offline);
+        assert_eq!(
+            state_colour(&MachineState::Unknown, &colours),
+            colours.text_faint
+        );
+    }
+
+    #[test]
+    fn a_tool_tooltip_names_the_action_and_its_shortcut() {
+        for command in [
+            Command::ToggleAppearance,
+            Command::Shortcuts,
+            Command::Settings,
+        ] {
+            let tip = tooltip_text(command);
+            assert!(tip.contains(keys::label(command)), "{tip}");
+            assert!(
+                tip.contains(&keys::keys_label(command).expect("these have keys")),
+                "{tip}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_command_without_keys_has_a_tooltip_of_its_name_alone() {
+        assert_eq!(
+            tooltip_text(Command::RemoveWorktree),
+            keys::label(Command::RemoveWorktree)
+        );
+    }
+}

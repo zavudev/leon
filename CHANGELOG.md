@@ -1,0 +1,48 @@
+# Changelog
+
+## [0.1.0]
+
+First public release.
+
+### What it does
+
+* One tree for everything you work on: machine, project, worktree and agent
+  session, with a status light on live terminals and the history of each
+  worktree beneath them.
+* Runs Claude Code, Codex and opencode in real terminals inside the window
+  (an embedded emulator over a pseudo-terminal, ConPTY on Windows), in tabs of
+  split panes. Sessions run in the background while you look at something else.
+* Imports the agents' own session history into a local SQLite database, with
+  search from the command palette, a read-only transcript view and
+  "resume this session" for each agent.
+* Detects agent processes started outside Leon and ties them to history
+  sessions, so the same session is not resumed twice by accident.
+* Remote machines over your system's `ssh`: a connection screen with a
+  checklist and a diagnosis for each failure (reach, host key, login, shell,
+  git, agents), connection sharing, and `leon --diagnose connect`.
+* Terminal conveniences: find, clear, copy and save of the buffer, paste of text,
+  files and (locally) images, a context menu and a menu bar.
+* One shortcut registry shown in the palette and the shortcuts sheet; a
+  keyboard-first interface throughout.
+* Themes (`leon` and `zavu`, light and dark, and your own as TOML files),
+  settings, per-project logos and a worktree activity indicator.
+* Builds for macOS (Apple Silicon and Intel), Linux x86_64 and Windows x86_64.
+
+### Known limitations
+
+* The Linux and Windows builds have not been tried by a human. They are built
+  and tested by CI, but the window, the terminal and the packaging have only
+  been run on macOS.
+* Real SSH paths have not been tested against real servers: the remote code is
+  covered by scripted tests.
+* Remote history import is not built: only sessions started from Leon on a
+  remote machine are known. Pasting an image over SSH is not built either.
+* Sessions end when the app quits; reattaching needs a terminal multiplexer on
+  the server and is not wired up.
+* Remote Windows hosts are not supported (a POSIX shell is assumed).
+* No auto-update: download the next release to upgrade.
+* macOS builds are unsigned and not notarized until the signing secrets are
+  configured, so Gatekeeper asks for confirmation. Windows builds are unsigned
+  and SmartScreen warns.
+
+[0.1.0]: https://github.com/zavudev/leon/releases/tag/v0.1.0

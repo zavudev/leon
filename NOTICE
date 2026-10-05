@@ -1,0 +1,56 @@
+Leon
+Copyright 2026 Zavu
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+TRADEMARKS
+  "Leon", "Zavu" and the Leon lion/glare mark and its application icon are
+  trademarks of their owner. The Apache License does not grant any right to
+  use them (section 6). The files that carry the mark (crates/app/assets/brand,
+  crates/app/assets/icons, brand/logo/final) are part of this repository so
+  that it builds and runs, not to be reused for another product or to suggest
+  that a fork or a derived work is Leon. A fork needs another name and mark.
+
+THIRD-PARTY CODE
+  gpui-terminal 0.1.0 (https://github.com/zortax/gpui-terminal)
+    Copyright (c) Leonard Seibold. MIT OR Apache-2.0.
+    The structure of crates/leon-term (an alacritty Term fed by a reader
+    thread, an event proxy, a GPUI view with an input handler, the key table)
+    follows this crate, ported to gpui-kit 0.7 and alacritty_terminal 0.26 and
+    extended. Licence texts: crates/leon-term/LICENSE-gpui-terminal-MIT and
+    crates/leon-term/LICENSE-gpui-terminal-APACHE.
+
+  Not used: Zed's terminal and terminal_view crates (GPL-3.0). No code from
+  them is part of Leon.
+
+THIRD-PARTY DEPENDENCIES
+  Leon is built on GPUI (the UI framework of the Zed editor) through gpui-kit,
+  gpui-component and their companion crates, all Apache-2.0, and on the
+  crates.io ecosystem (alacritty_terminal, portable-pty, rusqlite with a
+  bundled SQLite, tokio and others), each under its own licence, which
+  `cargo metadata` lists. SQLite is in the public domain.
+
+BUNDLED ASSETS (sources and licences: crates/app/assets/ASSETS.md)
+  Fonts, each with its licence text next to it in crates/app/assets/fonts:
+    Space Grotesk   Copyright 2020 The Space Grotesk Project Authors.
+                    SIL Open Font License 1.1 (SpaceGrotesk-OFL.txt).
+    Geist Mono      Copyright 2024 The Geist Project Authors.
+                    SIL Open Font License 1.1 (GeistMono-OFL.txt).
+    Inter           Copyright (c) 2016 The Inter Project Authors.
+                    SIL Open Font License 1.1 (Inter-LICENSE.txt).
+    JetBrains Mono  Copyright 2020 The JetBrains Mono Project Authors.
+                    SIL Open Font License 1.1 (JetBrainsMono-OFL.txt).
+  Agent marks:
+    Claude and OpenAI marks (Simple Icons): CC0 1.0.
+    opencode mark (github.com/sst/opencode): MIT, Copyright (c) 2025 opencode.
+  Interface icons:
+    Lucide (https://lucide.dev), bundled by gpui-kit's default assets.
+    ISC License. Copyright (c) 2022 Lucide Contributors; portions
+    Copyright (c) 2013-2022 Cole Bemis (Feather, MIT).
+    Permission to use, copy, modify, and/or distribute this software for any
+    purpose with or without fee is hereby granted, provided that the above
+    copyright notice and this permission notice appear in all copies.
+
+The names and marks of Claude (Anthropic), OpenAI, Codex and opencode belong to
+their owners. Leon shows them only to identify the tools it starts, and is not
+affiliated with, endorsed by or connected to them.

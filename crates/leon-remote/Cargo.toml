@@ -1,0 +1,20 @@
+[package]
+name = "leon-remote"
+description = "Command construction and execution on local and SSH machines for Leon."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64 = "0.22"
+sha2 = "0.10"
+leon-core.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

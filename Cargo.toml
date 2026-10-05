@@ -1,0 +1,67 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/leon-mark",
+    "crates/leon-core",
+    "crates/leon-history",
+    "crates/leon-remote",
+    "crates/leon-term",
+    "crates/app",
+    "crates/xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+leon-core = { path = "crates/leon-core" }
+leon-history = { path = "crates/leon-history" }
+leon-remote = { path = "crates/leon-remote" }
+leon-term = { path = "crates/leon-term" }
+leon-mark = { path = "crates/leon-mark" }
+
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "process", "io-util"] }
+# Theme files are TOML. Already in the build (a dependency of the GPUI stack),
+# so it adds nothing to compile.
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "v7"] }
+
+# Where the per-user data directory lives on each platform.
+dirs = "6"
+
+# UI. gpui-kit pins the matching GPUI snapshot (gpui-pre) and re-exports it
+# together with gpui-component; see docs/ARCHITECTURE.md.
+gpui-kit = "=0.7.0"
+
+# Terminal: the emulator (grid, escape sequences, scrollback), the pseudo-terminal
+# (ConPTY on Windows) and the plumbing between them.
+alacritty_terminal = "0.26"
+portable-pty = "0.9"
+parking_lot = "0.12"
+libc = "0.2"
+flume = "0.11"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+# Dependency debug info is by far the largest part of the build directory
+# (GPUI alone is several gigabytes) and is not needed to debug Leon itself.
+debug = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

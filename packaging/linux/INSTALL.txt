@@ -1,0 +1,21 @@
+Leon for Linux
+==============
+
+This archive holds the `leon` binary, a desktop entry and the icon.
+
+Install for your user (no root needed):
+
+  mkdir -p ~/.local/bin
+  cp leon ~/.local/bin/
+  cp -r share/* ~/.local/share/
+  update-desktop-database ~/.local/share/applications 2>/dev/null || true
+  gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor 2>/dev/null || true
+
+Make sure ~/.local/bin is on your PATH. For every user, copy `leon` to
+/usr/local/bin and `share/*` to /usr/local/share instead.
+
+Leon needs a graphical session (Wayland or X11) and a GPU driver with Vulkan.
+The agents (claude, codex, opencode) are not part of Leon: install the ones you
+use.
+
+Project and documentation: https://github.com/zavudev/leon

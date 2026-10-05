@@ -1,0 +1,38 @@
+# Build output and release staging.
+/target
+/dist
+/work
+
+# graft's local graph cache: regenerable, not committed (run `graft build`).
+/graft/
+
+# Local tools and state.
+.codegraph/
+.claude/
+.engram/
+.env
+.env.*
+*.p12
+*.pfx
+*.pem
+*.key
+*.keychain-db
+
+# Operating system and editors.
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.zed/
+*.swp
+*~
+
+# Brand: only the final marks and the token table are published. Rejected logo
+# explorations, bulky renders (with third-party source photos) and the internal
+# brand book stay on the owner's machine.
+/brand/logo/round-*/
+/brand/logo/direction-*/
+/brand/logo/simple/
+/brand/logo/png/
+/brand/logo/sheet.*
+/brand/brandbook.md
