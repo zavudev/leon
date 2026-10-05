@@ -5639,8 +5639,14 @@ mod live {
                 screen(h, cx, 1).contains("^C^D^[^I^[[A^[[D^M")
             });
             h.type_text("héllo", cx);
+            // The fake agent shows its input with `cat -vt`, and the two `cat`
+            // dialects print UTF-8 differently: BSD (macOS) leaves the letter
+            // as it is, GNU (Linux) writes each byte of it as `M-` and a
+            // character (`é` is the bytes C3 A9, shown `M-CM-)`). Either is
+            // the two bytes of `é` having reached the program.
             wait_until(&h, cx, "the text", |h, cx| {
-                screen(h, cx, 1).contains("héllo")
+                let screen = screen(h, cx, 1);
+                screen.contains("héllo") || screen.contains("hM-CM-)llo")
             });
         }
 
