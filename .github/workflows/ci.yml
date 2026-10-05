@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+    # `ready_for_review` starts the run a draft skipped.
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -27,9 +29,38 @@ env:
   # means never changes the build by itself.
 
 jobs:
+  # Decides whether anything but documentation changed. A workflow-level path
+  # filter would leave the required checks "pending" for a documentation-only
+  # change; here every job reports, and the build jobs are skipped (which a
+  # required check accepts). Drafts skip everything: mark the pull request
+  # ready for review to run the matrix.
+  changes:
+    name: Changes
+    runs-on: ${{ vars.RUNNER_LINUX || 'ubuntu-24.04' }}
+    timeout-minutes: 5
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!brand/**'
+              - '!docs/**'
+
   # Fails in seconds, before anything is built: no toolchain beyond rustfmt.
   fmt:
     name: Format
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.changes.outputs.code == 'true'
+    needs: changes
     runs-on: ${{ vars.RUNNER_LINUX || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
@@ -43,6 +74,8 @@ jobs:
   # jobs: it runs beside the tests and not in front of them.
   clippy:
     name: Clippy (${{ matrix.name }})
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.changes.outputs.code == 'true'
+    needs: changes
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -86,6 +119,8 @@ jobs:
 
   test:
     name: Test (${{ matrix.name }})
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.changes.outputs.code == 'true'
+    needs: changes
     runs-on: ${{ matrix.os }}
     # A build from nothing took 12 minutes on macOS and 19 on Windows; a job
     # that is still going after this is stuck, and fails instead of waiting
@@ -141,6 +176,8 @@ jobs:
   # bundled SQLite) are compiled for the target too.
   check-intel:
     name: Check (macOS x86_64, cross)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.changes.outputs.code == 'true'
+    needs: changes
     runs-on: ${{ vars.RUNNER_MACOS_ARM || 'macos-latest' }}
     timeout-minutes: 45
     steps:
@@ -154,3 +191,22 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo check --workspace --all-targets --locked --target x86_64-apple-darwin
+
+  # The one check to require in the branch protection: it always runs (unless
+  # the pull request is a draft), passes when the build jobs passed or were
+  # skipped because only documentation changed, and fails otherwise.
+  ci:
+    name: CI
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    needs: [changes, fmt, clippy, test, check-intel]
+    runs-on: ${{ vars.RUNNER_LINUX || 'ubuntu-24.04' }}
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed or was skipped
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          case "$RESULTS" in
+            *failure*|*cancelled*) exit 1 ;;
+          esac
