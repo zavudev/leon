@@ -27,13 +27,30 @@ cargo run -p leon                  # run from source
 ```
 
 The tests need no display (they use the toolkit's test platform), no `$SHELL`
-and no network. Before you open a pull request, the full run, the same one CI does:
+and no network.
+
+**Run `scripts/check.sh` before every push.** CI is a confirmation, not the
+first test: if the gate is green on your computer, CI should be too. The script
+runs what CI runs for your platform, in the same order, and stops at the first
+failure:
 
 ```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
+scripts/check.sh            # or: cargo xtask check
+scripts/check.sh --quick    # only format, hygiene and the generated docs
+scripts/install-hooks.sh    # opt in: run it automatically before every push
 ```
+
+That is `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+--locked -- -D warnings` and `cargo test --workspace --locked --no-fail-fast`,
+plus guards for the platforms you are not on: no CRLF in tracked text files,
+`Cargo.lock` current, the generated documents current, the shortcut registry
+checked under both chord tables, and a type check of the crates without C
+dependencies for Linux and Windows (when those Rust targets are installed). It
+prints a PASS or FAIL summary with the time of each step and says which crates
+it could not check.
+
+Pull requests start as drafts; CI runs the build matrix when you mark one ready
+for review, and skips it for changes to documentation only.
 
 ## Rules of the code
 

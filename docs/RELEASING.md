@@ -9,6 +9,10 @@ The version lives in one place: `version` under `[workspace.package]` in the roo
 `Cargo.toml`. Every crate inherits it, and the tag has to be `v` followed by it
 (`cargo xtask check-tag` and the workflow both enforce that).
 
+Run `scripts/check.sh` first (and before every push, release or not): CI is a
+confirmation, not the first test. `scripts/install-hooks.sh` installs it as an
+opt-in `pre-push` hook.
+
 ```sh
 cargo xtask bump patch        # or minor, major, or an explicit X.Y.Z
 git diff                      # Cargo.toml and Cargo.lock
