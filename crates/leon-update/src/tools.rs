@@ -443,6 +443,72 @@ mod tests {
         );
     }
 
+    /// Builds a disk image with `hdiutil`, as the release does, and takes the
+    /// bundle out of it with the real tools: the one test that mounts
+    /// something. It needs nothing but the system's own tools.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_real_disk_image_gives_up_its_bundle_and_an_unsigned_bundle_reads_as_unsigned() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        crate::package::fixtures::image(&source, "0.2.1", b"#!/bin/sh\necho Leon 0.2.1\n");
+        let program = source.join("Leon.app/Contents/MacOS/Leon");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::os::unix::fs::symlink("/Applications", source.join("Applications")).unwrap();
+        let image = dir.path().join("leon.dmg");
+        let made = std::process::Command::new("hdiutil")
+            .args([
+                "create",
+                "-volname",
+                "Leon",
+                "-ov",
+                "-format",
+                "UDZO",
+                "-srcfolder",
+            ])
+            .arg(&source)
+            .arg(&image)
+            .output();
+        let Ok(made) = made else {
+            eprintln!("skipped: hdiutil is not available");
+            return;
+        };
+        if !made.status.success() {
+            eprintln!("skipped: hdiutil could not make an image here");
+            return;
+        }
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let bundle = SystemTools.extract_bundle(&image, &out).unwrap();
+        assert_eq!(bundle, out.join("Leon.app"));
+        assert!(bundle.join("Contents/Info.plist").is_file());
+        assert!(!out.join("mount").exists(), "the image is let go of");
+        assert_eq!(
+            SystemTools.probe(&bundle.join("Contents/MacOS/Leon")),
+            Ok("Leon 0.2.1".into())
+        );
+        assert_eq!(SystemTools.signature(&bundle).unwrap().identity, None);
+        // The bundle is copied the way the install copies it.
+        let copy = dir.path().join("copy.app");
+        SystemTools.copy_bundle(&bundle, &copy).unwrap();
+        assert!(copy.join("Contents/MacOS/Leon").is_file());
+        // And the whole of it through the package code.
+        let mac = crate::release::Platform::parse("macos-aarch64").unwrap();
+        let again = dir.path().join("again");
+        let payload = crate::package::extract(
+            &image,
+            &mac,
+            &crate::version::Version::new(0, 2, 1),
+            &again,
+            &SystemTools,
+        )
+        .unwrap();
+        assert!(payload.join("Contents/MacOS/Leon").is_file());
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_real_probe_reads_the_output_and_fails_for_a_program_that_fails() {

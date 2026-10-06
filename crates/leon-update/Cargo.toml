@@ -16,6 +16,7 @@ serde_json.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 tar = { version = "0.4", default-features = false }
+tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -26,4 +27,4 @@ tempfile.workspace = true
 
 [features]
 # The scripted client and the fake tools, for the application's own tests.
-test-support = []
+test-support = ["dep:tempfile"]

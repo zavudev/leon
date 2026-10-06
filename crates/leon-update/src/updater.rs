@@ -313,6 +313,13 @@ impl Updater {
         }
     }
 
+    /// Makes the updater say it is in `state`, whatever it is doing: for the
+    /// tests of what a window draws for each state.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn publish_for_test(&self, state: State) {
+        self.publish(state);
+    }
+
     /// Takes the line about what happened without the person, once.
     pub fn take_notice(&self) -> Option<String> {
         let notice = self.lock().saved.notice.clone();

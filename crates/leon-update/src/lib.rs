@@ -26,6 +26,7 @@
 //!   and what is kept between runs.
 
 pub mod checksums;
+pub mod diagnose;
 pub mod download;
 pub mod http;
 pub mod install;
@@ -33,6 +34,8 @@ pub mod launch;
 pub mod package;
 pub mod release;
 pub mod state;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
 pub mod tools;
 pub mod trust;
 pub mod updater;
