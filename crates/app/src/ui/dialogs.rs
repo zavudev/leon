@@ -219,11 +219,27 @@ impl Shell {
                 .gap(px(12.))
                 .rounded(metrics::RADIUS())
                 .cursor_pointer()
-                .when(on, |this| this.bg(colours.surface_2))
+                .when(on, |this| {
+                    this.bg(colours.surface_2).child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .top_0()
+                            .bottom_0()
+                            .w(px(2.))
+                            .bg(colours.signal),
+                    )
+                })
                 .hover({
-                    let hover = colours.surface;
+                    let hover = colours.surface_2;
                     move |style| style.bg(hover)
                 })
+                .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                    if this.add_project_ui.cursor != index {
+                        this.add_project_ui.cursor = index;
+                        cx.notify();
+                    }
+                }))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.add_project_ui.cursor = index;
                     match index {
@@ -946,7 +962,7 @@ impl Shell {
                             .rounded(metrics::RADIUS())
                             .cursor_pointer()
                             .hover({
-                                let hover = colours.surface;
+                                let hover = colours.surface_2;
                                 move |style| style.bg(hover)
                             })
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -1059,7 +1075,7 @@ impl Shell {
                                     .rounded(metrics::RADIUS())
                                     .border_1()
                                     .border_color(colours.elevated_border)
-                                    .bg(colours.surface_2)
+                                    .bg(colours.surface)
                                     .shadow_md()
                                     .flex()
                                     .flex_col()
@@ -1092,7 +1108,7 @@ impl Shell {
                                         .rounded(px(3.))
                                         .cursor_pointer()
                                         .when(chosen, |this| {
-                                            this.bg(colours.surface).child(
+                                            this.bg(colours.surface_2).child(
                                                 div()
                                                     .absolute()
                                                     .left_0()
@@ -1103,9 +1119,17 @@ impl Shell {
                                             )
                                         })
                                         .hover({
-                                            let hover = colours.surface;
+                                            let hover = colours.surface_2;
                                             move |style| style.bg(hover)
                                         })
+                                        .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                                            if let Some(ui) = this.new_worktree_ui.as_mut() {
+                                                if ui.base_cursor != at {
+                                                    ui.base_cursor = at;
+                                                    cx.notify();
+                                                }
+                                            }
+                                        }))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             // Not the row beneath: it would reopen the list.
                                             cx.stop_propagation();
@@ -1176,7 +1200,7 @@ impl Shell {
                                             .rounded(metrics::RADIUS())
                                             .border_1()
                                             .border_color(colours.elevated_border)
-                                            .bg(colours.surface_2)
+                                            .bg(colours.surface)
                                             .shadow_md()
                                             .flex()
                                             .flex_col()
@@ -1209,7 +1233,7 @@ impl Shell {
                                                     .rounded(px(3.))
                                                     .cursor_pointer()
                                                     .when(chosen, |this| {
-                                                        this.bg(colours.surface).child(
+                                                        this.bg(colours.surface_2).child(
                                                             div()
                                                                 .absolute()
                                                                 .left_0()
@@ -1220,9 +1244,21 @@ impl Shell {
                                                         )
                                                     })
                                                     .hover({
-                                                        let hover = colours.surface;
+                                                        let hover = colours.surface_2;
                                                         move |style| style.bg(hover)
                                                     })
+                                                    .on_mouse_move(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            if let Some(ui) =
+                                                                this.new_worktree_ui.as_mut()
+                                                            {
+                                                                if ui.agent_cursor != at {
+                                                                    ui.agent_cursor = at;
+                                                                    cx.notify();
+                                                                }
+                                                            }
+                                                        },
+                                                    ))
                                                     .on_click(cx.listener(
                                                         move |this, _, window, cx| {
                                                             // Not the row beneath, and not through
@@ -1280,9 +1316,19 @@ impl Shell {
                         .gap(px(10.))
                         .rounded(metrics::RADIUS())
                         .cursor_pointer()
-                        .when(on(3), |this| this.bg(colours.surface))
+                        .when(on(3), |this| {
+                            this.bg(colours.surface_2).child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .top_0()
+                                    .bottom_0()
+                                    .w(px(2.))
+                                    .bg(colours.signal),
+                            )
+                        })
                         .hover({
-                            let hover = colours.surface;
+                            let hover = colours.surface_2;
                             move |style| style.bg(hover)
                         })
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -1340,6 +1386,13 @@ impl Shell {
                             colours.background
                         } else {
                             colours.text
+                        })
+                        // Pointing at it shows what pressing it does: the
+                        // accent of the row the keyboard is on.
+                        .hover({
+                            let fill = colours.signal;
+                            let ink = colours.background;
+                            move |style| style.bg(fill).text_color(ink)
                         })
                         .on_click(cx.listener(|this, _, window, cx| {
                             if let Some(ui) = this.new_worktree_ui.as_mut() {
