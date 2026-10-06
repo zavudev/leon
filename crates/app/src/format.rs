@@ -33,6 +33,27 @@ pub fn short_head(head: &str) -> &str {
     &head[..end]
 }
 
+/// A file size as one short token: `812 B`, `1 KB`, `1.5 MB`. Whole numbers
+/// lose their decimal (`2 MB`, not `2.0 MB`).
+pub fn size(bytes: u64) -> String {
+    const KB: u64 = 1_024;
+    const MB: u64 = 1_024 * 1_024;
+    match bytes {
+        0..KB => format!("{bytes} B"),
+        KB..MB => format!("{} KB", whole(bytes as f64 / KB as f64)),
+        _ => format!("{} MB", whole(bytes as f64 / MB as f64)),
+    }
+}
+
+/// One decimal place, without a trailing `.0`.
+fn whole(value: f64) -> String {
+    let text = format!("{value:.1}");
+    match text.strip_suffix(".0") {
+        Some(short) => short.to_owned(),
+        None => text,
+    }
+}
+
 /// The agent's name in the mono labels.
 pub fn agent_tag(agent: AgentKind) -> &'static str {
     match agent {
@@ -119,6 +140,18 @@ mod tests {
         assert_eq!(truncate_chars("hello", 3), ("hel", 2));
         assert_eq!(truncate_chars("héllo", 2), ("hé", 3));
         assert_eq!(truncate_chars("", 3), ("", 0));
+    }
+
+    #[test]
+    fn a_file_size_is_one_short_token() {
+        assert_eq!(size(0), "0 B");
+        assert_eq!(size(812), "812 B");
+        assert_eq!(size(1_023), "1023 B");
+        assert_eq!(size(1_024), "1 KB");
+        assert_eq!(size(1_536), "1.5 KB");
+        assert_eq!(size(1_048_576), "1 MB");
+        assert_eq!(size(2_097_152), "2 MB");
+        assert_eq!(size(1_572_864), "1.5 MB");
     }
 
     #[test]

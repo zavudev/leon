@@ -137,6 +137,8 @@ async fn drive(
         args: spec.args.clone(),
         env: spec.env.clone(),
         cwd: spec.cwd.clone(),
+        // A terminal's input arrives as terminal data, never as a spec.
+        stdin: None,
     };
     let stream = match client.pty_open(wire, grid(size), &label(&spec)).await {
         Ok(stream) => stream,

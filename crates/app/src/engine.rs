@@ -29,8 +29,8 @@ use leon_core::{
 use leon_history::{HistoryRoots, ImportReport, Importer};
 use leon_remote::connect::{self, Checklist, Target as Login};
 use leon_remote::{
-    probe, CommandSpec, Git, GitError, Output, ProbeError, ProbeReport, RunError, Runner,
-    SshOptions,
+    files, probe, run_on, CommandSpec, Git, GitError, Output, ProbeError, ProbeReport, RunError,
+    Runner, SshOptions,
 };
 use thiserror::Error;
 use tokio::runtime::Handle;
@@ -40,6 +40,10 @@ use tokio::task::{JoinHandle, JoinSet};
 use crate::address;
 use crate::avatar::{Fetched, IconFetcher, NoFetch};
 use crate::elsewhere::{self, Found};
+
+/// The most bytes of a file Leon reads or writes. The remote commands cap
+/// themselves at the same number; a local read applies it before reading.
+pub use leon_remote::files::MAX_FILE_BYTES;
 
 /// How many folders are resolved with git at the same time while projects are
 /// being discovered.
@@ -267,6 +271,9 @@ pub enum EngineError {
     /// The request was refused before anything ran.
     #[error("{0}")]
     Invalid(String),
+    /// A file could not be read or written.
+    #[error("{0}")]
+    File(String),
     /// A background job did not finish.
     #[error("A background job failed: {0}")]
     Job(String),
@@ -280,6 +287,17 @@ pub struct Elsewhere {
     pub found: Vec<Found>,
     /// How long the scan took, command and matching.
     pub took: std::time::Duration,
+}
+
+/// A file read off a machine: its text and the revision a save must find
+/// again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadFile {
+    /// The text.
+    pub contents: String,
+    /// The revision the bytes had when they were read; `None` when the
+    /// machine could not say, and then a save refuses to guess.
+    pub revision: Option<String>,
 }
 
 /// What collecting usage limits needs. Absent until the application supplies
@@ -1706,6 +1724,176 @@ impl Engine {
         Ok(format!("Logo of {name} is back to what was detected."))
     }
 
+    // ----- files -----------------------------------------------------------
+
+    /// Reads a text file on `machine`. Files above [`MAX_FILE_BYTES`], bytes
+    /// that are not UTF-8 and missing files are refused with a sentence the
+    /// status line can show.
+    pub fn read_file(
+        &self,
+        machine: MachineId,
+        path: String,
+    ) -> JoinHandle<Result<ReadFile, EngineError>> {
+        let engine = self.clone();
+        self.inner
+            .handle
+            .spawn(async move { engine.read_file_now(&machine, &path).await })
+    }
+
+    async fn read_file_now(
+        &self,
+        machine_id: &MachineId,
+        path: &str,
+    ) -> Result<ReadFile, EngineError> {
+        let machine = self.inner.store.machine(machine_id)?;
+        if machine.kind == MachineKind::Local {
+            let path = path.to_owned();
+            return self.blocking(move || read_local(&path)).await?;
+        }
+        let output = self
+            .run_file_command(&machine, files::read_command(path))
+            .await?;
+        match files::parse_read(&output.stdout) {
+            Some(files::Read::Contents { contents, revision }) => Ok(ReadFile {
+                contents,
+                revision: Some(revision),
+            }),
+            Some(files::Read::Missing) => Err(file_error(format!(
+                "{path} does not exist on {}.",
+                machine.name
+            ))),
+            Some(files::Read::TooBig { size }) => Err(file_error(too_big(path, size))),
+            Some(files::Read::NotText) => Err(file_error(format!("{path} is not UTF-8 text."))),
+            None => Err(file_error(unreadable(path, &output))),
+        }
+    }
+
+    /// Writes `contents` to `path` on `machine`, refusing when the file no
+    /// longer has `revision` (something else changed it), when it is a
+    /// symbolic link, or when it is gone. The handle yields the revision the
+    /// file has after the write, for the next save to insist on.
+    pub fn write_file(
+        &self,
+        machine: MachineId,
+        path: String,
+        contents: String,
+        revision: Option<String>,
+    ) -> JoinHandle<Result<Option<String>, EngineError>> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            engine
+                .write_file_now(&machine, &path, contents, revision.as_deref())
+                .await
+        })
+    }
+
+    async fn write_file_now(
+        &self,
+        machine_id: &MachineId,
+        path: &str,
+        contents: String,
+        revision: Option<&str>,
+    ) -> Result<Option<String>, EngineError> {
+        let machine = self.inner.store.machine(machine_id)?;
+        if machine.kind == MachineKind::Local {
+            let path = path.to_owned();
+            let revision = revision.map(str::to_owned);
+            return self
+                .blocking(move || write_local(&path, &contents, revision.as_deref()))
+                .await?;
+        }
+        let Some(revision) = revision else {
+            return Err(file_error(format!(
+                "Cannot save {path}: what was read has no revision to check."
+            )));
+        };
+        let payload = files::base64_encode(contents.as_bytes());
+        let command = files::write_command(path, revision).stdin(payload.into_bytes());
+        let output = self.run_file_command(&machine, command).await?;
+        match files::parse_write(&output.stdout) {
+            Some(files::Write::Saved { revision }) => Ok(Some(revision)),
+            Some(files::Write::Changed) => Err(file_error(changed(path))),
+            Some(files::Write::Missing) => Err(file_error(format!(
+                "{path} is gone on {}; nothing was written.",
+                machine.name
+            ))),
+            Some(files::Write::Symlink) => Err(file_error(format!(
+                "{path} is a symbolic link; Leon does not write through one."
+            ))),
+            None => Err(file_error(unreadable(path, &output))),
+        }
+    }
+
+    /// Lists the files under `root` on `machine`, as paths relative to it
+    /// with `/` separators: a git repository's tracked and
+    /// untracked-not-ignored files, or a bounded walk of the folder when it
+    /// is not one.
+    pub fn list_files(
+        &self,
+        machine: MachineId,
+        root: String,
+    ) -> JoinHandle<Result<Vec<String>, EngineError>> {
+        let engine = self.clone();
+        self.inner
+            .handle
+            .spawn(async move { engine.list_files_now(&machine, &root).await })
+    }
+
+    async fn list_files_now(
+        &self,
+        machine_id: &MachineId,
+        root: &str,
+    ) -> Result<Vec<String>, EngineError> {
+        let machine = self.inner.store.machine(machine_id)?;
+        if machine.kind == MachineKind::Local {
+            // Git first, straight through the runner: no shell involved, so
+            // this works on Windows too. A folder git does not know walks.
+            let git = CommandSpec::new("git").args([
+                "-C",
+                root,
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ]);
+            let runner = SharedRunner(self.inner.runner.clone());
+            if let Ok(output) = runner.run(&git).await {
+                if output.success() {
+                    return Ok(files::parse_listing(&output.stdout));
+                }
+            }
+            let root = root.to_owned();
+            return self.blocking(move || walk_local(&root)).await?;
+        }
+        let output = self
+            .run_file_command(&machine, files::list_command(root))
+            .await?;
+        if output.success() {
+            Ok(files::parse_listing(&output.stdout))
+        } else {
+            Err(file_error(format!(
+                "Could not list {root} on {}: {}",
+                machine.name,
+                why_of(&output)
+            )))
+        }
+    }
+
+    /// Runs one file command where the machine is, through the shared runner.
+    async fn run_file_command(
+        &self,
+        machine: &Machine,
+        command: CommandSpec,
+    ) -> Result<Output, EngineError> {
+        let runner = SharedRunner(self.inner.runner.clone());
+        let placed = run_on(machine, &command, &self.ssh());
+        runner
+            .run(&placed)
+            .await
+            .map_err(|error| EngineError::File(error.to_string()))
+    }
+
     // ----- state -----------------------------------------------------------
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -1799,6 +1987,170 @@ fn describe_probe(machine: &Machine, report: &ProbeReport) -> String {
         agents.join(", ")
     };
     format!("{} is online: {agents}.", machine.name)
+}
+
+/// Why a file could not be read or written, as the status line says it.
+fn file_error(text: impl Into<String>) -> EngineError {
+    EngineError::File(text.into())
+}
+
+fn too_big(path: &str, size: u64) -> String {
+    format!(
+        "{path} is {}; the most Leon opens is {}.",
+        crate::format::size(size),
+        crate::format::size(MAX_FILE_BYTES as u64)
+    )
+}
+
+fn changed(path: &str) -> String {
+    format!("{path} changed since you read it; reopen it and make the change again.")
+}
+
+/// The last non-empty line of what a failed file command said, or its exit
+/// status.
+fn why_of(output: &Output) -> String {
+    let why = output
+        .stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty());
+    match why {
+        Some(why) => why.to_owned(),
+        None => format!("exit status {:?}", output.status),
+    }
+}
+
+fn unreadable(path: &str, output: &Output) -> String {
+    format!("Could not read or write {path}: {}", why_of(output))
+}
+
+/// Reads a local file, under the same limits the remote command applies.
+fn read_local(path: &str) -> Result<ReadFile, EngineError> {
+    let meta = std::fs::metadata(path)
+        .map_err(|error| file_error(format!("Cannot read {path}: {error}.")))?;
+    if !meta.is_file() {
+        return Err(file_error(format!("{path} is not a file.")));
+    }
+    if meta.len() > MAX_FILE_BYTES as u64 {
+        return Err(file_error(too_big(path, meta.len())));
+    }
+    let bytes =
+        std::fs::read(path).map_err(|error| file_error(format!("Cannot read {path}: {error}.")))?;
+    let contents =
+        String::from_utf8(bytes).map_err(|_| file_error(format!("{path} is not UTF-8 text.")))?;
+    Ok(ReadFile {
+        contents,
+        revision: local_revision(&meta),
+    })
+}
+
+/// Writes a local file, refusing a revision that moved and never writing
+/// through a symbolic link. Yields the revision the file has after the
+/// write.
+fn write_local(
+    path: &str,
+    contents: &str,
+    revision: Option<&str>,
+) -> Result<Option<String>, EngineError> {
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|error| file_error(format!("Cannot save {path}: {error}.")))?;
+    if meta.file_type().is_symlink() {
+        return Err(file_error(format!(
+            "{path} is a symbolic link; Leon does not write through one."
+        )));
+    }
+    if !meta.is_file() {
+        return Err(file_error(format!("{path} is not a file.")));
+    }
+    match revision {
+        Some(want) if local_revision(&meta).as_deref() == Some(want) => {}
+        Some(_) => return Err(file_error(changed(path))),
+        None => {
+            return Err(file_error(format!(
+                "Cannot save {path}: what was read has no revision to check."
+            )))
+        }
+    }
+    std::fs::write(path, contents)
+        .map_err(|error| file_error(format!("Cannot save {path}: {error}.")))?;
+    Ok(std::fs::metadata(path)
+        .ok()
+        .as_ref()
+        .and_then(local_revision))
+}
+
+/// The revision of a local file: its modification time and size.
+fn local_revision(meta: &std::fs::Metadata) -> Option<String> {
+    let modified = meta.modified().ok()?;
+    let nanos = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(format!("mtime {nanos} size {}", meta.len()))
+}
+
+/// How deep a walk of a folder that is not a repository goes.
+const WALK_DEPTH: usize = 32;
+
+/// The folders a local walk leaves alone: version control and the heavy
+/// build or dependency folders of the common toolchains. Hidden files stay
+/// in: a `.github/` holds documents worth opening.
+const WALK_SKIPPED: [&str; 10] = [
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".next",
+    ".cache",
+];
+
+/// Walks a local folder for its files, in a stable order.
+fn walk_local(root: &str) -> Result<Vec<String>, EngineError> {
+    let root = std::path::Path::new(root);
+    if !root.is_dir() {
+        return Err(file_error(format!("{} is not a folder.", root.display())));
+    }
+    let mut paths = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth >= WALK_DEPTH {
+            continue;
+        }
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let kind = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(_) => continue,
+            };
+            if kind.is_symlink() {
+                continue;
+            }
+            if kind.is_dir() {
+                let name = entry.file_name();
+                if WALK_SKIPPED.contains(&name.to_string_lossy().as_ref()) {
+                    continue;
+                }
+                stack.push((entry.path(), depth + 1));
+            } else if kind.is_file() {
+                if let Ok(relative) = entry.path().strip_prefix(root) {
+                    paths.push(relative.to_string_lossy().replace('\\', "/"));
+                    if paths.len() >= files::MAX_LIST_ENTRIES {
+                        return Ok(paths);
+                    }
+                }
+            }
+        }
+    }
+    paths.sort();
+    Ok(paths)
 }
 
 #[cfg(test)]
@@ -3506,5 +3858,287 @@ branch refs/heads/feature/login
         // run: every agent is unreachable, but it was attempted.
         let rows = rig.store.usage_readings().unwrap();
         assert_eq!(rows.len(), 3);
+    }
+
+    // ----- files -----------------------------------------------------------
+
+    fn remote_machine(store: &Store) -> MachineId {
+        store
+            .add_machine(
+                "box",
+                MachineKind::Ssh {
+                    host: "box.example".into(),
+                    user: None,
+                    port: None,
+                    identity_file: None,
+                },
+            )
+            .unwrap()
+            .id
+    }
+
+    #[tokio::test]
+    async fn reading_a_local_file_gives_its_text_and_a_revision() {
+        let rig = rig(ScriptedRunner::new());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("NOTES.md");
+        std::fs::write(&path, "# Hola\n").unwrap();
+        let read = rig
+            .engine
+            .read_file(MachineId::local(), path.to_string_lossy().into_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.contents, "# Hola\n");
+        assert!(
+            read.revision
+                .as_deref()
+                .is_some_and(|revision| revision.starts_with("mtime ")),
+            "{:?}",
+            read.revision
+        );
+        assert!(
+            rig.runner.calls().is_empty(),
+            "the local read runs no command"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_local_file_above_the_limit_is_refused_with_its_size() {
+        let rig = rig(ScriptedRunner::new());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("BIG.md");
+        std::fs::write(&path, vec![b'x'; MAX_FILE_BYTES + 1]).unwrap();
+        let error = rig
+            .engine
+            .read_file(MachineId::local(), path.to_string_lossy().into_owned())
+            .await
+            .unwrap()
+            .unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("2 MB"), "{text}");
+        assert!(text.contains("BIG.md"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_local_file_that_is_not_utf8_is_refused() {
+        let rig = rig(ScriptedRunner::new());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("BIN");
+        std::fs::write(&path, [0xff, 0xfe, 0x00]).unwrap();
+        let error = rig
+            .engine
+            .read_file(MachineId::local(), path.to_string_lossy().into_owned())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("not UTF-8"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn saving_a_local_file_checks_the_revision_it_was_read_with() {
+        let rig = rig(ScriptedRunner::new());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("NOTES.md");
+        std::fs::write(&path, "one\n").unwrap();
+        let path_text = path.to_string_lossy().into_owned();
+        let read = rig
+            .engine
+            .read_file(MachineId::local(), path_text.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let revision = rig
+            .engine
+            .write_file(
+                MachineId::local(),
+                path_text.clone(),
+                "two\n".to_owned(),
+                read.revision.clone(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(revision.is_some(), "the new revision comes back");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two\n");
+
+        // Somebody else writes the file: the revision that was read no
+        // longer matches, and the save is refused instead of overwriting.
+        std::fs::write(&path, "somebody else\n").unwrap();
+        let error = rig
+            .engine
+            .write_file(
+                MachineId::local(),
+                path_text,
+                "mine\n".to_owned(),
+                read.revision,
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("changed since"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "somebody else\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn saving_never_writes_through_a_symbolic_link() {
+        let rig = rig(ScriptedRunner::new());
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.md");
+        std::fs::write(&real, "real\n").unwrap();
+        let link = dir.path().join("link.md");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let read = rig
+            .engine
+            .read_file(MachineId::local(), link.to_string_lossy().into_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        let error = rig
+            .engine
+            .write_file(
+                MachineId::local(),
+                link.to_string_lossy().into_owned(),
+                "new\n".to_owned(),
+                read.revision,
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("symbolic link"), "{error}");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "real\n");
+    }
+
+    #[tokio::test]
+    async fn reading_a_remote_file_runs_a_command_where_the_file_lives() {
+        let payload = leon_remote::files::base64_encode(b"# Hi\n");
+        let rig =
+            rig(ScriptedRunner::new()
+                .reply(Output::ok(format!("LEON-FILE 1\nCHECK 9 5\n{payload}\n"))));
+        let id = remote_machine(&rig.store);
+        let read = rig
+            .engine
+            .read_file(id, "/home/dev/README.md".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.contents, "# Hi\n");
+        assert_eq!(read.revision.as_deref(), Some("9 5"));
+        let call = &rig.runner.calls()[0];
+        assert_eq!(call.program, "ssh");
+        assert!(call.args.last().unwrap().contains("README.md"));
+        assert!(call.args.last().unwrap().contains("cksum"));
+    }
+
+    #[tokio::test]
+    async fn saving_a_remote_file_sends_the_new_bytes_as_standard_input() {
+        let rig = rig(ScriptedRunner::new().reply(Output::ok("LEON-FILE 1\nSAVED 10 5\n")));
+        let id = remote_machine(&rig.store);
+        let revision = rig
+            .engine
+            .write_file(
+                id,
+                "/home/dev/README.md".into(),
+                "# Hi\n".to_owned(),
+                Some("9 5".into()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(revision.as_deref(), Some("10 5"));
+        let call = &rig.runner.calls()[0];
+        assert_eq!(call.program, "ssh");
+        let expected = leon_remote::files::base64_encode(b"# Hi\n");
+        assert_eq!(call.stdin.as_deref(), Some(expected.as_bytes()));
+        assert!(call.args.last().unwrap().contains("9 5"));
+    }
+
+    #[tokio::test]
+    async fn a_remote_save_that_finds_another_revision_is_refused() {
+        let rig = rig(ScriptedRunner::new().reply(Output::ok("LEON-FILE 1\nCHANGED\n")));
+        let id = remote_machine(&rig.store);
+        let error = rig
+            .engine
+            .write_file(
+                id,
+                "/home/dev/README.md".into(),
+                "mine\n".to_owned(),
+                Some("9 5".into()),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("changed since"));
+    }
+
+    #[tokio::test]
+    async fn listing_a_local_folder_asks_git_first() {
+        let rig = rig(ScriptedRunner::new().reply(Output::ok("docs/A.md\0src/lib.rs\0")));
+        let paths = rig
+            .engine
+            .list_files(MachineId::local(), "/srv/api".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(paths, ["docs/A.md", "src/lib.rs"]);
+        let call = &rig.runner.calls()[0];
+        assert_eq!(call.program, "git");
+        assert_eq!(
+            call.args,
+            [
+                "-C",
+                "/srv/api",
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn listing_a_local_folder_walks_it_when_git_does_not_answer() {
+        // The scripted runner has no reply for git: it fails, and the folder
+        // is walked instead.
+        let rig = rig(ScriptedRunner::new());
+        let dir = tempfile::tempdir().unwrap();
+        let write = |path: &str| {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        };
+        write("a.md");
+        write("sub/b.md");
+        write(".github/workflows/ci.md");
+        write("target/skip.md");
+        write("node_modules/skip.md");
+        let paths = rig
+            .engine
+            .list_files(
+                MachineId::local(),
+                dir.path().to_string_lossy().into_owned(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(paths, [".github/workflows/ci.md", "a.md", "sub/b.md"]);
+    }
+
+    #[tokio::test]
+    async fn listing_a_remote_folder_runs_the_listing_command() {
+        let rig = rig(ScriptedRunner::new().reply(Output::ok("docs/A.md\0docs/B.md\0")));
+        let id = remote_machine(&rig.store);
+        let paths = rig
+            .engine
+            .list_files(id, "/home/dev/api".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(paths, ["docs/A.md", "docs/B.md"]);
+        let call = &rig.runner.calls()[0];
+        assert_eq!(call.program, "ssh");
+        assert!(call.args.last().unwrap().contains("ls-files"));
     }
 }
