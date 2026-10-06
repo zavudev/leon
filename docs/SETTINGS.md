@@ -226,7 +226,7 @@ How projects are found and what they show.
 
 | Setting | Key | Values | Default | Description |
 | --- | --- | --- | --- | --- |
-| Discover projects from session folders | `discover_projects` | on, off | `on` | Add the repositories your sessions ran in as projects. |
+| Discover projects from session folders | `discover_projects` | on, off | `off` | Add the repositories your sessions ran in as projects. Off by default: the history stays searchable without filling the sidebar. |
 | Detect project logos | `detect_logos` | on, off | `on` | Look in the repository for an icon to show beside the project. |
 | Fetch owner avatars from the Git host | `fetch_avatars` | on, off | `on` | When a repository has no icon, download its owner's avatar from the Git host (GitHub). This is the only network call Leon makes. |
 

@@ -453,7 +453,7 @@ impl Engine {
                     ssh_persist_minutes: ssh.persist_minutes,
                     ssh_connect_timeout: ssh.connect_timeout,
                     roots,
-                    discover_projects: true,
+                    discover_projects: false,
                     detect_logos: true,
                     fetch_avatars: true,
                 }),
@@ -2112,11 +2112,13 @@ impl MachineRefresh {
     }
 }
 
-/// The worktrees git listed, bare entries left out, in the store's shape.
+/// The worktrees git listed, in the store's shape. Bare entries are left out,
+/// and so are the prunable ones: their folder is gone, though git still lists
+/// them until it is told to prune.
 fn new_worktrees(listing: &[leon_remote::GitWorktree]) -> Vec<NewWorktree> {
     listing
         .iter()
-        .filter(|worktree| !worktree.is_bare)
+        .filter(|worktree| !worktree.is_bare && worktree.prunable.is_none())
         .map(|worktree| worktree.to_new_worktree())
         .collect()
 }
@@ -2211,6 +2213,15 @@ branch refs/heads/feature/login
             runner,
             store,
         }
+    }
+
+    /// A rig with project discovery on, which is off until somebody asks.
+    fn discovery_rig<R: Runner + 'static>(runner: R) -> Rig<R> {
+        let rig = rig_with(runner);
+        let mut prefs = rig.engine.prefs();
+        prefs.discover_projects = true;
+        rig.engine.set_prefs(prefs);
+        rig
     }
 
     fn local_project(store: &Store) -> Project {
@@ -2801,7 +2812,7 @@ branch refs/heads/feature/login
 
     #[tokio::test]
     async fn a_repository_a_session_ran_in_becomes_a_project_with_its_worktrees() {
-        let rig = rig_with(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
+        let rig = discovery_rig(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
         session_in(&rig.store, &MachineId::local(), "/srv/api/src", "one");
         rig.engine.run(Op::Refresh).await;
 
@@ -2819,8 +2830,53 @@ branch refs/heads/feature/login
     }
 
     #[tokio::test]
-    async fn a_session_started_in_a_linked_worktree_belongs_to_the_main_checkouts_project() {
+    async fn a_fresh_install_adopts_no_project_from_the_history() {
         let rig = rig_with(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
+        let local = MachineId::local();
+        session_in(&rig.store, &local, "/srv/api/src", "one");
+        rig.engine.run(Op::Refresh).await;
+        assert!(roots(&rig.store, &local).is_empty());
+        assert_eq!(
+            rig.store
+                .recent_sessions(&leon_core::SessionFilter::default(), 10)
+                .unwrap()
+                .len(),
+            1,
+            "the history is still there to be searched"
+        );
+        assert!(
+            rig.runner.calls().is_empty(),
+            "no folder of the history was looked at"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_of_a_project_opened_by_hand_still_hang_under_it_without_discovery() {
+        let rig = rig_with(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
+        let local = MachineId::local();
+        session_in(&rig.store, &local, "/srv/api/src", "one");
+        session_in(&rig.store, &local, "/srv/other", "two");
+        let opened = rig
+            .engine
+            .open_project(local.clone(), "/srv/api".into())
+            .await
+            .unwrap()
+            .unwrap();
+        let sessions = rig
+            .store
+            .recent_sessions(&leon_core::SessionFilter::default(), 10)
+            .unwrap();
+        let linked: Vec<_> = sessions
+            .iter()
+            .filter(|session| session.project_id.as_ref() == Some(&opened))
+            .map(|session| session.external_id.as_str())
+            .collect();
+        assert_eq!(linked, ["one"]);
+    }
+
+    #[tokio::test]
+    async fn a_session_started_in_a_linked_worktree_belongs_to_the_main_checkouts_project() {
+        let rig = discovery_rig(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
         let local = MachineId::local();
         session_in(&rig.store, &local, "/srv/api-worktrees/feature-login", "a");
         session_in(&rig.store, &local, "/srv/api", "b");
@@ -2834,7 +2890,7 @@ branch refs/heads/feature/login
 
     #[tokio::test]
     async fn a_folder_that_is_not_a_repository_or_is_gone_does_not_become_a_project() {
-        let rig = rig_with(Answering::new(git_at(&[], LISTING)));
+        let rig = discovery_rig(Answering::new(git_at(&[], LISTING)));
         let local = MachineId::local();
         session_in(&rig.store, &local, "/home/me/notes", "a");
         session_in(&rig.store, &local, "/gone", "b");
@@ -2849,7 +2905,7 @@ branch refs/heads/feature/login
 
     #[tokio::test]
     async fn a_bare_repository_is_not_taken_for_a_project() {
-        let rig = rig_with(Answering::new(git_at(
+        let rig = discovery_rig(Answering::new(git_at(
             &["/srv/api.git"],
             "worktree /srv/api.git\nbare\n",
         )));
@@ -2860,7 +2916,7 @@ branch refs/heads/feature/login
 
     #[tokio::test]
     async fn each_folder_is_resolved_once_however_many_sessions_ran_in_it() {
-        let rig = rig_with(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
+        let rig = discovery_rig(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
         let local = MachineId::local();
         for id in ["a", "b", "c"] {
             session_in(&rig.store, &local, "/srv/api/src", id);
@@ -2877,7 +2933,7 @@ branch refs/heads/feature/login
 
     #[tokio::test]
     async fn folders_that_already_belong_to_a_project_are_not_resolved_again() {
-        let rig = rig_with(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
+        let rig = discovery_rig(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
         let local = MachineId::local();
         local_project(&rig.store);
         session_in(&rig.store, &local, "/srv/api/src", "a");
@@ -2898,7 +2954,7 @@ branch refs/heads/feature/login
             "/r/10", "/r/11", "/r/12", "/r/13", "/r/14", "/r/15", "/r/16", "/r/17", "/r/18",
             "/r/19",
         ];
-        let rig = rig_with(Answering::new(git_at(&[], "")));
+        let rig = discovery_rig(Answering::new(git_at(&[], "")));
         for (index, folder) in FOLDERS.iter().enumerate() {
             session_in(&rig.store, &MachineId::local(), folder, &index.to_string());
         }
@@ -2914,7 +2970,7 @@ branch refs/heads/feature/login
 
     #[tokio::test]
     async fn a_removed_project_is_not_rediscovered() {
-        let rig = rig_with(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
+        let rig = discovery_rig(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
         let local = MachineId::local();
         session_in(&rig.store, &local, "/srv/api", "a");
         rig.engine.run(Op::Refresh).await;
@@ -2929,7 +2985,7 @@ branch refs/heads/feature/login
 
     #[tokio::test]
     async fn a_removed_project_comes_back_when_it_is_opened_by_hand() {
-        let rig = rig_with(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
+        let rig = discovery_rig(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
         let local = MachineId::local();
         session_in(&rig.store, &local, "/srv/api", "a");
         rig.engine.run(Op::Refresh).await;
@@ -2959,13 +3015,13 @@ branch refs/heads/feature/login
                 Ok(Output::failed(128, "fatal: not a git repository"))
             }
         };
-        let rig = rig_with(Answering::new(answer));
+        let rig = discovery_rig(Answering::new(answer));
         let machine = ssh_machine(&rig.store);
         session_in(&rig.store, &machine.id, "/opt/infra/deploy", "a");
         rig.engine.run(Op::Refresh).await;
         assert_eq!(roots(&rig.store, &machine.id), ["/opt/infra"]);
 
-        let offline = rig_with(Answering::new(|_: &CommandSpec| {
+        let offline = discovery_rig(Answering::new(|_: &CommandSpec| {
             Ok(Output::failed(255, "timed out"))
         }));
         let machine = ssh_machine(&offline.store);
@@ -2979,7 +3035,7 @@ branch refs/heads/feature/login
 
     #[tokio::test]
     async fn opening_a_subfolder_adds_the_repository_it_is_in() {
-        let rig = rig_with(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
+        let rig = discovery_rig(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
         let local = MachineId::local();
         let id = rig
             .engine
@@ -3003,7 +3059,7 @@ branch refs/heads/feature/login
 
     #[tokio::test]
     async fn opening_a_folder_that_is_not_a_repository_says_so_and_adds_nothing() {
-        let rig = rig_with(Answering::new(git_at(&[], LISTING)));
+        let rig = discovery_rig(Answering::new(git_at(&[], LISTING)));
         let opened = rig
             .engine
             .open_project(MachineId::local(), "/home/me/notes".into())
@@ -3018,7 +3074,7 @@ branch refs/heads/feature/login
 
     #[tokio::test]
     async fn opening_a_relative_path_is_refused_before_git_runs() {
-        let rig = rig_with(Answering::new(git_at(&[], LISTING)));
+        let rig = discovery_rig(Answering::new(git_at(&[], LISTING)));
         let opened = rig
             .engine
             .open_project(MachineId::local(), "notes".into())
@@ -3637,7 +3693,7 @@ branch refs/heads/feature/login
 
     #[tokio::test]
     async fn disabling_discovery_leaves_the_session_folders_unadopted() {
-        let rig = rig_with(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
+        let rig = discovery_rig(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
         let local = MachineId::local();
         session_in(&rig.store, &local, "/srv/api", "a");
         prefs_of(&rig.engine, |prefs| prefs.discover_projects = false);
@@ -3697,7 +3753,7 @@ branch refs/heads/feature/login
 
     #[tokio::test]
     async fn restoring_a_dismissed_root_lets_discovery_adopt_it_at_the_next_refresh() {
-        let rig = rig_with(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
+        let rig = discovery_rig(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
         let local = MachineId::local();
         session_in(&rig.store, &local, "/srv/api", "a");
         rig.engine.run(Op::Refresh).await;
@@ -3714,6 +3770,83 @@ branch refs/heads/feature/login
         assert!(status(&rig.engine).text.contains("again"));
         rig.engine.run(Op::Refresh).await;
         assert_eq!(roots(&rig.store, &local), ["/srv/api"]);
+    }
+
+    /// Git for `/srv/api` once its linked worktree has been removed: the
+    /// removal deletes the folder, so asking git there cannot even start.
+    fn git_that_forgets_a_removed_worktree(
+    ) -> impl Fn(&CommandSpec) -> Result<Output, RunError> + Send + Sync {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let removed = AtomicBool::new(false);
+        move |spec| {
+            let args: Vec<&str> = spec.args.iter().map(String::as_str).collect();
+            if args.starts_with(&["worktree", "remove"]) {
+                removed.store(true, SeqCst);
+                return Ok(Output::ok(""));
+            }
+            if !args.starts_with(&["worktree", "list"]) {
+                return Ok(Output::failed(128, "fatal: not a git repository"));
+            }
+            match (spec.cwd.as_deref(), removed.load(SeqCst)) {
+                (Some("/srv/api-worktrees/feature-login"), true) => Err(RunError::Spawn {
+                    program: "git".into(),
+                    source: std::io::Error::other("no such directory"),
+                }),
+                (Some("/srv/api"), true) => Ok(Output::ok(
+                    "worktree /srv/api\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/main\n",
+                )),
+                (Some("/srv/api" | "/srv/api-worktrees/feature-login"), false) => {
+                    Ok(Output::ok(LISTING))
+                }
+                _ => Ok(Output::failed(128, "fatal: not a git repository")),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_worktree_whose_folder_was_deleted_behind_gits_back_is_not_kept() {
+        let stale = format!("{LISTING}prunable gitdir file points to non-existent location\n");
+        let rig = rig(ScriptedRunner::new().reply(Output::ok(stale)));
+        let project = local_project(&rig.store);
+        rig.engine.run(Op::SyncWorktrees(project.id.clone())).await;
+        let paths: Vec<_> = rig
+            .store
+            .worktrees(&project.id)
+            .unwrap()
+            .into_iter()
+            .map(|worktree| worktree.path)
+            .collect();
+        assert_eq!(
+            paths,
+            ["/srv/api"],
+            "git still lists it, but it is not there"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sessions_of_a_removed_worktree_stay_out_of_the_sidebar_at_every_refresh() {
+        let rig = discovery_rig(Answering::new(git_that_forgets_a_removed_worktree()));
+        let local = MachineId::local();
+        session_in(&rig.store, &local, "/srv/api-worktrees/feature-login", "a");
+        rig.engine.run(Op::Refresh).await;
+        let project = rig.store.projects(Some(&local)).unwrap().remove(0);
+        let extra = rig.store.worktrees(&project.id).unwrap()[1].clone();
+        rig.engine
+            .run(Op::RemoveWorktree {
+                project: project.id.clone(),
+                worktree: extra.id,
+            })
+            .await;
+        for _ in 0..2 {
+            rig.engine.run(Op::Refresh).await;
+            assert_eq!(rig.store.worktrees(&project.id).unwrap().len(), 1);
+            assert_eq!(roots(&rig.store, &local), ["/srv/api"]);
+        }
+        assert!(rig
+            .store
+            .dismissed_roots(&local)
+            .unwrap()
+            .contains("/srv/api-worktrees/feature-login"));
     }
 
     // ----- usage limits

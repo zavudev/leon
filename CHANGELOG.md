@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Changed
+
+* A fresh install no longer turns every folder of the agents' history into a
+  project. *Discover projects from session folders* is now **off** by default:
+  the history is still imported and found with the history search, and the
+  projects you open by hand keep their sessions. Projects you already have
+  stay; turn the setting on to get the old behaviour.
+
+### Fixed
+
+* The sessions of a worktree that was removed no longer come back on their own.
+  A worktree git stops reporting (removed from Leon, from a terminal, or by an
+  agent) is remembered like a removed project, so the project that contains its
+  folder does not take its sessions again; they stay in the history. A
+  worktree whose folder was deleted behind git's back (git still lists it as
+  prunable) is no longer kept in the tree.
+
 ## [0.2.0] - 2026-10-05
 
 ### Added
