@@ -263,7 +263,7 @@ const READY_NOW: Readiness = Readiness {
 };
 
 // Some fields are read only by the Unix-only test modules.
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(not(leon_posix_tests), allow(dead_code))]
 struct Harness {
     // Dropped last: the engine's background calls run here.
     runtime: Runtime,
@@ -3392,7 +3392,7 @@ fn the_theme_is_saved_and_worn_again_when_the_window_opens(cx: &mut TestAppConte
 
 // ----- live sessions: what Leon does with its terminals ---------------------------------
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 mod live {
     use super::*;
     use crate::ui::live::{LiveId, LiveState};
@@ -5875,27 +5875,27 @@ fn the_toolkit_decodes_every_format_a_logo_may_have(cx: &mut TestAppContext) {
     }
 }
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_tools.rs"]
 mod tools;
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_lines.rs"]
 mod lines;
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_prefs.rs"]
 mod tests_prefs;
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_screen.rs"]
 mod tests_screen;
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_usage.rs"]
 mod tests_usage;
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_notify.rs"]
 mod tests_notify;
 
@@ -5909,7 +5909,7 @@ mod tests_settings;
 #[path = "tests_updates.rs"]
 mod tests_updates;
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_restore.rs"]
 mod tests_restore;
 
@@ -5919,14 +5919,14 @@ mod tests_settings_layout;
 #[path = "tests_themes.rs"]
 mod themes_files;
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_header.rs"]
 mod header;
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_elsewhere.rs"]
 mod elsewhere;
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_lion.rs"]
 mod lion_in_window;

@@ -156,6 +156,20 @@ pub fn home_relative(path: &Path, home: Option<&Path>) -> String {
     path.display().to_string()
 }
 
+/// A sentence that names paths: the home folder written as `~` and every path
+/// separator as `/`, whatever the platform spells them (a Windows path is
+/// `C:\Users\me\...`; the report reads the same on every system).
+fn home_relative_text(text: &str, home: Option<&Path>) -> String {
+    let mut text = text.to_owned();
+    if let Some(home) = home {
+        let home = home.display().to_string();
+        if !home.is_empty() {
+            text = text.replace(&home, "~");
+        }
+    }
+    text.replace('\\', "/")
+}
+
 fn time(at: Option<DateTime<Utc>>) -> String {
     at.map_or_else(
         || "none".to_owned(),
@@ -246,13 +260,7 @@ pub fn render(report: &Report, platform: &str) -> Vec<String> {
             None => lines.push("Last import: none recorded.".to_owned()),
         }
         for problem in &survey.problems {
-            lines.push(format!(
-                "PROBLEM: {}",
-                problem.replace(
-                    &home.map_or_else(String::new, |h| h.display().to_string()),
-                    "~"
-                )
-            ));
+            lines.push(format!("PROBLEM: {}", home_relative_text(problem, home)));
         }
     }
     lines
@@ -441,5 +449,22 @@ mod tests {
         );
         assert_eq!(home_relative(Path::new("/home/dev"), Some(home)), "~");
         assert_eq!(home_relative(Path::new("/srv/x"), Some(home)), "/srv/x");
+    }
+
+    #[test]
+    fn a_sentence_with_paths_reads_the_same_with_windows_separators() {
+        let home = Path::new(r"C:\Users\me");
+        assert_eq!(
+            home_relative_text(
+                r"C:\Users\me\AppData\opencode.db: no `session` table",
+                Some(home)
+            ),
+            "~/AppData/opencode.db: no `session` table"
+        );
+        assert_eq!(
+            home_relative_text("/srv/x: odd", Some(Path::new("/home/me"))),
+            "/srv/x: odd"
+        );
+        assert_eq!(home_relative_text("plain", None), "plain");
     }
 }

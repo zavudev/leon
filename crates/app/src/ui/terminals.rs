@@ -1128,7 +1128,7 @@ impl Shell {
 
     /// [`Self::pane_area`] for tests, which have no `App` at hand.
     #[cfg(test)]
-    #[cfg_attr(not(unix), allow(dead_code))] // used by the Unix-only tests
+    #[cfg_attr(not(leon_posix_tests), allow(dead_code))] // used by the Unix-only tests
     pub(super) fn pane_area_for_test(&self) -> (Rect, MinSize) {
         self.pane_area_with(8.0, 18.0)
     }

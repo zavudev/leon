@@ -9,6 +9,16 @@
 fn main() {
     println!("cargo:rerun-if-changed=assets/icons/app-icon.ico");
     println!("cargo:rerun-if-changed=build.rs");
+    // POSIX-only tests (they run a real /bin/sh) are compiled when the target is
+    // unix, unless LEON_NO_POSIX_TESTS is set. scripts/check.sh sets it for a
+    // lint pass that compiles the app's tests as Windows does, so helpers used
+    // only by those tests are caught on a Mac.
+    println!("cargo::rustc-check-cfg=cfg(leon_posix_tests)");
+    println!("cargo:rerun-if-env-changed=LEON_NO_POSIX_TESTS");
+    if std::env::var("CARGO_CFG_UNIX").is_ok() && std::env::var_os("LEON_NO_POSIX_TESTS").is_none()
+    {
+        println!("cargo:rustc-cfg=leon_posix_tests");
+    }
     embed_windows_icon();
 }
 

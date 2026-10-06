@@ -597,7 +597,7 @@ impl Shell {
 
     /// Says an event of a session the way the settings ask, as a wake-up of
     /// its terminal does.
-    #[cfg(test)]
+    #[cfg(all(test, leon_posix_tests))]
     pub(super) fn raise_for_test(
         &mut self,
         event: super::notify::Event,
@@ -608,7 +608,7 @@ impl Shell {
     }
 
     /// Shows the tab of a terminal, as clicking its row does.
-    #[cfg(test)]
+    #[cfg(all(test, leon_posix_tests))]
     pub(super) fn pending_open_for_test(&mut self, id: LiveId, cx: &mut Context<Self>) {
         self.resume_tab_of(id, cx);
     }

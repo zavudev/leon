@@ -134,7 +134,7 @@ impl Shell {
 
     /// The header's metadata as one line, for tests.
     #[cfg(test)]
-    #[cfg_attr(not(unix), allow(dead_code))] // used by the Unix-only tests
+    #[cfg_attr(not(leon_posix_tests), allow(dead_code))] // used by the Unix-only tests
     pub(super) fn main_heading_for_test(&self, cx: &App) -> String {
         self.main_heading(cx).2
     }

@@ -254,7 +254,7 @@ pub async fn pair(
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, leon_posix_tests))]
 mod tests {
     use super::*;
     use leon_host::{Host, HostConfig, RelayState};
