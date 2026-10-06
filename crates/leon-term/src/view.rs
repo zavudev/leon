@@ -968,7 +968,9 @@ mod tests {
         let (view, terminal) = show(cx, "stty -echo -icanon -isig; printf SET; exec cat -vt");
         // Input sent before `stty` has run would be echoed and line-buffered
         // by the terminal driver, not seen raw by `cat`.
-        wait_until(cx, "the raw mode", || terminal.screen_text().contains("SET"));
+        wait_until(cx, "the raw mode", || {
+            terminal.screen_text().contains("SET")
+        });
         let sent = cx.update(|cx| {
             view.update(cx, |view, cx| {
                 let up = view.handle_keystroke(&Keystroke::parse("up").unwrap(), cx);
@@ -989,7 +991,9 @@ mod tests {
     #[gpui_kit::test]
     fn text_from_the_input_method_reaches_the_program(cx: &mut TestAppContext) {
         let (view, terminal) = show(cx, "stty -echo -icanon -isig; printf SET; exec cat");
-        wait_until(cx, "the raw mode", || terminal.screen_text().contains("SET"));
+        wait_until(cx, "the raw mode", || {
+            terminal.screen_text().contains("SET")
+        });
         let window = cx.windows()[0];
         cx.update_window(window, |_, window, cx| {
             view.update(cx, |view, cx| {
