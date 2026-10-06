@@ -929,7 +929,7 @@ pub fn first_child_of(rows: &[Row], at: usize) -> Option<usize> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use leon_core::{AgentId, MachineKind, Merged};
+    use leon_core::{AgentId, MachineKind};
 
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, 4, 12, 0, 0).unwrap()
@@ -960,7 +960,7 @@ mod tests {
             branch: branch.map(str::to_owned),
             head: None,
             is_main: main,
-            merged: Merged::default(),
+            merged_pull_request: None,
         }
     }
 

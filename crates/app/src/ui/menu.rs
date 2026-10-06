@@ -750,7 +750,7 @@ mod tests {
     use crate::ui::live::LiveId;
     use crate::ui::tree::LiveEntry;
     use leon_core::{
-        Machine, MachineId, MachineKind, Merged, Project, ProjectId, Session, Worktree, WorktreeId,
+        Machine, MachineId, MachineKind, Project, ProjectId, Session, Worktree, WorktreeId,
     };
 
     fn labels(items: &[Item]) -> Vec<&str> {
@@ -787,7 +787,7 @@ mod tests {
                 branch: Some("main".into()),
                 head: None,
                 is_main: main,
-                merged: Merged::default(),
+                merged_pull_request: None,
             },
             sessions: 0,
         }

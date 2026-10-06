@@ -191,7 +191,7 @@ pub fn project_labels(snapshot: &Snapshot) -> HashMap<ProjectId, String> {
 mod tests {
     use super::*;
     use crate::ui::model::ProjectEntry;
-    use leon_core::{IconKind, MachineId, Merged, Project, ProjectIcon, Worktree};
+    use leon_core::{IconKind, MachineId, Project, ProjectIcon, Worktree};
 
     fn project(id: &str, machine: &MachineId, name: &str, root: &str) -> Project {
         Project {
@@ -210,7 +210,7 @@ mod tests {
             branch: branch.map(str::to_owned),
             head: None,
             is_main: false,
-            merged: Merged::default(),
+            merged_pull_request: None,
         }
     }
 

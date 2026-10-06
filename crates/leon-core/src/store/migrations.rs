@@ -303,11 +303,10 @@ const V11: &str = r#"
 ALTER TABLE session ADD COLUMN sort_order INTEGER;
 "#;
 
-/// Version 12: what is known about each worktree being merged. Both columns
-/// hold NULL until a probe says otherwise, so a worktree is "not known" rather
-/// than "not merged" until then, and no existing worktree moves.
+/// Version 12: what GitHub said about each worktree's pull request. NULL until
+/// a probe says otherwise, so a worktree is "not known" rather than "not
+/// merged" until then, and no existing worktree moves.
 const V12: &str = r#"
-ALTER TABLE worktree ADD COLUMN merged_branch INTEGER;
 ALTER TABLE worktree ADD COLUMN merged_pull_request INTEGER;
 "#;
 

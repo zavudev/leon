@@ -852,35 +852,24 @@ impl Shell {
         )
     }
 
-    /// The mark before a worktree's name: its branch, and whether that branch's
-    /// work is already merged. GitHub's icon when a merged pull request says
-    /// so (the stronger of the two signals, and the one with a page behind
-    /// it), the branch's own when only git does. The accent, which no
-    /// activity dot wears, so a merged worktree never reads as a running one.
-    /// A worktree nobody could ask about keeps the quiet branch icon: there is
-    /// nothing to say about it.
+    /// The mark before a worktree's name: its branch, and GitHub's icon in the
+    /// accent — which no activity dot wears, so a merged worktree never reads
+    /// as a running one — when its pull request is merged.
+    ///
+    /// Git alone cannot say: a branch inside the base looks the same whether
+    /// its work landed there or it never had any. So nothing is drawn for a
+    /// worktree whose pull request is not merged, or for one nobody could ask
+    /// about: the quiet branch icon the row has always had.
     fn merged_mark(
         &self,
         index: usize,
         worktree: &leon_core::Worktree,
         colours: &Palette,
     ) -> AnyElement {
-        let (name, tip) = if worktree.merged.pull_request == Some(true) {
-            (IconName::Github, "Pull request merged".to_owned())
-        } else if worktree.merged.branch == Some(true) {
-            (
-                IconName::GitBranch,
-                match self.base_branch(worktree) {
-                    Some(base) => format!("Merged into {base}"),
-                    None => "Branch merged".to_owned(),
-                },
-            )
-        } else {
-            // Nothing is known, or nothing is merged: the branch icon the row
-            // has always had.
+        if worktree.merged_pull_request != Some(true) {
             return icon(IconName::GitBranch, px(13.), colours.text_muted).into_any_element();
-        };
-        let tip: SharedString = tip.into();
+        }
+        let tip: SharedString = "Pull request merged".into();
         div()
             .flex_none()
             .flex()
@@ -888,19 +877,8 @@ impl Shell {
             .id(("merged-mark", index))
             .debug_selector(move || format!("tree-merged-{index}"))
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-            .child(icon(name, px(13.), colours.signal))
+            .child(icon(IconName::Github, px(13.), colours.signal))
             .into_any_element()
-    }
-
-    /// The branch a worktree's work is merged into: the main worktree's, which
-    /// is what a new worktree is created from.
-    fn base_branch(&self, worktree: &leon_core::Worktree) -> Option<String> {
-        self.snapshot
-            .project(&worktree.project_id)?
-            .worktrees
-            .iter()
-            .find(|main| main.is_main)
-            .and_then(|main| main.branch.clone())
     }
 
     fn dot(&self, index: usize, activity: Activity, colours: &Palette) -> AnyElement {

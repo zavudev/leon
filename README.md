@@ -1265,16 +1265,17 @@ Each worktree row leads with a dot, and a project row rolls up its worktrees
 (the most urgent state wins: error, then waiting, working, idle). A machine keeps
 its connection light. Hover a dot for its words.
 
-The branch icon after the dot says whether the worktree's work is **already
-merged**: GitHub's icon when the branch's pull request was merged (the stronger
-of the two answers), the branch's own when git says the branch is inside the
-project's base, and the accent, which no activity dot wears, so a merged
-worktree never reads as a running one. Hover it for the words; nothing is drawn
-for a worktree nobody could ask about, or one with work left. Git answers every
-ten seconds or so with the worktree listing; GitHub is asked far less often, and
-only for a project whose `origin` is on GitHub — without `gh` installed or
-logged in, the pull request answer stays unknown rather than wrong, and the
-branch answer still works.
+The branch icon after the dot becomes GitHub's icon in the accent — which no
+activity dot wears, so a merged worktree never reads as a running one — when the
+branch's pull request was merged, and stays the branch's own otherwise. Hover it
+for the words. Git alone never makes the claim: a branch inside the project's
+base looks exactly the same whether its work landed there or it never had a
+commit of its own, and a worktree that never did any work is not a merged one.
+So the mark comes from GitHub's record or from nowhere, and only for a project
+whose `origin` is on GitHub: without `gh` installed or logged in the answer
+stays unknown rather than wrong, and the row keeps its branch icon. GitHub is
+asked when a project is opened, discovered or refreshed, and on its own slower
+cadence — not on the ten-second timer, which stays on the machine.
 
 ### Keeping the worktrees fresh
 
