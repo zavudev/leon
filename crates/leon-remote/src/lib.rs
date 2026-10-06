@@ -12,6 +12,8 @@
 //! * [`quote`]: POSIX shell quoting.
 //! * [`command`]: [`CommandSpec`] and the placement of a command onto a
 //!   machine.
+//! * [`spawn`]: the command a local child is started from, so Windows does not
+//!   open a console window for it.
 //! * [`runner`]: the [`Runner`] trait, the real process-based implementation
 //!   and a scripted fake for tests.
 //! * [`git`]: git worktree operations expressed through a runner, so they
@@ -37,6 +39,7 @@ pub mod processes;
 pub mod quote;
 pub mod relay;
 pub mod runner;
+pub mod spawn;
 
 pub use agent::{agent_launch, session_command};
 pub use command::{interactive_on, remote_shell_command, run_on, CommandSpec, SshOptions};
@@ -46,3 +49,4 @@ pub use probe::{parse_probe, probe, probe_command, ProbeError, ProbeReport, Remo
 pub use quote::{sh_join, sh_quote};
 pub use relay::{RelayHub, RoutingRunner};
 pub use runner::{Output, ProcessRunner, RunError, Runner, ScriptedRunner};
+pub use spawn::child;

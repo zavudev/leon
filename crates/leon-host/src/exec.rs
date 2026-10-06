@@ -19,6 +19,26 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 /// The longest a client may ask for.
 pub const MAX_TIMEOUT: Duration = Duration::from_secs(900);
 
+/// The command a client's command is started from.
+///
+/// Windows gives every console program that a console-less process starts a
+/// console of its own, so without this each command a client asks for flashes a
+/// window. `CREATE_NO_WINDOW` asks it for none; the flag changes the window and
+/// nothing else, and these commands talk through pipes anyway.
+///
+/// This is the same guard as [`leon_remote::spawn`], repeated rather than
+/// imported: this crate deliberately re-implements the local command semantics
+/// of `leon-remote` instead of depending on it, and it is three lines.
+fn child(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    #[cfg(windows)]
+    let mut command = tokio::process::Command::new(program);
+    #[cfg(not(windows))]
+    let command = tokio::process::Command::new(program);
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    command
+}
+
 async fn capped<R: AsyncRead + Unpin>(mut reader: R) -> (Vec<u8>, bool) {
     let mut kept = Vec::new();
     let mut truncated = false;
@@ -44,7 +64,7 @@ pub async fn run(spec: &ExecSpec, timeout_ms: Option<u32>) -> Result<ExecOutput,
         .map(|ms| Duration::from_millis(u64::from(ms)))
         .unwrap_or(DEFAULT_TIMEOUT)
         .min(MAX_TIMEOUT);
-    let mut command = tokio::process::Command::new(&spec.program);
+    let mut command = child(&spec.program);
     command
         .args(&spec.args)
         .envs(spec.env.iter().map(|(name, value)| (name, value)))

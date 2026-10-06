@@ -56,7 +56,7 @@ impl IconFetcher for CurlFetcher {
             if !url.starts_with("https://") {
                 return Fetched::Missing;
             }
-            let mut command = tokio::process::Command::new("curl");
+            let mut command = leon_remote::spawn::child("curl");
             command
                 .args(["--fail", "--silent", "--location"])
                 .args(["--proto", "=https", "--proto-redir", "=https"])
