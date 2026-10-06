@@ -9,7 +9,6 @@
 //! a bearer credential to `api.kimi.com` (`/coding/v1/usages`, the call the
 //! CLI's own `/usage` makes) and nowhere else.
 
-use chrono::DateTime;
 use leon_core::AgentId;
 use serde_json::Value;
 
@@ -67,9 +66,7 @@ fn window_of(detail: Option<&Value>, kind: WindowKind, length: i64) -> Option<Us
     }
     let reset = ["resetTime", "resetAt"]
         .iter()
-        .find_map(|key| detail.get(*key).and_then(Value::as_str))
-        .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
-        .map(|at| at.timestamp());
+        .find_map(|key| detail.get(*key).and_then(crate::claude::parse_reset));
     Some(UsageWindow {
         kind,
         used_percent: (used / limit * 100.0).clamp(0.0, 100.0),
@@ -206,6 +203,28 @@ mod tests {
                 },
                 "{body}"
             );
+        }
+    }
+
+    #[test]
+    fn a_reset_time_may_take_any_form_the_service_sends_and_a_bad_one_is_no_reset() {
+        let body =
+            |reset: &str| format!(r#"{{"usage":{{"limit":100,"used":10,"resetTime":{reset}}}}}"#);
+        for (reset, at) in [
+            (r#""2026-10-12T00:00:00Z""#, Some(1_791_763_200)),
+            (r#""2026-10-12T00:00:00.123Z""#, Some(1_791_763_200)),
+            (r#""2026-10-12T02:00:00+02:00""#, Some(1_791_763_200)),
+            (r#""2026-10-12T00:00:00""#, Some(1_791_763_200)),
+            ("1791763200", Some(1_791_763_200)),
+            ("1791763200000", Some(1_791_763_200)),
+            (r#""1791763200""#, Some(1_791_763_200)),
+            (r#""next week""#, None),
+            ("null", None),
+        ] {
+            let State::Known { windows } = parse_usage(&body(reset), "m", 1).state else {
+                panic!("{reset}: a bad reset must not fail the read")
+            };
+            assert_eq!(windows[0].resets_at, at, "{reset}");
         }
     }
 }

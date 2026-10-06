@@ -53,6 +53,15 @@ pub const ALLOWED_HOSTS: [&str; 9] = [
 /// How long one call may take.
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// What Leon calls itself to every vendor. It never imitates another client:
+/// the protocol headers a service needs (`anthropic-beta`, `OpenAI-Beta`, the
+/// account id) are sent, the identity is Leon's own.
+pub const USER_AGENT: &str = concat!("Leon/", env!("CARGO_PKG_VERSION"));
+
+/// The least time, in seconds, between two calls to the same vendor by the
+/// schedule, whatever the refresh setting says.
+pub const MIN_GAP: i64 = 60;
+
 /// The largest answer read.
 const MAX_BYTES: u64 = 1_000_000;
 
@@ -267,7 +276,7 @@ impl Http for CurlHttp {
                 ])
                 .args(["--max-time", &TIMEOUT.as_secs().to_string()])
                 .args(["--max-filesize", &MAX_BYTES.to_string()])
-                .args(["--user-agent", "Leon"])
+                .args(["--user-agent", USER_AGENT])
                 .args(["--write-out", "\n%{http_code}"])
                 .args(["--config", "-"])
                 .stdin(std::process::Stdio::piped())
@@ -297,6 +306,7 @@ impl Http for CurlHttp {
 pub struct ScriptedHttp {
     replies: Mutex<Vec<Result<Response, HttpError>>>,
     calls: Mutex<Vec<String>>,
+    headers: Mutex<Vec<Vec<(&'static str, String)>>>,
 }
 
 impl ScriptedHttp {
@@ -330,12 +340,18 @@ impl ScriptedHttp {
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
+
+    /// The headers (never the credential) of each call so far.
+    pub fn headers(&self) -> Vec<Vec<(&'static str, String)>> {
+        self.headers.lock().unwrap().clone()
+    }
 }
 
 impl Http for ScriptedHttp {
     fn get<'a>(&'a self, request: &'a Request<'a>) -> BoxFuture<'a, Result<Response, HttpError>> {
         Box::pin(async move {
             self.calls.lock().unwrap().push(request.url.to_owned());
+            self.headers.lock().unwrap().push(request.headers.clone());
             let mut replies = self.replies.lock().unwrap();
             if replies.is_empty() {
                 Err(HttpError::Unreachable)
@@ -358,6 +374,9 @@ pub enum Read<T> {
     /// The system refused to hand it over (a keychain prompt that was denied
     /// or dismissed).
     Denied,
+    /// There is no usable credential, for a reason that is not "signed out":
+    /// the sign-in only the agent can renew, or an API-key login.
+    Not(Reason),
 }
 
 /// What `security find-generic-password` came to.
@@ -454,6 +473,7 @@ fn parse_file<T>(path: PathBuf, parse: impl FnOnce(&str) -> Option<T>) -> Read<T
         Read::Found(text) => parse(&text).map_or(Read::Missing, Read::Found),
         Read::Missing => Read::Missing,
         Read::Unavailable | Read::Denied => Read::Unavailable,
+        Read::Not(reason) => Read::Not(reason),
     }
 }
 
@@ -493,6 +513,25 @@ impl SystemCredentials {
         Read::Missing
     }
 
+    /// The Cursor IDE's global state database.
+    fn cursor_desktop_db(&self) -> PathBuf {
+        let root = if cfg!(target_os = "macos") {
+            self.home
+                .join("Library")
+                .join("Application Support")
+                .join("Cursor")
+        } else if cfg!(windows) {
+            env_dir("APPDATA")
+                .unwrap_or_else(|| self.home.join("AppData").join("Roaming"))
+                .join("Cursor")
+        } else {
+            env_dir("XDG_CONFIG_HOME")
+                .unwrap_or_else(|| self.home.join(".config"))
+                .join("Cursor")
+        };
+        root.join("User").join("globalStorage").join("state.vscdb")
+    }
+
     /// The folder of `cursor-agent`'s own files.
     fn cursor_cli_dir(&self) -> PathBuf {
         if cfg!(target_os = "macos") {
@@ -511,57 +550,112 @@ impl SystemCredentials {
 
 impl Credentials for SystemCredentials {
     fn claude(&self) -> Read<claude::Credential> {
+        let config_dir = env_dir("CLAUDE_CONFIG_DIR");
         #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut denied = false;
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut refresh_only = false;
         #[cfg(target_os = "macos")]
         {
-            // The keychain item the CLI itself writes. The first read may make
-            // macOS ask the user for permission.
-            let output = leon_remote::spawn::std_child("security")
-                .args([
-                    "find-generic-password",
-                    "-s",
-                    "Claude Code-credentials",
-                    "-w",
-                ])
-                .stdin(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                .output();
-            if let Ok(output) = output {
+            // The keychain item the CLI itself writes: scoped by the config
+            // folder when `CLAUDE_CONFIG_DIR` is set, then the shared one.
+            // The first read may make macOS ask the user for permission.
+            let mut services = Vec::new();
+            if let Some(dir) = &config_dir {
+                services.push(claude::scoped_service(&dir.to_string_lossy()));
+            }
+            services.push(claude::SERVICE.to_owned());
+            for service in services {
+                let output = leon_remote::spawn::std_child("security")
+                    .args(["find-generic-password", "-s", &service, "-w"])
+                    .stdin(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::piped())
+                    .output();
+                let Ok(output) = output else { continue };
                 match classify_security(
                     output.status.code(),
                     &String::from_utf8_lossy(&output.stderr),
                 ) {
                     KeychainOutcome::Found => {
-                        if let Some(found) =
-                            claude::parse_credential(&String::from_utf8_lossy(&output.stdout))
-                        {
+                        let text = String::from_utf8_lossy(&output.stdout);
+                        if let Some(found) = claude::parse_credential(&text) {
                             return Read::Found(found);
                         }
+                        refresh_only |= claude::refresh_only(&text);
                     }
                     KeychainOutcome::Denied => denied = true,
                     KeychainOutcome::NotFound | KeychainOutcome::Other => {}
                 }
             }
         }
-        let dir = env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| self.home.join(".claude"));
-        let missing = || if denied { Read::Denied } else { Read::Missing };
-        match read_file(&dir.join(".credentials.json")) {
-            Read::Found(text) => claude::parse_credential(&text).map_or_else(missing, Read::Found),
-            Read::Missing => missing(),
-            Read::Unavailable | Read::Denied => Read::Unavailable,
+        let dir = config_dir.unwrap_or_else(|| self.home.join(".claude"));
+        let file = read_file(&dir.join(".credentials.json"));
+        if let Read::Found(text) = &file {
+            if let Some(found) = claude::parse_credential(text) {
+                return Read::Found(found);
+            }
+            refresh_only |= claude::refresh_only(text);
+        }
+        if matches!(file, Read::Unavailable | Read::Denied) {
+            return Read::Unavailable;
+        }
+        if denied {
+            Read::Denied
+        } else if refresh_only {
+            Read::Not(Reason::SessionExpired)
+        } else if env_dir("ANTHROPIC_API_KEY").is_some() {
+            // No subscription sign-in and an API key in the environment: the
+            // account is billed by use and has no usage limits to read.
+            Read::Not(Reason::ApiKeyBilling)
+        } else {
+            Read::Missing
         }
     }
 
     fn opencode_go(&self) -> Read<Secret> {
         let data =
             env_dir("XDG_DATA_HOME").unwrap_or_else(|| self.home.join(".local").join("share"));
-        parse_file(data.join("opencode").join("auth.json"), opencode::parse_key)
+        let dir = data.join("opencode");
+        // Orca's order: the inline content, `auth.json`, the OpenCode 2
+        // credential database, then the shared `OPENCODE_API_KEY`.
+        if let Some(key) = std::env::var("OPENCODE_AUTH_CONTENT")
+            .ok()
+            .and_then(|text| opencode::parse_key(&text))
+        {
+            return Read::Found(key);
+        }
+        let file = parse_file(dir.join("auth.json"), opencode::parse_key);
+        if matches!(file, Read::Found(_)) {
+            return file;
+        }
+        if let Some(key) =
+            opencode::database_key(&dir, std::env::var("OPENCODE_DB").ok().as_deref())
+        {
+            return Read::Found(key);
+        }
+        match std::env::var("OPENCODE_API_KEY")
+            .ok()
+            .map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty())
+        {
+            Some(key) => Read::Found(Secret::new(&key)),
+            None => file,
+        }
     }
 
     fn codex(&self) -> Read<codex::Credential> {
         let dir = env_dir("CODEX_HOME").unwrap_or_else(|| self.home.join(".codex"));
-        parse_file(dir.join("auth.json"), codex::parse_credential)
+        let path = dir.join("auth.json");
+        match read_file(&path) {
+            Read::Found(text) => match codex::parse_credential(&text) {
+                Some(found) => Read::Found(found),
+                None if codex::is_api_key_login(&text) => Read::Not(Reason::ApiKeyBilling),
+                None => Read::Missing,
+            },
+            Read::Missing => Read::Missing,
+            Read::Unavailable | Read::Denied => Read::Unavailable,
+            Read::Not(reason) => Read::Not(reason),
+        }
     }
 
     fn grok(&self, now: i64) -> Read<grok::Credential> {
@@ -582,6 +676,9 @@ impl Credentials for SystemCredentials {
                 self.cursor_cli_dir().join("auth.json"),
                 cursor::parse_auth_file,
             ),
+            // The Cursor IDE's own session, read only, when the CLI has none
+            // that is live.
+            cursor::desktop_token(&self.cursor_desktop_db()).map_or(Read::Missing, Read::Found),
         ];
         for token in tokens {
             match token {
@@ -594,7 +691,7 @@ impl Credentials for SystemCredentials {
                     }
                 }
                 Read::Denied => denied = true,
-                Read::Missing | Read::Unavailable => {}
+                Read::Missing | Read::Unavailable | Read::Not(_) => {}
             }
         }
         match expired {
@@ -634,6 +731,9 @@ impl Throttle {
     pub const LONGEST: i64 = 30 * 60;
     /// The longest `Retry-After` honoured, in seconds.
     pub const LONGEST_RETRY_AFTER: i64 = 60 * 60;
+    /// The least a source rests after the vendor said 429, in seconds,
+    /// whatever `Retry-After` says (or does not).
+    pub const RATE_LIMIT_MIN: i64 = 5 * 60;
 
     /// Whether a call may be made at `now`.
     pub fn allows(&self, now: i64) -> bool {
@@ -677,12 +777,30 @@ impl Throttle {
     }
 }
 
+/// What a 401 or a 403 means for `agent`: the stored sign-in is stale (the
+/// agent renews its own), lacks a permission, or, for a key, was rejected or
+/// has no subscription behind it.
+fn auth_reason(agent: AgentId, status: u16, body: &str) -> Reason {
+    match agent {
+        AgentId::CLAUDE if status == 403 && claude::lacks_scope(body) => Reason::MissingScope,
+        AgentId::OPENCODE => opencode::auth_reason(status, body),
+        AgentId::ZCODE => Reason::KeyRejected,
+        _ => Reason::SessionExpired,
+    }
+}
+
 /// What a source answered that is not a success.
 fn failure(agent: AgentId, machine: &str, answer: Result<Response, HttpError>) -> AgentUsage {
     let reason = match answer {
-        Ok(response) if matches!(response.status, 401 | 403) => Reason::NotSignedIn,
+        Ok(response) if matches!(response.status, 401 | 403) => {
+            auth_reason(agent, response.status, &response.body)
+        }
         Ok(response) if response.status == 429 => {
             Reason::RateLimited(response.retry_after.unwrap_or(0))
+        }
+        // The opencode console answers an entitlement refusal with 402 too.
+        Ok(response) if agent == AgentId::OPENCODE && response.status == 402 => {
+            opencode::auth_reason(403, &response.body)
         }
         Ok(response) => Reason::VendorError(response.status),
         Err(HttpError::Unreachable) => Reason::Offline,
@@ -704,6 +822,7 @@ fn credential<T>(
         Read::Missing => missing,
         Read::Unavailable => Reason::Unreachable,
         Read::Denied => Reason::KeychainDenied,
+        Read::Not(reason) => reason,
     };
     Err(AgentUsage::unknown(agent, machine, reason))
 }
@@ -780,6 +899,10 @@ pub async fn opencode_usage(
         headers: vec![("Accept", "application/json".to_owned())],
     };
     match call(http, &request, agent, machine).await {
+        // A key bounced to the console's sign-in page arrives as a 200 page.
+        Ok(body) if body.trim_start().starts_with('<') => {
+            AgentUsage::unknown(agent, machine, Reason::KeyRejected)
+        }
         Ok(body) => opencode::parse_usage(&body, machine, now),
         Err(usage) => usage,
     }
@@ -803,7 +926,10 @@ pub async fn codex_usage(
         Ok(credential) => credential,
         Err(usage) => return usage,
     };
-    let mut headers = vec![("Accept", "application/json".to_owned())];
+    let mut headers = vec![
+        ("Accept", "application/json".to_owned()),
+        ("OpenAI-Beta", "codex-1".to_owned()),
+    ];
     if let Some(id) = &credential.account_id {
         headers.push(("ChatGPT-Account-Id", id.clone()));
     }
@@ -1069,12 +1195,16 @@ mod tests {
     struct FakeCredentials {
         claude_json: Option<&'static str>,
         key: Option<&'static str>,
+        claude_reason: Option<Reason>,
         reads: AtomicUsize,
     }
 
     impl Credentials for FakeCredentials {
         fn claude(&self) -> Read<claude::Credential> {
             self.reads.fetch_add(1, Ordering::SeqCst);
+            if let Some(reason) = self.claude_reason {
+                return Read::Not(reason);
+            }
             self.claude_json
                 .and_then(claude::parse_credential)
                 .map_or(Read::Missing, Read::Found)
@@ -1167,7 +1297,7 @@ mod tests {
         };
         let policy = NetworkPolicy::none().with(AgentId::CLAUDE);
         for (http, reason) in [
-            (ScriptedHttp::new().reply(401, "{}"), Reason::NotSignedIn),
+            (ScriptedHttp::new().reply(401, "{}"), Reason::SessionExpired),
             (ScriptedHttp::new().reply(429, "{}"), Reason::RateLimited(0)),
             (
                 ScriptedHttp::new().reply_after(429, "{}", Some(120)),
@@ -1363,5 +1493,126 @@ mod tests {
         assert!(throttle.allows(1000 + Throttle::LONGEST));
         throttle.record(true, 5000);
         assert!(throttle.allows(5000));
+    }
+
+    async fn claude_answer(status: u16, body: &str) -> Reason {
+        let credentials = FakeCredentials {
+            claude_json: Some(CLAUDE_OK),
+            ..Default::default()
+        };
+        let http = ScriptedHttp::new().reply(status, body);
+        let policy = NetworkPolicy::none().with(AgentId::CLAUDE);
+        match claude_usage(&policy, &credentials, &http, "local", 1)
+            .await
+            .state
+        {
+            State::Unknown { reason } => reason,
+            State::Known { .. } => panic!("expected a reason"),
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_401_and_403_are_a_stale_sign_in_not_a_signed_out_one() {
+        // As Orca classifies it: 401 is a recoverable stale token; 403 is too
+        // unless it names the missing `user:profile` scope.
+        for (status, body, reason) in [
+            (401, "{}", Reason::SessionExpired),
+            (
+                401,
+                r#"{"error":{"message":"invalid x-api-key"}}"#,
+                Reason::SessionExpired,
+            ),
+            (403, "{}", Reason::SessionExpired),
+            (
+                403,
+                r#"{"error":{"message":"OAuth token does not meet scope requirement user:profile"}}"#,
+                Reason::MissingScope,
+            ),
+        ] {
+            assert_eq!(claude_answer(status, body).await, reason, "{status} {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_signed_in_account_without_a_token_or_on_an_api_key_says_why() {
+        for reason in [Reason::SessionExpired, Reason::ApiKeyBilling] {
+            let credentials = FakeCredentials {
+                claude_reason: Some(reason),
+                ..Default::default()
+            };
+            let http = ScriptedHttp::new();
+            let policy = NetworkPolicy::none().with(AgentId::CLAUDE);
+            let usage = claude_usage(&policy, &credentials, &http, "local", 1).await;
+            assert_eq!(usage.state, State::Unknown { reason });
+            assert_eq!(http.calls().len(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn opencode_refusals_name_the_key_or_the_missing_subscription() {
+        for (status, body, reason) in [
+            (401, "{}", Reason::KeyRejected),
+            (403, "{}", Reason::NoSubscription),
+            (
+                402,
+                r#"{"error":{"type":"EntitlementError"}}"#,
+                Reason::NoSubscription,
+            ),
+            (
+                401,
+                r#"{"error":{"type":"AuthError"}}"#,
+                Reason::KeyRejected,
+            ),
+            (200, "<html>sign in</html>", Reason::KeyRejected),
+        ] {
+            let credentials = FakeCredentials {
+                key: Some("k"),
+                ..Default::default()
+            };
+            let http = ScriptedHttp::new().reply(status, body);
+            let policy = NetworkPolicy::none().with(AgentId::OPENCODE);
+            let usage = opencode_usage(&policy, &credentials, &http, "local", 1).await;
+            assert_eq!(usage.state, State::Unknown { reason }, "{status} {body}");
+        }
+    }
+
+    #[test]
+    fn leon_names_itself_and_never_another_client() {
+        assert!(USER_AGENT.starts_with("Leon/"), "{USER_AGENT}");
+        assert!(!USER_AGENT.to_ascii_lowercase().contains("claude-code"));
+        assert!(!USER_AGENT.to_ascii_lowercase().contains("codex"));
+    }
+
+    #[tokio::test]
+    async fn protocol_headers_are_sent_and_no_client_is_imitated() {
+        let credentials = FakeCredentials {
+            claude_json: Some(CLAUDE_OK),
+            ..Default::default()
+        };
+        let http = ScriptedHttp::new().reply(200, ANSWER);
+        let policy = NetworkPolicy::none().with(AgentId::CLAUDE);
+        claude_usage(&policy, &credentials, &http, "local", 1).await;
+        let sent = &http.headers()[0];
+        assert!(sent
+            .iter()
+            .any(|(name, value)| *name == "anthropic-beta" && value == "oauth-2025-04-20"));
+        assert!(sent
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("user-agent")));
+        assert!(sent
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("originator")));
+    }
+
+    #[test]
+    fn the_rate_limit_rest_is_at_least_five_minutes() {
+        let mut throttle = Throttle::default();
+        throttle.record_with(false, 1000, Some(Throttle::RATE_LIMIT_MIN), 0);
+        assert!(!throttle.allows(1000 + 299));
+        assert!(throttle.allows(1000 + 300));
+        let mut longer = Throttle::default();
+        longer.record_with(false, 1000, Some(900), 0);
+        assert!(!longer.allows(1000 + 899));
+        assert!(longer.allows(1000 + 900));
     }
 }

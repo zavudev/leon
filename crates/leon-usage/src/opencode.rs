@@ -30,6 +30,87 @@ pub fn parse_key(json: &str) -> Option<Secret> {
     (!key.is_empty()).then(|| Secret::new(key))
 }
 
+/// What a refusal of the usage endpoint means: the console names an
+/// entitlement refusal (`EntitlementError`, or 403) as a key with no Go
+/// subscription, and an authentication one (`AuthError`, or 401) as a key it
+/// does not know.
+pub fn auth_reason(status: u16, body: &str) -> Reason {
+    let kind = serde_json::from_str::<Value>(body).ok().and_then(|v| {
+        v.pointer("/error/type")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+    match (kind.as_deref(), status) {
+        (Some("EntitlementError"), _) | (_, 403) => Reason::NoSubscription,
+        _ => Reason::KeyRejected,
+    }
+}
+
+/// Reads the key from OpenCode 2's credential database, read only: the
+/// `credential` table, rows of the `opencode-go` integration, the active one
+/// first and the newest next, each `value` a JSON text `{"type":"key","key":..}`.
+/// `data_dir` is opencode's data folder; `db_override` its `OPENCODE_DB`.
+pub fn database_key(data_dir: &std::path::Path, db_override: Option<&str>) -> Option<Secret> {
+    let mut paths = Vec::new();
+    match db_override.map(str::trim).filter(|path| !path.is_empty()) {
+        Some(":memory:") => return None,
+        Some(path) => {
+            let path = std::path::Path::new(path);
+            paths.push(if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                data_dir.join(path)
+            });
+        }
+        None => {
+            let mut found: Vec<_> = std::fs::read_dir(data_dir)
+                .ok()?
+                .flatten()
+                .filter(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    entry.path().is_file()
+                        && name.starts_with("opencode")
+                        && name.ends_with(".db")
+                        && name[8..name.len() - 3]
+                            .chars()
+                            .all(|c| c == '-' || c == '_' || c == '.' || c.is_ascii_alphanumeric())
+                })
+                .map(|entry| entry.path())
+                .collect();
+            found.sort();
+            paths = found;
+        }
+    }
+    paths.iter().find_map(|path| key_from_database(path))
+}
+
+fn key_from_database(path: &std::path::Path) -> Option<Secret> {
+    use rusqlite::OpenFlags;
+    let connection = rusqlite::Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let mut statement = connection
+        .prepare(
+            "SELECT value FROM credential WHERE integration_id = ?1 \
+             ORDER BY active DESC, time_created DESC LIMIT 8",
+        )
+        .ok()?;
+    let rows = statement
+        .query_map(["opencode-go"], |row| row.get::<_, String>(0))
+        .ok()?;
+    let key = rows.flatten().find_map(|value| {
+        let value: Value = serde_json::from_str(&value).ok()?;
+        if value.get("type").and_then(Value::as_str) != Some("key") {
+            return None;
+        }
+        let key = value.get("key")?.as_str()?.trim();
+        (!key.is_empty()).then(|| Secret::new(key))
+    });
+    key
+}
+
 fn meter(kind: WindowKind, raw: Option<&Value>, length: i64) -> Option<UsageWindow> {
     let raw = raw?;
     let percent = raw.get("percent")?.as_f64().filter(|p| p.is_finite())?;
@@ -124,5 +205,87 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("leon-usage-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn database(dir: &std::path::Path, file: &str, rows: &[(&str, &str, i64, i64)]) {
+        let connection = rusqlite::Connection::open(dir.join(file)).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE credential (integration_id TEXT, value TEXT, active INTEGER, time_created INTEGER);",
+            )
+            .unwrap();
+        for (integration, value, active, created) in rows {
+            connection
+                .execute(
+                    "INSERT INTO credential VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![integration, value, active, created],
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn the_key_is_read_from_the_credential_table_active_row_first() {
+        let dir = scratch("credential");
+        database(
+            &dir,
+            "opencode.db",
+            &[
+                ("opencode-go", r#"{"type":"key","key":"newest"}"#, 0, 30),
+                ("opencode-go", r#"{"type":"key","key":" active "}"#, 1, 10),
+                (
+                    "opencode-go",
+                    r#"{"type":"oauth","key":"wrong-type"}"#,
+                    1,
+                    40,
+                ),
+                ("other", r#"{"type":"key","key":"other"}"#, 1, 50),
+            ],
+        );
+        let key = database_key(&dir, None).unwrap();
+        assert_eq!(key.expose(), "active");
+        // The explicit database and a missing one.
+        assert!(database_key(&dir, Some("opencode.db")).is_some());
+        assert!(database_key(&dir, Some("absent.db")).is_none());
+        assert!(database_key(&dir, Some(":memory:")).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_database_without_the_table_or_a_go_row_gives_no_key() {
+        let dir = scratch("nokey");
+        rusqlite::Connection::open(dir.join("opencode.db"))
+            .unwrap()
+            .execute_batch("CREATE TABLE other (a TEXT);")
+            .unwrap();
+        assert!(database_key(&dir, None).is_none());
+        let rows = scratch("norow");
+        database(&rows, "opencode-dev.db", &[("other", "{}", 1, 1)]);
+        assert!(database_key(&rows, None).is_none());
+        // Names that are not opencode databases are not opened.
+        std::fs::write(rows.join("notes.db"), b"x").unwrap();
+        assert!(database_key(&rows, None).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&rows).ok();
+    }
+
+    #[test]
+    fn refusals_are_told_by_the_error_name_then_the_status() {
+        assert_eq!(auth_reason(403, "{}"), Reason::NoSubscription);
+        assert_eq!(
+            auth_reason(402, r#"{"error":{"type":"EntitlementError"}}"#),
+            Reason::NoSubscription
+        );
+        assert_eq!(
+            auth_reason(401, r#"{"error":{"type":"AuthError"}}"#),
+            Reason::KeyRejected
+        );
+        assert_eq!(auth_reason(401, "not json"), Reason::KeyRejected);
     }
 }

@@ -172,12 +172,22 @@ async fn a_switched_on_source_calls_its_vendor_over_https_on_an_allowed_host() {
     }
 }
 
+/// What a 401 or a 403 means for each agent: a stale sign-in the agent renews
+/// by itself, and, for a key, a key the service rejected or without a plan.
+fn refused(agent: AgentId, status: u16) -> Reason {
+    match (agent, status) {
+        (AgentId::OPENCODE, 403) => Reason::NoSubscription,
+        (AgentId::OPENCODE | AgentId::ZCODE, _) => Reason::KeyRejected,
+        _ => Reason::SessionExpired,
+    }
+}
+
 #[tokio::test]
 async fn failures_are_explicit_reasons_never_numbers() {
     for agent in NETWORK {
         for (http, reason) in [
-            (ScriptedHttp::new().reply(401, "{}"), Reason::NotSignedIn),
-            (ScriptedHttp::new().reply(403, "{}"), Reason::NotSignedIn),
+            (ScriptedHttp::new().reply(401, "{}"), refused(agent, 401)),
+            (ScriptedHttp::new().reply(403, "{}"), refused(agent, 403)),
             (ScriptedHttp::new().reply(429, "{}"), Reason::RateLimited(0)),
             (
                 ScriptedHttp::new().reply_after(429, "{}", Some(90)),
@@ -198,19 +208,7 @@ async fn failures_are_explicit_reasons_never_numbers() {
         ] {
             let creds = Creds::default();
             let usage = network_usage(agent, &on(agent), &creds, &http, "local", NOW).await;
-            let expected = if agent == AgentId::CURSOR && reason == Reason::NotSignedIn {
-                // The dashboard's 401 is an expired session; 403 stays "signed out".
-                None
-            } else {
-                Some(reason)
-            };
-            if let Some(expected) = expected {
-                assert_eq!(
-                    usage.state,
-                    State::Unknown { reason: expected },
-                    "{agent} {expected:?}"
-                );
-            }
+            assert_eq!(usage.state, State::Unknown { reason }, "{agent} {reason:?}");
             assert!(!format!("{usage:?}").contains(SECRET));
         }
         let creds = Creds::default();
@@ -220,7 +218,9 @@ async fn failures_are_explicit_reasons_never_numbers() {
             panic!("{agent}: a page that is not json must not be a reading");
         };
         assert!(
-            matches!(reason, Reason::ParseError | Reason::NoData),
+            matches!(reason, Reason::ParseError | Reason::NoData)
+                // A key bounced to the console's sign-in page is a 200 page.
+                || (agent == AgentId::OPENCODE && reason == Reason::KeyRejected),
             "{agent}: {reason:?}"
         );
     }

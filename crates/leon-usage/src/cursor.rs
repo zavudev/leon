@@ -107,6 +107,38 @@ pub fn parse_auth_file(json: &str) -> Option<String> {
     (!token.is_empty()).then(|| token.to_owned())
 }
 
+/// The Cursor IDE's session token, from its `state.vscdb` (the `ItemTable`
+/// row `cursorAuth/accessToken`), opened read only and never written. A
+/// database the IDE holds locked, a missing table or an empty row is `None`.
+pub fn desktop_token(path: &std::path::Path) -> Option<String> {
+    use rusqlite::{types::Value as Cell, OpenFlags};
+    if !path.is_file() {
+        return None;
+    }
+    let connection = rusqlite::Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    connection
+        .busy_timeout(std::time::Duration::from_millis(250))
+        .ok()?;
+    let cell: Cell = connection
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = ?1",
+            ["cursorAuth/accessToken"],
+            |row| row.get(0),
+        )
+        .ok()?;
+    let text = match cell {
+        Cell::Text(text) => text,
+        Cell::Blob(bytes) => String::from_utf8(bytes).ok()?,
+        _ => return None,
+    };
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
 fn number(value: Option<&Value>) -> Option<f64> {
     match value? {
         Value::Number(n) => n.as_f64(),
@@ -468,5 +500,34 @@ mod tests {
         let extra = parse_legacy(r#"{"gpt-4":{"numRequests":1,"maxRequestUsage":4}}"#);
         let usage = reading(&summary, extra, "local", NOW);
         assert!(matches!(usage.state, State::Known { .. }));
+    }
+
+    #[test]
+    fn the_ide_session_is_read_from_its_state_database_read_only() {
+        let dir = std::env::temp_dir().join(format!("leon-usage-cursor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.vscdb");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch("CREATE TABLE ItemTable (key TEXT UNIQUE, value BLOB);")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO ItemTable VALUES ('cursorAuth/accessToken', ?1)",
+                [" tok-text "],
+            )
+            .unwrap();
+        drop(connection);
+        assert_eq!(desktop_token(&path).as_deref(), Some("tok-text"));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute("UPDATE ItemTable SET value = ?1", [b"tok-bytes".to_vec()])
+            .unwrap();
+        drop(connection);
+        assert_eq!(desktop_token(&path).as_deref(), Some("tok-bytes"));
+        assert!(desktop_token(&dir.join("absent.vscdb")).is_none());
+        std::fs::write(dir.join("junk.vscdb"), b"not a database").unwrap();
+        assert!(desktop_token(&dir.join("junk.vscdb")).is_none());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -38,5 +38,8 @@ pub use model::{
     AgentUsage, Collected, Effective, EffectiveWindow, Reason, Source, State, UsageWindow,
     WindowKind,
 };
-pub use present::{ago, compact_duration, percent_fixed, Level, Thresholds};
+pub use present::{
+    ago, compact_duration, countdown, percent_fixed, percent_round, Level, PercentDisplay,
+    Thresholds,
+};
 pub use view::{view, AgentView, Body, Meter};

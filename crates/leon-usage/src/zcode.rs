@@ -13,7 +13,6 @@
 use leon_core::AgentId;
 use serde_json::Value;
 
-use crate::codex::kind_for_minutes;
 use crate::model::{AgentUsage, Reason, Source, State, UsageWindow, WindowKind, MINUTE};
 use crate::secret::Secret;
 
@@ -99,8 +98,8 @@ fn minutes(limit: &Value) -> Option<i64> {
 }
 
 /// Parses the answer: `{"success":true,"data":{"limits":[..],"level":".."}}`.
-/// Token and credit limits are the plan's windows, ordered by length; the time
-/// limit is the monthly one.
+/// The plan's session (300 minutes) and weekly (10080 minutes) windows, then
+/// the time limit, labelled "MCP" as Orca does.
 pub fn parse_usage(body: &str, machine: &str, now: i64) -> AgentUsage {
     let fail = || AgentUsage::unknown(AgentId::ZCODE, machine, Reason::ParseError);
     let Ok(value) = serde_json::from_str::<Value>(body) else {
@@ -116,40 +115,53 @@ pub fn parse_usage(body: &str, machine: &str, now: i64) -> AgentUsage {
     if !ok {
         return fail();
     }
-    let mut windows: Vec<(i64, UsageWindow)> = limits
-        .iter()
-        .filter_map(|limit| {
-            let kind = limit.get("type").and_then(Value::as_str)?;
-            if !matches!(kind, "TOKENS_LIMIT" | "CREDIT_LIMIT" | "TIME_LIMIT") {
-                return None;
-            }
-            let length = minutes(limit)?;
-            let reset = number(limit.get("nextResetTime"))
-                .filter(|t| *t > 0.0)
-                .map(|ms| (ms / 1000.0) as i64);
-            // A five-hour window cannot reset more than five hours ahead: the
-            // service's time is then not that window's.
-            let reset = reset.filter(|at| length != 300 || *at <= now + 301 * 60);
-            Some((
-                if kind == "TIME_LIMIT" {
-                    i64::MAX
-                } else {
-                    length
-                },
-                UsageWindow {
-                    kind: if kind == "TIME_LIMIT" {
-                        WindowKind::Monthly
-                    } else {
-                        kind_for_minutes(length)
-                    },
-                    used_percent: used_percent(limit)?,
-                    resets_at: reset,
-                    window_length: Some(length * MINUTE),
-                },
-            ))
+    // As Orca keeps them: of the plan's token and credit limits only the
+    // 300-minute window (the session) and the 10080-minute one (the week), the
+    // first of each; the time limit is the plan's MCP allowance.
+    let window = |limit: &Value, kind: WindowKind, length: i64| -> Option<UsageWindow> {
+        let reset = number(limit.get("nextResetTime"))
+            .filter(|t| *t > 0.0)
+            .map(|ms| (ms / 1000.0) as i64);
+        // A five-hour window cannot reset more than five hours ahead: the
+        // service's time is then not that window's.
+        let reset = reset.filter(|at| length != 300 || *at <= now + 301 * 60);
+        Some(UsageWindow {
+            kind,
+            used_percent: used_percent(limit)?,
+            resets_at: reset,
+            window_length: Some(length * MINUTE),
         })
-        .collect();
-    windows.sort_by_key(|(order, _)| *order);
+    };
+    let of_type = |kinds: &[&str]| {
+        limits
+            .iter()
+            .filter(|limit| {
+                limit
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kinds.contains(&kind))
+            })
+            .filter_map(|limit| Some((limit, minutes(limit)?)))
+            .collect::<Vec<_>>()
+    };
+    let plan_limits = of_type(&["TOKENS_LIMIT", "CREDIT_LIMIT"]);
+    let pick = |length: i64, kind: WindowKind| {
+        plan_limits
+            .iter()
+            .filter(|(_, minutes)| *minutes == length)
+            .find_map(|(limit, _)| window(limit, kind.clone(), length))
+    };
+    let mcp = of_type(&["TIME_LIMIT"])
+        .into_iter()
+        .find_map(|(limit, length)| window(limit, WindowKind::Custom("MCP".into()), length));
+    let windows: Vec<UsageWindow> = [
+        pick(300, WindowKind::FiveHour),
+        pick(10_080, WindowKind::Weekly),
+        mcp,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     if windows.is_empty() {
         return fail();
     }
@@ -164,9 +176,7 @@ pub fn parse_usage(body: &str, machine: &str, now: i64) -> AgentUsage {
         plan,
         source: Some(Source::VendorApi),
         observed_at: Some(now),
-        state: State::Known {
-            windows: windows.into_iter().map(|(_, w)| w).collect(),
-        },
+        state: State::Known { windows },
     }
 }
 
@@ -230,7 +240,7 @@ mod tests {
         {"type":"OTHER","unit":3,"number":1,"percentage":1}]}}"#;
 
     #[test]
-    fn the_windows_are_ordered_by_length_with_the_monthly_one_last() {
+    fn the_session_and_week_come_first_and_the_time_limit_is_labelled_mcp() {
         let usage = parse_usage(BODY, "local", NOW);
         assert_eq!(usage.plan.as_deref(), Some("pro"));
         let State::Known { windows } = usage.state else {
@@ -245,7 +255,7 @@ mod tests {
             [
                 (WindowKind::FiveHour, 42.0),
                 (WindowKind::Weekly, 25.0),
-                (WindowKind::Monthly, 10.0),
+                (WindowKind::Custom("MCP".into()), 10.0),
             ]
         );
         assert_eq!(windows[0].resets_at, Some(1_790_003_600));
@@ -270,6 +280,8 @@ mod tests {
             r#"{"success":true,"code":500,"data":{"limits":[]}}"#,
             r#"{"success":true,"data":{"limits":[]}}"#,
             r#"{"success":true,"data":{"limits":[{"type":"TOKENS_LIMIT","unit":9,"number":1,"percentage":1}]}}"#,
+            // A plan window of another length is not kept.
+            r#"{"success":true,"data":{"limits":[{"type":"TOKENS_LIMIT","unit":3,"number":1,"percentage":1}]}}"#,
         ] {
             assert_eq!(
                 parse_usage(body, "local", NOW).state,

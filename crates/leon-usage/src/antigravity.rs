@@ -44,6 +44,99 @@ pub fn supports_usage(version: (u32, u32, u32)) -> bool {
     version >= MIN_VERSION
 }
 
+/// The machines where `agy` answered `/usage` with a model turn: it treats the
+/// command as a prompt, every read would spend quota, so Leon stops asking
+/// until it restarts.
+static LATCHED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Whether the usage command is latched off for `machine`.
+pub fn latched(machine: &str) -> bool {
+    LATCHED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|m| m == machine)
+}
+
+/// Latches the usage command off for `machine` for the rest of the session.
+pub fn latch(machine: &str) {
+    let mut list = LATCHED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !list.iter().any(|m| m == machine) {
+        list.push(machine.to_owned());
+    }
+}
+
+/// Clears the latch (tests only: a running session has no way back).
+#[cfg(test)]
+pub fn unlatch(machine: &str) {
+    LATCHED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|m| m != machine);
+}
+
+/// Whether the envelope shows a model ran a turn instead of the command
+/// answering: a real command reply has no conversation and zero turns.
+fn ran_model_turn(envelope: &Value) -> bool {
+    envelope
+        .get("num_turns")
+        .and_then(Value::as_f64)
+        .is_some_and(|turns| turns > 0.0)
+        || envelope
+            .get("conversation_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+}
+
+/// Why the command failed, from its `AGY_ERROR:{json}` lines (the structured
+/// status or code first) and, failing those, the sign-out phrases it prints.
+fn classify_failure(output: &str) -> Option<Reason> {
+    for line in output.lines() {
+        let Some((_, payload)) = line.split_once("AGY_ERROR:") else {
+            continue;
+        };
+        let Ok(error) = serde_json::from_str::<Value>(payload.trim()) else {
+            continue;
+        };
+        let status = error
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        let code = error.get("error_code").and_then(Value::as_i64);
+        if status == "UNAUTHENTICATED" || code == Some(401) {
+            return Some(Reason::NotSignedIn);
+        }
+        if status == "PERMISSION_DENIED" || code == Some(403) {
+            return Some(Reason::NoSubscription);
+        }
+        if status == "RESOURCE_EXHAUSTED" || code == Some(429) {
+            return Some(Reason::RateLimited(0));
+        }
+        if let Some(code @ 500..=599) = code {
+            return Some(Reason::VendorError(code as u16));
+        }
+    }
+    let text = output.to_ascii_lowercase();
+    [
+        "not logged into antigravity",
+        "not logged in",
+        "not signed in",
+        "not authenticated",
+        "unauthenticated",
+        "run agy login",
+        "please sign in",
+        "please log in",
+        "no credentials",
+        "authentication required",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase))
+    .then_some(Reason::NotSignedIn)
+}
+
 fn used_percent(fraction: f64) -> f64 {
     ((1.0 - fraction) * 100.0).round().clamp(0.0, 100.0)
 }
@@ -54,25 +147,30 @@ fn used_percent(fraction: f64) -> f64 {
 /// disabled bucket is not metered and is left out; a window name other than
 /// `weekly` and `5h` is shown as a named bucket without a length.
 pub fn parse_output(output: &str, machine: &str, now: i64) -> AgentUsage {
-    let fail = || AgentUsage::unknown(AgentId::ANTIGRAVITY, machine, Reason::ParseError);
-    let Some(envelope) = output
+    let unknown = |reason| AgentUsage::unknown(AgentId::ANTIGRAVITY, machine, reason);
+    let envelope = output
         .lines()
         .rev()
         .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
         .find(Value::is_object)
-        .or_else(|| serde_json::from_str::<Value>(output.trim()).ok())
-    else {
-        return fail();
+        .or_else(|| serde_json::from_str::<Value>(output.trim()).ok());
+    // The usage command's reply names itself `usage` (`/quota` is an alias):
+    // that is what proves the payload is a quota and not another command's.
+    let groups = envelope
+        .as_ref()
+        .filter(|e| e.get("status").and_then(Value::as_str) == Some("SUCCESS"))
+        .filter(|e| e.pointer("/command/name").and_then(Value::as_str) == Some("usage"))
+        .and_then(|e| e.pointer("/command/data/groups"))
+        .and_then(Value::as_array);
+    let Some(groups) = groups else {
+        // A model turn where the command's data should be: this build treats
+        // `/usage` as a prompt.
+        if envelope.as_ref().is_some_and(ran_model_turn) {
+            return unknown(Reason::SpendsATurn);
+        }
+        return unknown(classify_failure(output).unwrap_or(Reason::ParseError));
     };
-    if envelope.get("status").and_then(Value::as_str) != Some("SUCCESS") {
-        return fail();
-    }
-    let Some(groups) = envelope
-        .pointer("/command/data/groups")
-        .and_then(Value::as_array)
-    else {
-        return fail();
-    };
+    let fail = || unknown(Reason::ParseError);
     let mut windows = Vec::new();
     for group in groups {
         let Some(name) = group
@@ -217,11 +315,85 @@ mod tests {
 
     #[test]
     fn a_window_of_an_unknown_name_has_no_length() {
-        let body = r#"{"status":"SUCCESS","command":{"data":{"groups":[{"name":"G","buckets":[{"id":"x","window":"daily","remaining_fraction":0.9}]}]}}}"#;
+        let body = r#"{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"G","buckets":[{"id":"x","window":"daily","remaining_fraction":0.9}]}]}}}"#;
         let State::Known { windows } = parse_output(body, "local", NOW).state else {
             panic!("expected windows")
         };
         assert_eq!(windows[0].window_length, None);
         assert_eq!(windows[0].used_percent, 10.0);
+    }
+
+    #[test]
+    fn the_replys_command_must_be_usage() {
+        let other = r#"{"status":"SUCCESS","command":{"name":"help","data":{"groups":[{"name":"G","buckets":[{"id":"x","remaining_fraction":0.5}]}]}}}"#;
+        assert_eq!(
+            parse_output(other, "m", NOW).state,
+            State::Unknown {
+                reason: Reason::ParseError
+            }
+        );
+    }
+
+    #[test]
+    fn a_model_turn_instead_of_the_command_is_a_prompt_that_spends_quota() {
+        for output in [
+            r#"{"status":"SUCCESS","response":"Hello","num_turns":1,"conversation_id":""}"#,
+            r#"{"status":"SUCCESS","response":"Hi","num_turns":0,"conversation_id":"28a5ca91-301f"}"#,
+        ] {
+            assert_eq!(
+                parse_output(output, "m", NOW).state,
+                State::Unknown {
+                    reason: Reason::SpendsATurn
+                },
+                "{output}"
+            );
+        }
+        // A real reading is never mistaken for a prompt.
+        let real = r#"{"status":"SUCCESS","num_turns":0,"conversation_id":"","command":{"name":"usage","data":{"groups":[{"name":"G","buckets":[{"id":"x","remaining_fraction":0.5}]}]}}}"#;
+        assert!(matches!(
+            parse_output(real, "m", NOW).state,
+            State::Known { .. }
+        ));
+    }
+
+    #[test]
+    fn the_latch_is_per_machine_and_lasts() {
+        let machine = "latch-test-machine";
+        unlatch(machine);
+        assert!(!latched(machine));
+        latch(machine);
+        latch(machine);
+        assert!(latched(machine));
+        assert!(!latched("another-machine"));
+        unlatch(machine);
+    }
+
+    #[test]
+    fn errors_are_classified_instead_of_being_parse_errors() {
+        for (output, reason) in [
+            (
+                r#"AGY_ERROR:{"status":"UNAUTHENTICATED"}"#,
+                Reason::NotSignedIn,
+            ),
+            (r#"AGY_ERROR:{"error_code":401}"#, Reason::NotSignedIn),
+            (
+                r#"AGY_ERROR:{"status":"RESOURCE_EXHAUSTED"}"#,
+                Reason::RateLimited(0),
+            ),
+            (r#"AGY_ERROR:{"error_code":429}"#, Reason::RateLimited(0)),
+            (r#"AGY_ERROR:{"error_code":503}"#, Reason::VendorError(503)),
+            (
+                r#"AGY_ERROR:{"status":"PERMISSION_DENIED"}"#,
+                Reason::NoSubscription,
+            ),
+            ("Please sign in to Antigravity", Reason::NotSignedIn),
+            ("something odd", Reason::ParseError),
+        ] {
+            assert_eq!(
+                parse_output(output, "m", NOW).state,
+                State::Unknown { reason },
+                "{output}"
+            );
+        }
     }
 }

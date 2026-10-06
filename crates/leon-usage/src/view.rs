@@ -9,7 +9,7 @@
 use leon_core::AgentId;
 
 use crate::model::{AgentUsage, Effective, EffectiveWindow, Reason, Source, WindowKind};
-use crate::present::{ago, compact_duration, Level, Thresholds};
+use crate::present::{ago, countdown, Level, Thresholds};
 
 /// One window, ready to draw.
 #[derive(Clone, Debug, PartialEq)]
@@ -53,13 +53,37 @@ impl Meter {
         )
     }
 
+    /// The same for a figure that says what is left: `5h  62% left`.
+    pub fn text_for(&self, display: crate::present::PercentDisplay) -> String {
+        let marker = self.level.glyph();
+        let tail = if marker.is_empty() {
+            String::new()
+        } else {
+            format!(" {marker}")
+        };
+        let left = if display == crate::present::PercentDisplay::Remaining {
+            " left"
+        } else {
+            ""
+        };
+        format!(
+            "{} {}{}{}",
+            self.kind.short(),
+            display.fixed(self.percent),
+            left,
+            tail
+        )
+    }
+
     /// `Resets in 2h 29m`, `Reset since last seen`, or nothing.
     pub fn reset_text(&self) -> Option<String> {
         if self.reset_since_seen {
             return Some("Reset since last seen".into());
         }
-        self.resets_in
-            .map(|seconds| format!("Resets in {}", compact_duration(seconds)))
+        self.resets_in.map(|seconds| match countdown(seconds) {
+            text if text == "now" => "Resets now".to_owned(),
+            text => format!("Resets in {text}"),
+        })
     }
 }
 

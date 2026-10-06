@@ -150,6 +150,19 @@ pub enum Reason {
     SessionExpired,
     /// The plan has no limit to measure.
     Unlimited,
+    /// The sign-in is valid but lacks the permission to read usage (a 403 that
+    /// names a missing scope).
+    MissingScope,
+    /// The agent is used with an API key: usage limits belong to
+    /// subscriptions and do not apply to API-key billing.
+    ApiKeyBilling,
+    /// The key has no subscription behind it (opencode Go: no entitlement).
+    NoSubscription,
+    /// The service rejected the stored key.
+    KeyRejected,
+    /// This version of the agent answers its usage command with a model turn,
+    /// which would spend quota at every read: Leon stopped asking.
+    SpendsATurn,
 }
 
 impl Reason {
@@ -170,9 +183,18 @@ impl Reason {
             Reason::RateLimited(_) => "Rate limited: the service asked for fewer calls.",
             Reason::KeychainDenied => "The sign-in could not be read: access was denied.",
             Reason::SessionExpired => {
-                "The sign-in has expired. Run the agent once: it refreshes it by itself."
+                "The sign-in has expired. Run the agent once so it refreshes its own sign-in; Leon never does."
             }
             Reason::Unlimited => "The plan has no limit to measure.",
+            Reason::MissingScope => {
+                "The sign-in lacks permission to read usage. Sign in again with the agent."
+            }
+            Reason::ApiKeyBilling => "Usage limits do not apply to API-key billing.",
+            Reason::NoSubscription => "No subscription for this key: there is no limit to read.",
+            Reason::KeyRejected => "The service rejected the stored key.",
+            Reason::SpendsATurn => {
+                "This version of Antigravity cannot report usage without spending a turn."
+            }
         }
     }
 
@@ -204,6 +226,24 @@ impl Reason {
                 | Reason::VendorError(_)
                 | Reason::RateLimited(_)
                 | Reason::KeychainDenied
+                | Reason::SessionExpired
+        )
+    }
+
+    /// Whether the numbers of an earlier reading stay on show, marked with
+    /// their age, when a read ends in this reason: a failure that says nothing
+    /// about the limits themselves. A sign-out, a switch, or a key the service
+    /// refused replaces them.
+    pub fn keeps_numbers(self) -> bool {
+        matches!(
+            self,
+            Reason::Unreachable
+                | Reason::NoData
+                | Reason::Offline
+                | Reason::VendorError(_)
+                | Reason::RateLimited(_)
+                | Reason::KeychainDenied
+                | Reason::SessionExpired
         )
     }
 
@@ -225,7 +265,25 @@ impl Reason {
             Reason::KeychainDenied => "access denied",
             Reason::SessionExpired => "sign-in expired",
             Reason::Unlimited => "no limit",
+            Reason::MissingScope => "no permission",
+            Reason::ApiKeyBilling => "API key",
+            Reason::NoSubscription => "no subscription",
+            Reason::KeyRejected => "key rejected",
+            Reason::SpendsATurn => "unsupported",
         }
+    }
+}
+
+/// Who runs the service an agent's usage is read from, for a sentence such as
+/// "rate limited by Anthropic".
+pub fn vendor(agent: AgentId) -> &'static str {
+    match agent {
+        AgentId::CLAUDE => "Anthropic",
+        AgentId::CODEX => "OpenAI",
+        AgentId::GROK => "xAI",
+        AgentId::ZCODE => "Z.ai",
+        AgentId::KIMI => "Moonshot",
+        other => other.name(),
     }
 }
 
