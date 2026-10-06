@@ -335,6 +335,11 @@ const QUIT: Choices = Choices::Fixed(&[
     ("always", "Always"),
     ("never", "Never"),
 ]);
+const UPDATE_MODES: Choices = Choices::Fixed(&[
+    ("automatic", "Automatic"),
+    ("notify", "Tell me"),
+    ("off", "Off"),
+]);
 const LEVELS: Choices = Choices::Fixed(&[
     ("error", "Error"),
     ("warn", "Warn"),
@@ -903,6 +908,33 @@ const BASE: &[Def] = &[
         "debug trace logging verbose",
         K::Choice(LEVELS),
         D::Text("info"),
+    ),
+    def(
+        "updates_mode",
+        S::Advanced,
+        "Updates",
+        "How Leon follows its releases on GitHub: download them and install at the next restart, only tell you and let you decide, or never ask.",
+        "update upgrade version release download install automatic notify github",
+        K::Choice(UPDATE_MODES),
+        D::Text("automatic"),
+    ),
+    def(
+        "updates_prereleases",
+        S::Advanced,
+        "Pre-release versions",
+        "Also offer pre-releases (release candidates and betas). Off follows the stable releases only.",
+        "beta rc candidate channel preview unstable update",
+        K::Toggle,
+        D::Bool(false),
+    ),
+    def(
+        "check_for_updates",
+        S::Advanced,
+        "Check for updates",
+        "Ask GitHub now whether a newer version of Leon is out.",
+        "update upgrade version latest release new",
+        K::Action,
+        D::None,
     ),
     def(
         "about",

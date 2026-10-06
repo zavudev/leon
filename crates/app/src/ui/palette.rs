@@ -1042,6 +1042,7 @@ impl Shell {
                 None => crate::settings::set_theme_id(cx, id),
             },
             Action::Quit => self.quit_now(cx),
+            Action::RestartToUpdate => self.restart_now(cx),
             Action::NewTheme(name) => self.create_theme(&name, cx),
             Action::AddAgent {
                 name,

@@ -298,6 +298,9 @@ Folders, logging and starting over.
 | Setting | Key | Values | Default | Description |
 | --- | --- | --- | --- | --- |
 | Log level | `log_level` | `error`, `warn`, `info`, `debug`, `trace` | `info` | How much Leon writes to its log (standard error). The RUST_LOG variable wins when set. |
+| Updates | `updates_mode` | `automatic`, `notify`, `off` | `automatic` | How Leon follows its releases on GitHub: download them and install at the next restart, only tell you and let you decide, or never ask. |
+| Pre-release versions | `updates_prereleases` | on, off | `off` | Also offer pre-releases (release candidates and betas). Off follows the stable releases only. |
+| Check for updates |  | button |  | Ask GitHub now whether a newer version of Leon is out. |
 | About Leon |  | button |  | Version 0.2.0, by Zavu: the About panel. |
 | Data folder |  | button |  | Show the folder that holds the database and these settings. |
 | Themes folder |  | button |  | Show the folder of your theme files. |

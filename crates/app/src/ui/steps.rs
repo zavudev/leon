@@ -224,6 +224,8 @@ pub struct World {
     /// computer's own search, or the probe of a machine. A machine that is
     /// not in the list has not been looked at.
     pub installed: Vec<(MachineId, Vec<AgentId>)>,
+    /// The version of the update that is downloaded and waiting for a restart.
+    pub update_ready: Option<String>,
 }
 
 impl World {
@@ -282,7 +284,14 @@ impl World {
             prefs: Prefs::default(),
             repositories: Vec::new(),
             installed: Vec::new(),
+            update_ready: None,
         }
+    }
+
+    /// The same world knowing which update is waiting for a restart.
+    pub fn with_update_ready(mut self, version: Option<String>) -> Self {
+        self.update_ready = version;
+        self
     }
 
     /// The same world knowing the repositories found on the machines.
@@ -531,6 +540,8 @@ pub enum Action {
     Button(&'static str),
     /// Quit the application.
     Quit,
+    /// Restart into the update that is ready.
+    RestartToUpdate,
     /// Write a theme file with this name that extends the theme in use.
     NewTheme(String),
     /// Add an agent of the user's: name, command, arguments of a new session
@@ -562,7 +573,9 @@ pub enum Outcome {
     Refuse(String),
 }
 
-/// Whether a command is asked for in steps.
+/// Whether a command is asked for in steps. (Restart to update is not: it is
+/// run as a command, which decides whether there is anything to ask, and then
+/// starts [`Command::RestartToUpdate`]'s questions itself.)
 pub fn is_flow(command: Command) -> bool {
     matches!(
         command,
@@ -624,6 +637,7 @@ pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
         Command::ChooseTheme => choose_theme(answers, world),
         Command::SetInterfaceSize => set_size(answers, world),
         Command::Quit => quit(answers, world),
+        Command::RestartToUpdate => restart_update(answers, world),
         Command::NewThemeFromCurrent => match answers {
             [] => text("Theme name", "My theme", Validate::Required),
             [name, ..] => Outcome::Run(Action::NewTheme(name.clone())),
@@ -1309,6 +1323,49 @@ fn quit(answers: &[String], world: &World) -> Outcome {
     }
 }
 
+/// Whether to restart into the update: always asked, because a restart ends
+/// every terminal, and it says how many that is.
+fn restart_update(answers: &[String], world: &World) -> Outcome {
+    let Some(version) = &world.update_ready else {
+        return Outcome::Refuse("No update is ready to install yet.".to_owned());
+    };
+    let busy = world.live.iter().filter(|session| session.busy).count();
+    let open = world.live.len();
+    match answers {
+        [] => choices(
+            "Restart to update?",
+            vec![
+                Choice::new(
+                    match (busy, open) {
+                        (0, 0) => format!(
+                            "Restart {} and update to {version}",
+                            crate::product::PRODUCT_NAME
+                        ),
+                        (1, _) => format!(
+                            "Restart and update to {version}: 1 running session will be closed."
+                        ),
+                        (busy, _) if busy > 1 => format!(
+                            "Restart and update to {version}: {busy} running sessions will be closed."
+                        ),
+                        (_, 1) => format!(
+                            "Restart and update to {version}: 1 open terminal will be closed."
+                        ),
+                        (_, open) => format!(
+                            "Restart and update to {version}: {open} open terminals will be closed."
+                        ),
+                    },
+                    "hangs the terminals up and starts the new version",
+                    "yes",
+                ),
+                Choice::new("Cancel", "keep working", "no"),
+            ],
+            Custom::No,
+        ),
+        [chosen, ..] if chosen == "yes" => Outcome::Run(Action::RestartToUpdate),
+        _ => Outcome::Run(Action::Nothing),
+    }
+}
+
 fn set_appearance(answers: &[String], world: &World) -> Outcome {
     match answers {
         [] => choices(
@@ -1569,6 +1626,7 @@ mod tests {
             prefs: Prefs::default(),
             repositories: Vec::new(),
             installed: Vec::new(),
+            update_ready: None,
         }
     }
 
@@ -1745,6 +1803,7 @@ mod tests {
         ));
         let unknown = super::World {
             installed: vec![],
+            update_ready: None,
             ..world.clone()
         };
         assert!(matches!(
@@ -2616,6 +2675,78 @@ mod tests {
         assert_eq!(
             advance(Command::Quit, &[], &idle),
             Outcome::Run(Action::Quit)
+        );
+    }
+
+    fn session(id: u64, busy: bool) -> LiveInfo {
+        LiveInfo {
+            id: LiveId(id),
+            label: "Claude Code".into(),
+            busy,
+        }
+    }
+
+    fn first_choice(world: &World) -> String {
+        match advance(Command::RestartToUpdate, &[], world) {
+            Outcome::Ask(Step {
+                kind: StepKind::Choices { choices, .. },
+                ..
+            }) => choices[0].label.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn restarting_to_update_needs_an_update_that_is_ready() {
+        let world = with(Prefs::default());
+        assert!(matches!(
+            advance(Command::RestartToUpdate, &[], &world),
+            Outcome::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn restarting_to_update_always_asks_and_names_what_it_closes() {
+        let mut world = with(Prefs::default()).with_update_ready(Some("0.2.1".into()));
+        assert_eq!(first_choice(&world), "Restart Leon and update to 0.2.1");
+        world.live = vec![session(1, true)];
+        assert_eq!(
+            first_choice(&world),
+            "Restart and update to 0.2.1: 1 running session will be closed."
+        );
+        world.live = vec![session(1, true), session(2, true), session(3, false)];
+        assert_eq!(
+            first_choice(&world),
+            "Restart and update to 0.2.1: 2 running sessions will be closed."
+        );
+        world.live = vec![session(1, false)];
+        assert_eq!(
+            first_choice(&world),
+            "Restart and update to 0.2.1: 1 open terminal will be closed."
+        );
+        world.live = vec![session(1, false), session(2, false)];
+        assert_eq!(
+            first_choice(&world),
+            "Restart and update to 0.2.1: 2 open terminals will be closed."
+        );
+        // The quit setting does not skip this question: a restart is not a quit.
+        world.prefs.quit = QuitConfirm::Never;
+        assert!(matches!(
+            advance(Command::RestartToUpdate, &[], &world),
+            Outcome::Ask(_)
+        ));
+    }
+
+    #[test]
+    fn the_answer_to_the_restart_question_is_read() {
+        let world = with(Prefs::default()).with_update_ready(Some("0.2.1".into()));
+        assert_eq!(
+            advance(Command::RestartToUpdate, &["yes".into()], &world),
+            Outcome::Run(Action::RestartToUpdate)
+        );
+        assert_eq!(
+            advance(Command::RestartToUpdate, &["no".into()], &world),
+            Outcome::Run(Action::Nothing)
         );
     }
 

@@ -103,6 +103,8 @@ pub enum Overlay {
     Pair,
     /// "Share this machine".
     Share,
+    /// The release notes of the version on offer.
+    Notes,
 }
 
 /// What the folder picker answered.
@@ -121,6 +123,9 @@ pub type Reveal = Rc<dyn Fn(&mut App, &std::path::Path)>;
 
 /// Brings an application forward, given the path of its bundle.
 pub type RevealApp = Rc<dyn Fn(&mut App, &str)>;
+
+/// Opens an address in the browser.
+pub type OpenUrl = Rc<dyn Fn(&mut App, &str)>;
 
 /// Shows the folder picker and says what was chosen.
 pub type PickFolder = Rc<dyn Fn(&mut App) -> Task<Picked>>;
@@ -199,6 +204,13 @@ pub struct Options {
     /// Connections to other computers and sharing this one; absent in tests
     /// that do not need them.
     pub remote: Option<Arc<crate::remote::Remote>>,
+    /// The updater of this install; absent in tests that do not need it.
+    pub updates: Option<Arc<crate::updates::Service>>,
+    /// Whether the first check and the later ones run on a timer. Tests turn
+    /// it off.
+    pub update_timer: bool,
+    /// Opens an address in the browser.
+    pub open_url: OpenUrl,
 }
 
 /// A `~/.ssh` that is not there: the home folder is unknown.
@@ -249,6 +261,9 @@ impl Default for Options {
                 None => Arc::new(NoSshDir),
             },
             remote: None,
+            updates: None,
+            update_timer: true,
+            open_url: Rc::new(|cx, url| cx.open_url(url)),
             reveal_app: Rc::new(|_, bundle| {
                 // `open` on a running application brings it forward.
                 #[cfg(target_os = "macos")]
@@ -369,6 +384,8 @@ pub struct Shell {
     pub(super) pair_ui: super::pair::PairUi,
     /// "Share this machine".
     pub(super) share_ui: super::share::ShareUi,
+    /// Updates: what the window knows of them.
+    pub(super) updates: super::updates_view::UpdateUi,
     /// The sidebar's filter field, the text it holds, and what that leaves of
     /// the tree (`None` while it is empty).
     pub(super) filter_input: Entity<InputState>,
@@ -582,6 +599,7 @@ impl Shell {
             usage: super::usage_view::UsageUi::default(),
             pair_ui,
             share_ui: super::share::ShareUi::default(),
+            updates: super::updates_view::UpdateUi::default(),
             filter_input,
             filter_query: String::new(),
             filter: None,
@@ -617,6 +635,7 @@ impl Shell {
         shell.watch_elsewhere(window, cx);
         shell.usage_reload();
         shell.watch_usage(window, cx);
+        shell.watch_updates(window, cx);
         // Values of settings.json that could not be used were read as defaults.
         let problems = settings::take_problems(cx);
         shell.report_problems(&problems);
@@ -855,6 +874,7 @@ impl Shell {
             chosen.interface_scale,
         )
         .with_prefs(Self::step_prefs(cx))
+        .with_update_ready(self.ready_update_version())
         .with_installed(self.installed_agents())
         .with_repositories(
             self.connect_ui
@@ -1716,6 +1736,11 @@ impl Shell {
                 self.overlay = Overlay::About;
                 self.focus.focus(window, cx);
             }
+            C::CheckForUpdates => self.check_for_updates(cx),
+            C::RestartToUpdate => self.restart_to_update(window, cx),
+            C::ShowReleaseNotes => self.show_release_notes(window, cx),
+            C::SkipVersion => self.skip_version(cx),
+            C::OpenDownloadPage => self.open_download_page(cx),
             C::NewThemeFromCurrent => self.begin_flow(command, window, cx),
             C::ExportTheme => self.export_theme(cx),
             C::OpenThemesFolder => self.open_themes_folder(cx),
@@ -1753,6 +1778,7 @@ impl Shell {
                 Overlay::Shortcuts
                 | Overlay::Menu
                 | Overlay::About
+                | Overlay::Notes
                 | Overlay::Problems
                 | Overlay::Connect
                 | Overlay::Usage
@@ -1789,7 +1815,7 @@ impl Shell {
             Overlay::Connect => self.close_connect(window, cx),
             Overlay::Pair => self.close_pair(window, cx),
             Overlay::Share => self.close_share(window, cx),
-            Overlay::About | Overlay::Problems | Overlay::Usage => {
+            Overlay::About | Overlay::Notes | Overlay::Problems | Overlay::Usage => {
                 self.overlay = Overlay::None;
                 self.focus.focus(window, cx);
             }
@@ -2175,6 +2201,15 @@ impl Shell {
     /// programs keep running there), saves what is kept, and ends the
     /// application.
     pub(super) fn quit_now(&mut self, cx: &mut Context<Self>) {
+        // A ready update is put in place on the way out when the settings
+        // say so and nothing is running: the next start is the new version.
+        self.install_on_quit(cx);
+        self.quit_now_without_update(cx);
+    }
+
+    /// [`Shell::quit_now`] without looking at updates: the restart that has
+    /// just installed one ends here.
+    pub(super) fn quit_now_without_update(&mut self, cx: &mut Context<Self>) {
         self.flush(cx);
         (self.options.quit)(cx);
     }
@@ -2263,6 +2298,7 @@ impl Shell {
             Overlay::Usage => self.render_usage(colours, cx).into_any_element(),
             Overlay::Pair => self.render_pair(colours, cx).into_any_element(),
             Overlay::Share => self.render_share(colours, cx).into_any_element(),
+            Overlay::Notes => self.render_notes(colours, cx).into_any_element(),
         };
         let top = match self.overlay {
             Overlay::Palette => self.palette_top(),

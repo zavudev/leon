@@ -29,6 +29,13 @@
 //! is known. It prints nothing that identifies an account or a place (no
 //! account, no e-mail, no token, no path), and it calls a network source only
 //! when `--network <agent>` names it.
+//!
+//! `--diagnose update` makes the real update check against the GitHub
+//! releases (`leon_update::diagnose`) and prints the running version, the
+//! latest release, the file it would pick for this platform with its size,
+//! whether `SHA256SUMS` lists it, and the decision. `--pretend-version`
+//! compares with another version, and `--download` fetches, verifies and
+//! unpacks the file into a folder of its own, installing nothing.
 
 use crate::cli::Diagnose;
 use crate::launch::{self, Launch, RealSystem, System};
@@ -669,6 +676,92 @@ fn run_with(args: &Diagnose, system: &dyn System, settle: Duration) -> i32 {
             1
         }
     }
+}
+
+/// Runs `--diagnose update`: the real check, and with `--download` the real
+/// download into a scratch folder, verified and unpacked, never installed.
+pub fn run_update(request: &crate::cli::UpdateDiagnose) -> i32 {
+    use leon_update::{Install, Platform, SystemTools, Tools};
+    println!("leon diagnose update");
+    if let Some(file) = &request.check_archive {
+        return match leon_update::diagnose::check_archive(file, &SystemTools) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{line}");
+                }
+                0
+            }
+            Err(error) => {
+                println!("{error}");
+                1
+            }
+        };
+    }
+    let running = crate::product::VERSION;
+    println!("running: {} {running}", crate::product::PRODUCT_NAME);
+    let install = leon_update::install::detect();
+    println!(
+        "this install: {}",
+        match &install {
+            Install::Updatable(target) => format!(
+                "{} is replaced in place by an update ({})",
+                target.path.display(),
+                match target.kind {
+                    leon_update::package::Kind::Bundle => "an application bundle",
+                    leon_update::package::Kind::File => "a program file",
+                }
+            ),
+            Install::Manual(why) => format!("not replaced by Leon: {}", why.explain()),
+        }
+    );
+    let current = request.pretend_version.as_deref().unwrap_or(running);
+    if request.pretend_version.is_some() {
+        println!("pretending to run version {current} for the comparison");
+    }
+    let Some(current) = leon_update::version::parse_running(current) else {
+        println!("{current:?} is not a version");
+        return 1;
+    };
+    let platform = match request.platform.as_deref() {
+        Some(id) => Platform::parse(id).unwrap_or_else(Platform::current),
+        None => Platform::current(),
+    };
+    let tools = SystemTools;
+    let running_signature = match install.target() {
+        Some(target) => tools.signature(&target.path).unwrap_or_default(),
+        None => leon_update::tools::Signature::none(),
+    };
+    let download_to = request.download.then(|| {
+        request
+            .dir
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().join("leon-update-diagnose"))
+    });
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            println!("cannot start a runtime: {error}");
+            return 1;
+        }
+    };
+    let report = runtime.block_on(leon_update::diagnose::run(
+        &leon_update::CurlHttp::new(),
+        &tools,
+        &leon_update::diagnose::Request {
+            current,
+            prereleases: request.prerelease,
+            platform,
+            download_to,
+            running: running_signature,
+        },
+    ));
+    for line in &report.lines {
+        println!("{line}");
+    }
+    i32::from(!report.ok)
 }
 
 #[cfg(test)]

@@ -286,6 +286,8 @@ struct Harness {
     ssh: Arc<tests_connect::FakeSsh>,
     /// What the key file dialog answers.
     key_answer: Rc<std::cell::RefCell<Picked>>,
+    /// The addresses the browser was asked to open.
+    urls: Rc<std::cell::RefCell<Vec<String>>>,
 }
 
 /// Opens the window over an in-memory store, with nothing waiting on the
@@ -316,6 +318,18 @@ fn open_full(
     settings_file: Option<std::path::PathBuf>,
     picked: Picked,
     before: impl FnOnce(&Store),
+) -> Harness {
+    open_core(cx, runner, settings_file, picked, before, |_| None)
+}
+
+/// [`open_full`] with an updater: `updates` is given the harness's runtime.
+fn open_core(
+    cx: &mut TestAppContext,
+    runner: ScriptedRunner,
+    settings_file: Option<std::path::PathBuf>,
+    picked: Picked,
+    before: impl FnOnce(&Store),
+    updates: impl FnOnce(&tokio::runtime::Handle) -> Option<Arc<crate::updates::Service>>,
 ) -> Harness {
     cx.update(|cx| prepare(cx, settings_file));
     // A current-thread runtime only makes progress inside `block_on`, on this
@@ -348,6 +362,9 @@ fn open_full(
     let ssh = Arc::new(tests_connect::FakeSsh::default());
     let key_answer = Rc::new(std::cell::RefCell::new(Picked::Cancelled));
     let key_answer_in = key_answer.clone();
+    let urls = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let urls_in = urls.clone();
+    let updates = updates(runtime.handle());
     let options = Options {
         backend: computer.clone(),
         ready: READY_NOW,
@@ -374,6 +391,9 @@ fn open_full(
         pick_key: Rc::new(move |_| Task::ready(key_answer_in.borrow().clone())),
         ssh_dir: ssh.clone(),
         remote: None,
+        updates,
+        update_timer: false,
+        open_url: Rc::new(move |_, url| urls_in.borrow_mut().push(url.to_owned())),
     };
     let (window, shell) = cx.update(|cx| {
         let engine = engine.clone();
@@ -405,6 +425,7 @@ fn open_full(
         computer,
         ssh,
         key_answer,
+        urls,
     }
 }
 
@@ -5858,6 +5879,9 @@ mod tests_connect;
 
 #[path = "tests_settings.rs"]
 mod tests_settings;
+
+#[path = "tests_updates.rs"]
+mod tests_updates;
 
 #[path = "tests_settings_layout.rs"]
 mod tests_settings_layout;

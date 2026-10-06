@@ -275,6 +275,18 @@ pub enum Command {
     CloseWindow,
     /// The About panel.
     About,
+    // ----- updates
+    /// Asks GitHub whether a newer version is out.
+    CheckForUpdates,
+    /// Restarts into the update that is ready (downloads it first when it is
+    /// only on offer).
+    RestartToUpdate,
+    /// The release notes of the version on offer.
+    ShowReleaseNotes,
+    /// Stops offering the version that is on offer.
+    SkipVersion,
+    /// Opens the release's page in the browser, to download it by hand.
+    OpenDownloadPage,
     // ----- terminal: find, clear, copy, save
     /// Opens the find bar of the terminal that has the keyboard.
     Find,
@@ -1701,6 +1713,46 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::CheckForUpdates,
+        "Check for updates…",
+        S::Application,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::RestartToUpdate,
+        "Restart to update",
+        S::Application,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::ShowReleaseNotes,
+        "Show release notes",
+        S::Application,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::SkipVersion,
+        "Skip this version",
+        S::Application,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::OpenDownloadPage,
+        "Open the download page",
+        S::Application,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::Close,
         "Close, or go back",
         S::Application,
@@ -1741,6 +1793,11 @@ pub fn keywords(command: Command) -> &'static str {
         C::ReloadThemes => "refresh themes custom files toml",
         C::ShowThemeProblems => "errors warnings invalid validation themes report debug",
         C::Quit => "exit close application",
+        C::CheckForUpdates => "update upgrade new version latest release github",
+        C::RestartToUpdate => "update upgrade install relaunch restart new version",
+        C::ShowReleaseNotes => "changelog what's new changes update version",
+        C::SkipVersion => "ignore dismiss update later version",
+        C::OpenDownloadPage => "github releases browser manual update upgrade",
         C::Find => "search terminal scrollback",
         C::ClearBuffer | C::ClearScrollback => "reset empty erase terminal",
         C::PasteText | C::PasteImage => "clipboard image picture screenshot ctrl+v",
@@ -1967,6 +2024,11 @@ mod tests {
             C::Quit,
             C::CloseWindow,
             C::About,
+            C::CheckForUpdates,
+            C::RestartToUpdate,
+            C::ShowReleaseNotes,
+            C::SkipVersion,
+            C::OpenDownloadPage,
             C::Find,
             C::FindNext,
             C::FindPrevious,
@@ -2083,6 +2145,11 @@ mod tests {
                 | C::Quit
                 | C::CloseWindow
                 | C::About
+                | C::CheckForUpdates
+                | C::RestartToUpdate
+                | C::ShowReleaseNotes
+                | C::SkipVersion
+                | C::OpenDownloadPage
                 | C::Find
                 | C::FindNext
                 | C::FindPrevious

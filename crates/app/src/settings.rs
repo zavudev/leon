@@ -180,6 +180,12 @@ fn read_store(path: &Path) -> (Store, Vec<Problem>, Option<Vec<u8>>) {
     }
 }
 
+/// The settings of a file, read without a window: what the start of the
+/// application needs to know before anything is opened.
+pub fn stored(path: &Path) -> Store {
+    read_store(path).0
+}
+
 /// Writes a file whole, through a temporary one, so a crash midway never
 /// leaves half a file.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {

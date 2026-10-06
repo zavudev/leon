@@ -852,6 +852,9 @@ impl Shell {
                     .text_color(colour)
                     .child(text),
             );
+        if let Some(item) = self.render_update_item(colours, cx) {
+            bar = bar.child(item);
+        }
         if settings::flag(cx, "usage_bar") && self.engine.collects_usage() {
             bar = bar.child(self.render_usage_meters(colours, cx));
         }

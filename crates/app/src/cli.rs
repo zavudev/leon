@@ -26,6 +26,13 @@
 //! a credential and a network call follow the settings (on unless Settings,
 //! Usage turned them off); `--network` and `--no-network` override them for
 //! this run.
+//! `--diagnose update [--pretend-version <x.y.z>] [--download] [--dir <path>]
+//! [--prerelease] [--platform <id>]` makes the real update check against
+//! the GitHub releases and prints what the updater would do (the file it
+//! would take for this platform, whether `SHA256SUMS` lists it, the decision);
+//! `--download` also fetches the file into `--dir`, verifies and unpacks it
+//! there, and never installs anything. `--diagnose update --check-archive
+//! <file>` checks a built release archive with the updater's own extraction.
 
 use crate::product;
 use crate::settings::AppearanceChoice;
@@ -66,12 +73,31 @@ pub enum Command {
         /// The network sources switched off for this run.
         no_network: Vec<AgentId>,
     },
+    /// Make the real update check and print what the updater would do.
+    DiagnoseUpdate(UpdateDiagnose),
     /// Run the checklist of "Connect a machine" against a destination and
     /// print each check with its diagnosis.
     DiagnoseConnect {
         /// `user@host[:port]`, as typed in the screen.
         destination: String,
     },
+}
+
+/// What the hidden `--diagnose update` run is asked to do.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdateDiagnose {
+    /// Compare the release with this version instead of the running one.
+    pub pretend_version: Option<String>,
+    /// Also download, verify and unpack the file (never install it).
+    pub download: bool,
+    /// Where to download to; a folder under the temporary one when absent.
+    pub dir: Option<PathBuf>,
+    /// Follow the pre-release channel.
+    pub prerelease: bool,
+    /// The platform to pick the file for, as a release names it.
+    pub platform: Option<String>,
+    /// Check a built release archive instead of asking GitHub.
+    pub check_archive: Option<PathBuf>,
 }
 
 /// What the hidden `--diagnose terminal` run is asked to do.
@@ -159,6 +185,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
     let mut resume = false;
     let mut elsewhere = false;
     let mut usage = false;
+    let mut update: Option<UpdateDiagnose> = None;
     let mut network: Vec<AgentId> = Vec::new();
     let mut no_network: Vec<AgentId> = Vec::new();
     let mut agent = AgentId::CLAUDE;
@@ -205,6 +232,10 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                     usage = true;
                     continue;
                 }
+                if what == "update" {
+                    update = Some(UpdateDiagnose::default());
+                    continue;
+                }
                 if what == "connect" {
                     let destination = value("user@host[:port]")?;
                     connect = Some(destination);
@@ -212,7 +243,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                 }
                 if what != "terminal" {
                     return Err(format!(
-                        "Cannot diagnose {what:?}: only \"terminal\", \"folder-dialog\", \"resume\", \"sessions-elsewhere\", \"usage\" and \"connect\"."
+                        "Cannot diagnose {what:?}: only \"terminal\", \"folder-dialog\", \"resume\", \"sessions-elsewhere\", \"usage\", \"update\" and \"connect\"."
                     ));
                 }
                 diagnose = Some(Diagnose {
@@ -220,6 +251,40 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                     input: None,
                     timeout: 10,
                 });
+            }
+            "--pretend-version" | "--dir" | "--platform" | "--check-archive" => {
+                let text = value("a value")?;
+                let Some(update) = update.as_mut() else {
+                    return Err(format!("{name} only goes with --diagnose update."));
+                };
+                match name.as_str() {
+                    "--pretend-version" => {
+                        if leon_update::version::parse_running(&text).is_none() {
+                            return Err(format!("{text:?} is not a version like 0.0.9."));
+                        }
+                        update.pretend_version = Some(text);
+                    }
+                    "--dir" => update.dir = Some(PathBuf::from(text)),
+                    "--platform" => {
+                        if leon_update::Platform::parse(&text).is_none() {
+                            return Err(format!(
+                                "{text:?} is not a platform: use macos-aarch64, macos-x86_64, linux-x86_64 or windows-x86_64."
+                            ));
+                        }
+                        update.platform = Some(text);
+                    }
+                    _ => update.check_archive = Some(PathBuf::from(text)),
+                }
+            }
+            "--download" | "--prerelease" => {
+                let Some(update) = update.as_mut() else {
+                    return Err(format!("{name} only goes with --diagnose update."));
+                };
+                if name == "--download" {
+                    update.download = true;
+                } else {
+                    update.prerelease = true;
+                }
             }
             "--network" => {
                 let text = value("an agent id")?;
@@ -311,6 +376,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
             }
             other => return Err(format!("Unknown option {other:?}.")),
         }
+    }
+    if let Some(update) = update {
+        return Ok(Command::DiagnoseUpdate(update));
     }
     if usage {
         return Ok(Command::DiagnoseUsage {
@@ -404,6 +472,39 @@ mod tests {
         );
         assert!(parsed(&["--network", "claude"]).is_err());
         assert!(parsed(&["--no-network", "all"]).is_err());
+    }
+
+    #[test]
+    fn diagnose_update_takes_its_options_and_only_then() {
+        assert_eq!(
+            parsed(&["--diagnose", "update"]),
+            Ok(Command::DiagnoseUpdate(UpdateDiagnose::default()))
+        );
+        assert_eq!(
+            parsed(&[
+                "--diagnose",
+                "update",
+                "--pretend-version",
+                "0.0.9",
+                "--download",
+                "--dir=/tmp/x",
+                "--prerelease",
+                "--platform",
+                "linux-x86_64"
+            ]),
+            Ok(Command::DiagnoseUpdate(UpdateDiagnose {
+                pretend_version: Some("0.0.9".into()),
+                download: true,
+                dir: Some(PathBuf::from("/tmp/x")),
+                prerelease: true,
+                platform: Some("linux-x86_64".into()),
+                check_archive: None,
+            }))
+        );
+        assert!(parsed(&["--diagnose", "update", "--pretend-version", "v1"]).is_err());
+        assert!(parsed(&["--diagnose", "update", "--platform", "amiga"]).is_err());
+        assert!(parsed(&["--download"]).is_err());
+        assert!(parsed(&["--pretend-version", "0.0.9"]).is_err());
     }
 
     #[test]

@@ -122,6 +122,9 @@ impl Shell {
             "about" => {
                 self.run_command(C::About, window, cx);
             }
+            "check_for_updates" => {
+                self.run_command(C::CheckForUpdates, window, cx);
+            }
             "open_data_folder" => self.reveal_settings_folder(cx),
             "open_themes_folder" => self.open_themes_folder(cx),
             "reset_all" => {

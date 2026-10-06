@@ -42,6 +42,7 @@ mod terminal_tools;
 mod terminals;
 mod themes;
 mod tree;
+mod updates_view;
 mod usage_view;
 mod widgets;
 mod workspace;

@@ -37,6 +37,7 @@ mod settings;
 mod share;
 mod theme;
 mod ui;
+mod updates;
 mod usage;
 
 use gpui_kit::{
@@ -79,6 +80,9 @@ fn main() {
         Ok(cli::Command::Diagnose(request)) => {
             std::process::exit(diagnose::run(&request));
         }
+        Ok(cli::Command::DiagnoseUpdate(request)) => {
+            std::process::exit(diagnose::run_update(&request));
+        }
         Ok(cli::Command::DiagnoseFolderDialog { timeout }) => {
             std::process::exit(diagnose::run_folder_dialog(timeout));
         }
@@ -104,6 +108,10 @@ fn main() {
         }
     };
 
+    // A build that was started by "Restart to update" waits until the one
+    // before it has let go of the data (see `leon_update::launch`).
+    leon_update::launch::wait_for_parent(Duration::from_secs(20));
+
     let data_dir = options.data_dir.clone().unwrap_or_else(product::data_dir);
     if let Err(error) = std::fs::create_dir_all(&data_dir) {
         eprintln!(
@@ -112,6 +120,24 @@ fn main() {
             data_dir.display()
         );
         std::process::exit(1);
+    }
+
+    // Updates, before anything is opened: what an earlier run left is looked
+    // after, and an update that is ready is put in place, started and watched
+    // (the automatic mode); this process then ends.
+    let updater = updates::build_updater(&data_dir);
+    let update_mode = updates::Mode::parse(
+        settings::stored(&data_dir.join(settings::FILE_NAME))
+            .value("updates_mode")
+            .as_text()
+            .unwrap_or_default(),
+    );
+    let relaunch = leon_update::launch::spawn_with(std::env::args_os().skip(1).collect());
+    if let leon_update::launch::Outcome::Exit(code) = updater
+        .startup()
+        .run(update_mode == updates::Mode::Automatic, &relaunch)
+    {
+        std::process::exit(code);
     }
     let store = match Store::open(data_dir.join("leon.db")) {
         Ok(store) => store,
@@ -194,6 +220,8 @@ fn main() {
         handle: runtime.handle().clone(),
     });
     let backend = Rc::new(remote::RoutingBackend::new(hub, runtime.handle().clone()));
+    let update_service = updates::Service::with_updater(updater, runtime.handle().clone());
+    let update_service_in = update_service.clone();
     // What the store holds is shown at once; once the settings are read (they
     // may say not to) the engine brings it up to date.
     let started = engine.clone();
@@ -258,12 +286,22 @@ fn main() {
                     let options = ui::Options {
                         backend: backend.clone(),
                         remote: Some(remote_services.clone()),
+                        updates: Some(update_service_in.clone()),
                         ..ui::Options::default()
                     };
                     ui::Shell::new(engine, options, window, cx)
                 })
             })
             .expect("the main window opens");
+
+            // A few seconds into a run that is the first after an update, the
+            // update is confirmed: the version before is let go of.
+            let confirming = update_service_in.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs(4)).await;
+                confirming.confirm_started();
+            })
+            .detach();
 
             // Closing the window ends the application on every platform.
             cx.on_window_closed(|cx, _| {
@@ -277,5 +315,17 @@ fn main() {
 
     // Whatever the engine was doing is already in the store; stopping its
     // tasks with the runtime loses nothing.
-    runtime.shutdown_background();
+    runtime.shutdown_timeout(Duration::from_secs(2));
+
+    // "Restart to update" was confirmed: the new build is started, told to
+    // wait for this process to let go (it has), and watched until it says it
+    // is up; if it does not come up, the old one is put back and started.
+    if let Some(version) = update_service.take_restart() {
+        let startup = update_service.updater().startup();
+        let code = match leon_update::launch::hand_over(&startup, &version, &relaunch) {
+            leon_update::launch::Outcome::Exit(code) => code,
+            leon_update::launch::Outcome::Continue => 0,
+        };
+        std::process::exit(code);
+    }
 }
