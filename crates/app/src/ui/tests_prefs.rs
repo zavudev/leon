@@ -548,6 +548,8 @@ fn quit_confirmation_never_quits_without_asking(cx: &mut TestAppContext) {
     h.press_chord("cmd-q", "ctrl-shift-q", cx);
     // No question; the running agent is given its chance to save first, and
     // the quit follows within the grace (never held up longer).
+    // Let the watcher register its timer before the clock moves.
+    cx.run_until_parked();
     cx.executor()
         .advance_clock(std::time::Duration::from_secs(5));
     cx.run_until_parked();

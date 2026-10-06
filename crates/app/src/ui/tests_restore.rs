@@ -613,8 +613,12 @@ fn agent_in_front(cx: &mut TestAppContext) -> (Harness, tempfile::TempDir, Strin
     (h, dir, path)
 }
 
+/// Asks to quit and lets the watcher it started register its timer: the
+/// clock is only advanced after that, so no stage depends on whether some
+/// other thread's wake-up happened to run the executor first.
 fn quit(h: &Harness, cx: &mut TestAppContext) {
     cx.update(|cx| h.shell.update(cx, |s, cx| s.quit_now(cx)));
+    cx.run_until_parked();
 }
 
 fn pass(cx: &mut TestAppContext, millis: u64) {
@@ -686,4 +690,77 @@ fn the_state_written_before_the_agents_leave_still_names_them(cx: &mut TestAppCo
     assert!(state.clean_shutdown);
     assert_eq!(state.terminals[0].agent.as_deref(), Some("claude"));
     assert_eq!(state.terminals[0].session.as_deref(), Some("claude-new"));
+}
+
+/// How the agent leaves, and when, in laps of the watcher.
+#[derive(Clone, Copy, Debug)]
+enum Leave {
+    Never,
+    Foreground(u64),
+    Exit(u64),
+}
+
+const LAP: u64 = 50;
+
+/// One quit: the agent leaves as described; the quit must complete, once,
+/// and never later than the grace, whatever the order of the events.
+fn quit_with(cx: &mut TestAppContext, leave: Leave) {
+    let (h, _dir, _path) = agent_in_front(cx);
+    let script = super::live::script_of(&h, 1);
+    quit(&h, cx);
+    let grace = 500; // the harness's `quit_grace`
+    let at = match leave {
+        Leave::Never => None,
+        Leave::Foreground(lap) | Leave::Exit(lap) => Some(lap * LAP),
+    };
+    let mut now = 0;
+    while now <= grace + LAP {
+        if at == Some(now) {
+            match leave {
+                Leave::Foreground(_) => script.set_foreground(true),
+                Leave::Exit(_) => script.exit(0),
+                Leave::Never => {}
+            }
+            cx.run_until_parked();
+        }
+        let done = h.quits.get();
+        if let Some(left) = at.filter(|left| *left <= grace) {
+            if now >= left {
+                assert_eq!(
+                    done, 1,
+                    "{leave:?}: gone at {left} ms, still waiting at {now} ms"
+                );
+            } else if now < left {
+                assert_eq!(
+                    done, 0,
+                    "{leave:?}: quit before the agent left, at {now} ms"
+                );
+            }
+        }
+        if now > grace {
+            break;
+        }
+        pass(cx, LAP);
+        now += LAP;
+    }
+    pass(cx, LAP);
+    assert_eq!(
+        h.quits.get(),
+        1,
+        "{leave:?}: the quit must complete once, within the grace"
+    );
+    // And it is never repeated.
+    pass(cx, 2_000);
+    assert_eq!(h.quits.get(), 1, "{leave:?}: the quit ran twice");
+}
+
+#[gpui_kit::test]
+fn the_quit_always_completes_within_the_grace_whenever_the_agent_leaves_or_never(
+    cx: &mut TestAppContext,
+) {
+    quit_with(cx, Leave::Never);
+    for lap in 0..=11 {
+        quit_with(cx, Leave::Foreground(lap));
+        quit_with(cx, Leave::Exit(lap));
+    }
 }

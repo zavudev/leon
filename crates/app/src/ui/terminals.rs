@@ -437,6 +437,10 @@ impl Shell {
     /// What changed in a terminal's state or output: the agent phase, the
     /// state the sidebar shows.
     fn live_changed(&mut self, id: LiveId, cx: &mut Context<Self>) {
+        // While quitting, an agent leaving the terminal ends the wait at once.
+        if self.closing.quitting {
+            self.closing_look(cx);
+        }
         let Some(session) = self.live.get_mut(id) else {
             return;
         };
@@ -624,6 +628,10 @@ impl Shell {
                     if !info.success() {
                         self.flash_error(cx);
                     }
+                }
+                // While quitting, the last agent leaving ends the wait.
+                if self.closing.quitting {
+                    self.closing_look(cx);
                 }
                 // The agent ended: its session is complete.
                 self.request_import(cx);

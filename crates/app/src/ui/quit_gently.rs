@@ -32,6 +32,8 @@ pub struct Closing {
     pub quitting: bool,
     task: Option<Task<()>>,
     terminated: bool,
+    /// When the quit began, by the executor's clock (the one tests advance).
+    began: Option<std::time::Instant>,
 }
 
 impl Shell {
@@ -92,26 +94,45 @@ impl Shell {
                     .write(format!("{line}\r").into_bytes());
             }
         }
-        let (wait, grace) = (self.options.quit_gesture_wait, self.options.quit_grace);
-        self.closing.task = Some(cx.spawn(async move |this, cx| {
-            let mut elapsed = Duration::ZERO;
-            loop {
-                cx.background_executor().timer(POLL).await;
-                elapsed += POLL;
-                let finished = this
-                    .update(cx, |this, cx| this.closing_step(elapsed, wait, grace, cx))
-                    .unwrap_or(true);
-                if finished {
-                    this.update(cx, |this, cx| {
-                        this.flush(cx);
-                        (this.options.quit)(cx);
-                    })
-                    .ok();
-                    return;
-                }
+        self.closing.began = Some(cx.background_executor().now());
+        // The watcher: looks every POLL, and again at the end of the grace,
+        // whatever else happened. Time is the executor's clock, not a count
+        // of laps, so a late wake-up shortens the wait and never stretches
+        // it. Terminals ending are looked at too (see `closing_look`).
+        self.closing.task = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(POLL).await;
+            let done = this
+                .update(cx, |this, cx| this.closing_look(cx))
+                .unwrap_or(true);
+            if done {
+                return;
             }
         }));
         false
+    }
+
+    /// Looks at the agents now: ends the application when none is left or
+    /// the grace is over. `true` once it did. Called by the timer and by
+    /// every terminal's end, so the last agent leaving is never waited for.
+    pub(super) fn closing_look(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(began) = self.closing.began else {
+            return false;
+        };
+        if self.closing.task.is_none() {
+            return true;
+        }
+        let elapsed = cx
+            .background_executor()
+            .now()
+            .saturating_duration_since(began);
+        let (wait, grace) = (self.options.quit_gesture_wait, self.options.quit_grace);
+        if !self.closing_step(elapsed, wait, grace, cx) {
+            return false;
+        }
+        self.closing.task = None;
+        self.flush(cx);
+        (self.options.quit)(cx);
+        true
     }
 
     /// One look while closing: `true` when it is time to hang up what is left.

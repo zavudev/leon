@@ -5744,6 +5744,11 @@ mod live {
             wait_until(&h, cx, "the exit", |h, cx| {
                 state(h, cx, 1) == LiveState::Exited(7)
             });
+            // The terminal's own exit is read before the window's event that
+            // words the status has run: wait for that, not for a moment.
+            wait_until(&h, cx, "the status line", |h, _| {
+                h.status().contains("exited with code 7")
+            });
             assert!(h.status().contains("exited with code 7"), "{}", h.status());
         }
 
