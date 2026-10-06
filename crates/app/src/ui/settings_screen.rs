@@ -82,6 +82,8 @@ pub struct SettingsUi {
     /// The project roots that were removed, read from the store when the
     /// screen opens, a section is chosen and the store changes.
     pub dismissed: Vec<Dismissed>,
+    /// Whether the agents that are not installed are listed in Agents.
+    pub agents_expanded: bool,
 }
 
 impl SettingsUi {
@@ -99,6 +101,7 @@ impl SettingsUi {
             return_from_palette: false,
             restore_filter: false,
             dismissed: Vec::new(),
+            agents_expanded: false,
         }
     }
 }
@@ -114,6 +117,18 @@ pub enum Entry {
     Machine(Machine),
     /// A project root that was removed and is not adopted again by itself.
     Dismissed(Dismissed),
+    /// The button that adds an agent of the user's.
+    AddAgent,
+    /// An agent of the user's, with its removal.
+    CustomAgent(leon_core::AgentId),
+    /// The agents that are not installed here, folded into one line that
+    /// shows them when chosen.
+    MoreAgents {
+        /// How many are folded.
+        count: usize,
+        /// Whether they are shown now.
+        expanded: bool,
+    },
 }
 
 /// A project root somebody removed.
@@ -145,7 +160,7 @@ pub fn entries(section: Section, query: &str, mac: bool) -> Vec<Entry> {
             other => schema::of_section(other).map(Entry::Setting).collect(),
         };
     }
-    let mut found: Vec<(u32, Entry)> = schema::SETTINGS
+    let mut found: Vec<(u32, Entry)> = schema::settings()
         .iter()
         .filter(|def| def.platform.here())
         .filter_map(|def| {
@@ -195,6 +210,9 @@ impl Shell {
                     .map(Entry::Machine),
             );
         }
+        if query.is_empty() && ui.section == Section::Agents {
+            list = self.fold_agents(list);
+        }
         if here(Section::Projects) {
             list.extend(
                 ui.dismissed
@@ -205,6 +223,52 @@ impl Shell {
             );
         }
         list
+    }
+
+    /// The Agents section with what is not installed on this computer folded:
+    /// the settings of the installed agents (and the shared ones), then your
+    /// own agents with the button that adds one, then one line for the rest.
+    fn fold_agents(&self, list: Vec<Entry>) -> Vec<Entry> {
+        let installed: Vec<leon_core::AgentId> = self
+            .installed_agents()
+            .into_iter()
+            .find(|(id, _)| *id == MachineId::local())
+            .map(|(_, agents)| agents)
+            .unwrap_or_default();
+        let mut shown = Vec::new();
+        let mut hidden: Vec<Entry> = Vec::new();
+        let mut folded = std::collections::BTreeSet::new();
+        for entry in list {
+            match entry {
+                Entry::Setting(def) if def.key == "custom_agents" => {}
+                Entry::Setting(def) => match def.agent {
+                    Some(agent) if !installed.contains(&agent) => {
+                        folded.insert(agent);
+                        hidden.push(Entry::Setting(def));
+                    }
+                    _ => shown.push(Entry::Setting(def)),
+                },
+                other => shown.push(other),
+            }
+        }
+        shown.push(Entry::AddAgent);
+        shown.extend(
+            leon_core::agent::all()
+                .into_iter()
+                .filter(|spec| spec.custom)
+                .map(|spec| Entry::CustomAgent(spec.id)),
+        );
+        if !folded.is_empty() {
+            let expanded = self.settings_ui.agents_expanded;
+            shown.push(Entry::MoreAgents {
+                count: folded.len(),
+                expanded,
+            });
+            if expanded {
+                shown.extend(hidden);
+            }
+        }
+        shown
     }
 
     /// Reads the removed project roots of every machine again.
@@ -492,6 +556,10 @@ impl Shell {
                 self.settings_remove_machine(machine.id.clone(), window, cx);
                 return;
             }
+            ("backspace" | "delete" | "x", Some(Entry::CustomAgent(agent))) => {
+                self.settings_remove_agent(*agent, cx);
+                return;
+            }
             _ => {}
         }
         match key {
@@ -521,8 +589,28 @@ impl Shell {
                 self.engine.submit(crate::engine::Op::Probe(machine.id));
             }
             Some(Entry::Dismissed(dismissed)) => self.settings_restore_root(dismissed),
-            Some(Entry::Key(_)) | None => {}
+            Some(Entry::AddAgent) => self.begin_flow(crate::keys::Command::AddAgent, window, cx),
+            Some(Entry::MoreAgents { expanded, .. }) => {
+                self.settings_ui.agents_expanded = !expanded;
+                cx.notify();
+            }
+            Some(Entry::CustomAgent(_) | Entry::Key(_)) | None => {}
         }
+    }
+
+    /// Removes an agent of the user's, from its line in Settings.
+    pub(super) fn settings_remove_agent(
+        &mut self,
+        agent: leon_core::AgentId,
+        cx: &mut Context<Self>,
+    ) {
+        let name = agent.name();
+        settings::remove_custom_agent(cx, agent);
+        self.engine.report(
+            crate::engine::StatusKind::Info,
+            format!("{name} was removed from your agents."),
+        );
+        cx.notify();
     }
 
     /// Opens the Connect screen on the machine, pre-filled.
@@ -959,6 +1047,101 @@ impl Shell {
             }
             Entry::Setting(def) => self.render_setting(base, def, index, colours, cx),
             Entry::Machine(machine) => self.render_machine(base, machine, index, colours, cx),
+            Entry::AddAgent => {
+                let selector = format!("settings-add-agent-{index}");
+                base.debug_selector(move || selector.clone())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(div().child("Your own agents"))
+                            .child(
+                                div()
+                                    .text_size(metrics::TEXT_SMALL())
+                                    .text_color(colours.text_muted)
+                                    .child("Any command line tool: a name, the command, its arguments and how to resume a session."),
+                            ),
+                    )
+                    .child(
+                        mono("ADD AN AGENT…".to_owned())
+                            .px(px(8.))
+                            .py(px(3.))
+                            .rounded(metrics::RADIUS())
+                            .border_1()
+                            .border_color(colours.elevated_border)
+                            .cursor_pointer()
+                            .debug_selector(move || format!("settings-add-agent-button-{index}"))
+                            .on_mouse_down(
+                                gpui_kit::MouseButton::Left,
+                                cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.settings_select(index, window, cx);
+                                    this.begin_flow(crate::keys::Command::AddAgent, window, cx);
+                                }),
+                            ),
+                    )
+            }
+            Entry::CustomAgent(agent) => {
+                let id = *agent;
+                let command = id
+                    .spec()
+                    .map(|spec| {
+                        std::iter::once(spec.command.clone())
+                            .chain(spec.args.iter().cloned())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
+                let selector = format!("settings-custom-agent-{index}");
+                base.debug_selector(move || selector.clone())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(div().truncate().child(id.name()))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(metrics::TEXT_SMALL())
+                                    .text_color(colours.text_muted)
+                                    .child(command),
+                            ),
+                    )
+                    .child(
+                        mono("REMOVE".to_owned())
+                            .px(px(8.))
+                            .py(px(3.))
+                            .rounded(metrics::RADIUS())
+                            .border_1()
+                            .border_color(colours.elevated_border)
+                            .cursor_pointer()
+                            .debug_selector(move || format!("settings-remove-agent-{index}"))
+                            .on_mouse_down(
+                                gpui_kit::MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.settings_remove_agent(id, cx);
+                                }),
+                            ),
+                    )
+            }
+            Entry::MoreAgents { count, expanded } => {
+                let (count, expanded) = (*count, *expanded);
+                let selector = format!("settings-more-agents-{index}");
+                base.debug_selector(move || selector.clone())
+                    .text_color(colours.text_muted)
+                    .child(div().flex_1().child(if expanded {
+                        format!("Hide the {count} agents that are not installed on this computer")
+                    } else {
+                        format!("{count} more agents are not installed on this computer: show them")
+                    }))
+            }
             Entry::Dismissed(dismissed) => {
                 let root = dismissed.clone();
                 let selector = format!("settings-dismissed-{index}");
@@ -1368,7 +1551,7 @@ mod tests {
 
     #[test]
     fn every_setting_of_the_schema_is_in_a_section_of_the_screen() {
-        for def in schema::SETTINGS.iter().filter(|def| def.platform.here()) {
+        for def in schema::settings().iter().filter(|def| def.platform.here()) {
             assert!(
                 entries(def.section, "", false).contains(&Entry::Setting(def)),
                 "{}",

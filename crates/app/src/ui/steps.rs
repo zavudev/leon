@@ -8,7 +8,8 @@
 //! palette only renders the question and feeds the answer back.
 
 use leon_core::{
-    AgentKind, Machine, MachineId, MachineKind, Project, ProjectId, SessionId, Worktree,
+    AgentId, AgentSpec, CustomAgent, Machine, MachineId, MachineKind, Project, ProjectId,
+    SessionId, Worktree,
 };
 
 use super::live::LiveId;
@@ -149,11 +150,10 @@ impl QuitConfirm {
 /// What the settings change in the questions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prefs {
-    /// Which agents are offered for a new session, in the order of
-    /// [`AgentKind::ALL`].
-    pub agents_enabled: [bool; 3],
+    /// Which agents are offered for a new session.
+    pub agents_enabled: Vec<AgentId>,
     /// The agent a new session starts without asking.
-    pub default_agent: Option<AgentKind>,
+    pub default_agent: Option<AgentId>,
     /// Whether closing a pane with a program running asks first.
     pub confirm_close: bool,
     /// When quitting asks.
@@ -163,7 +163,7 @@ pub struct Prefs {
 impl Default for Prefs {
     fn default() -> Self {
         Self {
-            agents_enabled: [true; 3],
+            agents_enabled: leon_core::agent::all().iter().map(|spec| spec.id).collect(),
             default_agent: None,
             confirm_close: true,
             quit: QuitConfirm::Running,
@@ -172,13 +172,12 @@ impl Default for Prefs {
 }
 
 impl Prefs {
-    /// The agents offered for a new session.
-    pub fn offered(&self) -> Vec<AgentKind> {
-        AgentKind::ALL
+    /// The agents offered for a new session, in the catalogue's order.
+    pub fn offered(&self) -> Vec<AgentId> {
+        leon_core::agent::all()
             .iter()
-            .zip(self.agents_enabled)
-            .filter(|(_, enabled)| *enabled)
-            .map(|(agent, _)| *agent)
+            .map(|spec| spec.id)
+            .filter(|id| self.agents_enabled.contains(id))
             .collect()
     }
 }
@@ -221,6 +220,10 @@ pub struct World {
     /// Git repositories found on the machines (by the Connect screen), by
     /// machine: offered as folders when a project is added.
     pub repositories: Vec<(MachineId, String)>,
+    /// The agents each machine has, where that is known: from this
+    /// computer's own search, or the probe of a machine. A machine that is
+    /// not in the list has not been looked at.
+    pub installed: Vec<(MachineId, Vec<AgentId>)>,
 }
 
 impl World {
@@ -278,6 +281,7 @@ impl World {
             scale,
             prefs: Prefs::default(),
             repositories: Vec::new(),
+            installed: Vec::new(),
         }
     }
 
@@ -285,6 +289,20 @@ impl World {
     pub fn with_repositories(mut self, repositories: Vec<(MachineId, String)>) -> Self {
         self.repositories = repositories;
         self
+    }
+
+    /// The same world knowing which agents the machines have.
+    pub fn with_installed(mut self, installed: Vec<(MachineId, Vec<AgentId>)>) -> Self {
+        self.installed = installed;
+        self
+    }
+
+    /// The agents `machine` has, when that is known.
+    pub fn installed_on(&self, machine: &MachineId) -> Option<&[AgentId]> {
+        self.installed
+            .iter()
+            .find(|(id, _)| id == machine)
+            .map(|(_, agents)| agents.as_slice())
     }
 
     /// The same world knowing what the settings change.
@@ -353,9 +371,12 @@ pub struct Choice {
     /// Marks the value in use.
     pub current: bool,
     /// The agent the choice stands for, drawn as its logo.
-    pub agent: Option<AgentKind>,
+    pub agent: Option<AgentId>,
     /// The theme the choice stands for, drawn as a row of swatches.
     pub swatch: Option<ThemeId>,
+    /// Whether the choice is drawn dimmed: it can be picked but will say why
+    /// it cannot be done (an agent that is not installed).
+    pub dim: bool,
 }
 
 impl Choice {
@@ -367,7 +388,13 @@ impl Choice {
             current: false,
             agent: None,
             swatch: None,
+            dim: false,
         }
+    }
+
+    fn dim(mut self, dim: bool) -> Self {
+        self.dim = dim;
+        self
     }
 
     fn swatch(mut self, theme: ThemeId) -> Self {
@@ -375,7 +402,7 @@ impl Choice {
         self
     }
 
-    fn agent(mut self, agent: AgentKind) -> Self {
+    fn agent(mut self, agent: AgentId) -> Self {
         self.agent = Some(agent);
         self
     }
@@ -468,7 +495,7 @@ pub struct Step {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionIntent {
     /// The agent to start.
-    pub agent: AgentKind,
+    pub agent: AgentId,
     /// The machine to start it on.
     pub machine: MachineId,
     /// That machine's name.
@@ -506,6 +533,20 @@ pub enum Action {
     Quit,
     /// Write a theme file with this name that extends the theme in use.
     NewTheme(String),
+    /// Add an agent of the user's: name, command, arguments of a new session
+    /// and of a resume.
+    AddAgent {
+        /// The name shown.
+        name: String,
+        /// The program.
+        command: String,
+        /// Arguments of a new session, as typed.
+        args: String,
+        /// Arguments that resume a session, as typed.
+        resume_args: String,
+    },
+    /// Remove an agent of the user's.
+    RemoveAgent(AgentId),
     /// Do nothing: the person backed out.
     Nothing,
 }
@@ -526,6 +567,8 @@ pub fn is_flow(command: Command) -> bool {
     matches!(
         command,
         Command::NewSession
+            | Command::AddAgent
+            | Command::RemoveAgent
             | Command::CloseSession
             | Command::Rename
             | Command::RemoveMachine
@@ -565,6 +608,8 @@ fn choices(prompt: &'static str, choices: Vec<Choice>, custom: Custom) -> Outcom
 pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
     match command {
         Command::NewSession => new_session(answers, world),
+        Command::AddAgent => add_agent(answers),
+        Command::RemoveAgent => remove_agent(answers),
         Command::CloseSession => close_session(answers, world),
         Command::Rename => rename(answers, world),
         Command::RemoveMachine => remove_machine(answers, world),
@@ -584,6 +629,81 @@ pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
             [name, ..] => Outcome::Run(Action::NewTheme(name.clone())),
         },
         _ => Outcome::Refuse(format!("{} has no steps.", keys::label(command))),
+    }
+}
+
+/// The flow that adds an agent of the user's: any command line tool.
+fn add_agent(answers: &[String]) -> Outcome {
+    match answers {
+        [] => text("Agent name", "My agent", Validate::Required),
+        [name] => {
+            // A name that cannot be used is said before the rest is asked.
+            match CustomAgent::new(name, "x", "", "", &[]).and_then(|agent| {
+                let names: Vec<&str> = leon_core::agent::all()
+                    .iter()
+                    .map(|spec| spec.name.as_str())
+                    .collect();
+                agent.to_spec(&names).map(|_| ())
+            }) {
+                Ok(()) => text("Command", "the program that starts it", Validate::Required),
+                Err(error) => Outcome::Refuse(error.to_string()),
+            }
+        }
+        [_, _] => text(
+            "Arguments",
+            "arguments of a new session (optional)",
+            Validate::Optional,
+        ),
+        [_, _, _] => text(
+            "Resume arguments",
+            "e.g. --resume {id}, or --continue; empty: cannot be resumed",
+            Validate::Optional,
+        ),
+        [name, command, args, resume_args, ..] => {
+            let names: Vec<&str> = leon_core::agent::all()
+                .iter()
+                .map(|spec| spec.name.as_str())
+                .collect();
+            match CustomAgent::new(name, command, args, resume_args, &[])
+                .and_then(|agent| agent.to_spec(&names))
+            {
+                Ok(_) => Outcome::Run(Action::AddAgent {
+                    name: name.clone(),
+                    command: command.clone(),
+                    args: args.clone(),
+                    resume_args: resume_args.clone(),
+                }),
+                Err(error) => Outcome::Refuse(error.to_string()),
+            }
+        }
+    }
+}
+
+/// The flow that removes an agent of the user's.
+fn remove_agent(answers: &[String]) -> Outcome {
+    let custom: Vec<&'static AgentSpec> = leon_core::agent::all()
+        .into_iter()
+        .filter(|spec| spec.custom)
+        .collect();
+    if custom.is_empty() {
+        return Outcome::Refuse("You have not added any agent of your own.".to_owned());
+    }
+    match answers {
+        [] => choices(
+            "Agent",
+            custom
+                .iter()
+                .map(|spec| {
+                    Choice::new(spec.name.clone(), spec.command.clone(), spec.id.as_str())
+                        .agent(spec.id)
+                })
+                .collect(),
+            Custom::No,
+        ),
+        [id, ..] => match custom.iter().find(|spec| spec.id.as_str() == id) {
+            Some(spec) => Outcome::Run(Action::RemoveAgent(spec.id)),
+            None => Outcome::Refuse(format!("Unknown agent {id:?}.")),
+        },
     }
 }
 
@@ -618,23 +738,49 @@ fn new_session(answers: &[String], world: &World) -> Outcome {
             }));
         }
     }
+    let installed = world.installed_on(&target.machine);
+    let has = |agent: &AgentId| installed.is_none_or(|list| list.contains(agent));
     match rest {
-        [] => choices(
-            "Agent",
-            offered
+        [] => {
+            // What the machine has first, then the rest dimmed with where to
+            // get it; the palette filters the list as the person types.
+            let (have, lack): (Vec<AgentId>, Vec<AgentId>) =
+                offered.iter().partition(|agent| has(agent));
+            let place = format!("on {} in {}", target.machine_name, target.cwd);
+            let mut list: Vec<Choice> = have
                 .iter()
                 .map(|agent| {
-                    Choice::new(
-                        format::agent_name(*agent),
-                        format!("on {} in {}", target.machine_name, target.cwd),
-                        agent.as_str(),
-                    )
-                    .agent(*agent)
+                    Choice::new(format::agent_name(*agent), place.clone(), agent.as_str())
+                        .agent(*agent)
                 })
-                .collect(),
-            Custom::No,
-        ),
-        [agent, ..] => match AgentKind::parse(agent).filter(|agent| offered.contains(agent)) {
+                .collect();
+            list.extend(lack.iter().map(|agent| {
+                let docs = agent
+                    .spec()
+                    .and_then(|spec| spec.docs.clone())
+                    .map_or(String::new(), |url| format!(" · {url}"));
+                Choice::new(
+                    format::agent_name(*agent),
+                    format!("not installed on {}{docs}", target.machine_name),
+                    agent.as_str(),
+                )
+                .agent(*agent)
+                .dim(true)
+            }));
+            choices("Agent", list, Custom::No)
+        }
+        [agent, ..] => match AgentId::parse(agent).filter(|agent| offered.contains(agent)) {
+            Some(agent) if !has(&agent) => {
+                let docs = agent
+                    .spec()
+                    .and_then(|spec| spec.docs.clone())
+                    .map_or(String::new(), |url| format!(" Install it from {url}."));
+                Outcome::Refuse(format!(
+                    "{} is not installed on {}.{docs}",
+                    format::agent_name(agent),
+                    target.machine_name
+                ))
+            }
             Some(agent) => Outcome::Run(Action::StartSession(SessionIntent {
                 agent,
                 machine: target.machine,
@@ -1422,6 +1568,7 @@ mod tests {
             scale: 100,
             prefs: Prefs::default(),
             repositories: Vec::new(),
+            installed: Vec::new(),
         }
     }
 
@@ -1497,12 +1644,17 @@ mod tests {
     fn a_new_session_asks_for_the_agent_then_starts_it() {
         let world = world();
         let first = advance(Command::NewSession, &[], &world);
-        assert_eq!(labels(&first), ["Claude Code", "Codex", "opencode"]);
+        assert_eq!(labels(&first)[..3], ["Claude Code", "Codex", "opencode"]);
+        assert_eq!(
+            labels(&first).len(),
+            leon_core::agent::builtin().len(),
+            "the whole catalogue is offered"
+        );
         let done = advance(Command::NewSession, &strings(&["codex"]), &world);
         assert_eq!(
             done,
             Outcome::Run(Action::StartSession(SessionIntent {
-                agent: AgentKind::Codex,
+                agent: AgentId::CODEX,
                 machine: MachineId::local(),
                 machine_name: "Local".into(),
                 cwd: "/srv/api".into(),
@@ -1522,13 +1674,120 @@ mod tests {
         };
         let agents: Vec<_> = choices.iter().map(|choice| choice.agent).collect();
         assert_eq!(
-            agents,
+            agents[..3],
             [
-                Some(AgentKind::Claude),
-                Some(AgentKind::Codex),
-                Some(AgentKind::Opencode)
+                Some(AgentId::CLAUDE),
+                Some(AgentId::CODEX),
+                Some(AgentId::OPENCODE)
             ]
         );
+        assert!(
+            agents.iter().all(Option::is_some),
+            "every row has a logo or a letter-mark"
+        );
+    }
+
+    fn choices_of(outcome: Outcome) -> Vec<Choice> {
+        match outcome {
+            Outcome::Ask(Step {
+                kind: StepKind::Choices { choices, .. },
+                ..
+            }) => choices,
+            other => panic!("expected choices, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn what_the_machine_has_comes_first_and_the_rest_is_dimmed_with_where_to_get_it() {
+        let mut world = world();
+        world.installed = vec![(MachineId::local(), vec![AgentId::OPENCODE, AgentId::GROK])];
+        let list = choices_of(advance(Command::NewSession, &[], &world));
+        let labels: Vec<&str> = list.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels[..2], ["opencode", "Grok"]);
+        assert!(!list[0].dim && !list[1].dim);
+        assert_eq!(list.len(), leon_core::agent::builtin().len());
+        let claude = list.iter().find(|c| c.value == "claude").unwrap();
+        assert!(claude.dim);
+        assert!(
+            claude.detail.starts_with("not installed on Local"),
+            "{}",
+            claude.detail
+        );
+        assert!(
+            claude.detail.contains("https://"),
+            "the docs link: {}",
+            claude.detail
+        );
+        // The rest keeps the catalogue's order.
+        let rest: Vec<&str> = labels[2..].to_vec();
+        assert_eq!(rest[0], "Claude Code");
+        assert_eq!(rest[1], "Codex");
+    }
+
+    #[test]
+    fn an_agent_that_is_not_installed_is_refused_with_its_docs_link() {
+        let mut world = world();
+        world.installed = vec![(MachineId::local(), vec![AgentId::CLAUDE])];
+        match advance(Command::NewSession, &strings(&["grok"]), &world) {
+            Outcome::Refuse(text) => {
+                assert!(
+                    text.starts_with("Grok is not installed on Local."),
+                    "{text}"
+                );
+                assert!(text.contains("https://x.ai/cli"), "{text}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        // An installed one starts, and a machine nobody looked at offers all.
+        assert!(matches!(
+            advance(Command::NewSession, &strings(&["claude"]), &world),
+            Outcome::Run(Action::StartSession(_))
+        ));
+        let unknown = super::World {
+            installed: vec![],
+            ..world.clone()
+        };
+        assert!(matches!(
+            advance(Command::NewSession, &strings(&["grok"]), &unknown),
+            Outcome::Run(Action::StartSession(_))
+        ));
+    }
+
+    #[test]
+    fn adding_a_custom_agent_asks_four_questions_and_checks_the_answers() {
+        let world = world();
+        let ask = |answers: &[&str]| advance(Command::AddAgent, &strings(answers), &world);
+        let prompt = |outcome: Outcome| match outcome {
+            Outcome::Ask(step) => step.prompt,
+            other => panic!("expected a question, got {other:?}"),
+        };
+        assert_eq!(prompt(ask(&[])), "Agent name");
+        assert_eq!(prompt(ask(&["My Tool"])), "Command");
+        assert_eq!(prompt(ask(&["My Tool", "mytool"])), "Arguments");
+        assert_eq!(
+            prompt(ask(&["My Tool", "mytool", "--fast"])),
+            "Resume arguments"
+        );
+        assert_eq!(
+            ask(&["My Tool", "mytool", "--fast", "--resume {id}"]),
+            Outcome::Run(Action::AddAgent {
+                name: "My Tool".into(),
+                command: "mytool".into(),
+                args: "--fast".into(),
+                resume_args: "--resume {id}".into(),
+            })
+        );
+        // A name that is a built-in's is refused before the rest is asked.
+        assert!(matches!(ask(&["claude code"]), Outcome::Refuse(_)));
+        // Bad resume arguments are refused with the reason.
+        match ask(&["My Tool", "mytool", "", "--resume {id} {x}"]) {
+            Outcome::Refuse(text) => assert!(text.contains("{id}"), "{text}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(matches!(
+            ask(&["My Tool", "a\nb", "", ""]),
+            Outcome::Refuse(_)
+        ));
     }
 
     #[test]
@@ -1541,12 +1800,12 @@ mod tests {
             ["web / main", "api / main", "api / x", "api / detached"]
         );
         let agent = advance(Command::NewSession, &strings(&["a1"]), &world);
-        assert_eq!(labels(&agent), ["Claude Code", "Codex", "opencode"]);
+        assert_eq!(labels(&agent)[..3], ["Claude Code", "Codex", "opencode"]);
         let done = advance(Command::NewSession, &strings(&["a1", "claude"]), &world);
         assert_eq!(
             done,
             Outcome::Run(Action::StartSession(SessionIntent {
-                agent: AgentKind::Claude,
+                agent: AgentId::CLAUDE,
                 machine: MachineId::local(),
                 machine_name: "Local".into(),
                 cwd: "/srv/api-worktrees/x".into(),
@@ -2083,7 +2342,7 @@ mod tests {
         store
             .upsert_session(
                 &leon_core::NewSession {
-                    agent: AgentKind::Claude,
+                    agent: AgentId::CLAUDE,
                     external_id: "s".into(),
                     machine_id: MachineId::local(),
                     cwd: "/home/me/notes".into(),
@@ -2283,7 +2542,7 @@ mod tests {
     #[test]
     fn a_disabled_agent_is_not_offered_for_new_sessions() {
         let world = with(Prefs {
-            agents_enabled: [true, false, true],
+            agents_enabled: vec![AgentId::CLAUDE, AgentId::OPENCODE],
             ..Prefs::default()
         });
         assert_eq!(
@@ -2295,7 +2554,7 @@ mod tests {
             Outcome::Refuse(_)
         ));
         let none = with(Prefs {
-            agents_enabled: [false; 3],
+            agents_enabled: vec![],
             ..Prefs::default()
         });
         assert!(matches!(
@@ -2307,19 +2566,19 @@ mod tests {
     #[test]
     fn the_default_agent_starts_without_asking_unless_it_is_disabled() {
         let world = with(Prefs {
-            default_agent: Some(AgentKind::Codex),
+            default_agent: Some(AgentId::CODEX),
             ..Prefs::default()
         });
         assert!(matches!(
             advance(Command::NewSession, &[], &world),
             Outcome::Run(Action::StartSession(SessionIntent {
-                agent: AgentKind::Codex,
+                agent: AgentId::CODEX,
                 ..
             }))
         ));
         let off = with(Prefs {
-            default_agent: Some(AgentKind::Codex),
-            agents_enabled: [true, false, true],
+            default_agent: Some(AgentId::CODEX),
+            agents_enabled: vec![AgentId::CLAUDE, AgentId::OPENCODE],
             ..Prefs::default()
         });
         assert!(matches!(

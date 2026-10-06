@@ -1,7 +1,7 @@
 //! Small text helpers for what the UI prints: ages, tags and truncation. All pure.
 
 use chrono::{DateTime, Local, Utc};
-use leon_core::{AgentKind, Role};
+use leon_core::{AgentId, Role};
 
 /// How long ago `then` was, as one short token: `now`, `5m`, `3h`, `2d`,
 /// `6w`, `1y`. A time in the future reads as `now`.
@@ -34,21 +34,13 @@ pub fn short_head(head: &str) -> &str {
 }
 
 /// The agent's name in the mono labels.
-pub fn agent_tag(agent: AgentKind) -> &'static str {
-    match agent {
-        AgentKind::Claude => "CLAUDE",
-        AgentKind::Codex => "CODEX",
-        AgentKind::Opencode => "OPENCODE",
-    }
+pub fn agent_tag(agent: AgentId) -> &'static str {
+    agent.tag()
 }
 
 /// The agent's name in running text.
-pub fn agent_name(agent: AgentKind) -> &'static str {
-    match agent {
-        AgentKind::Claude => "Claude Code",
-        AgentKind::Codex => "Codex",
-        AgentKind::Opencode => "opencode",
-    }
+pub fn agent_name(agent: AgentId) -> &'static str {
+    agent.name()
 }
 
 /// The speaker's name in a transcript's mono labels.
@@ -123,7 +115,8 @@ mod tests {
 
     #[test]
     fn every_agent_and_role_has_a_tag() {
-        for agent in AgentKind::ALL {
+        for spec in leon_core::agent::builtin() {
+            let agent = spec.id;
             assert!(!agent_tag(agent).is_empty());
             assert!(!agent_name(agent).is_empty());
         }

@@ -47,7 +47,9 @@ use gpui_kit::{
     MouseButton, MouseDownEvent, PathPromptOptions, ScrollHandle, ScrollStrategy, Size, Stateful,
     Subscription, Task, UniformListScrollHandle, Window,
 };
-use leon_core::{MachineId, Message, ProjectId, Result as StoreResult, Session, WorktreeId};
+use leon_core::{
+    AgentId, MachineId, MachineKind, Message, ProjectId, Result as StoreResult, Session, WorktreeId,
+};
 use leon_term::{Backend, Pty};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -797,6 +799,48 @@ impl Shell {
         self.cursor = tree::follow(&self.rows, key.as_deref(), self.cursor.unwrap_or(0));
     }
 
+    /// The agents each machine has: this computer's by looking for their
+    /// programs, an SSH or relay machine's by its last probe. A machine that
+    /// has not been probed is absent (nothing is known of it).
+    pub(super) fn installed_agents(&self) -> Vec<(MachineId, Vec<AgentId>)> {
+        let mut out = Vec::new();
+        for machine in &self.snapshot.machines {
+            let found: Option<Vec<AgentId>> = if machine.kind == MachineKind::Local {
+                Some(
+                    leon_core::agent::all()
+                        .into_iter()
+                        .filter(|spec| {
+                            let names: Vec<&str> = if spec.detect.is_empty() {
+                                vec![spec.command.as_str()]
+                            } else {
+                                spec.detect.iter().map(String::as_str).collect()
+                            };
+                            names
+                                .iter()
+                                .any(|name| self.options.system.find_program(name).is_some())
+                        })
+                        .map(|spec| spec.id)
+                        .collect(),
+                )
+            } else {
+                match self.engine.machine_state(&machine.id) {
+                    crate::engine::MachineState::Online(Some(report)) => Some(
+                        leon_core::agent::all()
+                            .into_iter()
+                            .filter(|spec| crate::launch::probed(&report, spec).is_some())
+                            .map(|spec| spec.id)
+                            .collect(),
+                    ),
+                    _ => None,
+                }
+            };
+            if let Some(found) = found {
+                out.push((machine.id.clone(), found));
+            }
+        }
+        out
+    }
+
     /// The machines, projects and folders, and where the keyboard is, for the
     /// palette's questions.
     pub(super) fn world(&self, cx: &Context<Self>) -> World {
@@ -811,6 +855,7 @@ impl Shell {
             chosen.interface_scale,
         )
         .with_prefs(Self::step_prefs(cx))
+        .with_installed(self.installed_agents())
         .with_repositories(
             self.connect_ui
                 .repos
@@ -1605,6 +1650,8 @@ impl Shell {
             C::PasteImage => self.paste_terminal(super::paste::How::Image, cx),
             C::Copy | C::ScrollPageUp | C::ScrollPageDown => self.terminal_action(command, cx),
             C::NewSession
+            | C::AddAgent
+            | C::RemoveAgent
             | C::CloseSession
             | C::NewWorktree
             | C::AddProject

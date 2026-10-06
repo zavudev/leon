@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use crate::engine::SourceStatus;
-use leon_core::{AgentKind, MachineId, Store, UsagePoint};
+use leon_core::{AgentId, MachineId, Store, UsagePoint};
 use leon_usage::{series_key, AgentUsage, MachineUsage, Reason, State, Thresholds};
 use leon_usage::{view, Body, Level};
 
@@ -67,46 +67,55 @@ pub fn jitter_seconds(interval: i64, entropy: u32) -> i64 {
 }
 
 /// What the engine knows of each agent's last read.
-pub type Statuses = HashMap<AgentKind, SourceStatus>;
+pub type Statuses = HashMap<AgentId, SourceStatus>;
 
 /// The statuses of every agent now.
 pub fn statuses(engine: &crate::engine::Engine) -> Statuses {
-    AgentKind::ALL
+    leon_usage::network::switchable_agents()
         .into_iter()
         .map(|agent| (agent, engine.usage_status(agent)))
         .collect()
+}
+
+/// Whether "not signed in" is worth saying for an agent: it has a network
+/// source that reads the agent's own sign-in (the opencode Go key is absent
+/// for most people, who never subscribed).
+pub fn says_signed_out(agent: AgentId) -> bool {
+    agent == AgentId::CLAUDE
+        || (leon_usage::network::has_network_source(agent) && agent != AgentId::OPENCODE)
 }
 
 /// What a row says when nothing is known of an agent: why, and what happens
 /// next. A read under way is "Reading…" (with the keychain's heads-up for
 /// Claude Code on macOS), not what the last read said.
 pub fn unknown_text(
-    agent: AgentKind,
+    agent: AgentId,
     reason: Reason,
     status: &SourceStatus,
     now: i64,
     next_read: Option<i64>,
     mac: bool,
 ) -> String {
-    let claude = agent == AgentKind::Claude;
+    let name = agent.name();
+    // The agents whose sign-in lives in the macOS keychain.
+    let keychain = matches!(agent, AgentId::CLAUDE | AgentId::CURSOR);
     if status.reading {
-        return if claude && mac {
-            "Reading… macOS may ask for permission to read Claude Code's sign-in.".to_owned()
+        return if keychain && mac {
+            format!("Reading… macOS may ask for permission to read {name}'s sign-in.")
         } else {
             "Reading…".to_owned()
         };
     }
     if reason == Reason::KeychainDenied || status.refused {
         return if mac {
-            "macOS did not let Leon read Claude Code's sign-in: the permission was denied or dismissed. Leon will not ask again this session; choose Try again to be asked."
-                .to_owned()
+            format!("macOS did not let Leon read {name}'s sign-in: the permission was denied or dismissed. Leon will not ask again this session; choose Try again to be asked.")
         } else {
             "The sign-in could not be read. Leon will not try again by itself; choose Try again."
                 .to_owned()
         };
     }
-    if reason == Reason::NotSignedIn && claude {
-        return "Not signed in to Claude Code. Sign in there, then choose Try again.".to_owned();
+    if reason == Reason::NotSignedIn && says_signed_out(agent) {
+        return format!("Not signed in to {name}. Sign in there, then choose Try again.");
     }
     let base = match reason {
         Reason::RateLimited(_) => "Rate limited: the service asked for fewer calls.".to_owned(),
@@ -136,7 +145,7 @@ pub fn retry_clause(status: &SourceStatus, now: i64, next_read: Option<i64>) -> 
 
 /// What a row with numbers says when the last read failed.
 pub fn failure_note(
-    agent: AgentKind,
+    agent: AgentId,
     status: &SourceStatus,
     now: i64,
     next_read: Option<i64>,
@@ -160,7 +169,7 @@ pub fn failure_note(
 }
 
 /// The observations of one agent's account: the window key and the point.
-pub type Series = (AgentKind, String, Vec<(String, UsagePoint)>);
+pub type Series = (AgentId, String, Vec<(String, UsagePoint)>);
 
 /// The history points of a collection: per agent, the account key and the
 /// observations of every window, the current reading included.
@@ -274,7 +283,7 @@ impl Board {
     }
 
     /// The reading of `agent` on `machine`.
-    pub fn get(&self, machine: &MachineId, agent: AgentKind) -> Option<&AgentUsage> {
+    pub fn get(&self, machine: &MachineId, agent: AgentId) -> Option<&AgentUsage> {
         self.readings
             .iter()
             .find(|r| r.agent == agent && r.machine == machine.as_str())
@@ -286,7 +295,7 @@ impl Board {
         &self,
         scope: &Scope,
         context: &MachineId,
-        shown: &[AgentKind],
+        shown: &[AgentId],
     ) -> Vec<&AgentUsage> {
         let mut out: Vec<&AgentUsage> = self
             .readings
@@ -298,12 +307,8 @@ impl Board {
                 Scope::All => true,
             })
             .collect();
-        out.sort_by_key(|r| {
-            (
-                AgentKind::ALL.iter().position(|a| *a == r.agent),
-                r.machine.clone(),
-            )
-        });
+        let order = leon_usage::network::switchable_agents();
+        out.sort_by_key(|r| (order.iter().position(|a| *a == r.agent), r.machine.clone()));
         out
     }
 }
@@ -314,7 +319,7 @@ impl Board {
 pub fn start_notice(
     board: &Board,
     machine: &MachineId,
-    agent: AgentKind,
+    agent: AgentId,
     now: i64,
     thresholds: Thresholds,
 ) -> Option<String> {
@@ -331,11 +336,7 @@ pub fn start_notice(
         .resets_in
         .map(|s| format!(", resets in {}", leon_usage::compact_duration(s)))
         .unwrap_or_default();
-    let name = match agent {
-        AgentKind::Claude => "Claude Code",
-        AgentKind::Codex => "Codex",
-        AgentKind::Opencode => "opencode",
-    };
+    let name = agent.name();
     let state = if worst.percent >= 100.0 {
         "is at its limit".to_owned()
     } else {
@@ -348,8 +349,8 @@ pub fn start_notice(
 /// there) as JSON documents, ready to write.
 pub fn payloads(
     collected: &MachineUsage,
-    previous: &HashMap<AgentKind, AgentUsage>,
-) -> Vec<(AgentKind, AgentUsage)> {
+    previous: &HashMap<AgentId, AgentUsage>,
+) -> Vec<(AgentId, AgentUsage)> {
     collected
         .readings
         .iter()
@@ -369,7 +370,7 @@ mod tests {
 
     const NOW: i64 = 1_790_000_000;
 
-    fn known(agent: AgentKind, machine: &str, used: f64, reset_in: i64) -> AgentUsage {
+    fn known(agent: AgentId, machine: &str, used: f64, reset_in: i64) -> AgentUsage {
         AgentUsage {
             agent,
             machine: machine.into(),
@@ -390,24 +391,24 @@ mod tests {
 
     #[test]
     fn an_unreachable_machine_keeps_its_earlier_reading() {
-        let old = known(AgentKind::Codex, "box", 40.0, 3600);
-        let new = AgentUsage::unknown(AgentKind::Codex, "box", Reason::Unreachable);
+        let old = known(AgentId::CODEX, "box", 40.0, 3600);
+        let new = AgentUsage::unknown(AgentId::CODEX, "box", Reason::Unreachable);
         assert_eq!(merge(Some(old.clone()), new), old);
     }
 
     #[test]
     fn a_failed_network_read_keeps_the_numbers_and_a_switch_or_sign_out_replaces_them() {
-        let old = known(AgentKind::Claude, "box", 40.0, 3600);
+        let old = known(AgentId::CLAUDE, "box", 40.0, 3600);
         for reason in [
             Reason::Offline,
             Reason::VendorError(500),
             Reason::RateLimited(60),
             Reason::KeychainDenied,
         ] {
-            let new = AgentUsage::unknown(AgentKind::Claude, "box", reason);
+            let new = AgentUsage::unknown(AgentId::CLAUDE, "box", reason);
             assert_eq!(merge(Some(old.clone()), new), old, "{reason:?}");
         }
-        let signed_out = AgentUsage::unknown(AgentKind::Claude, "box", Reason::NotSignedIn);
+        let signed_out = AgentUsage::unknown(AgentId::CLAUDE, "box", Reason::NotSignedIn);
         assert_eq!(merge(Some(old), signed_out.clone()), signed_out);
     }
 
@@ -415,21 +416,21 @@ mod tests {
     fn the_time_of_the_last_read_ignores_rows_that_only_say_why_nothing_was_read() {
         let store = Store::open_in_memory().unwrap();
         let local = MachineId::local();
-        let off = AgentUsage::unknown(AgentKind::Claude, "local", Reason::SourceDisabled);
+        let off = AgentUsage::unknown(AgentId::CLAUDE, "local", Reason::SourceDisabled);
         store
             .put_usage_reading(
                 &local,
-                AgentKind::Claude,
+                AgentId::CLAUDE,
                 &serde_json::to_string(&off).unwrap(),
                 NOW,
             )
             .unwrap();
         assert_eq!(Board::load(&store).collected_at(), None);
-        let codex = known(AgentKind::Codex, "local", 12.0, 100);
+        let codex = known(AgentId::CODEX, "local", 12.0, 100);
         store
             .put_usage_reading(
                 &local,
-                AgentKind::Codex,
+                AgentId::CODEX,
                 &serde_json::to_string(&codex).unwrap(),
                 NOW - 90,
             )
@@ -495,7 +496,7 @@ mod tests {
             ..status()
         };
         let on_mac = unknown_text(
-            AgentKind::Claude,
+            AgentId::CLAUDE,
             Reason::SourceDisabled,
             &reading,
             NOW,
@@ -505,7 +506,7 @@ mod tests {
         assert!(on_mac.starts_with("Reading…"), "{on_mac}");
         assert!(on_mac.contains("macOS may ask for permission to read Claude Code's sign-in"));
         let elsewhere = unknown_text(
-            AgentKind::Claude,
+            AgentId::CLAUDE,
             Reason::SourceDisabled,
             &reading,
             NOW,
@@ -514,7 +515,7 @@ mod tests {
         );
         assert_eq!(elsewhere, "Reading…");
         let opencode = unknown_text(
-            AgentKind::Opencode,
+            AgentId::OPENCODE,
             Reason::SourceDisabled,
             &reading,
             NOW,
@@ -531,7 +532,7 @@ mod tests {
             ..status()
         };
         let text = |reason, status: &SourceStatus, next| {
-            unknown_text(AgentKind::Claude, reason, status, NOW, next, true)
+            unknown_text(AgentId::CLAUDE, reason, status, NOW, next, true)
         };
         assert!(text(Reason::Offline, &retry, None).contains("Offline"));
         assert!(text(Reason::Offline, &retry, None).contains("Next read in 2m"));
@@ -561,31 +562,32 @@ mod tests {
             retry_at: Some(NOW + 60),
             ..status()
         };
-        let note = failure_note(AgentKind::Claude, &failed, NOW, None, true).unwrap();
+        let note = failure_note(AgentId::CLAUDE, &failed, NOW, None, true).unwrap();
         assert!(note.starts_with("The last read failed."), "{note}");
-        assert!(failure_note(AgentKind::Claude, &status(), NOW, None, true).is_none());
+        assert!(failure_note(AgentId::CLAUDE, &status(), NOW, None, true).is_none());
     }
 
     #[test]
     fn a_reading_that_says_something_replaces_the_earlier_one() {
-        let old = known(AgentKind::Codex, "box", 40.0, 3600);
-        let newer = known(AgentKind::Codex, "box", 50.0, 3600);
+        let old = known(AgentId::CODEX, "box", 40.0, 3600);
+        let newer = known(AgentId::CODEX, "box", 50.0, 3600);
         assert_eq!(merge(Some(old.clone()), newer.clone()), newer);
-        let disabled = AgentUsage::unknown(AgentKind::Codex, "box", Reason::SourceDisabled);
+        let disabled = AgentUsage::unknown(AgentId::CODEX, "box", Reason::SourceDisabled);
         assert_eq!(merge(Some(old), disabled.clone()), disabled);
         assert_eq!(merge(None, disabled.clone()), disabled);
     }
 
     #[test]
     fn history_points_hold_the_samples_and_the_current_windows() {
-        let reading = known(AgentKind::Codex, "local", 40.0, 3600);
+        let reading = known(AgentId::CODEX, "local", 40.0, 3600);
         let collected = MachineUsage {
+            called: Vec::new(),
             readings: vec![
                 reading.clone(),
-                AgentUsage::unknown(AgentKind::Claude, "local", Reason::SourceDisabled),
+                AgentUsage::unknown(AgentId::CLAUDE, "local", Reason::SourceDisabled),
             ],
             samples: vec![(
-                AgentKind::Codex,
+                AgentId::CODEX,
                 WindowKind::FiveHour,
                 Sample {
                     at: NOW - 600,
@@ -596,7 +598,7 @@ mod tests {
         let got = history_points(&collected, "local");
         assert_eq!(got.len(), 1);
         let (agent, account, points) = &got[0];
-        assert_eq!(*agent, AgentKind::Codex);
+        assert_eq!(*agent, AgentId::CODEX);
         assert_eq!(account.len(), 12);
         assert_eq!(points.len(), 2);
         assert_eq!(points[0].0, "five_hour");
@@ -606,28 +608,28 @@ mod tests {
     #[test]
     fn the_bar_speaks_for_the_machine_in_context_or_for_all() {
         let board = Board::new(vec![
-            known(AgentKind::Codex, "local", 10.0, 100),
-            known(AgentKind::Codex, "box", 20.0, 100),
-            known(AgentKind::Claude, "local", 30.0, 100),
+            known(AgentId::CODEX, "local", 10.0, 100),
+            known(AgentId::CODEX, "box", 20.0, 100),
+            known(AgentId::CLAUDE, "local", 30.0, 100),
         ]);
         let local = MachineId::local();
-        let all = AgentKind::ALL;
+        let all = [AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE];
         let ctx = board.select(&Scope::Context, &local, &all);
         assert_eq!(ctx.len(), 2);
-        assert_eq!(ctx[0].agent, AgentKind::Claude);
+        assert_eq!(ctx[0].agent, AgentId::CLAUDE);
         let everything = board.select(&Scope::All, &local, &all);
         assert_eq!(everything.len(), 3);
         let one = board.select(&Scope::Machine(MachineId::from_string("box")), &local, &all);
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].machine, "box");
-        let only_codex = board.select(&Scope::All, &local, &[AgentKind::Codex]);
+        let only_codex = board.select(&Scope::All, &local, &[AgentId::CODEX]);
         assert_eq!(only_codex.len(), 2);
     }
 
     #[test]
     fn the_notice_appears_from_the_critical_threshold_and_names_the_reset() {
         let board = Board::new(vec![known(
-            AgentKind::Codex,
+            AgentId::CODEX,
             "local",
             97.0,
             2 * 3600 + 29 * 60,
@@ -635,24 +637,21 @@ mod tests {
         let local = MachineId::local();
         let t = Thresholds::default();
         assert_eq!(
-            start_notice(&board, &local, AgentKind::Codex, NOW, t).as_deref(),
+            start_notice(&board, &local, AgentId::CODEX, NOW, t).as_deref(),
             Some("Codex: 5-hour window is 97% used, resets in 2h 29m.")
         );
-        let low = Board::new(vec![known(AgentKind::Codex, "local", 89.0, 100)]);
-        assert_eq!(start_notice(&low, &local, AgentKind::Codex, NOW, t), None);
-        assert_eq!(
-            start_notice(&board, &local, AgentKind::Claude, NOW, t),
-            None
-        );
+        let low = Board::new(vec![known(AgentId::CODEX, "local", 89.0, 100)]);
+        assert_eq!(start_notice(&low, &local, AgentId::CODEX, NOW, t), None);
+        assert_eq!(start_notice(&board, &local, AgentId::CLAUDE, NOW, t), None);
     }
 
     #[test]
     fn an_exhausted_window_says_it_is_at_its_limit() {
-        let board = Board::new(vec![known(AgentKind::Codex, "local", 100.0, 600)]);
+        let board = Board::new(vec![known(AgentId::CODEX, "local", 100.0, 600)]);
         let notice = start_notice(
             &board,
             &MachineId::local(),
-            AgentKind::Codex,
+            AgentId::CODEX,
             NOW,
             Thresholds::default(),
         )
@@ -663,12 +662,12 @@ mod tests {
 
     #[test]
     fn a_window_that_has_reset_since_stops_the_notice() {
-        let board = Board::new(vec![known(AgentKind::Codex, "local", 99.0, -60)]);
+        let board = Board::new(vec![known(AgentId::CODEX, "local", 99.0, -60)]);
         assert_eq!(
             start_notice(
                 &board,
                 &MachineId::local(),
-                AgentKind::Codex,
+                AgentId::CODEX,
                 NOW,
                 Thresholds::default()
             ),
@@ -679,22 +678,22 @@ mod tests {
     #[test]
     fn a_board_reads_back_what_the_store_holds() {
         let store = Store::open_in_memory().unwrap();
-        let reading = known(AgentKind::Codex, "local", 12.0, 100);
+        let reading = known(AgentId::CODEX, "local", 12.0, 100);
         store
             .put_usage_reading(
                 &MachineId::local(),
-                AgentKind::Codex,
+                AgentId::CODEX,
                 &serde_json::to_string(&reading).unwrap(),
                 NOW,
             )
             .unwrap();
         store
-            .put_usage_reading(&MachineId::local(), AgentKind::Claude, "not json", NOW)
+            .put_usage_reading(&MachineId::local(), AgentId::CLAUDE, "not json", NOW)
             .unwrap();
         let board = Board::load(&store);
         assert_eq!(board.all().len(), 1);
         assert_eq!(
-            board.get(&MachineId::local(), AgentKind::Codex),
+            board.get(&MachineId::local(), AgentId::CODEX),
             Some(&reading)
         );
     }

@@ -79,7 +79,7 @@ fn rig(
     let h = open_live(cx);
     let processes = Processes::new();
     h.engine.set_process_scanner(processes.clone(), Some(LEON));
-    let (dir, path, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+    let (dir, path, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
     put_cursor_on(&h, cx, NodeId::Session(id.clone()));
     h.settle(cx);
     (h, processes, dir, path, id)

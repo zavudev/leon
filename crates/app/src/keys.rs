@@ -115,6 +115,10 @@ pub enum Command {
     // ----- create
     /// Starts an agent session where the keyboard is.
     NewSession,
+    /// Adds any command line tool as an agent of your own.
+    AddAgent,
+    /// Removes an agent of your own.
+    RemoveAgent,
     /// Resumes the history session the keyboard is on in another worktree of
     /// its project, when its own folder is gone.
     ResumeIn,
@@ -1012,6 +1016,22 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::AddAgent,
+        "Add a custom agent\u{2026}",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::RemoveAgent,
+        "Remove a custom agent\u{2026}",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::ResumeIn,
         "Resume the session in another worktree…",
         S::Create,
@@ -1714,6 +1734,8 @@ pub fn keywords(command: Command) -> &'static str {
     match command {
         C::ChooseTheme => "colors colours look appearance custom user",
         C::NewThemeFromCurrent => "create custom make theme colors colours file toml",
+        C::AddAgent => "custom cli tool command new agent register any",
+        C::RemoveAgent => "custom cli tool delete forget agent unregister",
         C::ExportTheme => "save write copy theme colors colours file toml backup",
         C::OpenThemesFolder => "themes folder directory reveal finder custom files",
         C::ReloadThemes => "refresh themes custom files toml",
@@ -1878,6 +1900,8 @@ mod tests {
             C::Collapse,
             C::Open,
             C::NewSession,
+            C::AddAgent,
+            C::RemoveAgent,
             C::NewWorktree,
             C::ResumeIn,
             C::ResumeAnyway,
@@ -1991,6 +2015,8 @@ mod tests {
                 | C::Collapse
                 | C::Open
                 | C::NewSession
+                | C::AddAgent
+                | C::RemoveAgent
                 | C::NewWorktree
                 | C::ResumeIn
                 | C::ResumeAnyway

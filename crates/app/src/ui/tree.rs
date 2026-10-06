@@ -30,7 +30,7 @@ use super::live::LiveId;
 use super::model::{ProjectEntry, Snapshot};
 use chrono::{DateTime, Duration, Utc};
 use leon_core::{
-    AgentKind, Machine, MachineId, Project, ProjectId, Session, SessionId, Worktree, WorktreeId,
+    AgentId, Machine, MachineId, Project, ProjectId, Session, SessionId, Worktree, WorktreeId,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -99,7 +99,7 @@ pub struct LiveEntry {
     /// The folder it runs in.
     pub cwd: String,
     /// The agent, or `None` for a plain shell.
-    pub agent: Option<AgentKind>,
+    pub agent: Option<AgentId>,
     /// The history session it was started from, when it resumed one.
     pub history: Option<SessionId>,
 }
@@ -812,7 +812,7 @@ pub fn first_child_of(rows: &[Row], at: usize) -> Option<usize> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use leon_core::{AgentKind, MachineKind};
+    use leon_core::{AgentId, MachineKind};
 
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, 4, 12, 0, 0).unwrap()
@@ -868,7 +868,7 @@ mod tests {
         let at = now() - Duration::minutes(minutes_ago);
         Session {
             id: SessionId::from_string(id),
-            agent: AgentKind::Claude,
+            agent: AgentId::CLAUDE,
             external_id: id.to_owned(),
             machine_id: MachineId::from_string(machine),
             cwd: cwd.to_owned(),
@@ -1453,7 +1453,7 @@ mod tests {
             id: LiveId(id),
             machine: MachineId::from_string(machine),
             cwd: cwd.to_owned(),
-            agent: Some(AgentKind::Claude),
+            agent: Some(AgentId::CLAUDE),
             history: None,
         }
     }

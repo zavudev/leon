@@ -32,7 +32,7 @@
 
 use crate::cli::Diagnose;
 use crate::launch::{self, Launch, RealSystem, System};
-use leon_core::{AgentKind, MachineId, SessionFilter, Store};
+use leon_core::{AgentId, MachineId, SessionFilter, Store};
 use leon_remote::SshOptions;
 use leon_term::{GridSize, SpawnSpec, Terminal};
 use std::time::{Duration, Instant};
@@ -189,7 +189,7 @@ pub fn plan(args: &Diagnose, system: &dyn System) -> (SpawnSpec, Vec<u8>) {
 /// is shown.
 pub fn resume_lines(
     store: &Store,
-    agent: AgentKind,
+    agent: AgentId,
     system: &dyn System,
 ) -> Result<Vec<String>, String> {
     let filter = SessionFilter {
@@ -242,7 +242,7 @@ pub fn resume_lines(
 /// `--diagnose resume`: imports the real local history of `agent` into memory
 /// and prints [`resume_lines`]. Exit code 0 when a session was found, 1 when
 /// none could be resumed.
-pub fn run_resume(agent: AgentKind) -> i32 {
+pub fn run_resume(agent: AgentId) -> i32 {
     println!(
         "leon diagnose resume ({})",
         crate::format::agent_name(agent)
@@ -495,24 +495,42 @@ pub fn usage_lines(collected: &leon_usage::MachineUsage, now: i64) -> Vec<String
 /// file says (on by default) with the run's own overrides on top.
 pub fn usage_policy_of(
     file: &std::path::Path,
-    network: &[AgentKind],
-    no_network: &[AgentKind],
+    network: &[AgentId],
+    no_network: &[AgentId],
 ) -> leon_usage::network::NetworkPolicy {
     let store = std::fs::read(file)
         .ok()
         .and_then(|bytes| crate::schema::Store::parse(&bytes).ok())
         .unwrap_or_default();
     let from_settings = |key: &str| matches!(store.value(key), crate::schema::Value::Bool(true));
-    let decide = |agent: AgentKind, key: &str| {
-        if no_network.contains(&agent) {
+    let mut policy = leon_usage::network::NetworkPolicy::none();
+    for agent in leon_usage::network::switchable_agents() {
+        let on = if no_network.contains(&agent) {
             false
         } else {
-            network.contains(&agent) || from_settings(key)
-        }
-    };
-    leon_usage::network::NetworkPolicy {
-        claude: decide(AgentKind::Claude, "usage_claude_network"),
-        opencode: decide(AgentKind::Opencode, "usage_opencode_network"),
+            network.contains(&agent) || from_settings(&crate::schema::usage_setting(agent, true))
+        };
+        policy.set(agent, on);
+    }
+    policy
+}
+
+/// How an agent's usage is read, in a few words, and whether that has been
+/// checked against the live service.
+pub fn usage_source_text(agent: AgentId) -> (&'static str, bool) {
+    match agent {
+        AgentId::CLAUDE => ("Anthropic's usage endpoint", true),
+        AgentId::CODEX => (
+            "its session log, then OpenAI's backend when the log is old",
+            true,
+        ),
+        AgentId::OPENCODE => ("the opencode Go usage endpoint", false),
+        AgentId::GROK => ("xAI's billing endpoint", false),
+        AgentId::CURSOR => ("cursor.com's usage summary", false),
+        AgentId::KIMI => ("Moonshot's usages endpoint", false),
+        AgentId::ZCODE => ("the GLM Coding Plan quota endpoint", false),
+        AgentId::ANTIGRAVITY => ("its own `agy -p /usage` command", false),
+        _ => ("an unknown source", false),
     }
 }
 
@@ -520,24 +538,27 @@ pub fn usage_policy_of(
 /// real runner. A network source is called as the settings file says (on by
 /// default), `network` and `no_network` overriding it for this run.
 pub fn run_usage(
-    network: &[AgentKind],
-    no_network: &[AgentKind],
+    network: &[AgentId],
+    no_network: &[AgentId],
     settings_file: &std::path::Path,
 ) -> i32 {
     use leon_usage::network::{CurlHttp, SystemCredentials};
     println!("leon diagnose usage");
     let policy = usage_policy_of(settings_file, network, no_network);
-    for (agent, on) in [
-        (AgentKind::Claude, policy.claude),
-        (AgentKind::Opencode, policy.opencode),
-    ] {
+    for agent in leon_usage::network::switchable_agents() {
+        let (source, verified) = usage_source_text(agent);
         println!(
-            "network source of {}: {}",
+            "source of {}: {source}; {}{}",
             crate::ui::agent_display_name(agent),
-            if on {
+            if policy.allows(agent) {
                 "on (settings, or --network)"
             } else {
                 "off (settings, or --no-network)"
+            },
+            if verified {
+                ""
+            } else {
+                "; implemented from Orca's reference, unverified against the live service"
             }
         );
     }
@@ -562,7 +583,7 @@ pub fn run_usage(
         &leon_remote::ProcessRunner::with_time_limit(Duration::from_secs(30)),
         &machine,
         &SshOptions::without_multiplexing(),
-        policy,
+        &policy,
         &SystemCredentials {
             home: dirs::home_dir().unwrap_or_default(),
         },
@@ -654,21 +675,29 @@ fn run_with(args: &Diagnose, system: &dyn System, settle: Duration) -> i32 {
 mod tests {
     #[test]
     fn the_usage_report_follows_the_settings_file_and_the_overrides() {
-        use leon_core::AgentKind::{Claude, Opencode};
+        use leon_core::AgentId;
+        let (claude, opencode) = (AgentId::CLAUDE, AgentId::OPENCODE);
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
         // No file: the defaults, on.
         let policy = super::usage_policy_of(&file, &[], &[]);
-        assert!(policy.claude && policy.opencode);
+        assert!(policy.allows(claude) && policy.allows(opencode));
+        assert!(
+            policy.allows(AgentId::GROK),
+            "every provider is on by default"
+        );
         std::fs::write(&file, br#"{"usage_claude_network": false}"#).unwrap();
         let policy = super::usage_policy_of(&file, &[], &[]);
-        assert!(!policy.claude && policy.opencode, "the file's off is kept");
         assert!(
-            super::usage_policy_of(&file, &[Claude], &[]).claude,
+            !policy.allows(claude) && policy.allows(opencode),
+            "the file's off is kept"
+        );
+        assert!(
+            super::usage_policy_of(&file, &[claude], &[]).allows(claude),
             "--network wins"
         );
-        let policy = super::usage_policy_of(&file, &[], &[Opencode]);
-        assert!(!policy.opencode, "--no-network wins");
+        let policy = super::usage_policy_of(&file, &[], &[opencode]);
+        assert!(!policy.allows(opencode), "--no-network wins");
     }
 
     #[test]
@@ -678,7 +707,7 @@ mod tests {
         };
         const NOW: i64 = 1_790_000_000;
         let known = AgentUsage {
-            agent: AgentKind::Codex,
+            agent: AgentId::CODEX,
             machine: "local".into(),
             account_label: Some("secret-label@example.com".into()),
             plan: Some("plus".into()),
@@ -702,8 +731,9 @@ mod tests {
             },
         };
         let collected = MachineUsage {
+            called: Vec::new(),
             readings: vec![
-                AgentUsage::unknown(AgentKind::Claude, "local", Reason::SourceDisabled),
+                AgentUsage::unknown(AgentId::CLAUDE, "local", Reason::SourceDisabled),
                 known,
             ],
             samples: vec![],
@@ -811,7 +841,7 @@ mod tests {
             store
                 .upsert_session(
                     &leon_core::NewSession {
-                        agent: AgentKind::Claude,
+                        agent: AgentId::CLAUDE,
                         external_id: id.into(),
                         machine_id: MachineId::local(),
                         cwd: cwd.into(),
@@ -828,7 +858,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let lines = resume_lines(&store, AgentKind::Claude, &Computer).unwrap();
+        let lines = resume_lines(&store, AgentId::CLAUDE, &Computer).unwrap();
         assert_eq!(
             lines,
             [
@@ -840,7 +870,7 @@ mod tests {
         );
         let shown = lines.join("\n");
         assert!(!shown.contains("secret") && !shown.contains("private"));
-        assert!(resume_lines(&store, AgentKind::Codex, &Computer).is_err());
+        assert!(resume_lines(&store, AgentId::CODEX, &Computer).is_err());
     }
 
     #[cfg(unix)]

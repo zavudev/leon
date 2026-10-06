@@ -13,7 +13,7 @@ use crate::theme::{fonts, metrics, px, Palette};
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::prelude::*;
 use gpui_kit::{div, list, AnyElement, App, Context, Div, FontWeight};
-use leon_core::{AgentKind, Message, Role};
+use leon_core::{AgentId, Message, Role};
 
 /// The most characters of one message drawn: a transcript can hold a whole
 /// file pasted by a tool, and laying that out every frame would cost more
@@ -185,7 +185,7 @@ impl Shell {
     }
 
     /// The agent of what is open, for the icon in the header.
-    fn main_agent(&self) -> Option<AgentKind> {
+    fn main_agent(&self) -> Option<AgentId> {
         match &self.main {
             Main::Session(transcript) => Some(transcript.session.agent),
             Main::Live(id) => self.live.get(*id).and_then(|session| session.shown_agent()),

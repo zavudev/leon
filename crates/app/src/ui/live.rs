@@ -10,7 +10,7 @@
 
 use super::activity::{terminal_activity, Activity, Signals, Thresholds};
 use gpui_kit::{App, Entity, Subscription};
-use leon_core::{AgentKind, MachineId, SessionId};
+use leon_core::{AgentId, MachineId, SessionId};
 use leon_term::TerminalView;
 
 /// The identity of a live session, for as long as the application runs.
@@ -115,7 +115,7 @@ pub struct LiveSession {
     /// The folder it runs in.
     pub cwd: String,
     /// The agent, or `None` for a plain shell.
-    pub agent: Option<AgentKind>,
+    pub agent: Option<AgentId>,
     /// The agent's own id of the history session it resumed.
     pub resumed: Option<String>,
     /// The history session it was started from, as the store knows it: while
@@ -185,7 +185,7 @@ impl LiveSession {
 
     /// The agent to show for this session: the one that was started in its
     /// shell, until the shell is seen to have the terminal back.
-    pub fn shown_agent(&self) -> Option<AgentKind> {
+    pub fn shown_agent(&self) -> Option<AgentId> {
         match self.phase {
             AgentPhase::Shell | AgentPhase::Returned => None,
             AgentPhase::Launched | AgentPhase::Running => self.agent,

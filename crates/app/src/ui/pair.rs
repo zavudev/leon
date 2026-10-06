@@ -298,16 +298,11 @@ impl Shell {
         };
         match self.engine.machine_state(id) {
             crate::engine::MachineState::Online(Some(report)) => {
-                let mut found: Vec<&str> = Vec::new();
-                for (label, path) in [
-                    ("Claude Code", &report.claude),
-                    ("Codex", &report.codex),
-                    ("opencode", &report.opencode),
-                ] {
-                    if path.is_some() {
-                        found.push(label);
-                    }
-                }
+                let found: Vec<&str> = leon_core::agent::all()
+                    .into_iter()
+                    .filter(|spec| crate::launch::probed(&report, spec).is_some())
+                    .map(|spec| spec.name.as_str())
+                    .collect();
                 let text = if found.is_empty() {
                     "no coding agent found there yet".to_owned()
                 } else {

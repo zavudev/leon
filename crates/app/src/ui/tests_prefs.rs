@@ -12,7 +12,7 @@ use crate::schema::{self, Value};
 use crate::theme::{self, Crosshairs};
 use crate::ui::live::LiveId;
 use gpui_kit::{Modifiers, MouseButton};
-use leon_core::{AgentKind, MachineId};
+use leon_core::{AgentId, MachineId};
 
 /// Chooses a value for a setting, as the screen does, and lets the window
 /// react.
@@ -336,7 +336,41 @@ fn a_disabled_agent_is_not_offered_for_new_sessions(cx: &mut TestAppContext) {
     let (_dir, _) = real_worktree(&h, cx);
     set(&h, cx, "agent_codex_enabled", Value::Bool(false));
     h.press("ctrl-n", cx);
-    assert_eq!(h.palette_titles(cx), ["Claude Code", "opencode"]);
+    let titles = h.palette_titles(cx);
+    assert_eq!(titles[..2], ["Claude Code", "opencode"].map(str::to_owned));
+    assert!(
+        !titles.contains(&"Codex".to_owned()),
+        "a disabled agent is gone, not dimmed"
+    );
+}
+
+#[gpui_kit::test]
+fn the_long_agent_list_is_filtered_as_you_type_and_an_agent_that_is_missing_says_where_to_get_it(
+    cx: &mut TestAppContext,
+) {
+    let h = open_live(cx);
+    let (_dir, _) = real_worktree(&h, cx);
+    h.press("ctrl-n", cx);
+    let all = h.palette_titles(cx);
+    assert!(
+        all.len() > 30,
+        "the whole catalogue is on offer: {}",
+        all.len()
+    );
+    h.type_text("mistral", cx);
+    let narrowed = h.palette_titles(cx);
+    assert_eq!(
+        narrowed.first().map(String::as_str),
+        Some("Mistral Vibe"),
+        "{narrowed:?}"
+    );
+    assert!(narrowed.len() < 6, "{narrowed:?}");
+    h.press("enter", cx); // the fake computer has no `vibe`
+    h.settle(cx);
+    assert_eq!(
+        h.status(),
+        "Mistral Vibe is not installed on This machine. Install it from https://github.com/mistralai/mistral-vibe."
+    );
 }
 
 #[gpui_kit::test]
@@ -379,7 +413,7 @@ fn the_executable_override_and_the_extra_arguments_are_typed_for_a_new_session(
 #[gpui_kit::test]
 fn extra_resume_arguments_are_typed_into_the_shell(cx: &mut TestAppContext) {
     let h = open_live(cx);
-    let (_dir, _path, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+    let (_dir, _path, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
     set(
         &h,
         cx,
@@ -403,7 +437,7 @@ fn extra_resume_arguments_are_typed_into_the_shell(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn open_transcript_mode_makes_enter_show_the_transcript(cx: &mut TestAppContext) {
     let h = open_live(cx);
-    let (_dir, _path, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+    let (_dir, _path, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
     set(&h, cx, "history_open", Value::Text("transcript".into()));
     put_cursor_on(&h, cx, NodeId::Session(id));
     h.press("enter", cx);
@@ -431,7 +465,7 @@ fn sessions_per_worktree_sets_how_many_show_before_show_more(cx: &mut TestAppCon
         stored_session(
             &h,
             cx,
-            AgentKind::Claude,
+            AgentId::CLAUDE,
             &MachineId::local(),
             &path,
             &format!("history {n}"),

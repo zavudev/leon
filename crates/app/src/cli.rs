@@ -19,7 +19,7 @@
 //! `--diagnose sessions-elsewhere` runs the real detection of sessions that
 //! run in another terminal on this computer and prints, for each agent
 //! process, what it found (see `diagnose.rs`).
-//! `--diagnose usage [--network <claude|opencode>]... [--no-network <claude|opencode|all>]...`
+//! `--diagnose usage [--network <agent>]... [--no-network <agent|all>]...`
 //! runs the real collection of the agents' usage limits for this computer and
 //! prints, per agent, the source, the windows, how fresh they are or why they
 //! are unknown, and nothing that identifies an account. The sources that need
@@ -30,7 +30,7 @@
 use crate::product;
 use crate::settings::AppearanceChoice;
 use crate::theme::ThemeId;
-use leon_core::AgentKind;
+use leon_core::AgentId;
 use std::path::PathBuf;
 
 /// What was asked for on the command line.
@@ -54,7 +54,7 @@ pub enum Command {
     /// start: the program, the folder and the line typed into the shell.
     DiagnoseResume {
         /// Whose history to take the session from.
-        agent: AgentKind,
+        agent: AgentId,
     },
     /// Run the real detection of sessions running in another terminal on this
     /// computer and print what it found.
@@ -62,9 +62,9 @@ pub enum Command {
     /// Collect the usage limits of this computer and print them.
     DiagnoseUsage {
         /// The network sources switched on for this run, whatever the settings say.
-        network: Vec<AgentKind>,
+        network: Vec<AgentId>,
         /// The network sources switched off for this run.
-        no_network: Vec<AgentKind>,
+        no_network: Vec<AgentId>,
     },
     /// Run the checklist of "Connect a machine" against a destination and
     /// print each check with its diagnosis.
@@ -116,6 +116,15 @@ pub fn usage() -> String {
     )
 }
 
+/// The ids of the agents that have a usage source, for the messages.
+fn usage_agent_ids() -> String {
+    leon_usage::network::switchable_agents()
+        .iter()
+        .map(|agent| agent.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The ids of the themes on offer, built-in ones first, as a list for a message.
 pub fn theme_ids() -> String {
     crate::theme::registry::usable()
@@ -150,9 +159,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
     let mut resume = false;
     let mut elsewhere = false;
     let mut usage = false;
-    let mut network: Vec<AgentKind> = Vec::new();
-    let mut no_network: Vec<AgentKind> = Vec::new();
-    let mut agent = AgentKind::Claude;
+    let mut network: Vec<AgentId> = Vec::new();
+    let mut no_network: Vec<AgentId> = Vec::new();
+    let mut agent = AgentId::CLAUDE;
     let mut dialog_timeout = 4u64;
     let mut args = args.into_iter();
     while let Some(argument) = args.next() {
@@ -213,35 +222,37 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                 });
             }
             "--network" => {
-                let text = value("claude or opencode")?;
+                let text = value("an agent id")?;
                 if !usage {
                     return Err("--network only goes with --diagnose usage.".to_owned());
                 }
-                match AgentKind::parse(&text) {
-                    Some(agent @ (AgentKind::Claude | AgentKind::Opencode)) => network.push(agent),
-                    _ => {
+                match AgentId::parse(&text)
+                    .filter(|a| leon_usage::network::switchable_agents().contains(a))
+                {
+                    Some(agent) => network.push(agent),
+                    None => {
                         return Err(format!(
-                            "{text:?} has no network source: use claude or opencode."
+                            "{text:?} has no usage source: use one of {}.",
+                            usage_agent_ids()
                         ))
                     }
                 }
             }
             "--no-network" => {
-                let text = value("claude, opencode or all")?;
+                let text = value("an agent id or all")?;
                 if !usage {
                     return Err("--no-network only goes with --diagnose usage.".to_owned());
                 }
                 match text.as_str() {
-                    "all" => {
-                        no_network.extend([AgentKind::Claude, AgentKind::Opencode]);
-                    }
-                    _ => match AgentKind::parse(&text) {
-                        Some(agent @ (AgentKind::Claude | AgentKind::Opencode)) => {
-                            no_network.push(agent)
-                        }
-                        _ => {
+                    "all" => no_network.extend(leon_usage::network::switchable_agents()),
+                    _ => match AgentId::parse(&text)
+                        .filter(|a| leon_usage::network::switchable_agents().contains(a))
+                    {
+                        Some(agent) => no_network.push(agent),
+                        None => {
                             return Err(format!(
-                                "{text:?} has no network source: use claude, opencode or all."
+                                "{text:?} has no usage source: use one of {} or all.",
+                                usage_agent_ids()
                             ))
                         }
                     },
@@ -252,9 +263,11 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                 if !resume {
                     return Err("--agent only goes with --diagnose resume.".to_owned());
                 }
-                agent = AgentKind::parse(&text).ok_or_else(|| {
-                    format!("Unknown agent {text:?}: use claude, codex or opencode.")
-                })?;
+                agent = AgentId::parse(&text)
+                    .filter(|a| a.spec().is_some_and(|spec| spec.history.is_some()))
+                    .ok_or_else(|| {
+                        format!("Unknown agent {text:?}: use claude, codex or opencode.")
+                    })?;
             }
             "--input" => {
                 let text = value("text to type")?;
@@ -362,18 +375,33 @@ mod tests {
                 "--no-network=opencode"
             ]),
             Ok(Command::DiagnoseUsage {
-                network: vec![AgentKind::Claude],
-                no_network: vec![AgentKind::Opencode]
+                network: vec![AgentId::CLAUDE],
+                no_network: vec![AgentId::OPENCODE]
             })
         );
         assert_eq!(
             parsed(&["--diagnose", "usage", "--no-network", "all"]),
             Ok(Command::DiagnoseUsage {
                 network: vec![],
-                no_network: vec![AgentKind::Claude, AgentKind::Opencode]
+                no_network: leon_usage::network::switchable_agents()
             })
         );
-        assert!(parsed(&["--diagnose", "usage", "--network", "codex"]).is_err());
+        assert!(parsed(&["--diagnose", "usage", "--network", "amp"]).is_err());
+        assert!(parsed(&["--diagnose", "usage", "--network", "not an id"]).is_err());
+        assert_eq!(
+            parsed(&[
+                "--diagnose",
+                "usage",
+                "--network",
+                "grok",
+                "--no-network",
+                "cursor"
+            ]),
+            Ok(Command::DiagnoseUsage {
+                network: vec![AgentId::GROK],
+                no_network: vec![AgentId::CURSOR]
+            })
+        );
         assert!(parsed(&["--network", "claude"]).is_err());
         assert!(parsed(&["--no-network", "all"]).is_err());
     }
@@ -543,13 +571,13 @@ mod tests {
         assert_eq!(
             parsed(&["--diagnose", "resume"]),
             Ok(Command::DiagnoseResume {
-                agent: AgentKind::Claude
+                agent: AgentId::CLAUDE
             })
         );
         assert_eq!(
             parsed(&["--diagnose=resume", "--agent", "codex"]),
             Ok(Command::DiagnoseResume {
-                agent: AgentKind::Codex
+                agent: AgentId::CODEX
             })
         );
         assert!(parsed(&["--diagnose", "resume", "--agent", "gemini"]).is_err());

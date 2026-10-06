@@ -24,7 +24,7 @@ use gpui_kit::{
     WindowBounds, WindowHandle, WindowOptions,
 };
 use leon_core::{
-    AgentKind, Machine, MachineId, MachineKind, NewMessage, NewSession, NewWorktree, Project, Role,
+    AgentId, Machine, MachineId, MachineKind, NewMessage, NewSession, NewWorktree, Project, Role,
     Store,
 };
 use leon_history::HistoryRoots;
@@ -702,7 +702,7 @@ fn session_at(
     store
         .upsert_session(
             &NewSession {
-                agent: AgentKind::Claude,
+                agent: AgentId::CLAUDE,
                 external_id: format!("{title}-{minutes_ago}"),
                 machine_id: machine.clone(),
                 cwd: cwd.to_owned(),
@@ -1854,15 +1854,22 @@ fn a_new_session_on_an_agent_that_is_not_installed_ends_in_a_clear_status(cx: &m
     }
     assert_eq!(h.cursor_row(cx), "worktree:feature/login");
     h.press("ctrl-n", cx);
+    // What this computer has comes first; Codex, which it lacks, is dimmed
+    // among the rest of the catalogue.
+    let titles = h.palette_titles(cx);
     assert_eq!(
-        h.palette_titles(cx),
-        ["Claude Code", "Codex", "opencode"].map(str::to_owned)
+        titles[..3],
+        ["Claude Code", "opencode", "Codex"].map(str::to_owned)
     );
+    h.press("down", cx);
     h.press("down", cx);
     h.press("enter", cx); // Codex: the fake computer has none
     h.settle(cx);
     assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
-    assert_eq!(h.status(), "Codex is not installed on This machine.");
+    assert_eq!(
+        h.status(),
+        "Codex is not installed on This machine. Install it from https://github.com/openai/codex."
+    );
     assert_eq!(h.engine.status().unwrap().kind, StatusKind::Error);
     assert!(
         h.shell(cx, |s| s.live.ids().is_empty()),
@@ -4508,7 +4515,7 @@ mod live {
         });
         assert_eq!(
             h.shell(cx, |s| s.live.get(LiveId(1)).unwrap().agent),
-            Some(AgentKind::Codex)
+            Some(AgentId::CODEX)
         );
     }
 
@@ -4858,7 +4865,7 @@ mod live {
     pub(super) fn local_session(
         h: &Harness,
         cx: &mut TestAppContext,
-        agent: AgentKind,
+        agent: AgentId,
         title: &str,
     ) -> (tempfile::TempDir, String, leon_core::SessionId) {
         let dir = tempfile::tempdir().unwrap();
@@ -4877,7 +4884,7 @@ mod live {
     pub(super) fn stored_session(
         h: &Harness,
         cx: &mut TestAppContext,
-        agent: AgentKind,
+        agent: AgentId,
         machine: &MachineId,
         cwd: &str,
         title: &str,
@@ -4932,7 +4939,7 @@ mod live {
         cx: &mut TestAppContext,
     ) {
         let h = open_live(cx);
-        let (_dir, path, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, path, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
         wait_until(&h, cx, "the resumed agent", |h, cx| {
@@ -4969,7 +4976,7 @@ mod live {
     #[gpui_kit::test]
     fn clicking_a_history_session_does_the_same_as_enter(cx: &mut TestAppContext) {
         let h = open_live(cx);
-        let (_dir, path, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, path, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         cx.update(|cx| {
             h.shell
                 .update(cx, |shell, _| shell.show(&NodeId::Session(id.clone())))
@@ -4987,7 +4994,7 @@ mod live {
     #[gpui_kit::test]
     fn a_codex_session_resumes_with_the_codex_command(cx: &mut TestAppContext) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Codex, "beta");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CODEX, "beta");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
         wait_until(&h, cx, "the codex line", |h, cx| {
@@ -5003,7 +5010,7 @@ mod live {
     #[gpui_kit::test]
     fn an_opencode_session_resumes_with_its_session_flag(cx: &mut TestAppContext) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Opencode, "gamma");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::OPENCODE, "gamma");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
         wait_until(&h, cx, "the opencode line", |h, cx| {
@@ -5021,7 +5028,7 @@ mod live {
         cx: &mut TestAppContext,
     ) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "two words");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "two words");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
         wait_until(&h, cx, "the agent", |h, cx| {
@@ -5035,7 +5042,7 @@ mod live {
         cx: &mut TestAppContext,
     ) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id.clone()));
         h.press("enter", cx);
         wait_until(&h, cx, "the agent", |h, cx| {
@@ -5072,7 +5079,7 @@ mod live {
     #[gpui_kit::test]
     fn closing_the_resumed_terminal_lets_the_session_be_resumed_again(cx: &mut TestAppContext) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id.clone()));
         h.press("enter", cx);
         wait_until(&h, cx, "the agent", |h, cx| {
@@ -5093,7 +5100,7 @@ mod live {
     #[gpui_kit::test]
     fn the_resumed_session_is_one_row_that_shows_the_live_state(cx: &mut TestAppContext) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id.clone()));
         let before = h.outline(cx);
         assert!(!h.shows("tree-live-led-1", cx));
@@ -5134,7 +5141,7 @@ mod live {
             stored_session(
                 &h,
                 cx,
-                AgentKind::Claude,
+                AgentId::CLAUDE,
                 &MachineId::local(),
                 &path,
                 &format!("s{n}"),
@@ -5180,7 +5187,7 @@ mod live {
         cx: &mut TestAppContext,
     ) {
         let h = open_live(cx);
-        let (_dir, path, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, path, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Folder(MachineId::local(), path.clone()));
         h.press("ctrl-t", cx); // a shell in that folder
         assert_eq!(h.main_kind(cx), "live:1");
@@ -5264,14 +5271,7 @@ mod live {
                 ],
             )
             .unwrap();
-        let id = stored_session(
-            &h,
-            cx,
-            AgentKind::Claude,
-            &MachineId::local(),
-            &gone,
-            "omega",
-        );
+        let id = stored_session(&h, cx, AgentId::CLAUDE, &MachineId::local(), &gone, "omega");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
         assert_eq!(h.main_kind(cx), "session:omega");
@@ -5305,7 +5305,7 @@ mod live {
                 shell.options.system = FakeSystem::without(&["claude"])
             })
         });
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
         assert_eq!(h.main_kind(cx), "session:alpha");
@@ -5324,7 +5324,7 @@ mod live {
         cx: &mut TestAppContext,
     ) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press_chord("cmd-shift-l", "ctrl-shift-l", cx);
         assert_eq!(h.main_kind(cx), "session:alpha");
@@ -5348,7 +5348,7 @@ mod live {
     #[gpui_kit::test]
     fn open_transcript_works_from_the_terminal_that_resumed_the_session(cx: &mut TestAppContext) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
         wait_until(&h, cx, "the agent", |h, cx| {
@@ -5369,7 +5369,7 @@ mod live {
     #[gpui_kit::test]
     fn the_menu_of_a_history_session_opens_it_in_a_terminal_first(cx: &mut TestAppContext) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("m", cx);
         assert_eq!(
@@ -5393,12 +5393,12 @@ mod live {
         cx: &mut TestAppContext,
     ) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "zebra");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "zebra");
         // A title that only the title has, and a message that only a message has.
         h.store
             .upsert_session(
                 &NewSession {
-                    agent: AgentKind::Claude,
+                    agent: AgentId::CLAUDE,
                     external_id: "zebra-3".into(),
                     machine_id: MachineId::local(),
                     cwd: h.store.session(&id).unwrap().cwd,

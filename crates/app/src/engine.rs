@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use leon_core::icon::{IconImage, IconKind, NewIcon};
 use leon_core::{
-    AgentKind, Machine, MachineId, MachineKind, NewWorktree, ProjectId, SessionFilter, Store,
+    AgentId, Machine, MachineId, MachineKind, NewWorktree, ProjectId, SessionFilter, Store,
     StoreError, WorktreeId,
 };
 use leon_history::{HistoryRoots, ImportReport, Importer};
@@ -192,7 +192,7 @@ pub enum Op {
     /// changed: for these agents (every network source when empty) the
     /// back-off and the refusal remembered for the session are forgotten. A
     /// request that comes while a read is under way is run right after it.
-    CollectUsageNow(Vec<leon_core::AgentKind>),
+    CollectUsageNow(Vec<leon_core::AgentId>),
     /// Delete the stored usage observations.
     ForgetUsageHistory,
 }
@@ -296,19 +296,19 @@ struct UsageSetup {
     /// The time, in Unix seconds; injected so tests control it.
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     /// The back-off of each network source.
-    throttle: HashMap<leon_core::AgentKind, leon_usage::network::Throttle>,
+    throttle: HashMap<leon_core::AgentId, leon_usage::network::Throttle>,
     /// Whether a collection is running: at most one request per source is in
     /// flight at any time.
     collecting: bool,
     /// Whether another collection was asked for while one was running.
     rerun: bool,
     /// The agents whose network source is being read right now.
-    reading: std::collections::HashSet<leon_core::AgentKind>,
+    reading: std::collections::HashSet<leon_core::AgentId>,
     /// Why the last read of a source failed, until one succeeds.
-    failed: HashMap<leon_core::AgentKind, leon_usage::Reason>,
+    failed: HashMap<leon_core::AgentId, leon_usage::Reason>,
     /// The sources whose sign-in the system refused: not asked again this
     /// session until the user says so.
-    refused: std::collections::HashSet<leon_core::AgentKind>,
+    refused: std::collections::HashSet<leon_core::AgentId>,
     /// Whether nothing is read yet: the application starts reading only once
     /// its window is up.
     deferred: bool,
@@ -329,12 +329,8 @@ pub struct SourceStatus {
 }
 
 /// Whether the network source of `agent` is switched on in `policy`.
-fn asked_on(policy: leon_usage::network::NetworkPolicy, agent: leon_core::AgentKind) -> bool {
-    match agent {
-        leon_core::AgentKind::Claude => policy.claude,
-        leon_core::AgentKind::Opencode => policy.opencode,
-        leon_core::AgentKind::Codex => false,
-    }
+fn asked_on(policy: &leon_usage::network::NetworkPolicy, agent: leon_core::AgentId) -> bool {
+    policy.allows(agent)
 }
 
 /// A jitter of 0 to 10 percent, so that many installs do not call a vendor at
@@ -659,11 +655,11 @@ impl Engine {
 
     /// Which network sources are switched on.
     pub fn usage_policy(&self) -> leon_usage::network::NetworkPolicy {
-        *self
-            .inner
+        self.inner
             .usage_policy
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Changes which network sources are switched on, live: the next
@@ -676,18 +672,11 @@ impl Engine {
                 .usage_policy
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
-            policy,
+            policy.clone(),
         );
         if let Some(setup) = self.usage_setup().as_mut() {
-            for (agent, was, is) in [
-                (leon_core::AgentKind::Claude, before.claude, policy.claude),
-                (
-                    leon_core::AgentKind::Opencode,
-                    before.opencode,
-                    policy.opencode,
-                ),
-            ] {
-                if was != is {
+            for agent in leon_usage::network::switchable_agents() {
+                if before.allows(agent) != policy.allows(agent) {
                     setup.throttle.remove(&agent);
                     setup.refused.remove(&agent);
                     setup.failed.remove(&agent);
@@ -697,7 +686,7 @@ impl Engine {
     }
 
     /// What the engine knows of the last read of `agent`'s source.
-    pub fn usage_status(&self, agent: leon_core::AgentKind) -> SourceStatus {
+    pub fn usage_status(&self, agent: leon_core::AgentId) -> SourceStatus {
         let usage = self.usage_setup();
         let Some(setup) = usage.as_ref() else {
             return SourceStatus::default();
@@ -776,13 +765,13 @@ impl Engine {
     }
 
     /// A read the user, or a changed setting, asked for.
-    async fn collect_usage_now(&self, agents: &[leon_core::AgentKind]) {
+    async fn collect_usage_now(&self, agents: &[leon_core::AgentId]) {
         {
             let mut usage = self.usage_setup();
             let Some(setup) = usage.as_mut() else {
                 return;
             };
-            let all = [leon_core::AgentKind::Claude, leon_core::AgentKind::Opencode];
+            let all = leon_usage::network::switchable_agents();
             for agent in if agents.is_empty() { &all[..] } else { agents } {
                 setup.throttle.remove(agent);
                 setup.refused.remove(agent);
@@ -803,11 +792,8 @@ impl Engine {
                 let mut usage = self.usage_setup();
                 if let Some(setup) = usage.as_mut() {
                     setup.reading.clear();
-                    for (agent, on) in [
-                        (leon_core::AgentKind::Claude, policy.claude),
-                        (leon_core::AgentKind::Opencode, policy.opencode),
-                    ] {
-                        if on && !setup.refused.contains(&agent) {
+                    for agent in policy.agents() {
+                        if !setup.refused.contains(&agent) {
                             setup.reading.insert(agent);
                         }
                     }
@@ -852,7 +838,7 @@ impl Engine {
                 return;
             }
             let now = (setup.clock)();
-            let held: Vec<leon_core::AgentKind> = setup
+            let held: Vec<leon_core::AgentId> = setup
                 .throttle
                 .iter()
                 .filter(|(_, throttle)| !throttle.allows(now))
@@ -868,14 +854,12 @@ impl Engine {
         };
         // A source that is backing off, or whose sign-in was refused, is not
         // called again yet.
-        let mut policy = asked;
-        let blocked =
-            |agent: leon_core::AgentKind| held.contains(&agent) || refused.contains(&agent);
-        if blocked(leon_core::AgentKind::Claude) {
-            policy.claude = false;
-        }
-        if blocked(leon_core::AgentKind::Opencode) {
-            policy.opencode = false;
+        let mut policy = asked.clone();
+        let blocked = |agent: leon_core::AgentId| held.contains(&agent) || refused.contains(&agent);
+        for agent in asked.agents() {
+            if blocked(agent) {
+                policy.set(agent, false);
+            }
         }
         let now = clock();
         let runner = SharedRunner(self.inner.runner.clone());
@@ -886,13 +870,13 @@ impl Engine {
                 .local_posix_shell
                 .load(std::sync::atomic::Ordering::Relaxed),
             &self.ssh(),
-            policy,
+            &policy,
             credentials.as_ref(),
             http.as_ref(),
             now,
         )
         .await;
-        let previous: HashMap<leon_core::AgentKind, leon_usage::AgentUsage> = self
+        let previous: HashMap<leon_core::AgentId, leon_usage::AgentUsage> = self
             .inner
             .store
             .usage_readings()
@@ -910,17 +894,7 @@ impl Engine {
         if local {
             let mut usage = self.usage_setup();
             if let Some(setup) = usage.as_mut() {
-                for (agent, called) in [
-                    (leon_core::AgentKind::Claude, policy.claude),
-                    (leon_core::AgentKind::Opencode, policy.opencode),
-                ] {
-                    if !called {
-                        continue;
-                    }
-                    let reason = collected.readings.iter().find_map(|r| match r.state {
-                        leon_usage::State::Unknown { reason } if r.agent == agent => Some(reason),
-                        _ => None,
-                    });
+                for (agent, reason) in collected.called.clone() {
                     match reason {
                         Some(reason) if reason.is_failure() => {
                             setup.failed.insert(agent, reason);
@@ -954,7 +928,7 @@ impl Engine {
         // A refused sign-in is said, not replaced by "off".
         if local {
             for reading in &mut collected.readings {
-                if asked_on(asked, reading.agent) && refused.contains(&reading.agent) {
+                if asked_on(&asked, reading.agent) && refused.contains(&reading.agent) {
                     *reading = leon_usage::AgentUsage::unknown(
                         reading.agent,
                         &reading.machine,
@@ -966,7 +940,7 @@ impl Engine {
         let store = &self.inner.store;
         for (agent, reading) in crate::agent_usage::payloads(&collected, &previous) {
             // A source held back keeps what it showed, unless it is off.
-            let reading = if asked_on(asked, agent)
+            let reading = if asked_on(&asked, agent)
                 && held.contains(&agent)
                 && matches!(reading.state, leon_usage::State::Unknown { .. })
             {
@@ -1599,7 +1573,7 @@ impl Engine {
         &self,
         machine: MachineId,
         cwd: String,
-        agent: AgentKind,
+        agent: AgentId,
     ) -> JoinHandle<Target> {
         let engine = self.clone();
         self.inner
@@ -1607,7 +1581,7 @@ impl Engine {
             .spawn(async move { engine.target_of(&machine, &cwd, agent).await })
     }
 
-    async fn target_of(&self, id: &MachineId, cwd: &str, agent: AgentKind) -> Target {
+    async fn target_of(&self, id: &MachineId, cwd: &str, agent: AgentId) -> Target {
         let Ok(machine) = self.inner.store.machine(id) else {
             return Target::Offline("That machine is not known.".to_owned());
         };
@@ -1627,7 +1601,10 @@ impl Engine {
                 }
             }
         };
-        if crate::launch::probed(&report, agent).is_none() {
+        let missing = agent.spec().is_some_and(|spec| {
+            !spec.detect.is_empty() && crate::launch::probed(&report, spec).is_none()
+        });
+        if missing {
             return Target::AgentMissing;
         }
         // Going into the folder is all that is asked: `cd` fails when it is
@@ -2021,15 +1998,11 @@ fn describe_import(report: &ImportReport) -> String {
 }
 
 fn describe_probe(machine: &Machine, report: &ProbeReport) -> String {
-    let agents: Vec<&str> = [
-        ("claude", &report.claude),
-        ("codex", &report.codex),
-        ("opencode", &report.opencode),
-    ]
-    .into_iter()
-    .filter(|(_, path)| path.is_some())
-    .map(|(name, _)| name)
-    .collect();
+    let agents: Vec<&str> = leon_core::agent::all()
+        .into_iter()
+        .filter(|spec| crate::launch::probed(report, spec).is_some())
+        .map(|spec| spec.name.as_str())
+        .collect();
     let agents = if agents.is_empty() {
         "no agents found".to_owned()
     } else {
@@ -2598,7 +2571,7 @@ branch refs/heads/feature/login
         store
             .upsert_session(
                 &leon_core::NewSession {
-                    agent: leon_core::AgentKind::Claude,
+                    agent: leon_core::AgentId::CLAUDE,
                     external_id: id.to_owned(),
                     machine_id: machine.clone(),
                     cwd: cwd.to_owned(),
@@ -3147,7 +3120,7 @@ branch refs/heads/feature/login
         let machine = remote_box(&rig.store);
         let found = rig
             .engine
-            .check_target(machine.clone(), "/opt/infra".into(), AgentKind::Claude)
+            .check_target(machine.clone(), "/opt/infra".into(), AgentId::CLAUDE)
             .await
             .unwrap();
         assert_eq!(found, Target::Ready);
@@ -3173,7 +3146,7 @@ branch refs/heads/feature/login
             .set_machine(&machine, MachineState::Online(Some(report)));
         let found = rig
             .engine
-            .check_target(machine, "/opt/infra".into(), AgentKind::Claude)
+            .check_target(machine, "/opt/infra".into(), AgentId::CLAUDE)
             .await
             .unwrap();
         assert_eq!(found, Target::Ready);
@@ -3195,13 +3168,13 @@ branch refs/heads/feature/login
         let machine = remote_box(&rig.store);
         let missing = rig
             .engine
-            .check_target(machine.clone(), "/opt/infra".into(), AgentKind::Claude)
+            .check_target(machine.clone(), "/opt/infra".into(), AgentId::CLAUDE)
             .await
             .unwrap();
         assert_eq!(missing, Target::FolderMissing);
         let silent = rig
             .engine
-            .check_target(machine, "/opt/infra".into(), AgentKind::Claude)
+            .check_target(machine, "/opt/infra".into(), AgentId::CLAUDE)
             .await
             .unwrap();
         match silent {
@@ -3218,7 +3191,7 @@ branch refs/heads/feature/login
         let machine = remote_box(&rig.store);
         let down = rig
             .engine
-            .check_target(machine.clone(), "/opt/infra".into(), AgentKind::Claude)
+            .check_target(machine.clone(), "/opt/infra".into(), AgentId::CLAUDE)
             .await
             .unwrap();
         match down {
@@ -3227,7 +3200,7 @@ branch refs/heads/feature/login
         }
         let bare = rig
             .engine
-            .check_target(machine, "/opt/infra".into(), AgentKind::Codex)
+            .check_target(machine, "/opt/infra".into(), AgentId::CODEX)
             .await
             .unwrap();
         assert_eq!(bare, Target::AgentMissing);
@@ -3583,19 +3556,19 @@ branch refs/heads/feature/login
         let (rig, http) = usage_rig(ScriptedRunner::new().reply(found_output()));
         rig.engine.run(Op::CollectUsage).await;
         let rows = rig.store.usage_readings().unwrap();
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), leon_usage::network::switchable_agents().len());
         let codex = rows
             .iter()
-            .find(|r| r.agent == leon_core::AgentKind::Codex)
+            .find(|r| r.agent == leon_core::AgentId::CODEX)
             .unwrap();
         let reading: leon_usage::AgentUsage = serde_json::from_str(&codex.payload).unwrap();
         assert!(matches!(reading.state, leon_usage::State::Known { .. }));
-        let account = leon_usage::series_key("local", leon_core::AgentKind::Codex, Some("plus"));
+        let account = leon_usage::series_key("local", leon_core::AgentId::CODEX, Some("plus"));
         let history = rig
             .store
             .usage_history(
                 &MachineId::local(),
-                leon_core::AgentKind::Codex,
+                leon_core::AgentId::CODEX,
                 &account,
                 "five_hour",
                 0,
@@ -3634,14 +3607,14 @@ branch refs/heads/feature/login
                 .unwrap_or_default()
         };
         let local = MachineId::local();
-        assert!(of(&local, leon_core::AgentKind::Codex).contains("not_supported"));
+        assert!(of(&local, leon_core::AgentId::CODEX).contains("not_supported"));
         let server = rows
             .iter()
             .find(|r| r.machine != local)
             .unwrap()
             .machine
             .clone();
-        assert!(of(&server, leon_core::AgentKind::Codex).contains("\"known\""));
+        assert!(of(&server, leon_core::AgentId::CODEX).contains("\"known\""));
         assert_eq!(http.calls().len(), 0);
     }
 
@@ -3653,7 +3626,7 @@ branch refs/heads/feature/login
         let rows = rig.store.usage_readings().unwrap();
         let claude = rows
             .iter()
-            .find(|r| r.agent == leon_core::AgentKind::Claude)
+            .find(|r| r.agent == leon_core::AgentId::CLAUDE)
             .unwrap();
         assert!(claude.payload.contains("source_disabled"));
     }
@@ -3678,7 +3651,7 @@ branch refs/heads/feature/login
         let rows = rig.store.usage_readings().unwrap();
         let codex = rows
             .iter()
-            .find(|r| r.agent == leon_core::AgentKind::Codex)
+            .find(|r| r.agent == leon_core::AgentId::CODEX)
             .unwrap();
         assert!(codex.payload.contains("\"known\""));
     }
@@ -3721,12 +3694,12 @@ branch refs/heads/feature/login
         rig.engine.run(Op::CollectUsage).await;
         rig.engine.run(Op::ForgetUsageHistory).await;
         assert!(status(&rig.engine).text.starts_with("Forgot "));
-        let account = leon_usage::series_key("local", leon_core::AgentKind::Codex, Some("plus"));
+        let account = leon_usage::series_key("local", leon_core::AgentId::CODEX, Some("plus"));
         assert!(rig
             .store
             .usage_history(
                 &MachineId::local(),
-                leon_core::AgentKind::Codex,
+                leon_core::AgentId::CODEX,
                 &account,
                 "five_hour",
                 0
@@ -3742,7 +3715,7 @@ branch refs/heads/feature/login
         // The scripted runner has nothing queued, so the collection failed to
         // run: every agent is unreachable, but it was attempted.
         let rows = rig.store.usage_readings().unwrap();
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), leon_usage::network::switchable_agents().len());
     }
 
     // ----- the network sources, live
@@ -3812,15 +3785,14 @@ branch refs/heads/feature/login
             .usage_readings()
             .unwrap()
             .into_iter()
-            .find(|r| r.agent == leon_core::AgentKind::Claude)
+            .find(|r| r.agent == leon_core::AgentId::CLAUDE)
             .unwrap()
             .payload
     }
 
-    const ON: leon_usage::network::NetworkPolicy = leon_usage::network::NetworkPolicy {
-        claude: true,
-        opencode: false,
-    };
+    fn on() -> leon_usage::network::NetworkPolicy {
+        leon_usage::network::NetworkPolicy::none().with(leon_core::AgentId::CLAUDE)
+    }
 
     #[tokio::test]
     async fn the_live_preference_reaches_the_collector() {
@@ -3832,9 +3804,9 @@ branch refs/heads/feature/login
         rig.engine.run(Op::CollectUsageNow(vec![])).await;
         assert_eq!(http.calls().len(), 0, "off: nothing is called");
         assert!(claude_row(&rig).contains("source_disabled"));
-        rig.engine.set_usage_policy(ON);
+        rig.engine.set_usage_policy(on());
         rig.engine
-            .run(Op::CollectUsageNow(vec![leon_core::AgentKind::Claude]))
+            .run(Op::CollectUsageNow(vec![leon_core::AgentId::CLAUDE]))
             .await;
         assert_eq!(http.calls().len(), 1, "on: read at once");
         assert!(claude_row(&rig).contains("\"known\""));
@@ -3847,7 +3819,7 @@ branch refs/heads/feature/login
             leon_usage::network::ScriptedHttp::new().reply(200, CLAUDE_ANSWER),
             2,
         );
-        rig.engine.set_usage_policy(ON);
+        rig.engine.set_usage_policy(on());
         rig.engine.run(Op::CollectUsageNow(vec![])).await;
         assert!(claude_row(&rig).contains("\"known\""));
         rig.engine
@@ -3866,10 +3838,10 @@ branch refs/heads/feature/login
                 .reply(200, CLAUDE_ANSWER),
             3,
         );
-        rig.engine.set_usage_policy(ON);
+        rig.engine.set_usage_policy(on());
         rig.engine.run(Op::CollectUsage).await;
         assert_eq!(http.calls().len(), 1);
-        let status = rig.engine.usage_status(leon_core::AgentKind::Claude);
+        let status = rig.engine.usage_status(leon_core::AgentId::CLAUDE);
         assert_eq!(status.failed, Some(leon_usage::Reason::RateLimited(300)));
         let wait = status.retry_at.unwrap() - USAGE_NOW;
         assert!((300..=330).contains(&wait), "{wait}");
@@ -3879,7 +3851,7 @@ branch refs/heads/feature/login
         assert_eq!(http.calls().len(), 2, "a manual read is not held back");
         assert!(rig
             .engine
-            .usage_status(leon_core::AgentKind::Claude)
+            .usage_status(leon_core::AgentId::CLAUDE)
             .failed
             .is_none());
     }
@@ -3893,16 +3865,16 @@ branch refs/heads/feature/login
                 .reply(200, CLAUDE_ANSWER),
             3,
         );
-        rig.engine.set_usage_policy(ON);
+        rig.engine.set_usage_policy(on());
         rig.engine.run(Op::CollectUsage).await;
         assert!(rig
             .engine
-            .usage_status(leon_core::AgentKind::Claude)
+            .usage_status(leon_core::AgentId::CLAUDE)
             .retry_at
             .is_some());
         rig.engine
             .set_usage_policy(leon_usage::network::NetworkPolicy::default());
-        rig.engine.set_usage_policy(ON);
+        rig.engine.set_usage_policy(on());
         rig.engine.run(Op::CollectUsage).await;
         assert_eq!(http.calls().len(), 2);
     }
@@ -3914,15 +3886,11 @@ branch refs/heads/feature/login
             leon_usage::network::ScriptedHttp::new().reply(200, CLAUDE_ANSWER),
             6,
         );
-        rig.engine.set_usage_policy(ON);
+        rig.engine.set_usage_policy(on());
         rig.engine.run(Op::CollectUsage).await;
         assert_eq!(credentials.reads(), 1);
         assert!(claude_row(&rig).contains("keychain_denied"));
-        assert!(
-            rig.engine
-                .usage_status(leon_core::AgentKind::Claude)
-                .refused
-        );
+        assert!(rig.engine.usage_status(leon_core::AgentId::CLAUDE).refused);
         for _ in 0..3 {
             rig.engine.run(Op::CollectUsage).await;
         }
@@ -3933,7 +3901,7 @@ branch refs/heads/feature/login
         );
         *credentials.mode.lock().unwrap() = Mode::Found;
         rig.engine
-            .run(Op::CollectUsageNow(vec![leon_core::AgentKind::Claude]))
+            .run(Op::CollectUsageNow(vec![leon_core::AgentId::CLAUDE]))
             .await;
         assert_eq!(credentials.reads(), 2);
         assert_eq!(http.calls().len(), 1);
@@ -3988,7 +3956,7 @@ branch refs/heads/feature/login
             http.clone(),
             Arc::new(|| USAGE_NOW),
         );
-        rig.engine.set_usage_policy(ON);
+        rig.engine.set_usage_policy(on());
         tokio::join!(
             rig.engine.run(Op::CollectUsage),
             rig.engine.run(Op::CollectUsage),
@@ -4006,7 +3974,7 @@ branch refs/heads/feature/login
             leon_usage::network::ScriptedHttp::new().reply(200, CLAUDE_ANSWER),
             2,
         );
-        rig.engine.set_usage_policy(ON);
+        rig.engine.set_usage_policy(on());
         rig.engine.defer_usage();
         rig.engine.run(Op::CollectUsage).await;
         rig.engine.run(Op::Refresh).await;

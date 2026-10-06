@@ -7,7 +7,7 @@
 
 use super::live::{open_live, real_worktree, wait_until};
 use super::*;
-use crate::agent_usage::Scope;
+use crate::agent_usage::{Board, Scope};
 use crate::ui::usage_view::{BarModel, Density};
 use leon_usage::network::{Credentials, Read, ScriptedHttp};
 use leon_usage::{AgentUsage, Reason, Source, State, UsageWindow, WindowKind};
@@ -26,11 +26,7 @@ fn now() -> i64 {
     fixed_now().timestamp()
 }
 
-fn reading(
-    agent: AgentKind,
-    machine: &MachineId,
-    windows: &[(WindowKind, f64, i64)],
-) -> AgentUsage {
+fn reading(agent: AgentId, machine: &MachineId, windows: &[(WindowKind, f64, i64)]) -> AgentUsage {
     AgentUsage {
         agent,
         machine: machine.as_str().to_owned(),
@@ -89,7 +85,7 @@ fn the_bar_shows_each_agents_primary_window_with_its_figure(cx: &mut TestAppCont
     put(
         &h,
         &reading(
-            AgentKind::Claude,
+            AgentId::CLAUDE,
             &local(),
             &[
                 (WindowKind::FiveHour, 10.0, 8940),
@@ -101,7 +97,7 @@ fn the_bar_shows_each_agents_primary_window_with_its_figure(cx: &mut TestAppCont
     put(
         &h,
         &reading(
-            AgentKind::Codex,
+            AgentId::CODEX,
             &local(),
             &[
                 (WindowKind::FiveHour, 0.0, 600),
@@ -128,7 +124,7 @@ fn the_marker_and_level_change_as_a_window_crosses_the_thresholds(cx: &mut TestA
         put(
             &h,
             &reading(
-                AgentKind::Codex,
+                AgentId::CODEX,
                 &local(),
                 &[(WindowKind::FiveHour, used, 3600)],
             ),
@@ -146,7 +142,7 @@ fn an_unknown_agent_shows_why_instead_of_a_number(cx: &mut TestAppContext) {
     let (h, _) = open_usage(cx);
     put(
         &h,
-        &AgentUsage::unknown(AgentKind::Claude, local().as_str(), Reason::SourceDisabled),
+        &AgentUsage::unknown(AgentId::CLAUDE, local().as_str(), Reason::SourceDisabled),
         cx,
     );
     assert!(h.shows("usage-agent-claude", cx));
@@ -159,13 +155,17 @@ fn an_unknown_agent_shows_why_instead_of_a_number(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn a_narrow_window_collapses_the_bar_in_steps(cx: &mut TestAppContext) {
     let (h, _) = open_usage(cx);
-    for agent in AgentKind::ALL {
+    for agent in [AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE] {
         put(
             &h,
             &reading(
                 agent,
                 &local(),
-                &[(WindowKind::FiveHour, 20.0 + agent as u8 as f64, 3600)],
+                &[(
+                    WindowKind::FiveHour,
+                    20.0 + agent.as_str().len() as f64,
+                    3600,
+                )],
             ),
             cx,
         );
@@ -174,7 +174,7 @@ fn a_narrow_window_collapses_the_bar_in_steps(cx: &mut TestAppContext) {
         VisualTestContext::from_window(h.window.into(), cx)
             .simulate_resize(size(px(width), px(800.)));
         h.settle(cx);
-        let shown: Vec<bool> = AgentKind::ALL
+        let shown: Vec<bool> = [AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE]
             .iter()
             .map(|agent| h.shows_dynamic(format!("usage-agent-{}", agent.as_str()), cx))
             .collect();
@@ -201,7 +201,7 @@ fn the_single_indicator_is_the_agent_closest_to_its_limit(cx: &mut TestAppContex
     put(
         &h,
         &reading(
-            AgentKind::Claude,
+            AgentId::CLAUDE,
             &local(),
             &[(WindowKind::Weekly, 30.0, 3600)],
         ),
@@ -210,7 +210,7 @@ fn the_single_indicator_is_the_agent_closest_to_its_limit(cx: &mut TestAppContex
     put(
         &h,
         &reading(
-            AgentKind::Codex,
+            AgentId::CODEX,
             &local(),
             &[(WindowKind::Weekly, 88.0, 3600)],
         ),
@@ -228,7 +228,7 @@ fn the_status_message_stays_visible_next_to_the_meters(cx: &mut TestAppContext) 
     put(
         &h,
         &reading(
-            AgentKind::Codex,
+            AgentId::CODEX,
             &local(),
             &[(WindowKind::Weekly, 10.0, 3600)],
         ),
@@ -268,7 +268,7 @@ fn an_agent_switched_off_in_settings_leaves_the_bar(cx: &mut TestAppContext) {
     put(
         &h,
         &reading(
-            AgentKind::Codex,
+            AgentId::CODEX,
             &local(),
             &[(WindowKind::Weekly, 10.0, 3600)],
         ),
@@ -277,7 +277,7 @@ fn an_agent_switched_off_in_settings_leaves_the_bar(cx: &mut TestAppContext) {
     put(
         &h,
         &reading(
-            AgentKind::Claude,
+            AgentId::CLAUDE,
             &local(),
             &[(WindowKind::Weekly, 10.0, 3600)],
         ),
@@ -292,7 +292,19 @@ fn an_agent_switched_off_in_settings_leaves_the_bar(cx: &mut TestAppContext) {
     });
     h.settle(cx);
     assert!(!h.shows("usage-agent-codex", cx));
-    assert!(h.shows("usage-agent-claude", cx));
+    // Claude stays: listed, or (when this computer has no shell of its own and
+    // every agent reads "unsupported") folded into the count.
+    let model = bar(&h, cx);
+    assert!(model
+        .items
+        .iter()
+        .chain(&model.folded)
+        .any(|item| item.agent == AgentId::CLAUDE));
+    assert!(!model
+        .items
+        .iter()
+        .chain(&model.folded)
+        .any(|item| item.agent == AgentId::CODEX));
 }
 
 #[gpui_kit::test]
@@ -301,7 +313,7 @@ fn the_chord_opens_the_view_and_escape_closes_it(cx: &mut TestAppContext) {
     put(
         &h,
         &reading(
-            AgentKind::Codex,
+            AgentId::CODEX,
             &local(),
             &[(WindowKind::FiveHour, 38.0, 8940)],
         ),
@@ -321,7 +333,7 @@ fn clicking_the_bar_opens_the_view(cx: &mut TestAppContext) {
     put(
         &h,
         &reading(
-            AgentKind::Codex,
+            AgentId::CODEX,
             &local(),
             &[(WindowKind::FiveHour, 38.0, 8940)],
         ),
@@ -358,7 +370,7 @@ fn the_view_shows_resets_provenance_and_the_unknown_reason(cx: &mut TestAppConte
     put(
         &h,
         &reading(
-            AgentKind::Codex,
+            AgentId::CODEX,
             &local(),
             &[
                 (WindowKind::FiveHour, 38.0, 8940),
@@ -369,14 +381,14 @@ fn the_view_shows_resets_provenance_and_the_unknown_reason(cx: &mut TestAppConte
     );
     put(
         &h,
-        &AgentUsage::unknown(AgentKind::Claude, local().as_str(), Reason::SourceDisabled),
+        &AgentUsage::unknown(AgentId::CLAUDE, local().as_str(), Reason::SourceDisabled),
         cx,
     );
     h.press_chord("cmd-shift-u", "ctrl-shift-alt-u", cx);
     let rows = cx.update(|cx| h.shell.read(cx).usage_view_rows(cx));
     assert_eq!(rows.len(), 2);
     let claude = &rows[0];
-    assert_eq!(claude.view.agent, AgentKind::Claude);
+    assert_eq!(claude.view.agent, AgentId::CLAUDE);
     assert_eq!(claude.view.provenance(), Reason::SourceDisabled.sentence());
     let codex = &rows[1];
     assert_eq!(codex.windows.len(), 2);
@@ -399,7 +411,7 @@ fn m_switches_between_detailed_and_compact_and_so_do_the_chips(cx: &mut TestAppC
     put(
         &h,
         &reading(
-            AgentKind::Codex,
+            AgentId::CODEX,
             &local(),
             &[(WindowKind::FiveHour, 38.0, 8940)],
         ),
@@ -446,7 +458,7 @@ fn the_arrows_choose_the_machine_the_view_lists(cx: &mut TestAppContext) {
     put(
         &h,
         &reading(
-            AgentKind::Codex,
+            AgentId::CODEX,
             &local(),
             &[(WindowKind::FiveHour, 10.0, 3600)],
         ),
@@ -455,7 +467,7 @@ fn the_arrows_choose_the_machine_the_view_lists(cx: &mut TestAppContext) {
     put(
         &h,
         &reading(
-            AgentKind::Codex,
+            AgentId::CODEX,
             &remote.id,
             &[(WindowKind::FiveHour, 80.0, 3600)],
         ),
@@ -531,7 +543,7 @@ fn starting_an_agent_at_its_critical_limit_says_so_with_the_reset_and_never_bloc
     put(
         &h,
         &reading(
-            AgentKind::Claude,
+            AgentId::CLAUDE,
             &local(),
             &[(WindowKind::FiveHour, 96.0, 2 * 3600 + 29 * 60)],
         ),
@@ -555,7 +567,7 @@ fn below_the_critical_limit_or_with_the_setting_off_nothing_is_said(cx: &mut Tes
     put(
         &h,
         &reading(
-            AgentKind::Claude,
+            AgentId::CLAUDE,
             &local(),
             &[(WindowKind::FiveHour, 80.0, 3600)],
         ),
@@ -578,7 +590,7 @@ fn below_the_critical_limit_or_with_the_setting_off_nothing_is_said(cx: &mut Tes
     put(
         &h,
         &reading(
-            AgentKind::Claude,
+            AgentId::CLAUDE,
             &local(),
             &[(WindowKind::FiveHour, 99.0, 3600)],
         ),
@@ -599,7 +611,7 @@ fn the_header_of_a_live_agent_session_shows_its_primary_window(cx: &mut TestAppC
     put(
         &h,
         &reading(
-            AgentKind::Claude,
+            AgentId::CLAUDE,
             &local(),
             &[
                 (WindowKind::FiveHour, 20.0, 3600),
@@ -632,7 +644,7 @@ fn forgetting_the_history_is_a_button_of_the_settings(cx: &mut TestAppContext) {
     h.store
         .record_usage_points(
             &local(),
-            AgentKind::Codex,
+            AgentId::CODEX,
             "acct",
             &[(
                 "five_hour".to_owned(),
@@ -655,7 +667,7 @@ fn forgetting_the_history_is_a_button_of_the_settings(cx: &mut TestAppContext) {
     assert!(h.status().starts_with("Forgot "), "{}", h.status());
     assert!(h
         .store
-        .usage_history(&local(), AgentKind::Codex, "acct", "five_hour", 0)
+        .usage_history(&local(), AgentId::CODEX, "acct", "five_hour", 0)
         .unwrap()
         .is_empty());
 }
@@ -750,7 +762,7 @@ fn claude_source(h: &Harness, on: bool, cx: &mut TestAppContext) {
 fn claude_row(h: &Harness, cx: &mut TestAppContext) -> crate::ui::usage_view::UsageRow {
     cx.update(|cx| h.shell.read(cx).usage_view_rows(cx))
         .into_iter()
-        .find(|row| row.view.agent == AgentKind::Claude)
+        .find(|row| row.view.agent == AgentId::CLAUDE)
         .expect("a row for Claude Code")
 }
 
@@ -758,7 +770,7 @@ fn claude_item(h: &Harness, cx: &mut TestAppContext) -> crate::ui::usage_view::B
     bar(h, cx)
         .items
         .into_iter()
-        .find(|item| item.agent == AgentKind::Claude)
+        .find(|item| item.agent == AgentId::CLAUDE)
         .expect("Claude Code is in the bar")
 }
 
@@ -778,8 +790,14 @@ fn the_network_sources_are_on_by_default_and_a_file_that_set_them_off_stays_off(
         Some(dir.path().join(settings::FILE_NAME)),
     );
     let policy = cx.update(|cx| settings::usage_policy(cx));
-    assert!(policy.claude, "a file without the key gets the default: on");
-    assert!(!policy.opencode, "a file that says off stays off");
+    assert!(
+        policy.allows(AgentId::CLAUDE),
+        "a file without the key gets the default: on"
+    );
+    assert!(
+        !policy.allows(AgentId::OPENCODE),
+        "a file that says off stays off"
+    );
     assert_eq!(cx.update(|cx| settings::usage_interval_seconds(cx)), 60);
 }
 
@@ -819,7 +837,7 @@ fn while_the_first_read_is_in_flight_the_view_says_reading(cx: &mut TestAppConte
     let h = open_network(cx, Creds::new(false), http.clone());
     claude_source(&h, false, cx);
     claude_source(&h, true, cx);
-    assert!(h.engine.usage_status(AgentKind::Claude).reading);
+    assert!(h.engine.usage_status(AgentId::CLAUDE).reading);
     let row = claude_row(&h, cx);
     let note = row.note.expect("the row says what is going on");
     assert!(note.starts_with("Reading…"), "{note}");
@@ -833,7 +851,7 @@ fn while_the_first_read_is_in_flight_the_view_says_reading(cx: &mut TestAppConte
     assert_eq!(claude_item(&h, cx).label, "reading…");
     open.notify_one();
     h.settle(cx);
-    assert!(!h.engine.usage_status(AgentKind::Claude).reading);
+    assert!(!h.engine.usage_status(AgentId::CLAUDE).reading);
     assert!(
         claude_item(&h, cx).known,
         "the numbers replace it when the read ends"
@@ -953,7 +971,7 @@ fn a_rate_limit_says_so_and_when_the_next_read_is(cx: &mut TestAppContext) {
 #[test]
 fn a_window_at_93_percent_is_critical_with_a_marker_in_the_view_the_bar_and_the_header() {
     let reading = reading(
-        AgentKind::Claude,
+        AgentId::CLAUDE,
         &local(),
         &[
             (WindowKind::FiveHour, 10.0, 8940),
@@ -967,7 +985,7 @@ fn a_window_at_93_percent_is_critical_with_a_marker_in_the_view_the_bar_and_the_
         &board,
         &Scope::Context,
         &local(),
-        &AgentKind::ALL,
+        &[AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE],
         &|id| id.to_owned(),
         now(),
         thresholds,
@@ -986,7 +1004,7 @@ fn a_window_at_93_percent_is_critical_with_a_marker_in_the_view_the_bar_and_the_
         &board,
         &local(),
         "This computer",
-        &AgentKind::ALL,
+        &[AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE],
         now(),
         thresholds,
         1600.0,
@@ -1003,4 +1021,194 @@ fn a_window_at_93_percent_is_critical_with_a_marker_in_the_view_the_bar_and_the_
     assert!(crate::ui::usage_view::chip_text(primary).contains("93% !!"));
     // And from 75 a warning, from the settings' own thresholds.
     assert_eq!(thresholds.classify(75.0).glyph(), "!");
+}
+
+#[gpui_kit::test]
+fn a_settings_file_of_the_three_agent_era_still_applies_and_new_agents_get_their_defaults(
+    cx: &mut TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(settings::FILE_NAME),
+        br#"{"agent_claude_args":"--model opus","agent_codex_enabled":false,"usage_codex":false,"default_agent":"opencode","usage_claude_network":false}"#,
+    )
+    .unwrap();
+    let _h = open_with(
+        cx,
+        ScriptedRunner::new(),
+        Some(dir.path().join(settings::FILE_NAME)),
+    );
+    let (prefs, steps, policy, shown, default) = cx.update(|cx| {
+        (
+            Shell::launch_prefs(cx),
+            Shell::step_prefs(cx),
+            settings::usage_policy(cx),
+            settings::usage_agents(cx),
+            settings::text(cx, "default_agent"),
+        )
+    });
+    assert_eq!(prefs.agent(AgentId::CLAUDE).args, ["--model", "opus"]);
+    assert!(!steps.offered().contains(&AgentId::CODEX));
+    assert!(
+        steps.offered().contains(&AgentId::GROK),
+        "a new agent is on by default"
+    );
+    assert!(!policy.allows(AgentId::CLAUDE) && policy.allows(AgentId::GROK));
+    assert!(!shown.contains(&AgentId::CODEX) && shown.contains(&AgentId::CURSOR));
+    assert_eq!(default, "opencode");
+}
+
+#[gpui_kit::test]
+fn a_custom_agent_is_added_validated_kept_and_offered_like_a_built_in_one(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(settings::FILE_NAME);
+    let _h = open_with(cx, ScriptedRunner::new(), Some(file.clone()));
+    let id = cx
+        .update(|cx| {
+            settings::add_custom_agent(cx, "Zed Zeta Tool", "zzt", "--fast", "--resume {id}")
+        })
+        .unwrap();
+    assert_eq!(id.as_str(), "custom-zed-zeta-tool");
+    // Everywhere a built-in one is: the catalogue, the offered list, the launch.
+    cx.update(|cx| {
+        assert!(Shell::step_prefs(cx).offered().contains(&id));
+        assert_eq!(id.name(), "Zed Zeta Tool");
+        assert_eq!(
+            crate::launch::command_line_with(
+                id,
+                Some("s 1"),
+                crate::launch::Flavor::Posix,
+                &Shell::launch_prefs(cx).agent(id).clone()
+            )
+            .as_deref(),
+            Some("zzt --resume 's 1'")
+        );
+    });
+    // Kept in the file as one JSON object per agent.
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("custom_agents") && text.contains("zzt"),
+        "{text}"
+    );
+    // Refused with a reason, and nothing is added.
+    for (name, command, resume) in [
+        ("Zed Zeta Tool", "other", ""),
+        ("claude code", "x", ""),
+        ("Bad Tool", "", ""),
+        ("Bad Tool", "x", "{nope}"),
+    ] {
+        let refused = cx.update(|cx| settings::add_custom_agent(cx, name, command, "", resume));
+        assert!(refused.is_err(), "{name} {command} {resume}");
+    }
+    cx.update(|cx| settings::remove_custom_agent(cx, id));
+    cx.update(|cx| assert!(!Shell::step_prefs(cx).offered().contains(&id)));
+}
+
+#[test]
+fn with_many_agents_the_bar_lists_those_with_numbers_and_folds_the_rest_into_a_count() {
+    let mut readings = Vec::new();
+    for (agent, used) in [(AgentId::CODEX, 30.0), (AgentId::GROK, 50.0)] {
+        readings.push(known_reading(agent, used));
+    }
+    for agent in [
+        AgentId::CLAUDE,
+        AgentId::CURSOR,
+        AgentId::KIMI,
+        AgentId::ZCODE,
+    ] {
+        readings.push(AgentUsage::unknown(agent, "local", Reason::NotSignedIn));
+    }
+    // Not installed: left out altogether, as ever.
+    readings.push(AgentUsage::unknown(
+        AgentId::OPENCODE,
+        "local",
+        Reason::NotInstalled,
+    ));
+    let board = Board::new(readings);
+    let all = leon_usage::network::switchable_agents();
+    let model = crate::ui::usage_view::bar_model(
+        &board,
+        &MachineId::local(),
+        "This computer",
+        &all,
+        1_790_000_000,
+        leon_usage::Thresholds::default(),
+        1600.0,
+    );
+    let shown: Vec<AgentId> = model.items.iter().map(|i| i.agent).collect();
+    assert_eq!(shown, [AgentId::CODEX, AgentId::GROK]);
+    assert_eq!(model.folded.len(), 4);
+    assert!(model.folded.iter().all(|i| !i.known));
+    // With few agents nothing is folded: each says why.
+    let few = Board::new(vec![
+        known_reading(AgentId::CODEX, 30.0),
+        AgentUsage::unknown(AgentId::CLAUDE, "local", Reason::NotSignedIn),
+    ]);
+    let model = crate::ui::usage_view::bar_model(
+        &few,
+        &MachineId::local(),
+        "This computer",
+        &all,
+        1_790_000_000,
+        leon_usage::Thresholds::default(),
+        1600.0,
+    );
+    assert_eq!(model.items.len(), 2);
+    assert!(model.folded.is_empty());
+}
+
+fn known_reading(agent: AgentId, used: f64) -> AgentUsage {
+    AgentUsage {
+        agent,
+        machine: "local".into(),
+        account_label: None,
+        plan: None,
+        source: Some(Source::VendorApi),
+        observed_at: Some(1_790_000_000),
+        state: State::Known {
+            windows: vec![UsageWindow {
+                kind: WindowKind::Weekly,
+                used_percent: used,
+                resets_at: Some(1_790_100_000),
+                window_length: None,
+            }],
+        },
+    }
+}
+
+#[test]
+fn the_view_tells_the_agents_with_numbers_from_those_not_installed_or_without_data() {
+    use crate::ui::usage_view::usage_rows;
+    let board = Board::new(vec![
+        known_reading(AgentId::CODEX, 10.0),
+        AgentUsage::unknown(AgentId::GROK, "local", Reason::NotInstalled),
+        AgentUsage::unknown(AgentId::CURSOR, "local", Reason::NoData),
+        AgentUsage::unknown(AgentId::CLAUDE, "local", Reason::NotSignedIn),
+    ]);
+    let rows = usage_rows(
+        &board,
+        &Scope::Context,
+        &MachineId::local(),
+        &leon_usage::network::switchable_agents(),
+        &|_| "This computer".to_owned(),
+        1_790_000_000,
+        leon_usage::Thresholds::default(),
+        &std::collections::HashMap::new(),
+    );
+    let inactive: Vec<AgentId> = rows
+        .iter()
+        .filter(|r| r.is_inactive())
+        .map(|r| r.view.agent)
+        .collect();
+    let active: Vec<AgentId> = rows
+        .iter()
+        .filter(|r| !r.is_inactive())
+        .map(|r| r.view.agent)
+        .collect();
+    assert_eq!(inactive, [AgentId::GROK, AgentId::CURSOR]);
+    assert_eq!(
+        active,
+        [AgentId::CLAUDE, AgentId::CODEX],
+        "signed out is not inactive: it needs you"
+    );
 }

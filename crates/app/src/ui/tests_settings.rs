@@ -30,7 +30,7 @@ fn every_setting_is_found_in_the_palette_by_its_label_and_by_a_keyword(cx: &mut 
     // through all of them, and typing is covered by the tests below and by
     // the two typed keywords at its end.
     h.press("ctrl-shift-p", cx);
-    for def in schema::SETTINGS.iter().filter(|d| d.platform.here()) {
+    for def in schema::settings().iter().filter(|d| d.platform.here()) {
         h.set_palette_text(&format!(">{}", def.label), cx);
         let found = h.palette_titles(cx);
         assert!(

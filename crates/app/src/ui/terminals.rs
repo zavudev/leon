@@ -309,7 +309,7 @@ impl Shell {
     /// session is already starting.
     fn warn_before_session(
         &mut self,
-        agent: Option<leon_core::AgentKind>,
+        agent: Option<leon_core::AgentId>,
         machine: &MachineId,
         cx: &mut Context<Self>,
     ) {
@@ -812,7 +812,11 @@ impl Shell {
                 self.show_transcript_instead(session, why, true, cx);
                 return;
             }
-            Err(error @ LaunchError::NotInstalled { .. }) => {
+            Err(
+                error @ (LaunchError::NotInstalled { .. }
+                | LaunchError::UnknownAgent(_)
+                | LaunchError::CannotResume { .. }),
+            ) => {
                 self.show_transcript_instead(session, error.to_string(), false, cx);
                 return;
             }

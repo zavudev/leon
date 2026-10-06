@@ -17,7 +17,7 @@
 //! the UI calls [`foreign`] to leave out Leon's own terminals.
 
 use chrono::{Local, TimeZone};
-use leon_core::{AgentKind, Session, SessionId};
+use leon_core::{AgentId, Session, SessionId};
 use leon_remote::processes::{AgentProcess, AppBundle, Resumes, Scan};
 use std::collections::HashSet;
 
@@ -70,7 +70,7 @@ pub struct Found {
     /// Its pid.
     pub pid: u32,
     /// Its agent.
-    pub agent: AgentKind,
+    pub agent: AgentId,
     /// Its terminal device.
     pub tty: Option<String>,
     /// When it started, in unix seconds.
@@ -126,7 +126,7 @@ fn same_folder(a: &str, b: &str) -> bool {
 /// that was scanned). `leon_pid` is this Leon's pid when the machine is this
 /// computer: what runs below it is Leon's own.
 pub fn resolve(scan: &Scan, sessions: &[Session], leon_pid: Option<u32>) -> Vec<Found> {
-    let by_id = |agent: AgentKind, id: &str| {
+    let by_id = |agent: AgentId, id: &str| {
         sessions
             .iter()
             .find(|session| session.agent == agent && session.external_id == id)
@@ -149,7 +149,7 @@ pub fn resolve(scan: &Scan, sessions: &[Session], leon_pid: Option<u32>) -> Vec<
         .collect();
 
     // Certain: the process says which session it holds.
-    let mut claimed: HashSet<(AgentKind, String)> = HashSet::new();
+    let mut claimed: HashSet<(AgentId, String)> = HashSet::new();
     for (entry, process) in found.iter_mut().zip(&scan.agents) {
         let named = match (&process.state_session, &process.resumes) {
             (Some(id), _) => Some((id.clone(), Signal::StateFile)),
@@ -220,7 +220,7 @@ pub fn resolve(scan: &Scan, sessions: &[Session], leon_pid: Option<u32>) -> Vec<
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnTerminal {
     /// Its agent.
-    pub agent: AgentKind,
+    pub agent: AgentId,
     /// The folder it runs in.
     pub cwd: String,
     /// The history session it resumed, when it did.
@@ -271,7 +271,7 @@ mod tests {
 
     const NOW: i64 = 1_000_000;
 
-    fn session(agent: AgentKind, external: &str, cwd: &str, updated: i64) -> Session {
+    fn session(agent: AgentId, external: &str, cwd: &str, updated: i64) -> Session {
         Session {
             id: SessionId::from_string(format!("s-{external}")),
             agent,
@@ -303,7 +303,7 @@ mod tests {
     fn an_id_in_the_arguments_is_a_certain_match() {
         let found = only(resolve(
             &scan(&[&format!("A 10 1 ttys0 00:30 claude --resume {A}")]),
-            &[session(AgentKind::Claude, A, "/w", NOW - 500)],
+            &[session(AgentId::CLAUDE, A, "/w", NOW - 500)],
             None,
         ));
         assert_eq!(
@@ -332,8 +332,8 @@ mod tests {
                 ),
             ]),
             &[
-                session(AgentKind::Claude, A, "/w", NOW - 500),
-                session(AgentKind::Claude, B, "/w", NOW - 400),
+                session(AgentId::CLAUDE, A, "/w", NOW - 500),
+                session(AgentId::CLAUDE, B, "/w", NOW - 400),
             ],
             None,
         ));
@@ -358,10 +358,10 @@ mod tests {
         let found = only(resolve(
             &scan(&["A 10 1 ttys0 00:30 claude --continue", "C 10 /w"]),
             &[
-                session(AgentKind::Claude, A, "/w", NOW - 900),
-                session(AgentKind::Claude, B, "/w", NOW - 800),
-                session(AgentKind::Claude, "other", "/elsewhere", NOW - 10),
-                session(AgentKind::Codex, "codex-one", "/w", NOW - 5),
+                session(AgentId::CLAUDE, A, "/w", NOW - 900),
+                session(AgentId::CLAUDE, B, "/w", NOW - 800),
+                session(AgentId::CLAUDE, "other", "/elsewhere", NOW - 10),
+                session(AgentId::CODEX, "codex-one", "/w", NOW - 5),
             ],
             None,
         ));
@@ -381,8 +381,8 @@ mod tests {
         // Started 30 s ago: the session touched 10 s ago is its; the one from
         // yesterday is not.
         let sessions = [
-            session(AgentKind::Codex, "old", "/w", NOW - 86_400),
-            session(AgentKind::Codex, "new", "/w", NOW - 10),
+            session(AgentId::CODEX, "old", "/w", NOW - 86_400),
+            session(AgentId::CODEX, "new", "/w", NOW - 10),
         ];
         let found = only(resolve(
             &scan(&["A 10 1 ttys0 00:30 codex", "C 10 /w/"]),
@@ -410,7 +410,7 @@ mod tests {
                 "C 10 /w",
                 "C 11 /w",
             ]),
-            &[session(AgentKind::Codex, "new", "/w", NOW - 5)],
+            &[session(AgentId::CODEX, "new", "/w", NOW - 5)],
             None,
         );
         assert_eq!(found.len(), 2);
@@ -426,7 +426,7 @@ mod tests {
                 "C 10 /w",
                 "C 11 /w",
             ]),
-            &[session(AgentKind::Claude, A, "/w", NOW - 5)],
+            &[session(AgentId::CLAUDE, A, "/w", NOW - 5)],
             None,
         );
         let second = found.iter().find(|f| f.pid == 11).unwrap();
@@ -459,8 +459,8 @@ mod tests {
     #[test]
     fn over_ssh_leons_own_terminals_account_for_their_processes() {
         let sessions = [
-            session(AgentKind::Claude, A, "/srv/a", NOW - 100),
-            session(AgentKind::Claude, B, "/srv/b", NOW - 100),
+            session(AgentId::CLAUDE, A, "/srv/a", NOW - 100),
+            session(AgentId::CLAUDE, B, "/srv/b", NOW - 100),
         ];
         let found = resolve(
             &scan(&[
@@ -471,7 +471,7 @@ mod tests {
             None,
         );
         let own = [OwnTerminal {
-            agent: AgentKind::Claude,
+            agent: AgentId::CLAUDE,
             cwd: "/srv/a".into(),
             session: Some(SessionId::from_string(format!("s-{A}"))),
         }];

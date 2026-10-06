@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::*;
 use gpui_kit::{div, Context, Div, FontWeight, Hsla, SharedString, Stateful, Task, Window};
-use leon_core::{AgentKind, MachineId, UsagePoint};
+use leon_core::{AgentId, MachineId, UsagePoint};
 use leon_usage::{
     compact_duration, forecast, series_key, view, AgentUsage, AgentView, Body, Level, Meter,
     Sample, Thresholds,
@@ -80,7 +80,7 @@ pub fn density(width: f32, agents: usize) -> Density {
 #[derive(Clone, Debug, PartialEq)]
 pub struct BarItem {
     /// The agent.
-    pub agent: AgentKind,
+    pub agent: AgentId,
     /// The machine's id.
     pub machine: String,
     /// The window shown: `5h`, `wk`, or the reason when nothing is known.
@@ -103,11 +103,19 @@ pub struct BarItem {
     pub reason: Option<leon_usage::Reason>,
 }
 
+/// How many agents the bar lists one by one. With more, the ones with numbers
+/// come first and the rest (signed out, switched off, no data yet) fold into
+/// a count.
+pub const BAR_PLAIN: usize = 4;
+
 /// What the bar shows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BarModel {
     /// The agents, in display order; an agent that is not installed is absent.
     pub items: Vec<BarItem>,
+    /// With many agents, the ones that have no numbers, folded into a `+N`
+    /// that lists them on hover.
+    pub folded: Vec<BarItem>,
     /// How much fits at this window width.
     pub density: Density,
     /// The index of the item closest to its limit.
@@ -140,7 +148,7 @@ pub fn bar_model(
     board: &Board,
     context: &MachineId,
     machine_name: &str,
-    shown: &[AgentKind],
+    shown: &[AgentId],
     now: i64,
     thresholds: Thresholds,
     width: f32,
@@ -195,6 +203,13 @@ pub fn bar_model(
         };
         items.push(item);
     }
+    let mut folded = Vec::new();
+    if items.len() > BAR_PLAIN {
+        let (known, rest): (Vec<BarItem>, Vec<BarItem>) =
+            items.into_iter().partition(|item| item.known);
+        items = known;
+        folded = rest;
+    }
     let worst = items
         .iter()
         .enumerate()
@@ -202,6 +217,7 @@ pub fn bar_model(
         .max_by(|a, b| a.1.percent.total_cmp(&b.1.percent))
         .map(|(index, _)| index);
     BarModel {
+        folded,
         density: density(width, items.len()),
         worst,
         updated: board
@@ -212,12 +228,8 @@ pub fn bar_model(
 }
 
 /// What an agent is called.
-pub fn agent_name(agent: AgentKind) -> &'static str {
-    match agent {
-        AgentKind::Claude => "Claude Code",
-        AgentKind::Codex => "Codex",
-        AgentKind::Opencode => "opencode",
-    }
+pub fn agent_name(agent: AgentId) -> &'static str {
+    agent.name()
 }
 
 /// The colour of a level: tokens of the theme only.
@@ -230,7 +242,7 @@ pub fn level_colour(level: Level, colours: &Palette) -> Hsla {
 }
 
 /// The history key of one window.
-pub type HistoryKey = (String, AgentKind, String);
+pub type HistoryKey = (String, AgentId, String);
 
 /// One window of a row of the view.
 #[derive(Clone, Debug, PartialEq)]
@@ -262,13 +274,28 @@ pub struct UsageRow {
     pub try_again: bool,
 }
 
+impl UsageRow {
+    /// Whether the agent has nothing to show here: it is not installed (or
+    /// has no usage source on this machine), or no limit was ever recorded.
+    pub fn is_inactive(&self) -> bool {
+        matches!(
+            self.view.body,
+            Body::Unknown(
+                leon_usage::Reason::NotInstalled
+                    | leon_usage::Reason::NotSupported
+                    | leon_usage::Reason::NoData
+            )
+        )
+    }
+}
+
 /// What the view lists for a scope.
 #[allow(clippy::too_many_arguments)]
 pub fn usage_rows(
     board: &Board,
     scope: &Scope,
     context: &MachineId,
-    shown: &[AgentKind],
+    shown: &[AgentId],
     names: &dyn Fn(&str) -> String,
     now: i64,
     thresholds: Thresholds,
@@ -319,18 +346,14 @@ pub struct Note<'a> {
 }
 
 impl Note<'_> {
-    fn status(&self, agent: AgentKind) -> SourceStatus {
+    fn status(&self, agent: AgentId) -> SourceStatus {
         self.statuses.get(&agent).copied().unwrap_or_default()
     }
 }
 
 /// The setting that switches an agent's network source.
-fn source_setting(agent: AgentKind) -> Option<&'static str> {
-    match agent {
-        AgentKind::Claude => Some("usage_claude_network"),
-        AgentKind::Opencode => Some("usage_opencode_network"),
-        AgentKind::Codex => None,
-    }
+fn source_setting(agent: AgentId) -> Option<&'static str> {
+    crate::schema::find(&crate::schema::usage_setting(agent, true)).map(|def| def.key)
 }
 
 /// Says what the last read of each network source came to: "Reading…" while
@@ -365,7 +388,8 @@ pub fn annotate_rows(rows: &mut [UsageRow], note: &Note<'_>) {
                     row.turn_on = source_setting(agent);
                 } else if reason.is_failure()
                     || status.refused
-                    || (reason == leon_usage::Reason::NotSignedIn && agent == AgentKind::Claude)
+                    || (reason == leon_usage::Reason::NotSignedIn
+                        && crate::agent_usage::says_signed_out(agent))
                 {
                     row.note = Some(unknown_text(
                         agent,
@@ -400,7 +424,8 @@ pub fn annotate_bar(model: &mut BarModel, note: &Note<'_>) {
         let text = if status.reading
             || status.refused
             || reason.is_failure()
-            || (reason == leon_usage::Reason::NotSignedIn && item.agent == AgentKind::Claude)
+            || (reason == leon_usage::Reason::NotSignedIn
+                && crate::agent_usage::says_signed_out(item.agent))
         {
             unknown_text(
                 item.agent,
@@ -493,7 +518,7 @@ pub struct UsageUi {
     pub next_at: Option<i64>,
     /// The settings the schedule was last given: which agents are shown and
     /// the interval, to tell what changed.
-    pub applied: Option<(Vec<AgentKind>, i64)>,
+    pub applied: Option<(Vec<AgentId>, i64)>,
 }
 
 impl Default for UsageUi {
@@ -694,12 +719,11 @@ impl Shell {
         let shown = settings::usage_agents(cx);
         let interval = settings::usage_interval_seconds(cx);
         let previous = self.usage.applied.replace((shown.clone(), interval));
-        let mut affected: Vec<AgentKind> = Vec::new();
-        if before.claude != policy.claude {
-            affected.push(AgentKind::Claude);
-        }
-        if before.opencode != policy.opencode {
-            affected.push(AgentKind::Opencode);
+        let mut affected: Vec<AgentId> = Vec::new();
+        for agent in leon_usage::network::switchable_agents() {
+            if before.allows(agent) != policy.allows(agent) {
+                affected.push(agent);
+            }
         }
         let mut changed = !affected.is_empty();
         if let Some((was_shown, was_interval)) = previous {
@@ -856,6 +880,21 @@ impl Shell {
         };
         for (_, item) in shown {
             cluster = cluster.child(self.render_bar_item(item, model.density, colours, cx));
+        }
+        if !model.folded.is_empty() {
+            let tip = model
+                .folded
+                .iter()
+                .map(|item| format!("{}: {}", agent_name(item.agent), item.label))
+                .collect::<Vec<_>>()
+                .join("\n");
+            cluster = cluster.child(
+                mono(format!("+{}", model.folded.len()))
+                    .id("usage-folded")
+                    .debug_selector(|| "usage-folded".into())
+                    .text_color(colours.text_faint)
+                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx)),
+            );
         }
         if model.items.is_empty() && self.usage.board.is_empty() {
             cluster = cluster.child(
@@ -1115,8 +1154,51 @@ impl Shell {
                     .child("Nothing to show: no agent is installed here, or none is switched on in Settings."),
             );
         }
-        for (index, row) in rows.iter().enumerate() {
+        let (active, inactive): (Vec<_>, Vec<_>) = rows
+            .iter()
+            .enumerate()
+            .partition(|(_, row)| !row.is_inactive());
+        let heading = match &self.usage.scope {
+            Scope::Context => "This machine's agents".to_owned(),
+            Scope::Machine(id) => format!("Agents on {}", self.machine_name_of(id.as_str())),
+            Scope::All => "Agents on every machine".to_owned(),
+        };
+        if !active.is_empty() && !inactive.is_empty() {
+            body = body.child(
+                section_label(&heading, colours)
+                    .id("usage-group-active")
+                    .debug_selector(|| "usage-group-active".into()),
+            );
+        }
+        for (index, row) in active {
             body = body.child(self.render_usage_row(index, row, detailed, colours, cx));
+        }
+        if !inactive.is_empty() {
+            body = body.child(
+                section_label("Not installed / no data", colours)
+                    .id("usage-group-inactive")
+                    .debug_selector(|| "usage-group-inactive".into()),
+            );
+            for (_, row) in inactive {
+                let reason = match &row.view.body {
+                    Body::Unknown(reason) => reason.short(),
+                    Body::Ready { .. } => "",
+                };
+                body = body.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_color(colours.text_faint)
+                        .child(agent_icon(row.view.agent, px(14.), colours))
+                        .child(format!(
+                            "{} · {} · {}",
+                            agent_name(row.view.agent),
+                            row.machine_name,
+                            reason
+                        )),
+                );
+            }
         }
         self.card("usage-view", colours)
             .w(px(680.))
@@ -1450,11 +1532,7 @@ mod tests {
 
     const NOW: i64 = 1_790_000_000;
 
-    fn reading(
-        agent: AgentKind,
-        machine: &str,
-        windows: Vec<(WindowKind, f64, i64)>,
-    ) -> AgentUsage {
+    fn reading(agent: AgentId, machine: &str, windows: Vec<(WindowKind, f64, i64)>) -> AgentUsage {
         AgentUsage {
             agent,
             machine: machine.into(),
@@ -1481,7 +1559,7 @@ mod tests {
             board,
             &MachineId::local(),
             "This computer",
-            &AgentKind::ALL,
+            &[AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE],
             NOW,
             Thresholds::default(),
             width,
@@ -1502,7 +1580,7 @@ mod tests {
     fn the_bar_shows_each_agents_primary_window() {
         let board = Board::new(vec![
             reading(
-                AgentKind::Claude,
+                AgentId::CLAUDE,
                 "local",
                 vec![
                     (WindowKind::FiveHour, 10.0, 8940),
@@ -1510,7 +1588,7 @@ mod tests {
                 ],
             ),
             reading(
-                AgentKind::Codex,
+                AgentId::CODEX,
                 "local",
                 vec![
                     (WindowKind::FiveHour, 0.0, 100),
@@ -1520,7 +1598,7 @@ mod tests {
         ]);
         let m = model(&board, 1600.0);
         assert_eq!(m.items.len(), 2);
-        assert_eq!(m.items[0].agent, AgentKind::Claude);
+        assert_eq!(m.items[0].agent, AgentId::CLAUDE);
         assert_eq!(m.items[0].label, "wk");
         assert_eq!(m.items[0].figure, " 91%");
         assert_eq!(m.items[0].glyph, "!!");
@@ -1535,7 +1613,7 @@ mod tests {
     fn the_level_and_the_marker_change_at_the_thresholds() {
         let level_of = |used: f64| {
             let board = Board::new(vec![reading(
-                AgentKind::Codex,
+                AgentId::CODEX,
                 "local",
                 vec![(WindowKind::FiveHour, used, 100)],
             )]);
@@ -1559,8 +1637,8 @@ mod tests {
     #[test]
     fn an_unknown_agent_shows_its_reason_and_one_that_is_not_installed_is_left_out() {
         let board = Board::new(vec![
-            AgentUsage::unknown(AgentKind::Claude, "local", Reason::SourceDisabled),
-            AgentUsage::unknown(AgentKind::Opencode, "local", Reason::NotInstalled),
+            AgentUsage::unknown(AgentId::CLAUDE, "local", Reason::SourceDisabled),
+            AgentUsage::unknown(AgentId::OPENCODE, "local", Reason::NotInstalled),
         ]);
         let m = model(&board, 1600.0);
         assert_eq!(m.items.len(), 1);
@@ -1573,7 +1651,7 @@ mod tests {
     #[test]
     fn the_tip_lists_every_window_the_source_and_the_age() {
         let board = Board::new(vec![reading(
-            AgentKind::Claude,
+            AgentId::CLAUDE,
             "local",
             vec![
                 (WindowKind::FiveHour, 10.0, 8940),
@@ -1599,7 +1677,7 @@ mod tests {
     #[test]
     fn a_window_that_reset_since_it_was_seen_reads_zero_in_the_bar() {
         let board = Board::new(vec![reading(
-            AgentKind::Codex,
+            AgentId::CODEX,
             "local",
             vec![(WindowKind::FiveHour, 97.0, -3600)],
         )]);
@@ -1613,12 +1691,12 @@ mod tests {
     fn only_the_machine_in_context_is_in_the_bar() {
         let board = Board::new(vec![
             reading(
-                AgentKind::Codex,
+                AgentId::CODEX,
                 "local",
                 vec![(WindowKind::FiveHour, 10.0, 100)],
             ),
             reading(
-                AgentKind::Codex,
+                AgentId::CODEX,
                 "box",
                 vec![(WindowKind::FiveHour, 80.0, 100)],
             ),
@@ -1639,19 +1717,19 @@ mod tests {
     fn the_view_lists_the_scope_with_a_forecast_and_a_history_line() {
         let board = Board::new(vec![
             reading(
-                AgentKind::Codex,
+                AgentId::CODEX,
                 "local",
                 vec![(WindowKind::FiveHour, 40.0, 5 * 3600)],
             ),
             reading(
-                AgentKind::Codex,
+                AgentId::CODEX,
                 "box",
                 vec![(WindowKind::FiveHour, 10.0, 5 * 3600)],
             ),
         ]);
         let mut history = HashMap::new();
         history.insert(
-            ("local".to_owned(), AgentKind::Codex, "five_hour".to_owned()),
+            ("local".to_owned(), AgentId::CODEX, "five_hour".to_owned()),
             vec![
                 UsagePoint {
                     at: NOW - 3600,
@@ -1668,7 +1746,7 @@ mod tests {
                 &board,
                 scope,
                 &MachineId::local(),
-                &AgentKind::ALL,
+                &[AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE],
                 &|id| id.to_uppercase(),
                 NOW,
                 Thresholds::default(),

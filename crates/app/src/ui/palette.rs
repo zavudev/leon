@@ -666,7 +666,7 @@ impl Shell {
         let mut found: Vec<(u32, Item)> = if query.is_empty() {
             Vec::new()
         } else {
-            schema::SETTINGS
+            schema::settings()
                 .iter()
                 .filter(|def| def.platform.here())
                 .filter_map(|def| {
@@ -1043,6 +1043,29 @@ impl Shell {
             },
             Action::Quit => self.quit_now(cx),
             Action::NewTheme(name) => self.create_theme(&name, cx),
+            Action::AddAgent {
+                name,
+                command,
+                args,
+                resume_args,
+            } => {
+                match crate::settings::add_custom_agent(cx, &name, &command, &args, &resume_args) {
+                    Ok(_) => self.engine.report(
+                        crate::engine::StatusKind::Info,
+                        format!("{name} is now an agent: New agent session offers it."),
+                    ),
+                    Err(error) => self
+                        .engine
+                        .report(crate::engine::StatusKind::Error, error.to_string()),
+                }
+            }
+            Action::RemoveAgent(agent) => {
+                crate::settings::remove_custom_agent(cx, agent);
+                self.engine.report(
+                    crate::engine::StatusKind::Info,
+                    format!("{} was removed from your agents.", agent.name()),
+                );
+            }
             Action::SetScale(step) => {
                 crate::settings::update(cx, |settings| settings.interface_scale = step)
             }

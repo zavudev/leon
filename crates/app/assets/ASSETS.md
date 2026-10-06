@@ -18,8 +18,15 @@ The other icon files are build inputs of the packages (see the end).
 | `agents/claude.svg` | Claude mark, `currentColor`, tinted by the agent's theme token | Simple Icons `claude.svg`, <https://github.com/simple-icons/simple-icons> | CC0 1.0 |
 | `agents/codex.svg` | OpenAI mark, stands for Codex, `currentColor` | Simple Icons 13.21.0 `openai.svg` (later releases dropped it), <https://github.com/simple-icons/simple-icons> | CC0 1.0 |
 | `agents/opencode.svg` | opencode mark: the frame of `opencode-logo-dark.svg`, without the dim inner square, single path | `packages/console/app/src/asset/brand/opencode-logo-dark.svg` of <https://github.com/sst/opencode> | MIT, Copyright (c) 2025 opencode |
+| `agents/cursor.svg` | Cursor mark, `currentColor`, tinted by the theme's neutral text colour | Simple Icons 16.34.0 `cursor.svg` (the path only, `fill="currentColor"`), <https://github.com/simple-icons/simple-icons> | CC0 1.0 |
+| `agents/copilot.svg` | GitHub Copilot mark, `currentColor`, tinted by the theme's neutral text colour | Simple Icons 16.34.0 `githubcopilot.svg` (the path only, `fill="currentColor"`), <https://github.com/simple-icons/simple-icons> | CC0 1.0 |
+| `agents/gemini.svg` | Google Gemini mark, `currentColor`, tinted by the theme's neutral text colour | Simple Icons 16.34.0 `googlegemini.svg` (the path only, `fill="currentColor"`), <https://github.com/simple-icons/simple-icons> | CC0 1.0 |
+| `agents/mistral-vibe.svg` | Mistral AI (stands for Mistral Vibe) mark, `currentColor`, tinted by the theme's neutral text colour | Simple Icons 16.34.0 `mistralai.svg` (the path only, `fill="currentColor"`), <https://github.com/simple-icons/simple-icons> | CC0 1.0 |
+| `agents/cline.svg` | Cline mark, `currentColor`, tinted by the theme's neutral text colour | Simple Icons 16.34.0 `cline.svg` (the path only, `fill="currentColor"`), <https://github.com/simple-icons/simple-icons> | CC0 1.0 |
+| `agents/kimi.svg` | Kimi mark, `currentColor`, tinted by the theme's neutral text colour | Simple Icons 16.34.0 `kimi.svg` (the path only, `fill="currentColor"`), <https://github.com/simple-icons/simple-icons> | CC0 1.0 |
+| `agents/qwen-code.svg` | Qwen (stands for Qwen Code) mark, `currentColor`, tinted by the theme's neutral text colour | Simple Icons 16.34.0 `qwen.svg` (the path only, `fill="currentColor"`), <https://github.com/simple-icons/simple-icons> | CC0 1.0 |
 
-The agent marks are trademarks of their owners (Anthropic, OpenAI, opencode).
+The agent marks are trademarks of their owners (Anthropic, OpenAI, opencode, Anysphere, GitHub, Google, Mistral AI, Cline, Moonshot AI, Alibaba).
 They are used only to identify the tools Leon starts. The files draw with
 `currentColor`; the colour is the theme token of the agent (`agent_claude`,
 `agent_codex`, `agent_opencode` in `src/theme/`): Claude's clay `#D97757`
@@ -54,3 +61,13 @@ ink read from `brand/logo/final/app-icon.svg`: never edited by hand, and a test 
 `leon-mark` fails when they drift. They are SMIL (no script) and carry a
 `prefers-reduced-motion` media query that swaps the animated path for a still one.
 Their first frame, last frame and still path are the owner's path to the byte.
+
+## Agents without a mark
+
+Every other agent of the catalogue (Grok, Muse, DeepSeek Harness, ZCode and the
+rest) has **no bundled logo**: no mark of it was found whose licence clearly
+allows redistribution (Simple Icons, CC0, has none of them, or has a different
+product's mark: its `amp` is the AMP web project, not Sourcegraph's Amp). Those
+agents get a letter-mark tile, drawn by the application from the theme's tokens
+and the initials of the agent's name (`icons::agent_icon`): nothing is bundled
+and nothing is fetched at run time. Leon never loads an icon from the network.

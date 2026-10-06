@@ -116,6 +116,8 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
         "File",
         &[
             Cmd(C::NewSession),
+            Cmd(C::AddAgent),
+            Cmd(C::RemoveAgent),
             Cmd(C::OpenShell),
             Cmd(C::NewWorktree),
             Cmd(C::OpenProject),
