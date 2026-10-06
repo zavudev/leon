@@ -337,6 +337,20 @@ jobs:
             test -s "dist/$file" || { echo "::error::$file is missing"; exit 1; }
           done
 
+      # The one-line installer and system packages are made from the same
+      # archive checked above. Put them in dist before writing SHA256SUMS so
+      # every downloadable release file is covered by the published checksums.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Build the Linux installer and packages
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+          packaging/linux/package.sh --out dist
+          cp packaging/linux/install.sh dist/install.sh
+
       - name: Checksums
         run: |
           cargo xtask checksums --dir dist

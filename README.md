@@ -54,15 +54,28 @@ _No screenshots yet._
 
 ## Install
 
-Builds for macOS, Linux and Windows are on the
-[releases page](https://github.com/zavudev/leon/releases). Pick the file for your
-computer (`<version>` is the release, for example `0.1.0`):
+On Linux, install Leon completely for your user (binary, applications-menu
+entry, icons and licences) with no root access:
+
+```sh
+curl -fsSL https://github.com/zavudev/leon/releases/latest/download/install.sh | sh
+```
+
+Run the command again to upgrade, or download the `.deb`/`.rpm` from the
+[releases page](https://github.com/zavudev/leon/releases) for a system install.
+The script verifies the archive against the release's SHA-256 checksums and
+supports `--uninstall` without removing projects or settings. Leon's Linux build
+requires x86_64 and glibc 2.35 or newer (Ubuntu 22.04 or a similarly recent
+distribution).
+
+Builds for macOS, Linux and Windows are on that releases page. Pick the file for
+your computer (`<version>` is the release, for example `0.1.0`):
 
 | Platform | File | To install |
 | --- | --- | --- |
 | macOS, Apple Silicon | `leon-<version>-macos-aarch64.dmg` | Open it and drag Leon to Applications. |
 | macOS, Intel | `leon-<version>-macos-x86_64.dmg` | The same. |
-| Linux, x86_64 | `leon-<version>-linux-x86_64.tar.gz` | Unpack it and follow `INSTALL.txt`: the binary, a desktop entry and the icons. |
+| Linux, x86_64 | `install.sh`, `leon_<version>_amd64.deb`, or `leon-<version>-1.x86_64.rpm` | Use the command above for a user install, or install the package for the whole system. The tarball remains available for manual installs. |
 | Windows, x86_64 | `leon-<version>-windows-x86_64.zip` | There is no installer: unzip it and run `leon.exe` from a folder you own. |
 
 `SHA256SUMS` in the release lists the checksum of every file
