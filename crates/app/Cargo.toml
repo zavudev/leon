@@ -18,6 +18,7 @@ leon-pty.workspace = true
 leon-wire.workspace = true
 leon-term.workspace = true
 leon-usage.workspace = true
+leon-update.workspace = true
 
 chrono.workspace = true
 flume.workspace = true
@@ -47,6 +48,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 winresource = "0.1"
 
 [dev-dependencies]
+leon-update = { workspace = true, features = ["test-support"] }
 leon-link = { workspace = true, features = ["test-support"] }
 gpui-kit = { workspace = true, features = ["test-support"] }
 leon-mark = { workspace = true, features = ["test-support"] }

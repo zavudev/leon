@@ -243,13 +243,15 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// The colour of an agent's mark in this theme.
-    pub fn agent(&self, agent: leon_core::AgentKind) -> Hsla {
-        use leon_core::AgentKind;
-        match agent {
-            AgentKind::Claude => self.agent_claude,
-            AgentKind::Codex => self.agent_codex,
-            AgentKind::Opencode => self.agent_opencode,
+    /// The colour of an agent's mark in this theme: its own token when the
+    /// catalogue gives it one, else the theme's text colour.
+    pub fn agent(&self, agent: leon_core::AgentId) -> Hsla {
+        use leon_core::agent::Tint;
+        match agent.spec().map_or(Tint::Neutral, |spec| spec.tint) {
+            Tint::Claude => self.agent_claude,
+            Tint::Codex => self.agent_codex,
+            Tint::Opencode => self.agent_opencode,
+            Tint::Neutral => self.text,
         }
     }
 
@@ -597,6 +599,21 @@ pub mod metrics {
     /// The least height of an option of the Settings card.
     pub fn SETTINGS_ROW() -> Pixels {
         token(56.0)
+    }
+    /// The space above and below the content of an option of the Settings
+    /// card.
+    pub fn SETTINGS_ROW_PAD() -> Pixels {
+        token(10.0)
+    }
+    /// The width of the column of controls at the right of an option of the
+    /// Settings card: the text never runs under it.
+    pub fn SETTINGS_CONTROL() -> Pixels {
+        token(240.0)
+    }
+    /// The narrowest column of text an option of the Settings card keeps beside
+    /// its controls; narrower than this, the controls go under the text.
+    pub fn SETTINGS_TEXT_MIN() -> Pixels {
+        token(300.0)
     }
     /// The corner radius of controls, chips, inputs and floating cards: the
     /// active theme's.

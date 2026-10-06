@@ -26,11 +26,18 @@ pub mod codex;
 mod importer;
 mod normalize;
 pub mod opencode;
+pub mod opencode_json;
 mod roots;
 mod session;
 mod source;
+mod survey;
 
 pub use importer::{ImportReport, Importer};
-pub use roots::{default_roots, default_roots_in, HistoryRoots};
+pub use roots::{
+    considered, default_roots, default_roots_in, env_variable, home_dir, HistoryRoots,
+};
 pub use session::ParsedSession;
-pub use source::{ClaudeFiles, CodexFiles, HistoryError, HistorySource, OpencodeDb, SourceItem};
+pub use source::{
+    ClaudeFiles, CodexFiles, HistoryError, HistorySource, OpencodeData, OpencodeDb, SourceItem,
+};
+pub use survey::{Place, SkipReason, Survey};

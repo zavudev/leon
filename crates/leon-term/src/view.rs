@@ -17,14 +17,14 @@
 //!   asked for the mouse, or becomes arrow keys on the alternate screen.
 //!   Click and drag select (double click a word, triple click a line); with
 //!   Shift held, or when the program did not ask for the mouse, selection is
-//!   always available.
+//!   always available. Ctrl+click opens links (Command+click on macOS).
 
 use crate::colors::{mix, TerminalTheme};
 use crate::keys::{self, MouseAction, MouseEvent};
 use crate::layout::{Batcher, CellInput};
 use crate::size::GridSize;
 use crate::spec::SpawnSpec;
-use crate::terminal::{Backend, ExitInfo, Pty, SpawnError, Terminal, TerminalEvent};
+use crate::terminal::{visible_links, Backend, ExitInfo, Pty, SpawnError, Terminal, TerminalEvent};
 use alacritty_terminal::grid::Dimensions as _;
 use alacritty_terminal::index::Side;
 use alacritty_terminal::selection::SelectionType;
@@ -33,11 +33,12 @@ use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::CursorShape;
 use gpui_kit::{
     canvas, div, fill, outline, px, App, AppContext as _, BorderStyle, Bounds, ClipboardItem,
-    Context, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    Font, FontFeatures, FontStyle, FontWeight, InteractiveElement as _, IntoElement, Keystroke,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point,
-    Render, ScrollDelta, ScrollWheelEvent, SharedString, Size, StrikethroughStyle, Styled as _,
-    Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    Context, CursorStyle, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, Font, FontFeatures, FontStyle, FontWeight, InteractiveElement as _,
+    IntoElement, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement as _, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Size,
+    StatefulInteractiveElement as _, StrikethroughStyle, Styled as _, Task, TextAlign, TextRun,
+    UTF16Selection, UnderlineStyle, Window,
 };
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
@@ -87,6 +88,13 @@ struct Scratch {
     batcher: Batcher,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct LinkPrompt {
+    uri: String,
+    col: usize,
+    row: usize,
+}
+
 /// A terminal drawn on the GPU.
 pub struct TerminalView {
     terminal: Arc<Terminal>,
@@ -96,6 +104,9 @@ pub struct TerminalView {
     metrics: Rc<Cell<Metrics>>,
     scratch: Rc<RefCell<Scratch>>,
     selecting: bool,
+    link_clicked: bool,
+    hovered_link: Option<String>,
+    link_prompt: Option<LinkPrompt>,
     scroll_fraction: f32,
     marked: Option<String>,
     padding: Pixels,
@@ -166,6 +177,9 @@ impl TerminalView {
                 metrics: Rc::new(Cell::new(Metrics::default())),
                 scratch: Rc::new(RefCell::new(Scratch::default())),
                 selecting: false,
+                link_clicked: false,
+                hovered_link: None,
+                link_prompt: None,
                 scroll_fraction: 0.0,
                 marked: None,
                 padding: px(0.),
@@ -369,6 +383,31 @@ impl TerminalView {
     ) {
         window.focus(&self.focus, cx);
         cx.emit(ViewEvent::Clicked);
+        // A program that captures the mouse owns plain clicks, links or not;
+        // the secondary key (Cmd or Ctrl) is what opens a link then. Shift is
+        // the usual way past the program, as for selecting.
+        let captured = keys::mouse_reporting(self.terminal.mode()) && !event.modifiers.shift;
+        if event.button == MouseButton::Left && (!captured || event.modifiers.secondary()) {
+            let (col, row, _) = self.cell_at(event.position);
+            if let Some(link) = self.terminal.link_at(col, row) {
+                if event.modifiers.secondary() {
+                    self.link_prompt = None;
+                    self.link_clicked = true;
+                    cx.open_url(&link);
+                } else {
+                    self.link_prompt = Some(LinkPrompt {
+                        uri: link,
+                        col,
+                        row,
+                    });
+                    cx.notify();
+                }
+                return;
+            }
+        }
+        if self.link_prompt.take().is_some() {
+            cx.notify();
+        }
         let reporting = keys::mouse_reporting(self.terminal.mode()) && !event.modifiers.shift;
         if reporting {
             let button = match event.button {
@@ -406,6 +445,16 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let hovered_link = if event.dragging() {
+            None
+        } else {
+            let (col, row, _) = self.cell_at(event.position);
+            self.terminal.link_at(col, row)
+        };
+        if self.hovered_link != hovered_link {
+            self.hovered_link = hovered_link;
+            cx.notify();
+        }
         if self.selecting && event.dragging() {
             let (col, row, side) = self.cell_at(event.position);
             self.terminal.update_selection(col, row, side);
@@ -425,6 +474,10 @@ impl TerminalView {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.link_clicked && event.button == MouseButton::Left {
+            self.link_clicked = false;
+            return;
+        }
         if self.selecting {
             self.selecting = false;
             match self.terminal.selection_text() {
@@ -491,6 +544,13 @@ impl TerminalView {
         }
         cx.notify();
         cx.stop_propagation();
+    }
+
+    fn open_link_prompt(&mut self, cx: &mut Context<Self>) {
+        if let Some(prompt) = self.link_prompt.take() {
+            cx.open_url(&prompt.uri);
+            cx.notify();
+        }
     }
 }
 
@@ -608,12 +668,68 @@ impl Render for TerminalView {
         let metrics = self.metrics.clone();
         let scratch = self.scratch.clone();
         let padding = self.padding;
+        let hovered_link = self.hovered_link.clone();
+        let link_prompt = self.link_prompt.clone();
+        let current_metrics = self.metrics.get();
+        let prompt = link_prompt.map(|prompt| {
+            let uri = prompt.uri.clone();
+            let approximate_cols =
+                (80.0 / current_metrics.cell.width.as_f32().max(1.0)).ceil() as usize;
+            let col = prompt
+                .col
+                .min(current_metrics.cols.saturating_sub(approximate_cols));
+            let below = prompt.row + 2 < current_metrics.rows;
+            let top = if below {
+                current_metrics.cell.height * (prompt.row + 1) as f32
+            } else {
+                current_metrics.cell.height * prompt.row.saturating_sub(1) as f32
+            };
+            div()
+                .id("terminal-open-link")
+                .absolute()
+                .left(padding + current_metrics.cell.width * col as f32)
+                .top(padding + top)
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .border_1()
+                .border_color(theme.cursor)
+                .bg(theme.background)
+                .text_color(theme.cursor)
+                .text_size(font.size * 0.9)
+                .shadow_sm()
+                .cursor_pointer()
+                .hover(move |style| style.bg(theme.cursor).text_color(theme.background))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if this
+                        .link_prompt
+                        .as_ref()
+                        .is_some_and(|prompt| prompt.uri == uri)
+                    {
+                        this.open_link_prompt(cx);
+                    }
+                    cx.stop_propagation();
+                }))
+                .child("Open link")
+        });
         div()
             .id("terminal")
             .key_context("Terminal")
             .track_focus(&self.focus)
+            .relative()
             .size_full()
             .bg(theme.background)
+            .cursor(if hovered_link.is_some() {
+                CursorStyle::PointingHand
+            } else {
+                CursorStyle::Arrow
+            })
+            .on_hover(cx.listener(|this, hovered, _, cx| {
+                if !hovered && this.hovered_link.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
@@ -634,6 +750,7 @@ impl Render for TerminalView {
                             &font,
                             &focus,
                             padding,
+                            hovered_link.as_deref(),
                             bounds,
                             &metrics,
                             &mut scratch.borrow_mut(),
@@ -644,6 +761,7 @@ impl Render for TerminalView {
                 )
                 .size_full(),
             )
+            .children(prompt)
     }
 }
 
@@ -673,6 +791,7 @@ fn paint_grid(
     font: &FontSettings,
     focus: &FocusHandle,
     padding: Pixels,
+    hovered_link: Option<&str>,
     bounds: Bounds<Pixels>,
     metrics: &Cell<Metrics>,
     scratch: &mut Scratch,
@@ -711,6 +830,8 @@ fn paint_grid(
     let highlights = terminal.highlights();
     let mut next_match = 0usize;
     let (cols, rows) = terminal.with_term(|term| {
+        let links = visible_links(term);
+        let columns = term.grid().columns();
         let content = term.renderable_content();
         let offset = content.display_offset as i32;
         let overrides = content.colors;
@@ -739,6 +860,16 @@ fn paint_grid(
             }
             if cell.flags.contains(Flags::DIM) {
                 fg = mix(fg, bg, 0.4);
+            }
+            let link = links
+                .get(row.max(0) as usize * columns + point.column.0)
+                .and_then(Option::as_deref);
+            let mut flags = cell.flags;
+            if link.is_some() {
+                flags.insert(Flags::UNDERLINE);
+            }
+            if link_is_hovered(link, hovered_link) {
+                fg = theme.cursor;
             }
             let mut paint_bg = cell.flags.contains(Flags::INVERSE) || bg != theme.background;
             if let Some(found) = &highlights {
@@ -771,7 +902,7 @@ fn paint_grid(
                 zerowidth: cell.zerowidth().unwrap_or(&[]),
                 fg,
                 bg: paint_bg.then_some(bg),
-                flags: cell.flags,
+                flags,
             });
         }
         batcher.finish();
@@ -882,12 +1013,41 @@ fn paint_grid(
     window.handle_input(focus, ElementInputHandler::new(bounds, view.clone()), cx);
 }
 
+/// Whether the cell's link is the one under the pointer. Cells that are no
+/// link at all are never hovered, whatever the pointer is over: two absent
+/// links are not the same link.
+fn link_is_hovered(link: Option<&str>, hovered: Option<&str>) -> bool {
+    link.is_some() && link == hovered
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::link_is_hovered;
+
+    #[test]
+    fn only_a_cell_of_the_hovered_link_is_hovered() {
+        assert!(!link_is_hovered(None, None), "plain text is not a link");
+        assert!(!link_is_hovered(None, Some("https://a.example")));
+        assert!(!link_is_hovered(Some("https://a.example"), None));
+        assert!(!link_is_hovered(
+            Some("https://a.example"),
+            Some("https://b.example")
+        ));
+        assert!(link_is_hovered(
+            Some("https://a.example"),
+            Some("https://a.example")
+        ));
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::testing::{sh_c, theme, PATIENCE};
     use crate::Timings;
-    use gpui_kit::{px, size, TestAppContext, WindowBounds, WindowOptions};
+    use gpui_kit::{
+        px, size, Modifiers, TestAppContext, VisualTestContext, WindowBounds, WindowOptions,
+    };
     use std::time::{Duration, Instant};
 
     fn font() -> FontSettings {
@@ -965,7 +1125,12 @@ mod tests {
 
     #[gpui_kit::test]
     fn a_keystroke_that_is_a_terminal_key_is_sent_and_plain_text_is_not(cx: &mut TestAppContext) {
-        let (view, terminal) = show(cx, "stty -echo -icanon -isig; exec cat -vt");
+        let (view, terminal) = show(cx, "stty -echo -icanon -isig; printf SET; exec cat -vt");
+        // Input sent before `stty` has run would be echoed and line-buffered
+        // by the terminal driver, not seen raw by `cat`.
+        wait_until(cx, "the raw mode", || {
+            terminal.screen_text().contains("SET")
+        });
         let sent = cx.update(|cx| {
             view.update(cx, |view, cx| {
                 let up = view.handle_keystroke(&Keystroke::parse("up").unwrap(), cx);
@@ -985,7 +1150,10 @@ mod tests {
 
     #[gpui_kit::test]
     fn text_from_the_input_method_reaches_the_program(cx: &mut TestAppContext) {
-        let (view, terminal) = show(cx, "stty -echo -icanon -isig; exec cat");
+        let (view, terminal) = show(cx, "stty -echo -icanon -isig; printf SET; exec cat");
+        wait_until(cx, "the raw mode", || {
+            terminal.screen_text().contains("SET")
+        });
         let window = cx.windows()[0];
         cx.update_window(window, |_, window, cx| {
             view.update(cx, |view, cx| {
@@ -994,6 +1162,87 @@ mod tests {
         })
         .unwrap();
         wait_until(cx, "the text", || terminal.screen_text().contains("ñandú"));
+    }
+
+    #[gpui_kit::test]
+    fn a_program_that_captures_the_mouse_keeps_plain_clicks_and_ctrl_click_opens_the_link(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, terminal) = show(
+            cx,
+            "printf '\\033[?1000h\\033[?1006hSee https://one.example '; read hold",
+        );
+        wait_until(cx, "the link", || {
+            terminal.screen_text().contains("https://one.example")
+        });
+        let metrics = cx.update(|cx| view.read(cx).metrics.get());
+        let at = Point {
+            x: metrics.origin.x + metrics.cell.width * 10.5,
+            y: metrics.origin.y + metrics.cell.height * 0.5,
+        };
+        let window = cx.windows()[0];
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        visual.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        drop(visual);
+        assert_eq!(cx.opened_url(), None, "the click belongs to the program");
+        assert_eq!(cx.update(|cx| view.read(cx).link_prompt.clone()), None);
+
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.simulate_mouse_down(at, MouseButton::Left, Modifiers::secondary_key());
+        visual.simulate_mouse_up(at, MouseButton::Left, Modifiers::secondary_key());
+        assert_eq!(cx.opened_url().as_deref(), Some("https://one.example"));
+    }
+
+    #[gpui_kit::test]
+    fn link_clicks_offer_or_open_and_hover_identifies_the_target(cx: &mut TestAppContext) {
+        let (view, terminal) = show(
+            cx,
+            "printf 'See https://one.example and https://two.example'; read hold",
+        );
+        wait_until(cx, "the link", || {
+            terminal.screen_text().contains("https://two.example")
+        });
+        let metrics = cx.update(|cx| view.read(cx).metrics.get());
+        let first = Point {
+            x: metrics.origin.x + metrics.cell.width * 10.5,
+            y: metrics.origin.y + metrics.cell.height * 0.5,
+        };
+        let second = Point {
+            x: metrics.origin.x + metrics.cell.width * 34.5,
+            y: first.y,
+        };
+        let window = cx.windows()[0];
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.simulate_mouse_move(first, None, Modifiers::none());
+        drop(visual);
+        assert_eq!(
+            cx.update(|cx| view.read(cx).hovered_link.clone())
+                .as_deref(),
+            Some("https://one.example")
+        );
+
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.simulate_mouse_down(first, MouseButton::Left, Modifiers::none());
+        visual.simulate_mouse_up(first, MouseButton::Left, Modifiers::none());
+        drop(visual);
+        assert_eq!(cx.opened_url(), None, "the offer does not open it yet");
+        assert_eq!(
+            cx.update(|cx| view.read(cx).link_prompt.clone()),
+            Some(LinkPrompt {
+                uri: "https://one.example".into(),
+                col: 10,
+                row: 0,
+            })
+        );
+        cx.update(|cx| view.update(cx, |view, cx| view.open_link_prompt(cx)));
+        assert_eq!(cx.opened_url().as_deref(), Some("https://one.example"));
+
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.simulate_mouse_down(second, MouseButton::Left, Modifiers::secondary_key());
+        visual.simulate_mouse_up(second, MouseButton::Left, Modifiers::secondary_key());
+        assert_eq!(cx.opened_url().as_deref(), Some("https://two.example"));
+        assert_eq!(terminal.selection_text(), None);
     }
 
     #[gpui_kit::test]

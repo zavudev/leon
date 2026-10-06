@@ -10,16 +10,15 @@
 
 use std::borrow::Cow;
 
-/// The logo of an agent, one single-path SVG drawn with `currentColor`.
-pub fn agent_mark(agent: leon_core::AgentKind) -> &'static str {
-    match agent {
-        leon_core::AgentKind::Claude => "agents/claude.svg",
-        leon_core::AgentKind::Codex => "agents/codex.svg",
-        leon_core::AgentKind::Opencode => "agents/opencode.svg",
-    }
+/// The path of the logo of an agent: one single-path SVG drawn with
+/// `currentColor`. `None` for an agent without a bundled mark, which gets a
+/// letter-mark tile instead.
+pub fn agent_mark(agent: leon_core::AgentId) -> Option<String> {
+    let mark = agent.spec()?.mark.as_deref()?;
+    Some(format!("agents/{mark}.svg"))
 }
 
-const FILES: [(&str, &[u8]); 3] = [
+const FILES: [(&str, &[u8]); 10] = [
     (
         "agents/claude.svg",
         include_bytes!("../assets/agents/claude.svg"),
@@ -31,6 +30,34 @@ const FILES: [(&str, &[u8]); 3] = [
     (
         "agents/opencode.svg",
         include_bytes!("../assets/agents/opencode.svg"),
+    ),
+    (
+        "agents/cursor.svg",
+        include_bytes!("../assets/agents/cursor.svg"),
+    ),
+    (
+        "agents/copilot.svg",
+        include_bytes!("../assets/agents/copilot.svg"),
+    ),
+    (
+        "agents/gemini.svg",
+        include_bytes!("../assets/agents/gemini.svg"),
+    ),
+    (
+        "agents/mistral-vibe.svg",
+        include_bytes!("../assets/agents/mistral-vibe.svg"),
+    ),
+    (
+        "agents/cline.svg",
+        include_bytes!("../assets/agents/cline.svg"),
+    ),
+    (
+        "agents/kimi.svg",
+        include_bytes!("../assets/agents/kimi.svg"),
+    ),
+    (
+        "agents/qwen-code.svg",
+        include_bytes!("../assets/agents/qwen-code.svg"),
     ),
 ];
 
@@ -257,15 +284,31 @@ mod tests {
     }
 
     #[test]
-    fn every_agent_has_a_bundled_single_path_mark_in_the_current_colour() {
-        for agent in leon_core::AgentKind::ALL {
-            let path = agent_mark(agent);
-            let bytes = load(path).unwrap_or_else(|| panic!("{path} is not bundled"));
+    fn every_catalogue_mark_is_bundled_as_a_single_path_in_the_current_colour() {
+        let mut marked = 0;
+        for spec in leon_core::agent::builtin() {
+            let Some(path) = agent_mark(spec.id) else {
+                continue;
+            };
+            marked += 1;
+            let bytes = load(&path).unwrap_or_else(|| panic!("{path} is not bundled"));
             let svg = std::str::from_utf8(bytes).unwrap();
             assert!(svg.contains("fill=\"currentColor\""), "{path}");
             assert!(!svg.contains('#'), "{path} carries a colour of its own");
             assert_eq!(svg.matches("<path").count(), 1, "{path} is one path");
             assert!(paths().any(|name| name == path));
+        }
+        assert_eq!(marked, FILES.len(), "a bundled file no agent uses");
+    }
+
+    #[test]
+    fn every_bundled_mark_is_recorded_with_its_source_and_licence() {
+        let assets = include_str!("../assets/ASSETS.md");
+        for (name, _) in FILES {
+            assert!(
+                assets.contains(&format!("`{name}`")),
+                "{name} is not in ASSETS.md"
+            );
         }
     }
 

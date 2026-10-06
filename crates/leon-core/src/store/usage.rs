@@ -12,7 +12,7 @@ use super::Store;
 use crate::change::StoreChange;
 use crate::error::Result;
 use crate::ids::MachineId;
-use crate::model::AgentKind;
+use crate::model::AgentId;
 
 /// The most points one series (machine, agent, account, window) keeps.
 pub const MAX_POINTS: usize = 300;
@@ -23,7 +23,7 @@ pub struct UsageRow {
     /// The machine.
     pub machine: MachineId,
     /// The agent.
-    pub agent: AgentKind,
+    pub agent: AgentId,
     /// The reading, as the JSON the collector wrote.
     pub payload: String,
     /// When it was collected (Unix seconds).
@@ -44,7 +44,7 @@ impl Store {
     pub fn put_usage_reading(
         &self,
         machine: &MachineId,
-        agent: AgentKind,
+        agent: AgentId,
         payload: &str,
         collected_at: i64,
     ) -> Result<()> {
@@ -78,7 +78,7 @@ impl Store {
             let mut out = Vec::new();
             for row in rows {
                 let (machine, agent, payload, collected_at) = row?;
-                if let Some(agent) = AgentKind::parse(&agent) {
+                if let Some(agent) = AgentId::parse(&agent) {
                     out.push(UsageRow {
                         machine: MachineId::from_string(machine),
                         agent,
@@ -98,7 +98,7 @@ impl Store {
     pub fn record_usage_points(
         &self,
         machine: &MachineId,
-        agent: AgentKind,
+        agent: AgentId,
         account: &str,
         points: &[(String, UsagePoint)],
         keep_since: i64,
@@ -154,7 +154,7 @@ impl Store {
     pub fn usage_history(
         &self,
         machine: &MachineId,
-        agent: AgentKind,
+        agent: AgentId,
         account: &str,
         window: &str,
         since: i64,
@@ -207,10 +207,10 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let local = MachineId::local();
         store
-            .put_usage_reading(&local, AgentKind::Codex, "{\"a\":1}", 10)
+            .put_usage_reading(&local, AgentId::CODEX, "{\"a\":1}", 10)
             .unwrap();
         store
-            .put_usage_reading(&local, AgentKind::Codex, "{\"a\":2}", 20)
+            .put_usage_reading(&local, AgentId::CODEX, "{\"a\":2}", 20)
             .unwrap();
         let rows = store.usage_readings().unwrap();
         assert_eq!(rows.len(), 1);
@@ -229,10 +229,10 @@ mod tests {
             point(100, 10.0),
         ];
         store
-            .record_usage_points(&local, AgentKind::Codex, "acct", &points, 0)
+            .record_usage_points(&local, AgentId::CODEX, "acct", &points, 0)
             .unwrap();
         let got = store
-            .usage_history(&local, AgentKind::Codex, "acct", "five_hour", 0)
+            .usage_history(&local, AgentId::CODEX, "acct", "five_hour", 0)
             .unwrap();
         let times: Vec<i64> = got.iter().map(|p| p.at).collect();
         assert_eq!(times, [100, 200, 300]);
@@ -245,17 +245,17 @@ mod tests {
         store
             .record_usage_points(
                 &local,
-                AgentKind::Codex,
+                AgentId::CODEX,
                 "a",
                 &[point(10, 1.0), point(500, 2.0)],
                 0,
             )
             .unwrap();
         store
-            .record_usage_points(&local, AgentKind::Codex, "a", &[point(900, 3.0)], 400)
+            .record_usage_points(&local, AgentId::CODEX, "a", &[point(900, 3.0)], 400)
             .unwrap();
         let got = store
-            .usage_history(&local, AgentKind::Codex, "a", "five_hour", 0)
+            .usage_history(&local, AgentId::CODEX, "a", "five_hour", 0)
             .unwrap();
         assert_eq!(got.iter().map(|p| p.at).collect::<Vec<_>>(), [500, 900]);
     }
@@ -268,10 +268,10 @@ mod tests {
             .map(|i| point(1000 + i, 1.0))
             .collect();
         store
-            .record_usage_points(&local, AgentKind::Claude, "a", &points, 0)
+            .record_usage_points(&local, AgentId::CLAUDE, "a", &points, 0)
             .unwrap();
         let got = store
-            .usage_history(&local, AgentKind::Claude, "a", "five_hour", 0)
+            .usage_history(&local, AgentId::CLAUDE, "a", "five_hour", 0)
             .unwrap();
         assert_eq!(got.len(), MAX_POINTS);
         assert_eq!(got.last().unwrap().at, 1000 + MAX_POINTS as i64 + 24);
@@ -283,21 +283,21 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let local = MachineId::local();
         store
-            .record_usage_points(&local, AgentKind::Codex, "a", &[point(5, 1.0)], 0)
+            .record_usage_points(&local, AgentId::CODEX, "a", &[point(5, 1.0)], 0)
             .unwrap();
         store
-            .record_usage_points(&local, AgentKind::Claude, "a", &[point(6, 1.0)], 0)
+            .record_usage_points(&local, AgentId::CLAUDE, "a", &[point(6, 1.0)], 0)
             .unwrap();
         assert_eq!(
             store
-                .usage_history(&local, AgentKind::Codex, "a", "five_hour", 0)
+                .usage_history(&local, AgentId::CODEX, "a", "five_hour", 0)
                 .unwrap()
                 .len(),
             1
         );
         assert_eq!(
             store
-                .usage_history(&local, AgentKind::Claude, "a", "five_hour", 0)
+                .usage_history(&local, AgentId::CLAUDE, "a", "five_hour", 0)
                 .unwrap()
                 .len(),
             1
@@ -309,12 +309,12 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let local = MachineId::local();
         store
-            .put_usage_reading(&local, AgentKind::Codex, "{}", 1)
+            .put_usage_reading(&local, AgentId::CODEX, "{}", 1)
             .unwrap();
         store
             .record_usage_points(
                 &local,
-                AgentKind::Codex,
+                AgentId::CODEX,
                 "a",
                 &[point(5, 1.0), point(6, 2.0)],
                 0,
@@ -322,7 +322,7 @@ mod tests {
             .unwrap();
         assert_eq!(store.forget_usage_history().unwrap(), 2);
         assert!(store
-            .usage_history(&local, AgentKind::Codex, "a", "five_hour", 0)
+            .usage_history(&local, AgentId::CODEX, "a", "five_hour", 0)
             .unwrap()
             .is_empty());
         assert_eq!(store.usage_readings().unwrap().len(), 1);
@@ -333,7 +333,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let mut listener = store.subscribe();
         store
-            .put_usage_reading(&MachineId::local(), AgentKind::Codex, "{}", 1)
+            .put_usage_reading(&MachineId::local(), AgentId::CODEX, "{}", 1)
             .unwrap();
         assert_eq!(listener.try_next(), Some(StoreChange::Usage));
     }
@@ -353,10 +353,10 @@ mod tests {
             )
             .unwrap();
         store
-            .put_usage_reading(&machine.id, AgentKind::Codex, "{}", 1)
+            .put_usage_reading(&machine.id, AgentId::CODEX, "{}", 1)
             .unwrap();
         store
-            .record_usage_points(&machine.id, AgentKind::Codex, "a", &[point(5, 1.0)], 0)
+            .record_usage_points(&machine.id, AgentId::CODEX, "a", &[point(5, 1.0)], 0)
             .unwrap();
         store.remove_machine(&machine.id).unwrap();
         assert!(store.usage_readings().unwrap().is_empty());

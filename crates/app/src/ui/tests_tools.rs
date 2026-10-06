@@ -1000,7 +1000,7 @@ mod pasting {
         cx.update(|cx| {
             h.shell.update(cx, |shell, _| {
                 if let Some(session) = shell.live.get_mut(crate::ui::live::LiveId(1)) {
-                    session.agent = Some(AgentKind::Claude);
+                    session.agent = Some(AgentId::CLAUDE);
                     session.phase = crate::ui::live::AgentPhase::Running;
                 }
             })

@@ -180,6 +180,12 @@ fn read_store(path: &Path) -> (Store, Vec<Problem>, Option<Vec<u8>>) {
     }
 }
 
+/// The settings of a file, read without a window: what the start of the
+/// application needs to know before anything is opened.
+pub fn stored(path: &Path) -> Store {
+    read_store(path).0
+}
+
 /// Writes a file whole, through a temporary one, so a crash midway never
 /// leaves half a file.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -215,6 +221,9 @@ struct Active {
     /// Bytes read from the file that differ from `seen`, until two reads
     /// agree on them.
     pending: Option<Vec<u8>>,
+    /// The custom agents this store put in the catalogue, so that a change
+    /// takes out only what it put there.
+    registered: std::sync::Mutex<Vec<leon_core::AgentId>>,
 }
 
 /// A choice shown without being kept.
@@ -240,6 +249,7 @@ impl Active {
             generation: 0,
             seen: None,
             pending: None,
+            registered: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -274,6 +284,70 @@ pub fn init(path: Option<PathBuf>, overrides: Overrides, cx: &mut App) {
     apply_theme(cx);
 }
 
+/// Tells the catalogue which custom agents the settings hold.
+fn sync_custom_agents(active: &Active) {
+    let entries = active
+        .store
+        .value("custom_agents")
+        .as_list()
+        .map(<[String]>::to_vec)
+        .unwrap_or_default();
+    let specs = leon_core::agent::custom_from_entries(&entries);
+    let Ok(mut registered) = active.registered.lock() else {
+        return;
+    };
+    for id in registered
+        .iter()
+        .filter(|id| !specs.iter().any(|s| s.id == **id))
+    {
+        leon_core::agent::unregister_custom(*id);
+    }
+    *registered = specs.iter().map(|spec| spec.id).collect();
+    for spec in specs {
+        leon_core::agent::register_custom(spec);
+    }
+}
+
+/// Adds an agent of the user's: any command line tool. The name and the
+/// command are checked here, and the agent is offered everywhere the built-in
+/// ones are. Returns the new agent's id.
+pub fn add_custom_agent(
+    cx: &mut App,
+    name: &str,
+    command: &str,
+    args: &str,
+    resume_args: &str,
+) -> Result<leon_core::AgentId, leon_core::agent::CustomError> {
+    let taken: Vec<leon_core::AgentId> = leon_core::agent::all().iter().map(|s| s.id).collect();
+    let agent = leon_core::CustomAgent::new(name, command, args, resume_args, &taken)?;
+    let names: Vec<String> = leon_core::agent::all()
+        .iter()
+        .map(|spec| spec.name.clone())
+        .collect();
+    let others: Vec<&str> = names.iter().map(String::as_str).collect();
+    let spec = agent.to_spec(&others)?;
+    let mut entries = list(cx, "custom_agents");
+    entries.push(serde_json::to_string(&agent).unwrap_or_default());
+    if let Some(def) = schema::find("custom_agents") {
+        set_value(cx, def, Value::List(entries));
+    }
+    Ok(spec.id)
+}
+
+/// Removes a custom agent of the user's.
+pub fn remove_custom_agent(cx: &mut App, id: leon_core::AgentId) {
+    let entries: Vec<String> = list(cx, "custom_agents")
+        .into_iter()
+        .filter(|entry| {
+            serde_json::from_str::<leon_core::CustomAgent>(entry)
+                .map_or(true, |agent| agent.id != id.as_str())
+        })
+        .collect();
+    if let Some(def) = schema::find("custom_agents") {
+        set_value(cx, def, Value::List(entries));
+    }
+}
+
 thread_local! {
     /// How many sessions a worktree lists before "show more". Per thread, like
     /// the interface size: the tree is built on the interface thread.
@@ -290,6 +364,7 @@ pub fn sessions_shown() -> usize {
 /// interface size, the sidebar, the blueprint lines and the length of the
 /// tree's lists.
 fn apply_look(active: &Active) {
+    sync_custom_agents(active);
     let shown = active
         .store
         .value("sessions_per_worktree")
@@ -530,12 +605,13 @@ pub fn engine_prefs(cx: &App, engine: &crate::engine::Engine) -> crate::engine::
     }
 }
 
-/// Which network sources of the usage limits the settings switched on.
+/// Which sources of the usage limits the settings switched on.
 pub fn usage_policy(cx: &App) -> leon_usage::network::NetworkPolicy {
-    leon_usage::network::NetworkPolicy {
-        claude: flag(cx, "usage_claude_network"),
-        opencode: flag(cx, "usage_opencode_network"),
+    let mut policy = leon_usage::network::NetworkPolicy::none();
+    for agent in leon_usage::network::switchable_agents() {
+        policy.set(agent, flag(cx, &crate::schema::usage_setting(agent, true)));
     }
+    policy
 }
 
 /// Where a limit turns to a warning and to critical, from the settings. The
@@ -548,12 +624,67 @@ pub fn usage_thresholds(cx: &App) -> leon_usage::Thresholds {
     }
 }
 
+/// Whether the bar and the view say what is used or what is left.
+pub fn usage_percent_display(cx: &App) -> leon_usage::PercentDisplay {
+    leon_usage::PercentDisplay::parse(&text(cx, "usage_percentage_display"))
+}
+
+/// Whether the bar lists every window of each agent (`detailed`) or the one
+/// closest to its limit (`compact`).
+pub fn usage_bar_detailed(cx: &App) -> bool {
+    text(cx, "usage_bar_mode") != "compact"
+}
+
 /// The agents whose limits the settings show.
-pub fn usage_agents(cx: &App) -> Vec<leon_core::AgentKind> {
-    leon_core::AgentKind::ALL
+pub fn usage_agents(cx: &App) -> Vec<leon_core::AgentId> {
+    leon_usage::network::switchable_agents()
         .into_iter()
-        .filter(|agent| flag(cx, &format!("usage_{}", agent.as_str())))
+        .filter(|agent| flag(cx, &crate::schema::usage_setting(*agent, false)))
         .collect()
+}
+
+/// What the notification settings ask for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Notifications {
+    /// The master switch.
+    pub enabled: bool,
+    /// Say when a session wants the user.
+    pub waiting: bool,
+    /// Say when a session ends cleanly.
+    pub finished: bool,
+    /// Say when a session fails.
+    pub failed: bool,
+    /// The geek banner in the window.
+    pub banner: bool,
+    /// The desktop notification.
+    pub desktop: bool,
+    /// The desktop only while the window does not have the focus.
+    pub only_unfocused: bool,
+}
+
+impl Notifications {
+    /// Whether an event is said at all.
+    pub fn allows(&self, event: crate::ui::notify::Event) -> bool {
+        match event {
+            crate::ui::notify::Event::Waiting => self.waiting,
+            crate::ui::notify::Event::Finished { .. } => self.finished,
+            crate::ui::notify::Event::Failed { .. } => self.failed,
+        }
+    }
+}
+
+/// The notification settings in force.
+pub fn notifications(cx: &App) -> Notifications {
+    let how = text(cx, "notify_how");
+    Notifications {
+        enabled: flag(cx, "notify"),
+        waiting: flag(cx, "notify_waiting"),
+        finished: flag(cx, "notify_finished"),
+        failed: flag(cx, "notify_failed"),
+        banner: how != "system",
+        desktop: how != "banner",
+        only_unfocused: flag(cx, "notify_only_unfocused"),
+    }
 }
 
 /// Tells the engine what the settings ask and, unless they say not to, brings
@@ -561,11 +692,17 @@ pub fn usage_agents(cx: &App) -> Vec<leon_core::AgentKind> {
 pub fn start_engine(cx: &App, engine: &crate::engine::Engine) {
     engine.set_prefs(engine_prefs(cx, engine));
     engine.set_usage_policy(usage_policy(cx));
+    // Usage limits are not read here: the window starts them once it is up
+    // (`Engine::start_usage`), so that the first keychain prompt, if any,
+    // never comes before there is a window to read it against.
     if flag(cx, "import_on_start") {
         engine.submit(crate::engine::Op::Refresh);
-    } else {
-        engine.submit(crate::engine::Op::CollectUsage);
     }
+}
+
+/// How many seconds between two scheduled readings of the usage limits.
+pub fn usage_interval_seconds(cx: &App) -> i64 {
+    int(cx, "usage_refresh_seconds").max(30)
 }
 
 /// Changes the window's settings, saves them and applies what changed.

@@ -11,7 +11,7 @@ repository. This document specifies what a relay must do and what it can and
 cannot see; the security-relevant code (`leon-wire`, `leon-link`, `leon-host`)
 is all here so it can be reviewed without trusting any server.
 
-> **Status.** The relay at `wss://relay.zavu.dev` is not deployed yet. Leon
+> **Status.** The relay at `wss://relay.getleon.dev` is not deployed yet. Leon
 > detects an unreachable relay and says so, naming the address it tried. This
 > code has had **no independent security review**.
 
@@ -195,7 +195,7 @@ No home-made cryptography: Leon composes audited crates.
 
 ## Settings
 
-`Relay server` (`remote_relay_url`, default `wss://relay.zavu.dev`), `Name of this
+`Relay server` (`remote_relay_url`, default `wss://relay.getleon.dev`), `Name of this
 computer` (`remote_device_name`), `Share this machine` (`remote_share`) and `Ask
 before pairing` (`remote_require_approval`). See [SETTINGS.md](SETTINGS.md).
 `LEON_RELAY_URL` and `--relay` set the relay for `leon host`.

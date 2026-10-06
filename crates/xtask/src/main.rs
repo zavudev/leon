@@ -39,7 +39,7 @@ Commands:
       Platforms: linux-x86_64, macos-aarch64, macos-x86_64, windows-x86_64.
   checksums --dir <DIR>
       Writes <DIR>/SHA256SUMS for every file in <DIR>.
-  bump <major|minor|patch|X.Y.Z> [--no-lock]
+  bump <major|minor|patch|X.Y.Z> [--no-lock] [--no-docs]
       Sets the workspace version in Cargo.toml, refreshes Cargo.lock and
       prints the tag to create. Pre-release versions are refused.
   check [--quick]
@@ -137,7 +137,7 @@ fn run(args: &[String]) -> Result<String, String> {
         }
         "package" => package(&Args::parse(rest, &[])?).map(|path| path.display().to_string()),
         "checksums" => checksums(&Args::parse(rest, &[])?),
-        "bump" => bump_command(&Args::parse(rest, &["no-lock"])?),
+        "bump" => bump_command(&Args::parse(rest, &["no-lock", "no-docs"])?),
         "check" => check_command(rest),
         "help" | "--help" | "-h" => Ok(USAGE.to_owned()),
         other => Err(format!("unknown command `{other}`\n\n{USAGE}")),
@@ -204,11 +204,32 @@ fn bump_command(args: &Args) -> Result<String, String> {
     if !args.has("no-lock") {
         refresh_lock(&workspace_root())?;
     }
+    if !args.has("no-docs") {
+        regenerate_docs(&workspace_root())?;
+    }
     Ok(format!(
         "{current} -> {next}\n\
          Review the change, commit it, then create and push the tag:\n  \
          git tag v{next} && git push origin v{next}"
     ))
+}
+
+/// Rewrites the generated docs that embed the version (`docs/SETTINGS.md`):
+/// the same blessing step the staleness test names, run after the version
+/// changed so the text carries the new one.
+fn regenerate_docs(root: &Path) -> Result<(), String> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let status = std::process::Command::new(cargo)
+        .args(["test", "-p", "leon", "the_settings_reference_is_current"])
+        .env("LEON_BLESS", "1")
+        .current_dir(root)
+        .status()
+        .map_err(|error| format!("cargo test: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("regenerating docs/SETTINGS.md failed".into())
+    }
 }
 
 /// Brings the workspace members' own entries in `Cargo.lock` to the new

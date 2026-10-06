@@ -13,22 +13,34 @@
 //! `--diagnose resume [--agent <claude|codex|opencode>]` prints what opening
 //! the newest local history session of that agent would start, without
 //! starting it.
+//! `--diagnose history [--agent <id>]` prints where each agent's history is
+//! looked for, what is found there and why sessions are missing (counts and
+//! paths only; see `history_report.rs`).
 //! `--diagnose connect <user@host[:port]>` runs the checklist of "Connect a
 //! machine" from the command line and prints each check with its diagnosis;
 //! it only attempts an SSH connection in batch mode (see `diagnose.rs`).
 //! `--diagnose sessions-elsewhere` runs the real detection of sessions that
 //! run in another terminal on this computer and prints, for each agent
 //! process, what it found (see `diagnose.rs`).
-//! `--diagnose usage [--network <claude|opencode>]...` runs the real collection
-//! of the agents' usage limits for this computer and prints, per agent, the
-//! source, the windows, how fresh they are or why they are unknown, and nothing
-//! that identifies an account. A source that needs a credential and a network
-//! call runs only when named with `--network`.
+//! `--diagnose usage [--network <agent>]... [--no-network <agent|all>]...`
+//! runs the real collection of the agents' usage limits for this computer and
+//! prints, per agent, the source, the windows, how fresh they are or why they
+//! are unknown, and nothing that identifies an account. The sources that need
+//! a credential and a network call follow the settings (on unless Settings,
+//! Usage turned them off); `--network` and `--no-network` override them for
+//! this run.
+//! `--diagnose update [--pretend-version <x.y.z>] [--download] [--dir <path>]
+//! [--prerelease] [--platform <id>]` makes the real update check against
+//! the GitHub releases and prints what the updater would do (the file it
+//! would take for this platform, whether `SHA256SUMS` lists it, the decision);
+//! `--download` also fetches the file into `--dir`, verifies and unpacks it
+//! there, and never installs anything. `--diagnose update --check-archive
+//! <file>` checks a built release archive with the updater's own extraction.
 
 use crate::product;
 use crate::settings::AppearanceChoice;
 use crate::theme::ThemeId;
-use leon_core::AgentKind;
+use leon_core::AgentId;
 use std::path::PathBuf;
 
 /// What was asked for on the command line.
@@ -52,22 +64,52 @@ pub enum Command {
     /// start: the program, the folder and the line typed into the shell.
     DiagnoseResume {
         /// Whose history to take the session from.
-        agent: AgentKind,
+        agent: AgentId,
     },
     /// Run the real detection of sessions running in another terminal on this
     /// computer and print what it found.
     DiagnoseElsewhere,
+    /// Print where each agent's history is looked for, what was found there
+    /// and why sessions are missing: counts and paths, no content.
+    DiagnoseHistory {
+        /// Only this agent, or every agent with an importer.
+        agent: Option<AgentId>,
+        /// Leon's data folder, to count what it imported; the platform's
+        /// when absent.
+        data_dir: Option<PathBuf>,
+    },
     /// Collect the usage limits of this computer and print them.
     DiagnoseUsage {
-        /// The network sources switched on for this run.
-        network: Vec<AgentKind>,
+        /// The network sources switched on for this run, whatever the settings say.
+        network: Vec<AgentId>,
+        /// The network sources switched off for this run.
+        no_network: Vec<AgentId>,
     },
+    /// Make the real update check and print what the updater would do.
+    DiagnoseUpdate(UpdateDiagnose),
     /// Run the checklist of "Connect a machine" against a destination and
     /// print each check with its diagnosis.
     DiagnoseConnect {
         /// `user@host[:port]`, as typed in the screen.
         destination: String,
     },
+}
+
+/// What the hidden `--diagnose update` run is asked to do.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdateDiagnose {
+    /// Compare the release with this version instead of the running one.
+    pub pretend_version: Option<String>,
+    /// Also download, verify and unpack the file (never install it).
+    pub download: bool,
+    /// Where to download to; a folder under the temporary one when absent.
+    pub dir: Option<PathBuf>,
+    /// Follow the pre-release channel.
+    pub prerelease: bool,
+    /// The platform to pick the file for, as a release names it.
+    pub platform: Option<String>,
+    /// Check a built release archive instead of asking GitHub.
+    pub check_archive: Option<PathBuf>,
 }
 
 /// What the hidden `--diagnose terminal` run is asked to do.
@@ -112,6 +154,15 @@ pub fn usage() -> String {
     )
 }
 
+/// The ids of the agents that have a usage source, for the messages.
+fn usage_agent_ids() -> String {
+    leon_usage::network::switchable_agents()
+        .iter()
+        .map(|agent| agent.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The ids of the themes on offer, built-in ones first, as a list for a message.
 pub fn theme_ids() -> String {
     crate::theme::registry::usable()
@@ -144,10 +195,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
     let mut connect: Option<String> = None;
     let mut folder_dialog = false;
     let mut resume = false;
+    let mut history = false;
     let mut elsewhere = false;
     let mut usage = false;
-    let mut network: Vec<AgentKind> = Vec::new();
-    let mut agent = AgentKind::Claude;
+    let mut update: Option<UpdateDiagnose> = None;
+    let mut network: Vec<AgentId> = Vec::new();
+    let mut no_network: Vec<AgentId> = Vec::new();
+    let mut agent = AgentId::CLAUDE;
+    let mut history_agent: Option<AgentId> = None;
     let mut dialog_timeout = 4u64;
     let mut args = args.into_iter();
     while let Some(argument) = args.next() {
@@ -183,12 +238,20 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                     resume = true;
                     continue;
                 }
+                if what == "history" {
+                    history = true;
+                    continue;
+                }
                 if what == "sessions-elsewhere" {
                     elsewhere = true;
                     continue;
                 }
                 if what == "usage" {
                     usage = true;
+                    continue;
+                }
+                if what == "update" {
+                    update = Some(UpdateDiagnose::default());
                     continue;
                 }
                 if what == "connect" {
@@ -198,7 +261,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                 }
                 if what != "terminal" {
                     return Err(format!(
-                        "Cannot diagnose {what:?}: only \"terminal\", \"folder-dialog\", \"resume\", \"sessions-elsewhere\", \"usage\" and \"connect\"."
+                        "Cannot diagnose {what:?}: only \"terminal\", \"folder-dialog\", \"resume\", \"history\", \"sessions-elsewhere\", \"usage\", \"update\" and \"connect\"."
                     ));
                 }
                 diagnose = Some(Diagnose {
@@ -207,28 +270,88 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                     timeout: 10,
                 });
             }
+            "--pretend-version" | "--dir" | "--platform" | "--check-archive" => {
+                let text = value("a value")?;
+                let Some(update) = update.as_mut() else {
+                    return Err(format!("{name} only goes with --diagnose update."));
+                };
+                match name.as_str() {
+                    "--pretend-version" => {
+                        if leon_update::version::parse_running(&text).is_none() {
+                            return Err(format!("{text:?} is not a version like 0.0.9."));
+                        }
+                        update.pretend_version = Some(text);
+                    }
+                    "--dir" => update.dir = Some(PathBuf::from(text)),
+                    "--platform" => {
+                        if leon_update::Platform::parse(&text).is_none() {
+                            return Err(format!(
+                                "{text:?} is not a platform: use macos-aarch64, macos-x86_64, linux-x86_64 or windows-x86_64."
+                            ));
+                        }
+                        update.platform = Some(text);
+                    }
+                    _ => update.check_archive = Some(PathBuf::from(text)),
+                }
+            }
+            "--download" | "--prerelease" => {
+                let Some(update) = update.as_mut() else {
+                    return Err(format!("{name} only goes with --diagnose update."));
+                };
+                if name == "--download" {
+                    update.download = true;
+                } else {
+                    update.prerelease = true;
+                }
+            }
             "--network" => {
-                let text = value("claude or opencode")?;
+                let text = value("an agent id")?;
                 if !usage {
                     return Err("--network only goes with --diagnose usage.".to_owned());
                 }
-                match AgentKind::parse(&text) {
-                    Some(agent @ (AgentKind::Claude | AgentKind::Opencode)) => network.push(agent),
-                    _ => {
+                match AgentId::parse(&text)
+                    .filter(|a| leon_usage::network::switchable_agents().contains(a))
+                {
+                    Some(agent) => network.push(agent),
+                    None => {
                         return Err(format!(
-                            "{text:?} has no network source: use claude or opencode."
+                            "{text:?} has no usage source: use one of {}.",
+                            usage_agent_ids()
                         ))
                     }
                 }
             }
+            "--no-network" => {
+                let text = value("an agent id or all")?;
+                if !usage {
+                    return Err("--no-network only goes with --diagnose usage.".to_owned());
+                }
+                match text.as_str() {
+                    "all" => no_network.extend(leon_usage::network::switchable_agents()),
+                    _ => match AgentId::parse(&text)
+                        .filter(|a| leon_usage::network::switchable_agents().contains(a))
+                    {
+                        Some(agent) => no_network.push(agent),
+                        None => {
+                            return Err(format!(
+                                "{text:?} has no usage source: use one of {} or all.",
+                                usage_agent_ids()
+                            ))
+                        }
+                    },
+                }
+            }
             "--agent" => {
                 let text = value("claude, codex or opencode")?;
-                if !resume {
-                    return Err("--agent only goes with --diagnose resume.".to_owned());
+                if !resume && !history {
+                    return Err("--agent only goes with --diagnose resume or history.".to_owned());
                 }
-                agent = AgentKind::parse(&text).ok_or_else(|| {
-                    format!("Unknown agent {text:?}: use claude, codex or opencode.")
-                })?;
+                agent = AgentId::parse(&text)
+                    .filter(|a| a.spec().is_some_and(|spec| spec.history.is_some()))
+                    .ok_or_else(|| {
+                        format!("Unknown agent {text:?}: use claude, codex or opencode.")
+                    })?;
+                history_agent = Some(agent);
             }
             "--input" => {
                 let text = value("text to type")?;
@@ -273,14 +396,26 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
             other => return Err(format!("Unknown option {other:?}.")),
         }
     }
+    if let Some(update) = update {
+        return Ok(Command::DiagnoseUpdate(update));
+    }
     if usage {
-        return Ok(Command::DiagnoseUsage { network });
+        return Ok(Command::DiagnoseUsage {
+            network,
+            no_network,
+        });
     }
     if elsewhere {
         return Ok(Command::DiagnoseElsewhere);
     }
     if let Some(destination) = connect {
         return Ok(Command::DiagnoseConnect { destination });
+    }
+    if history {
+        return Ok(Command::DiagnoseHistory {
+            agent: history_agent,
+            data_dir: options.data_dir,
+        });
     }
     if resume {
         return Ok(Command::DiagnoseResume { agent });
@@ -316,10 +451,13 @@ mod tests {
     }
 
     #[test]
-    fn diagnose_usage_leaves_every_network_source_off_unless_named() {
+    fn diagnose_usage_follows_the_settings_and_takes_overrides() {
         assert_eq!(
             parsed(&["--diagnose", "usage"]),
-            Ok(Command::DiagnoseUsage { network: vec![] })
+            Ok(Command::DiagnoseUsage {
+                network: vec![],
+                no_network: vec![]
+            })
         );
         assert_eq!(
             parsed(&[
@@ -327,14 +465,71 @@ mod tests {
                 "usage",
                 "--network",
                 "claude",
-                "--network=opencode"
+                "--no-network=opencode"
             ]),
             Ok(Command::DiagnoseUsage {
-                network: vec![AgentKind::Claude, AgentKind::Opencode]
+                network: vec![AgentId::CLAUDE],
+                no_network: vec![AgentId::OPENCODE]
             })
         );
-        assert!(parsed(&["--diagnose", "usage", "--network", "codex"]).is_err());
+        assert_eq!(
+            parsed(&["--diagnose", "usage", "--no-network", "all"]),
+            Ok(Command::DiagnoseUsage {
+                network: vec![],
+                no_network: leon_usage::network::switchable_agents()
+            })
+        );
+        assert!(parsed(&["--diagnose", "usage", "--network", "amp"]).is_err());
+        assert!(parsed(&["--diagnose", "usage", "--network", "not an id"]).is_err());
+        assert_eq!(
+            parsed(&[
+                "--diagnose",
+                "usage",
+                "--network",
+                "grok",
+                "--no-network",
+                "cursor"
+            ]),
+            Ok(Command::DiagnoseUsage {
+                network: vec![AgentId::GROK],
+                no_network: vec![AgentId::CURSOR]
+            })
+        );
         assert!(parsed(&["--network", "claude"]).is_err());
+        assert!(parsed(&["--no-network", "all"]).is_err());
+    }
+
+    #[test]
+    fn diagnose_update_takes_its_options_and_only_then() {
+        assert_eq!(
+            parsed(&["--diagnose", "update"]),
+            Ok(Command::DiagnoseUpdate(UpdateDiagnose::default()))
+        );
+        assert_eq!(
+            parsed(&[
+                "--diagnose",
+                "update",
+                "--pretend-version",
+                "0.0.9",
+                "--download",
+                "--dir=/tmp/x",
+                "--prerelease",
+                "--platform",
+                "linux-x86_64"
+            ]),
+            Ok(Command::DiagnoseUpdate(UpdateDiagnose {
+                pretend_version: Some("0.0.9".into()),
+                download: true,
+                dir: Some(PathBuf::from("/tmp/x")),
+                prerelease: true,
+                platform: Some("linux-x86_64".into()),
+                check_archive: None,
+            }))
+        );
+        assert!(parsed(&["--diagnose", "update", "--pretend-version", "v1"]).is_err());
+        assert!(parsed(&["--diagnose", "update", "--platform", "amiga"]).is_err());
+        assert!(parsed(&["--download"]).is_err());
+        assert!(parsed(&["--pretend-version", "0.0.9"]).is_err());
     }
 
     #[test]
@@ -502,18 +697,44 @@ mod tests {
         assert_eq!(
             parsed(&["--diagnose", "resume"]),
             Ok(Command::DiagnoseResume {
-                agent: AgentKind::Claude
+                agent: AgentId::CLAUDE
             })
         );
         assert_eq!(
             parsed(&["--diagnose=resume", "--agent", "codex"]),
             Ok(Command::DiagnoseResume {
-                agent: AgentKind::Codex
+                agent: AgentId::CODEX
             })
         );
         assert!(parsed(&["--diagnose", "resume", "--agent", "gemini"]).is_err());
         assert!(parsed(&["--agent", "claude"]).is_err());
         assert!(!usage().contains("resume"));
+    }
+
+    #[test]
+    fn the_history_diagnostic_is_hidden_and_takes_an_agent_and_a_data_dir() {
+        assert_eq!(
+            parsed(&["--diagnose", "history"]),
+            Ok(Command::DiagnoseHistory {
+                agent: None,
+                data_dir: None
+            })
+        );
+        assert_eq!(
+            parsed(&[
+                "--diagnose=history",
+                "--agent",
+                "opencode",
+                "--data-dir",
+                "/d"
+            ]),
+            Ok(Command::DiagnoseHistory {
+                agent: Some(AgentId::OPENCODE),
+                data_dir: Some("/d".into())
+            })
+        );
+        assert!(parsed(&["--diagnose", "history", "--agent", "gemini"]).is_err());
+        assert!(!usage().contains("history"));
     }
 
     #[test]

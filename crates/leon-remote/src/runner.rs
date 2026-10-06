@@ -111,7 +111,7 @@ impl ProcessRunner {
 
 impl Runner for ProcessRunner {
     async fn run(&self, spec: &CommandSpec) -> Result<Output, RunError> {
-        let mut command = tokio::process::Command::new(&spec.program);
+        let mut command = crate::spawn::child(&spec.program);
         command
             .args(&spec.args)
             .envs(spec.env.iter().map(|(name, value)| (name, value)))

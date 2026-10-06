@@ -23,7 +23,7 @@ use super::{bad_tag, from_millis, to_millis, Store};
 use crate::change::StoreChange;
 use crate::error::{Result, StoreError};
 use crate::ids::{MachineId, ProjectId, SessionId};
-use crate::model::{AgentKind, Message, NewMessage, NewSession, Role, Session};
+use crate::model::{AgentId, Message, NewMessage, NewSession, Role, Session};
 
 /// The session columns, in the order [`session_from_row`] expects them, for a
 /// `session` table aliased as `s`.
@@ -37,7 +37,7 @@ pub(crate) const SESSION_COLUMN_COUNT: usize = 11;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionFilter {
     /// Only sessions of this agent.
-    pub agent: Option<AgentKind>,
+    pub agent: Option<AgentId>,
     /// Only sessions that ran on this machine.
     pub machine_id: Option<MachineId>,
     /// Only sessions linked to this project.
@@ -84,7 +84,7 @@ impl Store {
             let sessions = statement
                 .query_map(
                     params![
-                        filter.agent.map(AgentKind::as_str),
+                        filter.agent.map(AgentId::as_str),
                         filter.machine_id.as_ref().map(MachineId::as_str),
                         filter.project_id.as_ref().map(ProjectId::as_str),
                         sql_limit(limit),
@@ -93,6 +93,28 @@ impl Store {
                 )?
                 .collect::<rusqlite::Result<_>>()?;
             Ok(sessions)
+        })
+    }
+
+    /// The history session an agent's own id names on a machine, if it was
+    /// imported.
+    pub fn session_by_external(
+        &self,
+        machine_id: &MachineId,
+        agent: AgentId,
+        external_id: &str,
+    ) -> Result<Option<Session>> {
+        self.read(|connection| {
+            Ok(connection
+                .prepare_cached(&format!(
+                    "SELECT {SESSION_COLUMNS} FROM session s
+                     WHERE s.machine_id = ?1 AND s.agent = ?2 AND s.external_id = ?3"
+                ))?
+                .query_row(
+                    params![machine_id.as_str(), agent.as_str(), external_id],
+                    |row| session_from_row(row, 0),
+                )
+                .optional()?)
         })
     }
 
@@ -194,6 +216,179 @@ impl Store {
     ) -> Result<()> {
         self.transact(|tx| set_import_cursor_in(tx, machine_id, source_key, fingerprint))
     }
+}
+
+/// What the last import of one agent on one machine did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportRun {
+    /// The agent whose source was imported.
+    pub agent: String,
+    /// When the run finished.
+    pub at: chrono::DateTime<chrono::Utc>,
+    /// How long it took, in milliseconds.
+    pub duration_ms: u64,
+    /// Items found.
+    pub scanned: u64,
+    /// Items stored.
+    pub imported: u64,
+    /// Items skipped because they had not changed.
+    pub unchanged: u64,
+    /// Items without messages.
+    pub empty: u64,
+    /// Items or sources that could not be read or stored.
+    pub failed: u64,
+    /// Rows inside items that could not be understood.
+    pub malformed: u64,
+    /// Sources whose layout is not known.
+    pub unsupported: u64,
+}
+
+/// What the store holds of one agent's history, for the diagnosis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentOverview {
+    /// The agent's catalogue id.
+    pub agent: String,
+    /// Sessions stored.
+    pub sessions: u64,
+    /// The latest update time of any of them.
+    pub newest: Option<chrono::DateTime<chrono::Utc>>,
+    /// Sessions linked to no project.
+    pub unplaced: u64,
+    /// The last import of this agent, when one was recorded.
+    pub last_run: Option<ImportRun>,
+}
+
+fn import_run_from_row(row: &Row<'_>) -> rusqlite::Result<ImportRun> {
+    Ok(ImportRun {
+        agent: row.get(0)?,
+        at: from_millis(row.get(1)?),
+        duration_ms: row.get::<_, i64>(2)? as u64,
+        scanned: row.get::<_, i64>(3)? as u64,
+        imported: row.get::<_, i64>(4)? as u64,
+        unchanged: row.get::<_, i64>(5)? as u64,
+        empty: row.get::<_, i64>(6)? as u64,
+        failed: row.get::<_, i64>(7)? as u64,
+        malformed: row.get::<_, i64>(8)? as u64,
+        unsupported: row.get::<_, i64>(9)? as u64,
+    })
+}
+
+const IMPORT_RUN_COLUMNS: &str =
+    "agent, at, duration_ms, scanned, imported, unchanged, empty, failed, malformed, unsupported";
+
+impl Store {
+    /// Records what an import of one agent did, replacing the previous run.
+    /// Announces nothing: nothing displays it but the diagnosis.
+    pub fn record_import_run(&self, machine_id: &MachineId, run: &ImportRun) -> Result<()> {
+        self.transact(|tx| {
+            tx.prepare_cached(&format!(
+                "INSERT OR REPLACE INTO import_run (machine_id, {IMPORT_RUN_COLUMNS})
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+            ))?
+            .execute(params![
+                machine_id.as_str(),
+                run.agent,
+                to_millis(run.at),
+                run.duration_ms as i64,
+                run.scanned as i64,
+                run.imported as i64,
+                run.unchanged as i64,
+                run.empty as i64,
+                run.failed as i64,
+                run.malformed as i64,
+                run.unsupported as i64,
+            ])?;
+            Ok(())
+        })
+    }
+
+    /// The history of every agent on a machine, with its last import.
+    pub fn history_overview(&self, machine_id: &MachineId) -> Result<Vec<AgentOverview>> {
+        self.read(|connection| overview(connection, machine_id.as_str()))
+    }
+}
+
+/// Counts what the store holds per agent from an open connection. Tolerates
+/// a database from before the import log existed.
+fn overview(connection: &Connection, machine: &str) -> Result<Vec<AgentOverview>> {
+    let mut runs: HashMap<String, ImportRun> = HashMap::new();
+    if let Ok(mut statement) = connection.prepare(&format!(
+        "SELECT {IMPORT_RUN_COLUMNS} FROM import_run WHERE machine_id = ?1"
+    )) {
+        for run in statement
+            .query_map([machine], import_run_from_row)?
+            .flatten()
+        {
+            runs.insert(run.agent.clone(), run);
+        }
+    }
+    let mut statement = connection.prepare(
+        "SELECT agent, COUNT(*), MAX(updated_at), SUM(project_id IS NULL)
+         FROM session WHERE machine_id = ?1 GROUP BY agent ORDER BY agent",
+    )?;
+    let mut rows: Vec<AgentOverview> = statement
+        .query_map([machine], |row| {
+            let agent: String = row.get(0)?;
+            Ok(AgentOverview {
+                sessions: row.get::<_, i64>(1)? as u64,
+                newest: row.get::<_, Option<i64>>(2)?.map(from_millis),
+                unplaced: row.get::<_, Option<i64>>(3)?.unwrap_or(0) as u64,
+                last_run: None,
+                agent,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    for (agent, run) in runs {
+        match rows.iter_mut().find(|row| row.agent == agent) {
+            Some(row) => row.last_run = Some(run),
+            None => rows.push(AgentOverview {
+                agent,
+                sessions: 0,
+                newest: None,
+                unplaced: 0,
+                last_run: Some(run),
+            }),
+        }
+    }
+    rows.sort_by(|a, b| a.agent.cmp(&b.agent));
+    Ok(rows)
+}
+
+/// Reads the history overview of the database file at `path` without
+/// opening it for writing, migrating it or touching its settings: safe
+/// against the database of a Leon that is running, of any version.
+pub fn history_overview_at(
+    path: &std::path::Path,
+    machine_id: &MachineId,
+) -> Result<Vec<AgentOverview>> {
+    let connection = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(std::time::Duration::from_secs(2))?;
+    overview(&connection, machine_id.as_str())
+}
+
+/// The import cursors of the database file at `path`, read without opening
+/// it for writing. Empty for a database from before cursors existed.
+pub fn import_cursors_at(
+    path: &std::path::Path,
+    machine_id: &MachineId,
+) -> Result<HashMap<String, String>> {
+    let connection = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(std::time::Duration::from_secs(2))?;
+    let Ok(mut statement) = connection
+        .prepare("SELECT source_key, fingerprint FROM import_cursor WHERE machine_id = ?1")
+    else {
+        return Ok(HashMap::new());
+    };
+    let cursors = statement
+        .query_map([machine_id.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(cursors)
 }
 
 /// Stores a session and its complete transcript inside an open transaction.
@@ -317,7 +512,7 @@ pub(crate) fn session_from_row(row: &Row<'_>, offset: usize) -> rusqlite::Result
     let agent: String = row.get(offset + 1)?;
     Ok(Session {
         id: SessionId::from_string(row.get::<_, String>(offset)?),
-        agent: AgentKind::parse(&agent).ok_or_else(|| bad_tag(offset + 1, &agent))?,
+        agent: AgentId::parse(&agent).ok_or_else(|| bad_tag(offset + 1, &agent))?,
         external_id: row.get(offset + 2)?,
         machine_id: MachineId::from_string(row.get::<_, String>(offset + 3)?),
         cwd: row.get(offset + 4)?,
@@ -348,7 +543,7 @@ mod tests {
 
     fn session(external_id: &str) -> NewSession {
         NewSession {
-            agent: AgentKind::Claude,
+            agent: AgentId::CLAUDE,
             external_id: external_id.into(),
             machine_id: MachineId::local(),
             cwd: "/srv/api".into(),
@@ -393,7 +588,7 @@ mod tests {
         let id = store.upsert_session(&session("s1"), &transcript()).unwrap();
 
         let stored = store.session(&id).unwrap();
-        assert_eq!(stored.agent, AgentKind::Claude);
+        assert_eq!(stored.agent, AgentId::CLAUDE);
         assert_eq!(stored.external_id, "s1");
         assert_eq!(stored.title, "Fix the login flow");
         assert_eq!(stored.model.as_deref(), Some("model-a"));
@@ -481,7 +676,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let claude = store.upsert_session(&session("shared"), &[]).unwrap();
         let mut other = session("shared");
-        other.agent = AgentKind::Codex;
+        other.agent = AgentId::CODEX;
         let codex = store.upsert_session(&other, &[]).unwrap();
         assert_ne!(claude, codex);
     }
@@ -524,7 +719,7 @@ mod tests {
         store.upsert_session(&session("in-project"), &[]).unwrap();
         let mut elsewhere = session("elsewhere");
         elsewhere.cwd = "/tmp/scratch".into();
-        elsewhere.agent = AgentKind::Opencode;
+        elsewhere.agent = AgentId::OPENCODE;
         store.upsert_session(&elsewhere, &[]).unwrap();
 
         let by = |filter: SessionFilter| -> Vec<String> {
@@ -544,7 +739,7 @@ mod tests {
         );
         assert_eq!(
             by(SessionFilter {
-                agent: Some(AgentKind::Opencode),
+                agent: Some(AgentId::OPENCODE),
                 ..Default::default()
             }),
             ["elsewhere"]
@@ -663,5 +858,53 @@ mod tests {
             .recent_sessions(&SessionFilter::default(), 10)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn the_overview_counts_sessions_per_agent_and_keeps_the_last_import_run() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_session(&session("one"), &[]).unwrap();
+        let run = ImportRun {
+            agent: "claude".into(),
+            at: from_millis(5_000),
+            duration_ms: 42,
+            scanned: 3,
+            imported: 2,
+            unchanged: 1,
+            empty: 0,
+            failed: 0,
+            malformed: 4,
+            unsupported: 0,
+        };
+        store.record_import_run(&MachineId::local(), &run).unwrap();
+        let later = ImportRun {
+            duration_ms: 7,
+            ..run.clone()
+        };
+        store
+            .record_import_run(&MachineId::local(), &later)
+            .unwrap();
+
+        let overview = store.history_overview(&MachineId::local()).unwrap();
+        assert_eq!(overview.len(), 1);
+        assert_eq!(overview[0].agent, "claude");
+        assert_eq!(overview[0].sessions, 1);
+        // The session sits in no project, and the last run replaced the first.
+        assert_eq!(overview[0].unplaced, 1);
+        assert_eq!(overview[0].last_run, Some(later));
+    }
+
+    #[test]
+    fn the_overview_of_a_file_is_read_without_migrating_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("leon.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store.upsert_session(&session("one"), &[]).unwrap();
+        }
+        let before = std::fs::metadata(&path).unwrap().len();
+        let overview = history_overview_at(&path, &MachineId::local()).unwrap();
+        assert_eq!(overview[0].sessions, 1);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), before);
     }
 }

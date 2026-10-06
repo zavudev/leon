@@ -26,6 +26,7 @@ use super::live::{LiveId, Sessions};
 use super::logos::Logos;
 use super::menu::Menu;
 use super::model::Snapshot;
+use super::notify;
 use super::palette::PaletteState;
 use super::panes::{Axis, Dir};
 use super::settings_screen::SettingsUi;
@@ -43,11 +44,13 @@ use chrono::{DateTime, Utc};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, App, Context, Div, Entity, FocusHandle, Keystroke, ListAlignment, ListOffset, ListState,
-    MouseButton, MouseDownEvent, PathPromptOptions, ScrollHandle, ScrollStrategy, Size, Stateful,
-    Subscription, Task, UniformListScrollHandle, Window,
+    div, App, Context, Div, Entity, FocusHandle, FontWeight, Keystroke, ListAlignment, ListOffset,
+    ListState, MouseButton, MouseDownEvent, PathPromptOptions, ScrollHandle, ScrollStrategy, Size,
+    Stateful, Subscription, Task, UniformListScrollHandle, Window,
 };
-use leon_core::{MachineId, Message, ProjectId, Result as StoreResult, Session, WorktreeId};
+use leon_core::{
+    AgentId, MachineId, MachineKind, Message, ProjectId, Result as StoreResult, Session, WorktreeId,
+};
 use leon_term::{Backend, Pty};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -101,6 +104,12 @@ pub enum Overlay {
     Pair,
     /// "Share this machine".
     Share,
+    /// The release notes of the version on offer.
+    Notes,
+    /// "Why is a session missing?": the history report.
+    History,
+    /// "Restore N sessions from last time?" and what could not be restored.
+    Restore,
 }
 
 /// What the folder picker answered.
@@ -119,6 +128,9 @@ pub type Reveal = Rc<dyn Fn(&mut App, &std::path::Path)>;
 
 /// Brings an application forward, given the path of its bundle.
 pub type RevealApp = Rc<dyn Fn(&mut App, &str)>;
+
+/// Opens an address in the browser.
+pub type OpenUrl = Rc<dyn Fn(&mut App, &str)>;
 
 /// Shows the folder picker and says what was chosen.
 pub type PickFolder = Rc<dyn Fn(&mut App) -> Task<Picked>>;
@@ -168,6 +180,23 @@ pub struct Options {
     pub activity: Thresholds,
     /// How long the lion shows an error after a session ends with one.
     pub error_flash: Duration,
+    /// How a note reaches the desktop's notification centre; tests record the
+    /// notes instead.
+    pub notify: notify::Notify,
+    /// How long a banner stays on screen.
+    pub banner_duration: Duration,
+    /// How long a change of the open terminals waits before it is written.
+    pub save_debounce: Duration,
+    /// How long a request for an incremental history import waits, so a
+    /// burst of them is one import.
+    pub import_debounce: Duration,
+    /// How often history is imported on a timer; zero is never.
+    pub import_interval: Duration,
+    /// How long a quit waits after typing an agent's exit line before it sends
+    /// SIGTERM to what still runs.
+    pub quit_gesture_wait: Duration,
+    /// The longest a quit waits for agents to end by themselves.
+    pub quit_grace: Duration,
     /// How an image file is picked on this computer, for a project's logo.
     pub pick_image: PickFolder,
     /// Where a file is saved: the system's save dialog.
@@ -197,6 +226,13 @@ pub struct Options {
     /// Connections to other computers and sharing this one; absent in tests
     /// that do not need them.
     pub remote: Option<Arc<crate::remote::Remote>>,
+    /// The updater of this install; absent in tests that do not need it.
+    pub updates: Option<Arc<crate::updates::Service>>,
+    /// Whether the first check and the later ones run on a timer. Tests turn
+    /// it off.
+    pub update_timer: bool,
+    /// Opens an address in the browser.
+    pub open_url: OpenUrl,
 }
 
 /// A `~/.ssh` that is not there: the home folder is unknown.
@@ -220,6 +256,9 @@ impl leon_remote::connect::SshDir for NoSshDir {
 /// How many polls of this computer pass between two of the SSH machines.
 pub const REMOTE_EVERY: u32 = 6;
 
+/// How often the banners' expiry is looked at while any is on screen.
+const BANNER_TICK: Duration = Duration::from_millis(250);
+
 impl Default for Options {
     fn default() -> Self {
         Self {
@@ -233,6 +272,13 @@ impl Default for Options {
             ready: Readiness::default(),
             activity: Thresholds::default(),
             error_flash: Duration::from_secs(4),
+            notify: Rc::new(notify::system),
+            banner_duration: Duration::from_secs(8),
+            save_debounce: Duration::from_millis(500),
+            import_debounce: Duration::from_secs(2),
+            import_interval: Duration::from_secs(60),
+            quit_gesture_wait: Duration::from_millis(1_200),
+            quit_grace: Duration::from_millis(2_500),
             pick_image: super::projects::default_image_picker(),
             save_file: Rc::new(super::terminal_tools::system_save_dialog),
             read_clipboard: Rc::new(|cx| cx.read_from_clipboard()),
@@ -247,10 +293,13 @@ impl Default for Options {
                 None => Arc::new(NoSshDir),
             },
             remote: None,
+            updates: None,
+            update_timer: true,
+            open_url: Rc::new(|cx, url| cx.open_url(url)),
             reveal_app: Rc::new(|_, bundle| {
                 // `open` on a running application brings it forward.
                 #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("open").arg(bundle).spawn();
+                let _ = leon_remote::spawn::std_child("open").arg(bundle).spawn();
                 #[cfg(not(target_os = "macos"))]
                 let _ = bundle;
             }),
@@ -367,6 +416,8 @@ pub struct Shell {
     pub(super) pair_ui: super::pair::PairUi,
     /// "Share this machine".
     pub(super) share_ui: super::share::ShareUi,
+    /// Updates: what the window knows of them.
+    pub(super) updates: super::updates_view::UpdateUi,
     /// The sidebar's filter field, the text it holds, and what that leaves of
     /// the tree (`None` while it is empty).
     pub(super) filter_input: Entity<InputState>,
@@ -376,8 +427,22 @@ pub struct Shell {
     pub(super) labels: std::collections::HashMap<ProjectId, String>,
     /// The project logos read from the store.
     pub(super) logos: Logos,
+    /// The scroll of the history report.
+    pub(super) history_scroll: ScrollHandle,
+    /// What is remembered and offered back (see `restore_view.rs`).
+    pub(super) restore: super::restore_view::RestoreUi,
+    /// Prompt history imports (see `history_sync.rs`).
+    pub(super) sync: super::history_sync::SyncUi,
+    /// Closing sessions gently on the way out (see `quit_gently.rs`).
+    pub(super) closing: super::quit_gently::Closing,
     /// Watches the terminals' activity while any is live.
     pub(super) ticker: Option<Task<()>>,
+    /// The notifications shown for what sessions just did, oldest first.
+    pub(super) banners: Vec<notify::Banner>,
+    /// Watches the banners' expiry while any is on screen.
+    pub(super) banner_ticker: Option<Task<()>>,
+    /// The id the next banner gets.
+    pub(super) next_banner: u64,
     pub(super) choosing: Option<Task<()>>,
     /// The context menu, while one is open.
     pub(super) menu: Option<Menu>,
@@ -497,7 +562,11 @@ impl Shell {
             cx.observe_window_activation(window, |this, window, cx| {
                 this.window_active = window.is_window_active();
                 if window.is_window_active() {
+                    this.request_import(cx);
                     this.scan_elsewhere_now(true, cx);
+                    // Back in front: a reading older than the interval is
+                    // made once.
+                    this.usage_tick(cx);
                 }
                 cx.notify();
             }),
@@ -538,7 +607,13 @@ impl Shell {
         let engine_watcher = cx.spawn(async move |this, cx| {
             use tokio::sync::broadcast::error::RecvError;
             while !matches!(events.recv().await, Err(RecvError::Closed)) {
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                if this
+                    .update(cx, |this, cx| {
+                        this.learn_session_ids(cx);
+                        cx.notify()
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -577,12 +652,20 @@ impl Shell {
             usage: super::usage_view::UsageUi::default(),
             pair_ui,
             share_ui: super::share::ShareUi::default(),
+            updates: super::updates_view::UpdateUi::default(),
             filter_input,
             filter_query: String::new(),
             filter: None,
             labels,
             logos: Logos::default(),
+            history_scroll: ScrollHandle::new(),
+            restore: Default::default(),
+            sync: Default::default(),
+            closing: Default::default(),
             ticker: None,
+            banners: Vec::new(),
+            banner_ticker: None,
+            next_banner: 0,
             choosing: None,
             menu: None,
             sheet_scroll: ScrollHandle::new(),
@@ -612,6 +695,9 @@ impl Shell {
         shell.watch_elsewhere(window, cx);
         shell.usage_reload();
         shell.watch_usage(window, cx);
+        shell.watch_updates(window, cx);
+        shell.begin_session_restore(window, cx);
+        shell.watch_history(window, cx);
         // Values of settings.json that could not be used were read as defaults.
         let problems = settings::take_problems(cx);
         shell.report_problems(&problems);
@@ -755,6 +841,8 @@ impl Shell {
                 self.fill_palette(cx);
             }
         }
+        // A session that was just imported may be the id a terminal waits for.
+        self.learn_session_ids(cx);
         cx.notify();
     }
 
@@ -794,6 +882,48 @@ impl Shell {
         self.cursor = tree::follow(&self.rows, key.as_deref(), self.cursor.unwrap_or(0));
     }
 
+    /// The agents each machine has: this computer's by looking for their
+    /// programs, an SSH or relay machine's by its last probe. A machine that
+    /// has not been probed is absent (nothing is known of it).
+    pub(super) fn installed_agents(&self) -> Vec<(MachineId, Vec<AgentId>)> {
+        let mut out = Vec::new();
+        for machine in &self.snapshot.machines {
+            let found: Option<Vec<AgentId>> = if machine.kind == MachineKind::Local {
+                Some(
+                    leon_core::agent::all()
+                        .into_iter()
+                        .filter(|spec| {
+                            let names: Vec<&str> = if spec.detect.is_empty() {
+                                vec![spec.command.as_str()]
+                            } else {
+                                spec.detect.iter().map(String::as_str).collect()
+                            };
+                            names
+                                .iter()
+                                .any(|name| self.options.system.find_program(name).is_some())
+                        })
+                        .map(|spec| spec.id)
+                        .collect(),
+                )
+            } else {
+                match self.engine.machine_state(&machine.id) {
+                    crate::engine::MachineState::Online(Some(report)) => Some(
+                        leon_core::agent::all()
+                            .into_iter()
+                            .filter(|spec| crate::launch::probed(&report, spec).is_some())
+                            .map(|spec| spec.id)
+                            .collect(),
+                    ),
+                    _ => None,
+                }
+            };
+            if let Some(found) = found {
+                out.push((machine.id.clone(), found));
+            }
+        }
+        out
+    }
+
     /// The machines, projects and folders, and where the keyboard is, for the
     /// palette's questions.
     pub(super) fn world(&self, cx: &Context<Self>) -> World {
@@ -808,6 +938,8 @@ impl Shell {
             chosen.interface_scale,
         )
         .with_prefs(Self::step_prefs(cx))
+        .with_update_ready(self.ready_update_version())
+        .with_installed(self.installed_agents())
         .with_repositories(
             self.connect_ui
                 .repos
@@ -1465,6 +1597,9 @@ impl Shell {
         if self.overlay == Overlay::Connect && self.connect_key(stroke, window, cx) {
             return true;
         }
+        if self.overlay == Overlay::Restore && self.restore_key(stroke, window, cx) {
+            return true;
+        }
         if self.overlay == Overlay::Usage && self.usage_key(stroke, window, cx) {
             return true;
         }
@@ -1602,6 +1737,8 @@ impl Shell {
             C::PasteImage => self.paste_terminal(super::paste::How::Image, cx),
             C::Copy | C::ScrollPageUp | C::ScrollPageDown => self.terminal_action(command, cx),
             C::NewSession
+            | C::AddAgent
+            | C::RemoveAgent
             | C::CloseSession
             | C::NewWorktree
             | C::AddProject
@@ -1629,6 +1766,8 @@ impl Shell {
             C::Settings => self.open_settings(window, cx),
             C::ShowUsage => self.toggle_usage(window, cx),
             C::RefreshUsage => self.refresh_usage(cx),
+            C::WhyMissing => self.open_history_report(window, cx),
+            C::RestoreSessions => self.restore_last_sessions(window, cx),
             C::Refresh => self.engine.submit(crate::engine::Op::Refresh),
             C::ProbeMachine => {
                 let machine = self.current_machine();
@@ -1666,6 +1805,11 @@ impl Shell {
                 self.overlay = Overlay::About;
                 self.focus.focus(window, cx);
             }
+            C::CheckForUpdates => self.check_for_updates(cx),
+            C::RestartToUpdate => self.restart_to_update(window, cx),
+            C::ShowReleaseNotes => self.show_release_notes(window, cx),
+            C::SkipVersion => self.skip_version(cx),
+            C::OpenDownloadPage => self.open_download_page(cx),
             C::NewThemeFromCurrent => self.begin_flow(command, window, cx),
             C::ExportTheme => self.export_theme(cx),
             C::OpenThemesFolder => self.open_themes_folder(cx),
@@ -1703,6 +1847,9 @@ impl Shell {
                 Overlay::Shortcuts
                 | Overlay::Menu
                 | Overlay::About
+                | Overlay::Notes
+                | Overlay::History
+                | Overlay::Restore
                 | Overlay::Problems
                 | Overlay::Connect
                 | Overlay::Usage
@@ -1739,7 +1886,12 @@ impl Shell {
             Overlay::Connect => self.close_connect(window, cx),
             Overlay::Pair => self.close_pair(window, cx),
             Overlay::Share => self.close_share(window, cx),
-            Overlay::About | Overlay::Problems | Overlay::Usage => {
+            Overlay::About
+            | Overlay::Notes
+            | Overlay::History
+            | Overlay::Restore
+            | Overlay::Problems
+            | Overlay::Usage => {
                 self.overlay = Overlay::None;
                 self.focus.focus(window, cx);
             }
@@ -2114,8 +2266,10 @@ impl Shell {
     /// The window is being closed: it may be, unless a program is running.
     fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !self.quit_asks(cx) {
-            self.flush(cx);
-            return true;
+            self.install_on_quit(cx);
+            // Agents are given their chance to save; the window closes by
+            // itself when they are done, within the grace.
+            return self.begin_quit(cx);
         }
         self.begin_flow(Command::Quit, window, cx);
         false
@@ -2125,8 +2279,18 @@ impl Shell {
     /// programs keep running there), saves what is kept, and ends the
     /// application.
     pub(super) fn quit_now(&mut self, cx: &mut Context<Self>) {
-        self.flush(cx);
-        (self.options.quit)(cx);
+        // A ready update is put in place on the way out when the settings
+        // say so and nothing is running: the next start is the new version.
+        self.install_on_quit(cx);
+        self.quit_now_without_update(cx);
+    }
+
+    /// [`Shell::quit_now`] without looking at updates: the restart that has
+    /// just installed one ends here.
+    pub(super) fn quit_now_without_update(&mut self, cx: &mut Context<Self>) {
+        if self.begin_quit(cx) {
+            (self.options.quit)(cx);
+        }
     }
 
     /// What must not be lost when the application ends: the terminals are hung
@@ -2134,6 +2298,12 @@ impl Shell {
     /// beside the settings is written. The settings themselves are written at
     /// every change.
     pub(super) fn flush(&mut self, cx: &mut Context<Self>) {
+        // Before anything is hung up: what is open now, marked as ended
+        // normally (a gentle quit has written it already, before the agents
+        // ended).
+        if !self.closing.quitting {
+            self.remember_clean_shutdown(cx);
+        }
         for id in self.live.ids() {
             if let Some(session) = self.live.get(id) {
                 let terminal = session.view.read(cx).terminal();
@@ -2201,6 +2371,148 @@ impl Shell {
         }
     }
 
+    /// Watches the banners' expiry while any is on screen. One timer for all
+    /// of them, and it ends itself once the last one is gone.
+    pub(super) fn keep_banners(&mut self, cx: &mut Context<Self>) {
+        if self.banner_ticker.is_some() {
+            return;
+        }
+        self.banner_ticker = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(BANNER_TICK).await;
+            let alive = this.update(cx, |this, cx| {
+                let now = cx.background_executor().now();
+                let before = this.banners.len();
+                this.banners.retain(|banner| banner.until > now);
+                if this.banners.len() != before {
+                    cx.notify();
+                }
+                let alive = !this.banners.is_empty();
+                if !alive {
+                    // Dropping the handle ends the task after this turn.
+                    this.banner_ticker = None;
+                }
+                alive
+            });
+            if !matches!(alive, Ok(true)) {
+                return;
+            }
+        }));
+    }
+
+    /// The geek banners: what the sessions just did, over the main pane. A
+    /// click opens the session the note came from; the cross dismisses it.
+    fn render_notifications(
+        &self,
+        colours: &Colours,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        if self.banners.is_empty() {
+            return None;
+        }
+        let cards = self.banners.iter().rev().map(|banner| {
+            let id = banner.id;
+            let session = banner.note.session;
+            let (marker, label) = match banner.note.kind {
+                notify::Kind::Waiting => (colours.warning, "WAIT"),
+                notify::Kind::Finished => (colours.success, "DONE"),
+                notify::Kind::Failed => (colours.error, "FAIL"),
+            };
+            div()
+                .id(("notify", id as usize))
+                .debug_selector(move || format!("notify-{id}"))
+                .w(px(320.))
+                .flex()
+                .flex_row()
+                .rounded(metrics::RADIUS())
+                .border_1()
+                .border_color(colours.elevated_border)
+                .bg(colours.surface)
+                .overflow_hidden()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.banners.retain(|banner| banner.id != id);
+                    if let Some(session) = session {
+                        this.open_live(session, window, cx);
+                    }
+                    cx.notify();
+                }))
+                .child(div().w(px(3.)).flex_none().bg(marker))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .font_family(theme::fonts::mono())
+                                        .font_features(theme::fonts::mono_features())
+                                        .text_size(metrics::TEXT_LABEL())
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(marker)
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(theme::fonts::mono())
+                                        .text_size(metrics::TEXT_SMALL())
+                                        .text_color(colours.text)
+                                        .child(banner.note.title.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(metrics::TEXT_SMALL())
+                                .text_color(colours.text_muted)
+                                .child(banner.note.body.clone()),
+                        ),
+                )
+                .child(
+                    div()
+                        .id(("notify-dismiss", id as usize))
+                        .debug_selector(move || format!("notify-dismiss-{id}"))
+                        .px_2()
+                        .py_2()
+                        .flex_none()
+                        .cursor_pointer()
+                        .text_size(metrics::TEXT_SMALL())
+                        .text_color(colours.text_faint)
+                        .hover(move |style| style.text_color(colours.text))
+                        .child("✕")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.banners.retain(|banner| banner.id != id);
+                            cx.stop_propagation();
+                            cx.notify();
+                        })),
+                )
+        });
+        Some(
+            div()
+                .id("notifications")
+                .debug_selector(|| "notifications".into())
+                .absolute()
+                .right(px(12.))
+                .bottom(metrics::FOOTER_HEIGHT() + px(12.))
+                .occlude()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .children(cards),
+        )
+    }
+
     fn render_overlay(&self, colours: &Colours, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let content = match self.overlay {
             Overlay::None | Overlay::Menu => return None,
@@ -2213,6 +2525,9 @@ impl Shell {
             Overlay::Usage => self.render_usage(colours, cx).into_any_element(),
             Overlay::Pair => self.render_pair(colours, cx).into_any_element(),
             Overlay::Share => self.render_share(colours, cx).into_any_element(),
+            Overlay::Notes => self.render_notes(colours, cx).into_any_element(),
+            Overlay::History => self.render_history_report(colours, cx).into_any_element(),
+            Overlay::Restore => self.render_restore(colours, cx).into_any_element(),
         };
         let top = match self.overlay {
             Overlay::Palette => self.palette_top(),
@@ -2250,6 +2565,8 @@ impl Render for Shell {
             self.menu_state = available;
             crate::menus::refresh(available, cx);
         }
+        // What is open is remembered after every change.
+        self.watch_workspace(cx);
         // Terminals wear the theme and the interface size in use.
         self.sync_settings(cx);
         let (terminal_theme, terminal_font) = (colours.terminal, Self::terminal_font(cx));
@@ -2314,6 +2631,9 @@ impl Render for Shell {
             .when(settings::get(cx).sidebar_visible, |this| {
                 this.child(self.render_sidebar_handle(&colours, cx))
             })
+            // The notifications of what the sessions just did, over the main
+            // pane and under any overlay.
+            .children(self.render_notifications(&colours, cx))
             // While anything is dragged (the sidebar's edge, a pane divider) a
             // sheet over the window takes the pointer: no terminal beneath
             // selects text or is sent mouse reports, and the cursor stays the

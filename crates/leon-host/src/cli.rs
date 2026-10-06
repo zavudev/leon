@@ -28,7 +28,7 @@ use leon_link::{DeviceRegistry, Identity};
 use crate::host::{running_as_root, Host, HostConfig, RelayState};
 
 /// The relay Leon uses unless told otherwise.
-pub const DEFAULT_RELAY_URL: &str = "wss://relay.zavu.dev";
+pub const DEFAULT_RELAY_URL: &str = "wss://relay.getleon.dev";
 
 const SAFETY: &str = "\
 This service runs as you and gives every device you pair a full terminal as
@@ -73,7 +73,7 @@ pub struct Options {
 /// The usage text.
 pub fn usage() -> &'static str {
     "Usage: leon host [--pair] [options]\n       leon host pair | devices | status\n       leon host revoke <device id or name>\n\n\
-     Options:\n  --relay <url>        The relay (default wss://relay.zavu.dev, or LEON_RELAY_URL)\n  \
+     Options:\n  --relay <url>        The relay (default wss://relay.getleon.dev, or LEON_RELAY_URL)\n  \
      --name <name>        The name your devices see (default: this computer's name)\n  \
      --data-dir <path>    Keep the service's files here\n  \
      --allow-root         Allow running as the superuser (not recommended)\n  \

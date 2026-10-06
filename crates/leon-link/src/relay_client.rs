@@ -40,6 +40,10 @@ pub enum DialError {
     /// The relay could not be reached at all (DNS, refused, TLS, timeout).
     #[error("cannot reach the relay: {0}")]
     Unreachable(String),
+    /// TLS could not be set up (no crypto provider, a failure inside the
+    /// connection task). The connection is retried like any other failure.
+    #[error("The secure connection could not be set up: {0}")]
+    Secure(String),
     /// The relay answered but refused.
     #[error("the relay refused: {}", .0.message)]
     Refused(RelayError),
@@ -68,11 +72,33 @@ async fn open_socket(url: &str) -> Result<Socket, DialError> {
     let config = WebSocketConfig::default()
         .max_message_size(Some(MAX_WS_MESSAGE))
         .max_frame_size(Some(MAX_WS_MESSAGE));
-    let connect = tokio_tungstenite::connect_async_with_config(url, Some(config), false);
-    match tokio::time::timeout(DIAL_TIMEOUT, connect).await {
-        Err(_) => Err(DialError::Unreachable("timed out".into())),
-        Ok(Err(error)) => Err(DialError::Unreachable(short_error(&error))),
-        Ok(Ok((socket, _))) => Ok(socket),
+    let connector = if url.starts_with("wss://") {
+        Some(crate::tls::connector().map_err(DialError::Secure)?)
+    } else {
+        None
+    };
+    let url = url.to_owned();
+    // In a task of its own: a failure inside the connection (a panic of a TLS
+    // library included) comes back here as an error to report and retry, and
+    // never as a connection that stays "connecting" for ever.
+    let task = tokio::spawn(async move {
+        let connect = tokio_tungstenite::connect_async_tls_with_config(
+            url.as_str(),
+            Some(config),
+            false,
+            connector,
+        );
+        tokio::time::timeout(DIAL_TIMEOUT, connect).await
+    });
+    match task.await {
+        Err(joined) => Err(DialError::Secure(if joined.is_panic() {
+            "the TLS library failed".into()
+        } else {
+            "the connection was cancelled".into()
+        })),
+        Ok(Err(_)) => Err(DialError::Unreachable("timed out".into())),
+        Ok(Ok(Err(error))) => Err(DialError::Unreachable(short_error(&error))),
+        Ok(Ok(Ok((socket, _)))) => Ok(socket),
     }
 }
 

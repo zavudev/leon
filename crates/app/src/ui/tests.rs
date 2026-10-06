@@ -24,7 +24,7 @@ use gpui_kit::{
     WindowBounds, WindowHandle, WindowOptions,
 };
 use leon_core::{
-    AgentKind, Machine, MachineId, MachineKind, NewMessage, NewSession, NewWorktree, Project, Role,
+    AgentId, Machine, MachineId, MachineKind, NewMessage, NewSession, NewWorktree, Project, Role,
     Store,
 };
 use leon_history::HistoryRoots;
@@ -263,7 +263,7 @@ const READY_NOW: Readiness = Readiness {
 };
 
 // Some fields are read only by the Unix-only test modules.
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(not(leon_posix_tests), allow(dead_code))]
 struct Harness {
     // Dropped last: the engine's background calls run here.
     runtime: Runtime,
@@ -278,6 +278,8 @@ struct Harness {
     revealed_apps: Rc<std::cell::RefCell<Vec<String>>>,
     /// The files the system's editor was asked to open.
     opened: Rc<std::cell::RefCell<Vec<std::path::PathBuf>>>,
+    /// The desktop notifications the shell asked for.
+    notes: Rc<std::cell::RefCell<Vec<crate::ui::notify::Note>>>,
     /// How many times the system's folder dialog was asked for.
     folder_dialogs: Rc<std::cell::Cell<usize>>,
     /// The terminals the shell started, and what they were sent.
@@ -286,6 +288,10 @@ struct Harness {
     ssh: Arc<tests_connect::FakeSsh>,
     /// What the key file dialog answers.
     key_answer: Rc<std::cell::RefCell<Picked>>,
+    /// The addresses the browser was asked to open.
+    urls: Rc<std::cell::RefCell<Vec<String>>>,
+    /// How many times the application was asked to end.
+    quits: Rc<std::cell::Cell<usize>>,
 }
 
 /// Opens the window over an in-memory store, with nothing waiting on the
@@ -317,6 +323,18 @@ fn open_full(
     picked: Picked,
     before: impl FnOnce(&Store),
 ) -> Harness {
+    open_core(cx, runner, settings_file, picked, before, |_| None)
+}
+
+/// [`open_full`] with an updater: `updates` is given the harness's runtime.
+fn open_core(
+    cx: &mut TestAppContext,
+    runner: ScriptedRunner,
+    settings_file: Option<std::path::PathBuf>,
+    picked: Picked,
+    before: impl FnOnce(&Store),
+    updates: impl FnOnce(&tokio::runtime::Handle) -> Option<Arc<crate::updates::Service>>,
+) -> Harness {
     cx.update(|cx| prepare(cx, settings_file));
     // A current-thread runtime only makes progress inside `block_on`, on this
     // thread. The test therefore decides when background work runs, which
@@ -345,9 +363,16 @@ fn open_full(
     let computer = Rc::new(computer());
     let opened = Rc::new(std::cell::RefCell::new(Vec::new()));
     let opened_in = opened.clone();
+    let notes = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let notes_in = notes.clone();
     let ssh = Arc::new(tests_connect::FakeSsh::default());
     let key_answer = Rc::new(std::cell::RefCell::new(Picked::Cancelled));
     let key_answer_in = key_answer.clone();
+    let urls = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let urls_in = urls.clone();
+    let quits = Rc::new(std::cell::Cell::new(0usize));
+    let quits_in = quits.clone();
+    let updates = updates(runtime.handle());
     let options = Options {
         backend: computer.clone(),
         ready: READY_NOW,
@@ -362,10 +387,17 @@ fn open_full(
         reveal: Rc::new(move |_, path| revealed_in.borrow_mut().push(path.to_path_buf())),
         activity: Thresholds::default(),
         error_flash: std::time::Duration::from_secs(4),
+        notify: Rc::new(move |note, _| notes_in.borrow_mut().push(note.clone())),
+        banner_duration: std::time::Duration::from_secs(30),
+        save_debounce: std::time::Duration::ZERO,
+        import_debounce: std::time::Duration::ZERO,
+        import_interval: std::time::Duration::ZERO,
+        quit_gesture_wait: std::time::Duration::from_millis(200),
+        quit_grace: std::time::Duration::from_millis(500),
         pick_image: Rc::new(|_| Task::ready(Picked::Cancelled)),
         save_file: Rc::new(|_, _| Task::ready(Picked::Cancelled)),
         read_clipboard: Rc::new(|_| None),
-        quit: Rc::new(|_| {}),
+        quit: Rc::new(move |_| quits_in.set(quits_in.get() + 1)),
         theme_poll: None,
         elsewhere_poll: None,
         usage_timer: false,
@@ -374,6 +406,9 @@ fn open_full(
         pick_key: Rc::new(move |_| Task::ready(key_answer_in.borrow().clone())),
         ssh_dir: ssh.clone(),
         remote: None,
+        updates,
+        update_timer: false,
+        open_url: Rc::new(move |_, url| urls_in.borrow_mut().push(url.to_owned())),
     };
     let (window, shell) = cx.update(|cx| {
         let engine = engine.clone();
@@ -401,10 +436,13 @@ fn open_full(
         revealed,
         revealed_apps,
         opened,
+        notes,
         folder_dialogs: dialogs,
         computer,
         ssh,
         key_answer,
+        urls,
+        quits,
     }
 }
 
@@ -702,7 +740,7 @@ fn session_at(
     store
         .upsert_session(
             &NewSession {
-                agent: AgentKind::Claude,
+                agent: AgentId::CLAUDE,
                 external_id: format!("{title}-{minutes_ago}"),
                 machine_id: machine.clone(),
                 cwd: cwd.to_owned(),
@@ -1895,15 +1933,22 @@ fn a_new_session_on_an_agent_that_is_not_installed_ends_in_a_clear_status(cx: &m
     }
     assert_eq!(h.cursor_row(cx), "worktree:feature/login");
     h.press("ctrl-n", cx);
+    // What this computer has comes first; Codex, which it lacks, is dimmed
+    // among the rest of the catalogue.
+    let titles = h.palette_titles(cx);
     assert_eq!(
-        h.palette_titles(cx),
-        ["Claude Code", "Codex", "opencode"].map(str::to_owned)
+        titles[..3],
+        ["Claude Code", "opencode", "Codex"].map(str::to_owned)
     );
+    h.press("down", cx);
     h.press("down", cx);
     h.press("enter", cx); // Codex: the fake computer has none
     h.settle(cx);
     assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
-    assert_eq!(h.status(), "Codex is not installed on This machine.");
+    assert_eq!(
+        h.status(),
+        "Codex is not installed on This machine. Install it from https://github.com/openai/codex."
+    );
     assert_eq!(h.engine.status().unwrap().kind, StatusKind::Error);
     assert!(
         h.shell(cx, |s| s.live.ids().is_empty()),
@@ -2759,6 +2804,71 @@ fn projects_with_one_name_are_told_apart_in_the_tree(cx: &mut TestAppContext) {
     assert_eq!(labels, ["acme.io/monorepo", "zavu/monorepo"]);
 }
 
+/// The bug of a Windows PC: git reports the worktree with `/`, the agent
+/// recorded its folder with `\`, and the session fell out of its worktree
+/// into `[ UNSORTED ]`. Both spellings are one folder.
+#[gpui_kit::test]
+fn a_session_with_a_backslash_folder_appears_under_the_worktree_git_spelled_with_slashes(
+    cx: &mut TestAppContext,
+) {
+    let h = open(cx, ScriptedRunner::new());
+    let project = h
+        .store
+        .add_project(&MachineId::local(), "winapi", "C:/Users/me/code/winapi")
+        .unwrap();
+    let worktrees = h
+        .store
+        .replace_worktrees(
+            &project.id,
+            vec![NewWorktree {
+                path: "C:/Users/me/code/winapi".into(),
+                branch: Some("main".into()),
+                head: None,
+                is_main: true,
+            }],
+        )
+        .unwrap();
+    let at = fixed_now() - chrono::Duration::minutes(5);
+    for (n, cwd) in [
+        r"C:\Users\me\code\winapi",
+        r"c:\users\me\code\winapi\src\",
+        r"\\?\C:\Users\me\code\winapi",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        h.store
+            .upsert_session(
+                &NewSession {
+                    agent: AgentId::CLAUDE,
+                    external_id: format!("win-{n}"),
+                    machine_id: MachineId::local(),
+                    cwd: cwd.to_owned(),
+                    title: format!("windows session {n}"),
+                    model: None,
+                    started_at: at,
+                    updated_at: at,
+                },
+                &[],
+            )
+            .unwrap();
+    }
+    h.settle(cx);
+    let (placed, loose) = h.shell(cx, |s| {
+        (
+            s.placement.of_worktree(&worktrees[0].id).len(),
+            s.placement
+                .unsorted
+                .get(&MachineId::local())
+                .map_or(0, |folders| {
+                    folders.iter().map(|f| f.sessions.len()).sum::<usize>()
+                }),
+        )
+    });
+    assert_eq!(placed, 3, "every spelling lands under the worktree");
+    assert_eq!(loose, 0, "nothing falls into the unsorted folders");
+}
+
 // ----- project logos ---------------------------------------------------------------------
 
 fn png_logo() -> leon_core::IconImage {
@@ -3323,7 +3433,7 @@ fn the_theme_is_saved_and_worn_again_when_the_window_opens(cx: &mut TestAppConte
 
 // ----- live sessions: what Leon does with its terminals ---------------------------------
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 mod live {
     use super::*;
     use crate::ui::live::{LiveId, LiveState};
@@ -4549,7 +4659,7 @@ mod live {
         });
         assert_eq!(
             h.shell(cx, |s| s.live.get(LiveId(1)).unwrap().agent),
-            Some(AgentKind::Codex)
+            Some(AgentId::CODEX)
         );
     }
 
@@ -4664,7 +4774,12 @@ mod live {
         h.settle(cx);
     }
 
-    fn show_worktree_detail(h: &Harness, cx: &mut TestAppContext, project: &str, label: &str) {
+    pub(super) fn show_worktree_detail(
+        h: &Harness,
+        cx: &mut TestAppContext,
+        project: &str,
+        label: &str,
+    ) {
         cx.update(|cx| {
             h.shell.update(cx, |shell, cx| {
                 let entry = shell
@@ -4899,7 +5014,7 @@ mod live {
     pub(super) fn local_session(
         h: &Harness,
         cx: &mut TestAppContext,
-        agent: AgentKind,
+        agent: AgentId,
         title: &str,
     ) -> (tempfile::TempDir, String, leon_core::SessionId) {
         let dir = tempfile::tempdir().unwrap();
@@ -4918,7 +5033,7 @@ mod live {
     pub(super) fn stored_session(
         h: &Harness,
         cx: &mut TestAppContext,
-        agent: AgentKind,
+        agent: AgentId,
         machine: &MachineId,
         cwd: &str,
         title: &str,
@@ -4973,7 +5088,7 @@ mod live {
         cx: &mut TestAppContext,
     ) {
         let h = open_live(cx);
-        let (_dir, path, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, path, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
         wait_until(&h, cx, "the resumed agent", |h, cx| {
@@ -5010,7 +5125,7 @@ mod live {
     #[gpui_kit::test]
     fn clicking_a_history_session_does_the_same_as_enter(cx: &mut TestAppContext) {
         let h = open_live(cx);
-        let (_dir, path, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, path, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         cx.update(|cx| {
             h.shell
                 .update(cx, |shell, _| shell.show(&NodeId::Session(id.clone())))
@@ -5028,7 +5143,7 @@ mod live {
     #[gpui_kit::test]
     fn a_codex_session_resumes_with_the_codex_command(cx: &mut TestAppContext) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Codex, "beta");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CODEX, "beta");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
         wait_until(&h, cx, "the codex line", |h, cx| {
@@ -5044,7 +5159,7 @@ mod live {
     #[gpui_kit::test]
     fn an_opencode_session_resumes_with_its_session_flag(cx: &mut TestAppContext) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Opencode, "gamma");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::OPENCODE, "gamma");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
         wait_until(&h, cx, "the opencode line", |h, cx| {
@@ -5062,7 +5177,7 @@ mod live {
         cx: &mut TestAppContext,
     ) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "two words");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "two words");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
         wait_until(&h, cx, "the agent", |h, cx| {
@@ -5076,7 +5191,7 @@ mod live {
         cx: &mut TestAppContext,
     ) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id.clone()));
         h.press("enter", cx);
         wait_until(&h, cx, "the agent", |h, cx| {
@@ -5113,7 +5228,7 @@ mod live {
     #[gpui_kit::test]
     fn closing_the_resumed_terminal_lets_the_session_be_resumed_again(cx: &mut TestAppContext) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id.clone()));
         h.press("enter", cx);
         wait_until(&h, cx, "the agent", |h, cx| {
@@ -5134,7 +5249,7 @@ mod live {
     #[gpui_kit::test]
     fn the_resumed_session_is_one_row_that_shows_the_live_state(cx: &mut TestAppContext) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id.clone()));
         let before = h.outline(cx);
         assert!(!h.shows("tree-live-led-1", cx));
@@ -5175,7 +5290,7 @@ mod live {
             stored_session(
                 &h,
                 cx,
-                AgentKind::Claude,
+                AgentId::CLAUDE,
                 &MachineId::local(),
                 &path,
                 &format!("s{n}"),
@@ -5221,7 +5336,7 @@ mod live {
         cx: &mut TestAppContext,
     ) {
         let h = open_live(cx);
-        let (_dir, path, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, path, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Folder(MachineId::local(), path.clone()));
         h.press("ctrl-t", cx); // a shell in that folder
         assert_eq!(h.main_kind(cx), "live:1");
@@ -5305,14 +5420,7 @@ mod live {
                 ],
             )
             .unwrap();
-        let id = stored_session(
-            &h,
-            cx,
-            AgentKind::Claude,
-            &MachineId::local(),
-            &gone,
-            "omega",
-        );
+        let id = stored_session(&h, cx, AgentId::CLAUDE, &MachineId::local(), &gone, "omega");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
         assert_eq!(h.main_kind(cx), "session:omega");
@@ -5346,7 +5454,7 @@ mod live {
                 shell.options.system = FakeSystem::without(&["claude"])
             })
         });
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
         assert_eq!(h.main_kind(cx), "session:alpha");
@@ -5365,7 +5473,7 @@ mod live {
         cx: &mut TestAppContext,
     ) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press_chord("cmd-shift-l", "ctrl-shift-l", cx);
         assert_eq!(h.main_kind(cx), "session:alpha");
@@ -5389,7 +5497,7 @@ mod live {
     #[gpui_kit::test]
     fn open_transcript_works_from_the_terminal_that_resumed_the_session(cx: &mut TestAppContext) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
         wait_until(&h, cx, "the agent", |h, cx| {
@@ -5410,7 +5518,7 @@ mod live {
     #[gpui_kit::test]
     fn the_menu_of_a_history_session_opens_it_in_a_terminal_first(cx: &mut TestAppContext) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("m", cx);
         assert_eq!(
@@ -5434,12 +5542,12 @@ mod live {
         cx: &mut TestAppContext,
     ) {
         let h = open_live(cx);
-        let (_dir, _, id) = local_session(&h, cx, AgentKind::Claude, "zebra");
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "zebra");
         // A title that only the title has, and a message that only a message has.
         h.store
             .upsert_session(
                 &NewSession {
-                    agent: AgentKind::Claude,
+                    agent: AgentId::CLAUDE,
                     external_id: "zebra-3".into(),
                     machine_id: MachineId::local(),
                     cwd: h.store.session(&id).unwrap().cwd,
@@ -5677,6 +5785,11 @@ mod live {
             wait_until(&h, cx, "the exit", |h, cx| {
                 state(h, cx, 1) == LiveState::Exited(7)
             });
+            // The terminal's own exit is read before the window's event that
+            // words the status has run: wait for that, not for a moment.
+            wait_until(&h, cx, "the status line", |h, _| {
+                h.status().contains("exited with code 7")
+            });
             assert!(h.status().contains("exited with code 7"), "{}", h.status());
         }
 
@@ -5808,25 +5921,29 @@ fn the_toolkit_decodes_every_format_a_logo_may_have(cx: &mut TestAppContext) {
     }
 }
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_tools.rs"]
 mod tools;
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_lines.rs"]
 mod lines;
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_prefs.rs"]
 mod tests_prefs;
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_screen.rs"]
 mod tests_screen;
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_usage.rs"]
 mod tests_usage;
+
+#[cfg(leon_posix_tests)]
+#[path = "tests_notify.rs"]
+mod tests_notify;
 
 #[cfg(test)]
 #[path = "tests_connect.rs"]
@@ -5835,17 +5952,27 @@ mod tests_connect;
 #[path = "tests_settings.rs"]
 mod tests_settings;
 
+#[path = "tests_updates.rs"]
+mod tests_updates;
+
+#[cfg(leon_posix_tests)]
+#[path = "tests_restore.rs"]
+mod tests_restore;
+
+#[path = "tests_settings_layout.rs"]
+mod tests_settings_layout;
+
 #[path = "tests_themes.rs"]
 mod themes_files;
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_header.rs"]
 mod header;
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_elsewhere.rs"]
 mod elsewhere;
 
-#[cfg(unix)]
+#[cfg(leon_posix_tests)]
 #[path = "tests_lion.rs"]
 mod lion_in_window;

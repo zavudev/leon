@@ -191,7 +191,7 @@ impl Shell {
                         entry
                             .worktrees
                             .iter()
-                            .find(|worktree| worktree.path.trim_end_matches('/') == session.cwd)
+                            .find(|worktree| super::tree::same_folder(&worktree.path, &session.cwd))
                             .map_or_else(|| folder(&session.cwd), super::tree::worktree_label),
                     ),
                     None => (folder(&root), folder(&session.cwd)),

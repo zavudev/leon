@@ -122,6 +122,9 @@ impl Shell {
             "about" => {
                 self.run_command(C::About, window, cx);
             }
+            "check_for_updates" => {
+                self.run_command(C::CheckForUpdates, window, cx);
+            }
             "open_data_folder" => self.reveal_settings_folder(cx),
             "open_themes_folder" => self.open_themes_folder(cx),
             "reset_all" => {
@@ -239,7 +242,9 @@ impl Shell {
         if prefs != self.engine.prefs() {
             self.engine.set_prefs(prefs);
         }
+        let before = self.engine.usage_policy();
         self.engine.set_usage_policy(settings::usage_policy(cx));
+        self.usage_settings_changed(before, cx);
         for session in self.live.all() {
             apply_terminal_prefs(&session.view, cx);
         }
@@ -284,27 +289,39 @@ impl Shell {
                 .collect(),
             ..crate::launch::LaunchPrefs::default()
         };
-        for (place, kind) in leon_core::AgentKind::ALL.iter().enumerate() {
-            let key = |what: &str| format!("agent_{}_{what}", kind.as_str());
+        // The catalogue's agents; a custom agent's command and arguments are
+        // its own spec, so only a program of the user's choice overrides it.
+        for spec in leon_core::agent::builtin() {
+            let key = |what: &str| crate::schema::agent_setting(spec.id, what);
             let program = settings::text(cx, &key("executable"));
-            prefs.agents[place] = AgentPrefs {
-                executable: (!program.is_empty()).then_some(program),
-                args: split_words(&settings::text(cx, &key("args"))),
-                resume_args: split_words(&settings::text(cx, &key("resume_args"))),
-            };
+            prefs.agents.insert(
+                spec.id,
+                AgentPrefs {
+                    executable: (!program.is_empty()).then_some(program),
+                    args: split_words(&settings::text(cx, &key("args"))),
+                    resume_args: if spec.can_resume() {
+                        split_words(&settings::text(cx, &key("resume_args")))
+                    } else {
+                        Vec::new()
+                    },
+                },
+            );
         }
         prefs
     }
 
     /// What the settings change in the palette's questions.
     pub(super) fn step_prefs(cx: &gpui_kit::App) -> super::steps::Prefs {
-        let mut enabled = [true; 3];
-        for (place, kind) in leon_core::AgentKind::ALL.iter().enumerate() {
-            enabled[place] = settings::flag(cx, &format!("agent_{}_enabled", kind.as_str()));
-        }
+        let enabled: Vec<leon_core::AgentId> = leon_core::agent::all()
+            .iter()
+            .filter(|spec| {
+                spec.custom || settings::flag(cx, &crate::schema::agent_setting(spec.id, "enabled"))
+            })
+            .map(|spec| spec.id)
+            .collect();
         super::steps::Prefs {
             agents_enabled: enabled,
-            default_agent: leon_core::AgentKind::parse(&settings::text(cx, "default_agent")),
+            default_agent: leon_core::AgentId::parse(&settings::text(cx, "default_agent")),
             confirm_close: settings::flag(cx, "terminal_confirm_close"),
             quit: super::steps::QuitConfirm::parse(&settings::text(cx, "quit_confirmation")),
         }

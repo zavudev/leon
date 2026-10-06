@@ -35,6 +35,7 @@ use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Processor, Rgb};
 use parking_lot::{Mutex, RwLock};
@@ -499,6 +500,38 @@ impl Terminal {
         }
     }
 
+    /// Asks the program running in front of the shell to end: SIGTERM to the
+    /// terminal's foreground process group. `false` when nothing was sent:
+    /// the shell itself is in front, the terminal is on another computer, the
+    /// foreground cannot be told (Windows) or the signal failed.
+    pub fn terminate_foreground(&self) -> bool {
+        if let Some(script) = &self.script {
+            return script.terminate();
+        }
+        #[cfg(unix)]
+        {
+            let Some(pid) = self.pid else { return false };
+            let Some(leader) = self
+                .master
+                .lock()
+                .as_ref()
+                .and_then(|master| master.process_group_leader())
+            else {
+                return false;
+            };
+            if leader as u32 == pid || leader <= 1 {
+                return false;
+            }
+            // SAFETY: plain signal delivery to the terminal's foreground
+            // process group, which the pseudo-terminal itself reported.
+            unsafe { libc::kill(-leader, libc::SIGTERM) == 0 }
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
     /// The events since the last call.
     pub fn drain_events(&self) -> Vec<TerminalEvent> {
         self.shared.events_pending.store(false, Ordering::Release);
@@ -699,6 +732,12 @@ impl Terminal {
             .filter(|text| !text.is_empty())
     }
 
+    /// The OSC 8 or HTTP(S) hyperlink under a viewport cell, across wraps.
+    pub fn link_at(&self, col: usize, row: usize) -> Option<String> {
+        let term = self.term.lock();
+        link_at(&term, col, row)
+    }
+
     /// The text of the visible screen, one line per row, trailing blanks
     /// trimmed. For tests and diagnostics.
     pub fn screen_text(&self) -> String {
@@ -784,6 +823,177 @@ fn viewport_point(term: &Term<EventProxy>, col: usize, row: usize) -> Point {
     let col = col.min(grid.columns().saturating_sub(1));
     let row = row.min(grid.screen_lines().saturating_sub(1));
     Point::new(Line(row as i32 - grid.display_offset() as i32), Column(col))
+}
+
+/// Whether an address that a program wrote (an OSC 8 hyperlink) may be handed
+/// to the system to open: only the web's own schemes. Anything else
+/// (`file:`, an application's scheme, `javascript:`...) would let output that
+/// is merely printed start something, so it is not a link at all.
+pub(crate) fn openable(uri: &str) -> bool {
+    let lower = uri.trim().to_ascii_lowercase();
+    (lower.starts_with("https://") || lower.starts_with("http://"))
+        && !uri.chars().any(char::is_control)
+}
+
+fn link_at(term: &Term<EventProxy>, col: usize, row: usize) -> Option<String> {
+    let point = viewport_point(term, col, row);
+    let grid = term.grid();
+    if let Some(link) = grid[point].hyperlink() {
+        return openable(link.uri()).then(|| link.uri().to_owned());
+    }
+
+    let (columns, first, final_line) = logical_line_bounds(term, point);
+    if columns == 0 {
+        return None;
+    }
+    let mut text = Vec::new();
+    let mut clicked = None;
+    for line in first..=final_line {
+        for column in 0..columns {
+            let cell = &grid[Point::new(Line(line), Column(column))];
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                if line == point.line.0 && column == point.column.0 {
+                    clicked = text.len().checked_sub(1);
+                }
+                continue;
+            }
+            if line == point.line.0 && column == point.column.0 {
+                clicked = Some(text.len());
+            }
+            text.push(if cell.c == '\0' { ' ' } else { cell.c });
+        }
+    }
+    plain_link_at(&text, clicked?)
+}
+
+fn plain_link_at(text: &[char], clicked: usize) -> Option<String> {
+    plain_links(text)
+        .into_iter()
+        .find(|(range, _)| range.contains(&clicked))
+        .map(|(_, uri)| uri)
+}
+
+pub(crate) fn plain_links(text: &[char]) -> Vec<(std::ops::Range<usize>, String)> {
+    let mut links = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let scheme_len = if starts_with(text, start, "https://") {
+            8
+        } else if starts_with(text, start, "http://") {
+            7
+        } else {
+            start += 1;
+            continue;
+        };
+        let mut end = (start + scheme_len..text.len())
+            .find(|&index| link_separator(text[index]))
+            .unwrap_or(text.len());
+        while end > start + scheme_len && matches!(text[end - 1], '.' | ',' | ';' | ':' | '!') {
+            end -= 1;
+        }
+        for (open, close) in [('(', ')'), ('[', ']'), ('{', '}')] {
+            while end > start + scheme_len
+                && text[end - 1] == close
+                && text[start..end].iter().filter(|&&ch| ch == close).count()
+                    > text[start..end].iter().filter(|&&ch| ch == open).count()
+            {
+                end -= 1;
+            }
+        }
+        if end > start + scheme_len {
+            links.push((start..end, text[start..end].iter().collect()));
+        }
+        start = end.max(start + 1);
+    }
+    links
+}
+
+pub(crate) fn visible_links(term: &Term<EventProxy>) -> Vec<Option<String>> {
+    let grid = term.grid();
+    let columns = grid.columns();
+    let rows = grid.screen_lines();
+    let offset = grid.display_offset() as i32;
+    let mut links = vec![None; columns * rows];
+    let mut logical_start = None;
+
+    for viewport_row in 0..rows {
+        let point = Point::new(Line(viewport_row as i32 - offset), Column(0));
+        let (_, first, final_line) = logical_line_bounds(term, point);
+        if logical_start == Some(first) {
+            continue;
+        }
+        logical_start = Some(first);
+
+        let mut text = Vec::new();
+        let mut points = Vec::new();
+        for line in first..=final_line {
+            for column in 0..columns {
+                let point = Point::new(Line(line), Column(column));
+                let cell = &grid[point];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                text.push(if cell.c == '\0' { ' ' } else { cell.c });
+                points.push(point);
+            }
+        }
+        for (range, uri) in plain_links(&text) {
+            for point in &points[range] {
+                let row = point.line.0 + offset;
+                if row >= 0 && row < rows as i32 {
+                    links[row as usize * columns + point.column.0] = Some(uri.clone());
+                }
+            }
+        }
+    }
+
+    for row in 0..rows {
+        for column in 0..columns {
+            let point = Point::new(Line(row as i32 - offset), Column(column));
+            if let Some(link) = grid[point].hyperlink() {
+                if openable(link.uri()) {
+                    links[row * columns + column] = Some(link.uri().to_owned());
+                }
+            }
+        }
+    }
+    links
+}
+
+fn logical_line_bounds(term: &Term<EventProxy>, point: Point) -> (usize, i32, i32) {
+    let grid = term.grid();
+    let columns = grid.columns();
+    let last = Column(columns.saturating_sub(1));
+    let top = -(grid.total_lines().saturating_sub(grid.screen_lines()) as i32);
+    let bottom = grid.screen_lines().saturating_sub(1) as i32;
+    let mut first = point.line.0;
+    while columns > 0
+        && first > top
+        && grid[Point::new(Line(first - 1), last)]
+            .flags
+            .contains(Flags::WRAPLINE)
+    {
+        first -= 1;
+    }
+    let mut final_line = point.line.0;
+    while columns > 0
+        && final_line < bottom
+        && grid[Point::new(Line(final_line), last)]
+            .flags
+            .contains(Flags::WRAPLINE)
+    {
+        final_line += 1;
+    }
+    (columns, first, final_line)
+}
+
+fn starts_with(text: &[char], at: usize, prefix: &str) -> bool {
+    text.get(at..at + prefix.len())
+        .is_some_and(|candidate| candidate.iter().copied().eq(prefix.chars()))
+}
+
+fn link_separator(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '<' | '>' | '\'' | '"' | '`')
 }
 
 fn spawn_thread(name: &str, work: impl FnOnce() + Send + 'static) {
@@ -951,6 +1161,40 @@ mod tests {
     }
 
     #[test]
+    fn http_links_are_found_at_the_clicked_cell_and_trim_sentence_punctuation() {
+        let mut headless = Headless::new(80, 4, theme());
+        headless.feed(b"See (https://example.com/a_(b)). Next");
+        assert_eq!(
+            link_at(headless.term(), 10, 0).as_deref(),
+            Some("https://example.com/a_(b)")
+        );
+        assert_eq!(link_at(headless.term(), 31, 0), None);
+    }
+
+    #[test]
+    fn a_plain_link_is_found_across_wrapped_rows() {
+        let mut headless = Headless::new(12, 4, theme());
+        headless.feed(b"https://example.com/docs");
+        assert_eq!(
+            link_at(headless.term(), 3, 1).as_deref(),
+            Some("https://example.com/docs")
+        );
+        let links = visible_links(headless.term());
+        assert_eq!(links[3].as_deref(), Some("https://example.com/docs"));
+        assert_eq!(links[12 + 3].as_deref(), Some("https://example.com/docs"));
+    }
+
+    #[test]
+    fn an_osc_8_label_opens_its_declared_uri() {
+        let mut headless = Headless::new(40, 4, theme());
+        headless.feed(b"\x1b]8;;https://example.com/target\x1b\\read me\x1b]8;;\x1b\\");
+        assert_eq!(
+            link_at(headless.term(), 3, 0).as_deref(),
+            Some("https://example.com/target")
+        );
+    }
+
+    #[test]
     fn colour_queries_are_answered_from_the_theme() {
         let mut headless = Headless::new(20, 4, theme());
         // OSC 11 ; ? asks for the background, OSC 10 for the foreground.
@@ -1015,6 +1259,29 @@ mod tests {
 /// reported, a stubborn child is killed. Each runs `/bin/sh` with no startup
 /// file and a fixed `PATH` (see [`crate::testing::sh`]), with the waits
 /// shortened by [`FAST`]; conditions are polled, never slept for.
+#[cfg(test)]
+mod link_scheme_tests {
+    use super::openable;
+
+    #[test]
+    fn only_web_addresses_are_ever_handed_to_the_system() {
+        assert!(openable("https://example.com/a?b=c"));
+        assert!(openable("HTTP://example.com"));
+        for refused in [
+            "file:///Applications/Calculator.app",
+            "javascript:alert(1)",
+            "ssh://host",
+            "x-apple.systempreferences:",
+            "mailto:a@b",
+            "",
+            "https://exa\nmple.com",
+            "  file:///etc/passwd",
+        ] {
+            assert!(!openable(refused), "{refused:?}");
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 mod pty_tests {
     use super::*;
@@ -1277,6 +1544,23 @@ mod foreground_tests {
             Box::new(|| {}),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_program_in_front_is_asked_to_end_and_the_shell_is_left_alone() {
+        let terminal = shell();
+        wait_for("the prompt", || terminal.screen_text().contains("READY>"));
+        // Nothing runs in front of the shell: there is nobody to ask.
+        assert!(!terminal.terminate_foreground());
+        terminal.write(&b"cat\n"[..]);
+        wait_for("cat to take the terminal", || {
+            terminal.shell_is_foreground() == Some(false)
+        });
+        assert!(terminal.terminate_foreground(), "SIGTERM reached cat");
+        wait_for("the shell to get the terminal back", || {
+            terminal.shell_is_foreground() == Some(true)
+        });
+        assert!(terminal.exit_info().is_none(), "the shell was not touched");
     }
 
     #[test]

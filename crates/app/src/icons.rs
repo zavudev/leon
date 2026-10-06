@@ -78,16 +78,45 @@ pub fn icon(name: IconName, size: Pixels, colour: Hsla) -> Icon {
 }
 
 /// The logo of an agent at `size`, in the agent's colour token of `palette`.
+/// An agent without a bundled mark gets a letter-mark tile: its initials on a
+/// hairline square, drawn from the theme's tokens (generated, so it needs no
+/// asset and no licence).
 pub fn agent_icon(
-    agent: leon_core::AgentKind,
+    agent: leon_core::AgentId,
     size: Pixels,
     palette: &crate::theme::Palette,
-) -> impl gpui_kit::IntoElement {
-    gpui_kit::svg()
-        .path(crate::brand::agent_mark(agent))
-        .flex_none()
-        .size(size)
-        .text_color(palette.agent(agent))
+) -> gpui_kit::AnyElement {
+    use gpui_kit::prelude::*;
+    let colour = palette.agent(agent);
+    match crate::brand::agent_mark(agent) {
+        Some(path) => gpui_kit::svg()
+            .path(path)
+            .flex_none()
+            .size(size)
+            .text_color(colour)
+            .into_any_element(),
+        None => {
+            let letters = agent.spec().map_or_else(
+                || leon_core::agent::initials(agent.name()),
+                leon_core::AgentSpec::initials,
+            );
+            gpui_kit::div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(size)
+                .rounded(size * 0.2)
+                .border_1()
+                .border_color(palette.elevated_border)
+                .text_color(colour)
+                .font_family(crate::theme::fonts::mono())
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .text_size(size * 0.42)
+                .child(letters)
+                .into_any_element()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -95,10 +124,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_agent_logo_loads_through_the_asset_source() {
-        for agent in leon_core::AgentKind::ALL {
-            let loaded = Assets.load(crate::brand::agent_mark(agent)).unwrap();
-            assert!(loaded.is_some_and(|bytes| bytes.starts_with(b"<svg")));
+    fn every_bundled_agent_logo_loads_through_the_asset_source() {
+        for spec in leon_core::agent::builtin() {
+            let Some(path) = crate::brand::agent_mark(spec.id) else {
+                continue;
+            };
+            let loaded = Assets.load(&path).unwrap();
+            assert!(
+                loaded.is_some_and(|bytes| bytes.starts_with(b"<svg")),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_agent_without_a_mark_gets_letters_and_every_agent_gets_something() {
+        let without: Vec<&str> = leon_core::agent::builtin()
+            .iter()
+            .filter(|spec| crate::brand::agent_mark(spec.id).is_none())
+            .map(|spec| spec.id.as_str())
+            .collect();
+        assert!(
+            without.contains(&"grok") && without.len() > 20,
+            "{without:?}"
+        );
+        for spec in leon_core::agent::builtin() {
+            let letters = spec.initials();
+            assert!((1..=2).contains(&letters.chars().count()), "{}", spec.id);
         }
     }
 }

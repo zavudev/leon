@@ -12,6 +12,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub use crate::agent::AgentId;
+
 use crate::ids::{MachineId, ProjectId, SessionId, WorktreeId};
 
 /// A computer that agents can run on.
@@ -103,37 +105,6 @@ pub struct NewWorktree {
     pub is_main: bool,
 }
 
-/// The coding agents Leon knows how to launch and import history from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentKind {
-    /// Anthropic's Claude Code.
-    Claude,
-    /// OpenAI's Codex CLI.
-    Codex,
-    /// The opencode CLI.
-    Opencode,
-}
-
-impl AgentKind {
-    /// Every supported agent, in display order.
-    pub const ALL: [AgentKind; 3] = [AgentKind::Claude, AgentKind::Codex, AgentKind::Opencode];
-
-    /// The short tag used in the database and in source keys.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            AgentKind::Claude => "claude",
-            AgentKind::Codex => "codex",
-            AgentKind::Opencode => "opencode",
-        }
-    }
-
-    /// Parses the tag produced by [`AgentKind::as_str`].
-    pub fn parse(tag: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.as_str() == tag)
-    }
-}
-
 /// Who produced a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -177,7 +148,7 @@ pub struct Session {
     /// Leon's identifier for the session.
     pub id: SessionId,
     /// The agent that ran the session.
-    pub agent: AgentKind,
+    pub agent: AgentId,
     /// The agent's own identifier, the value its `resume` option accepts.
     pub external_id: String,
     /// The machine the session ran on.
@@ -220,7 +191,7 @@ pub struct Message {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewSession {
     /// The agent that ran the session.
-    pub agent: AgentKind,
+    pub agent: AgentId,
     /// The agent's own identifier for the session.
     pub external_id: String,
     /// The machine the session ran on.
@@ -255,10 +226,10 @@ mod tests {
 
     #[test]
     fn agent_tags_round_trip() {
-        for kind in AgentKind::ALL {
-            assert_eq!(AgentKind::parse(kind.as_str()), Some(kind));
+        for spec in crate::agent::builtin() {
+            assert_eq!(AgentId::parse(spec.id.as_str()), Some(spec.id));
         }
-        assert_eq!(AgentKind::parse("unknown"), None);
+        assert_eq!(AgentId::parse("Not Valid"), None);
     }
 
     #[test]

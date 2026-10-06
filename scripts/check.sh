@@ -166,6 +166,24 @@ esac
 notes="$notes
   - the simulated runs cover decisions (chords, key routing, \"no POSIX shell\"), not the real OS: file systems, processes, clipboard, windowing and path syntax of Windows or Linux are only seen by CI"
 
+# Path identity as Windows spells it: git's `C:/x`, an agent's `C:\x`, the
+# verbatim prefix, case. A session folder must match its worktree whatever the
+# spelling, in the store, in the tree and when the store is healed.
+step "path spellings, as Windows (leon-core, history roots, the tree)" \
+    sh -c 'cargo test -p leon-core --locked --quiet -- path:: spelling migration \
+        && cargo test -p leon-history --locked --quiet -- roots:: cut_mid_line zero_length \
+        && LEON_SIMULATE_OS=windows cargo test -p leon --locked --quiet -- backslash_folder same_folder history_report'
+
+# The app's tests as Windows compiles them: LEON_NO_POSIX_TESTS (read by
+# crates/app/build.rs) drops the `leon_posix_tests` cfg, which gates every
+# test module that runs a real /bin/sh and the helpers only those tests use.
+# Windows CI lints and builds without them, so an item used only by a POSIX
+# test shows up here as dead code, on any computer, instead of first in CI.
+# (`cargo clippy --target x86_64-pc-windows-msvc` cannot lint the app here: it
+# needs that target's C toolchain.)
+step "clippy, app tests without the POSIX-only ones (as Windows)" \
+    env LEON_NO_POSIX_TESTS=1 cargo clippy -p leon --all-targets --locked -- -D warnings
+
 # Generated documents (settings reference, token reference) match their source.
 step "generated docs are current" \
     cargo test -p leon --locked --quiet -- the_settings_reference_is_current \

@@ -194,11 +194,11 @@ fn text_stays_legible_on_the_accent_tint_of_a_text_field_selection_in_every_them
 
 #[test]
 fn each_agent_maps_to_its_own_token_in_every_theme() {
-    use leon_core::AgentKind;
+    use leon_core::AgentId;
     for (theme, p) in all() {
-        assert_eq!(p.agent(AgentKind::Claude), p.agent_claude, "{theme}");
-        assert_eq!(p.agent(AgentKind::Codex), p.agent_codex, "{theme}");
-        assert_eq!(p.agent(AgentKind::Opencode), p.agent_opencode, "{theme}");
+        assert_eq!(p.agent(AgentId::CLAUDE), p.agent_claude, "{theme}");
+        assert_eq!(p.agent(AgentId::CODEX), p.agent_codex, "{theme}");
+        assert_eq!(p.agent(AgentId::OPENCODE), p.agent_opencode, "{theme}");
         assert_ne!(p.agent_claude, p.agent_codex, "{theme}");
         assert_ne!(p.agent_claude, p.agent_opencode, "{theme}");
     }
@@ -208,7 +208,11 @@ fn each_agent_maps_to_its_own_token_in_every_theme() {
 fn agent_marks_reach_the_component_contrast_on_every_surface_in_every_theme() {
     const GRAPHIC: f32 = 3.0;
     for (theme, p) in all() {
-        for agent in leon_core::AgentKind::ALL {
+        for agent in [
+            leon_core::AgentId::CLAUDE,
+            leon_core::AgentId::CODEX,
+            leon_core::AgentId::OPENCODE,
+        ] {
             let mark = p.agent(agent);
             for (surface, name) in [
                 (p.background, "the page"),

@@ -110,13 +110,12 @@ jobs:
       # One cache for the check builds of this job on each system (clippy's
       # artifacts are not the tests', so the two jobs do not share one), kept
       # after a failed run too (a build from nothing is most of the time), and
-      # written from main only: a pull request reads main's cache and never
-      # fills the quota.
+      # saved by pull requests as well as by main: a pull request restores its
+      # own cache on its second push and falls back to main's on its first.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-clippy-${{ runner.os }}
           cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -162,7 +161,6 @@ jobs:
         with:
           shared-key: ci-test-${{ runner.os }}
           cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # One command builds each test binary once and runs it. The window tests
       # run without a display on every system: the toolkit's test platform
@@ -192,7 +190,6 @@ jobs:
         with:
           shared-key: ci-check-intel
           cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo check --workspace --all-targets --locked --target x86_64-apple-darwin
 
   # The one check to require in the branch protection: it always runs (unless

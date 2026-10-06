@@ -6,10 +6,10 @@
 //! All wording that is not a layout decision lives here, so the window, the
 //! diagnostic command and the tests read the same sentences.
 
-use leon_core::AgentKind;
+use leon_core::AgentId;
 
 use crate::model::{AgentUsage, Effective, EffectiveWindow, Reason, Source, WindowKind};
-use crate::present::{ago, compact_duration, Level, Thresholds};
+use crate::present::{ago, countdown, Level, Thresholds};
 
 /// One window, ready to draw.
 #[derive(Clone, Debug, PartialEq)]
@@ -53,13 +53,37 @@ impl Meter {
         )
     }
 
+    /// The same for a figure that says what is left: `5h  62% left`.
+    pub fn text_for(&self, display: crate::present::PercentDisplay) -> String {
+        let marker = self.level.glyph();
+        let tail = if marker.is_empty() {
+            String::new()
+        } else {
+            format!(" {marker}")
+        };
+        let left = if display == crate::present::PercentDisplay::Remaining {
+            " left"
+        } else {
+            ""
+        };
+        format!(
+            "{} {}{}{}",
+            self.kind.short(),
+            display.fixed(self.percent),
+            left,
+            tail
+        )
+    }
+
     /// `Resets in 2h 29m`, `Reset since last seen`, or nothing.
     pub fn reset_text(&self) -> Option<String> {
         if self.reset_since_seen {
             return Some("Reset since last seen".into());
         }
-        self.resets_in
-            .map(|seconds| format!("Resets in {}", compact_duration(seconds)))
+        self.resets_in.map(|seconds| match countdown(seconds) {
+            text if text == "now" => "Resets now".to_owned(),
+            text => format!("Resets in {text}"),
+        })
     }
 }
 
@@ -81,7 +105,7 @@ pub enum Body {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentView {
     /// The agent.
-    pub agent: AgentKind,
+    pub agent: AgentId,
     /// The machine's id.
     pub machine: String,
     /// The plan, when known.
@@ -106,7 +130,7 @@ impl AgentView {
     /// `from Codex's own session log, 3 min ago`, or the reason's sentence.
     pub fn provenance(&self) -> String {
         match (&self.body, self.source, self.age) {
-            (Body::Unknown(reason), ..) => reason.sentence().to_owned(),
+            (Body::Unknown(reason), ..) => reason.text(),
             (_, Some(source), Some(age)) => {
                 format!("from {}, {}", source.describe(self.agent), ago(age))
             }
@@ -152,7 +176,7 @@ mod tests {
 
     fn usage(windows: Vec<UsageWindow>) -> AgentUsage {
         AgentUsage {
-            agent: AgentKind::Codex,
+            agent: AgentId::CODEX,
             machine: "local".into(),
             account_label: None,
             plan: Some("plus".into()),
@@ -244,7 +268,7 @@ mod tests {
     #[test]
     fn an_unknown_reading_gives_its_reason() {
         let v = view(
-            &AgentUsage::unknown(AgentKind::Claude, "local", Reason::SourceDisabled),
+            &AgentUsage::unknown(AgentId::CLAUDE, "local", Reason::SourceDisabled),
             NOW,
             Thresholds::default(),
         );

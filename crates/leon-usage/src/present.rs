@@ -48,8 +48,8 @@ pub struct Thresholds {
 impl Default for Thresholds {
     fn default() -> Self {
         Self {
-            warning: 75.0,
-            critical: 90.0,
+            warning: 60.0,
+            critical: 80.0,
         }
     }
 }
@@ -105,9 +105,93 @@ pub fn ago(seconds: i64) -> String {
     }
 }
 
+/// A used percentage as the whole number every surface shows: clamped to 0..100
+/// and rounded half away from zero (12.5 reads 13), as Orca does. Anything that
+/// is not a number reads 0.
+pub fn percent_round(percent: f64) -> i64 {
+    if percent.is_finite() {
+        percent.clamp(0.0, 100.0).round() as i64
+    } else {
+        0
+    }
+}
+
 /// A percentage as a fixed-width figure: `  7%`, ` 38%`, `100%`.
 pub fn percent_fixed(percent: f64) -> String {
-    format!("{:>3}%", percent.round().clamp(0.0, 100.0) as i64)
+    format!("{:>3}%", percent_round(percent))
+}
+
+/// Whether a figure says how much is used or how much is left.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PercentDisplay {
+    /// `N% used`.
+    #[default]
+    Used,
+    /// `N% left`, computed as 100 minus the rounded used figure.
+    Remaining,
+}
+
+impl PercentDisplay {
+    /// The setting's value: `used` or `remaining`; anything else is `used`.
+    pub fn parse(value: &str) -> Self {
+        if value == "remaining" {
+            Self::Remaining
+        } else {
+            Self::Used
+        }
+    }
+
+    /// The number shown for a used percentage. The used figure is rounded
+    /// first, so `20.5` reads 21 used and 79 left, never 80 left.
+    pub fn number(self, used: f64) -> i64 {
+        match self {
+            Self::Used => percent_round(used),
+            Self::Remaining => 100 - percent_round(used),
+        }
+    }
+
+    /// `38% used` or `62% left`.
+    pub fn label(self, used: f64) -> String {
+        let word = match self {
+            Self::Used => "used",
+            Self::Remaining => "left",
+        };
+        format!("{}% {word}", self.number(used))
+    }
+
+    /// The figure with the fixed width of [`percent_fixed`]: ` 38%`, ` 62%`.
+    pub fn fixed(self, used: f64) -> String {
+        format!("{:>3}%", self.number(used))
+    }
+}
+
+/// The time until a reset the way Orca words it, floored to whole units:
+/// `47m`, `3h 54m`, `6d 7h`, and `now` when it is not ahead. Used for the
+/// labels of the bar's windows, so they count down.
+pub fn countdown(seconds: i64) -> String {
+    if seconds <= 0 {
+        return "now".into();
+    }
+    let minutes = seconds / MINUTE;
+    if minutes < 60 {
+        return format!("{minutes}m");
+    }
+    let hours = minutes / 60;
+    let rest = minutes % 60;
+    if hours >= 24 {
+        let days = hours / 24;
+        let hours = hours % 24;
+        return if hours > 0 {
+            format!("{days}d {hours}h")
+        } else {
+            format!("{days}d")
+        };
+    }
+    if rest > 0 {
+        format!("{hours}h {rest}m")
+    } else {
+        format!("{hours}h")
+    }
 }
 
 #[cfg(test)]
@@ -118,10 +202,11 @@ mod tests {
     fn levels_change_at_the_thresholds() {
         let t = Thresholds::default();
         assert_eq!(t.classify(0.0), Level::Normal);
-        assert_eq!(t.classify(74.9), Level::Normal);
-        assert_eq!(t.classify(75.0), Level::Warning);
-        assert_eq!(t.classify(89.9), Level::Warning);
-        assert_eq!(t.classify(90.0), Level::Critical);
+        assert_eq!(t.classify(59.0), Level::Normal);
+        assert_eq!(t.classify(59.9), Level::Normal);
+        assert_eq!(t.classify(60.0), Level::Warning);
+        assert_eq!(t.classify(79.0), Level::Warning);
+        assert_eq!(t.classify(80.0), Level::Critical);
         assert_eq!(t.classify(100.0), Level::Critical);
     }
 
@@ -159,5 +244,52 @@ mod tests {
         assert_eq!(percent_fixed(100.0), "100%");
         assert_eq!(percent_fixed(140.0), "100%");
         assert_eq!(percent_fixed(-3.0), "  0%");
+    }
+
+    #[test]
+    fn percentages_round_half_away_from_zero_and_clamp() {
+        for (used, shown) in [
+            (12.5, 13),
+            (12.4, 12),
+            (0.5, 1),
+            (99.5, 100),
+            (100.4, 100),
+            (-3.0, 0),
+            (f64::NAN, 0),
+        ] {
+            assert_eq!(percent_round(used), shown, "{used}");
+        }
+        assert_eq!(percent_fixed(12.5), " 13%");
+    }
+
+    #[test]
+    fn remaining_is_the_complement_of_the_rounded_used_figure() {
+        assert_eq!(PercentDisplay::Used.label(20.5), "21% used");
+        assert_eq!(PercentDisplay::Remaining.label(20.5), "79% left");
+        assert_eq!(PercentDisplay::Remaining.label(0.0), "100% left");
+        assert_eq!(PercentDisplay::Remaining.label(140.0), "0% left");
+        assert_eq!(PercentDisplay::Remaining.fixed(62.0), " 38%");
+        assert_eq!(
+            PercentDisplay::parse("remaining"),
+            PercentDisplay::Remaining
+        );
+        assert_eq!(PercentDisplay::parse("anything"), PercentDisplay::Used);
+    }
+
+    #[test]
+    fn countdowns_floor_like_orca() {
+        for (seconds, text) in [
+            (-5, "now"),
+            (0, "now"),
+            (59, "0m"),
+            (47 * MINUTE + 59, "47m"),
+            (3 * HOUR + 54 * MINUTE + 30, "3h 54m"),
+            (2 * HOUR, "2h"),
+            (6 * DAY + 7 * HOUR + 59 * MINUTE, "6d 7h"),
+            (DAY + 11 * HOUR, "1d 11h"),
+            (2 * DAY, "2d"),
+        ] {
+            assert_eq!(countdown(seconds), text, "{seconds}");
+        }
     }
 }

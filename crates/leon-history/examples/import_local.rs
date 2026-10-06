@@ -11,7 +11,7 @@
 
 use std::time::Instant;
 
-use leon_core::{AgentKind, MachineId, SearchQuery, SessionFilter, Store};
+use leon_core::{MachineId, SearchQuery, SessionFilter, Store};
 use leon_history::{default_roots, Importer};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,7 +31,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("second run: {second:?}");
     println!("            took {:.2?}", started.elapsed());
 
-    for agent in AgentKind::ALL {
+    for agent in leon_core::agent::builtin()
+        .iter()
+        .filter(|spec| spec.history.is_some())
+        .map(|spec| spec.id)
+    {
         let filter = SessionFilter {
             agent: Some(agent),
             ..Default::default()

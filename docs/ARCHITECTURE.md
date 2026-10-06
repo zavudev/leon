@@ -12,10 +12,12 @@ app (leon)  ── ui, engine, keys, theme, launch, diagnose
  │   ├── leon-remote   commands on this machine or over SSH
  │   ├── leon-history  importers for the agents' own session files
 │   ├── leon-usage    the agents' usage limits, per machine
+ │   ├── leon-update   updates from the GitHub releases (no window)
  │   └── leon-core     the model and the SQLite store
 leon-remote ── leon-core
 leon-history ── leon-core
 leon-usage ── leon-core, leon-remote
+leon-update ── leon-remote (only for `spawn`)
 leon-term ── gpui-kit only (no other Leon crate)
 leon-mark ── gpui-kit only (no other Leon crate)
 ```
@@ -26,6 +28,7 @@ leon-mark ── gpui-kit only (no other Leon crate)
 | `leon-history` | Reads the history Claude Code, Codex and opencode keep on disk and turns it into sessions and messages. |
 | `leon-remote` | A `CommandSpec` says what to run and where; `run_on` and `interactive_on` place it on a machine (unchanged locally, `ssh` remotely, with shell quoting and optional connection sharing). Git worktree operations, how each agent starts and resumes, the machine probe and the connection checklist (`connect`, `diagnosis`) are built on it. A scripted runner makes all of it testable without a process. |
 | `leon-usage` | How much of each agent's limits is left. A provider-neutral model (`AgentUsage`: windows with a used percentage, a reset time and a length, or an explicit `Reason` why nothing is known; staleness is part of it), pure parsers for each source (`codex`, `claude`, `opencode`), the burn-rate `forecast`, the wording (`present`, `view`), `collect_machine` (one bounded command per machine through a `Runner`) and the opt-in `network` sources behind an `Http` trait. No UI. |
+| `leon-update` | Updates from the GitHub releases of this repository. `version` (which tags count, which is newer), `release` (the API's answer, the platform's file), `http` (an `Http` trait and the system `curl` behind it, with the host allow-list), `download` (redirects by hand, resumable, bounded), `checksums` (`SHA256SUMS`, constant-time), `package` (the program out of the dmg, tarball or zip, strictly), `trust` (the signature rules), `install` (where Leon is installed and the swap with its way back), `launch` (the hand-over, the watch, the confirmation, the rollback), `updater` (the state machine published over a watch channel) and `state` (what is kept). No UI; every system tool (`hdiutil`, `ditto`, `codesign`, PowerShell) is behind a `Tools` trait. |
 | `leon-wire` | The wire protocol: versioned length-prefixed frames, the application messages (run a command, terminals, re-attach) and the relay rendezvous messages. Pure (`postcard` over `serde`); every decoder is bounded and fuzz-style tested. |
 | `leon-link` | Everything that keeps a remote session private: identity, the short pairing code (SPAKE2 then Noise `XXpsk3`), the Noise `IK` session with fragmentation and rekeying, the device registry, the relay WebSocket adapter, the durable `Client` (reconnection, exact terminal re-attach) and, behind `test-support`, an in-process test relay. |
 | `leon-pty` | The GPUI-free part of terminals: `SpawnSpec`, grid maths and `PtyProcess` (a child in a pseudo-terminal driven by channels). `leon-term` re-exports it. |
@@ -139,14 +142,31 @@ above: the engine writes the store and the UI reads it.
   take the same path through `ssh`. A machine that cannot be reached keeps its
   earlier reading (`agent_usage::merge`), whose age is shown and judged.
 * **Sources, least intrusive first.** Local files the agent already writes
-  (Codex); the agent's own command line (none gives limits without launching a
-  session, so none is used); the vendor's usage endpoint with the agent's own
-  credential (Claude Code, the opencode Go subscription), **opt-in per agent and
-  off by default**. Those run on this computer only and through the `Http` trait
+  (Codex's session log); the agent's own command line (Antigravity's
+  `agy -p /usage`, only after `agy --version` says it is a metadata read, run
+  through the runner on any machine); the vendor's usage endpoint with the
+  agent's own credential (Claude Code, the opencode Go subscription, Codex's
+  backend when its log is more than ten minutes old, Grok, Cursor, Kimi, ZCode),
+  **on by default, off per agent in Settings** (the switches are generated from
+  the catalogue: `usage_<id>_network`). Only Claude Code and the Codex log have
+  been verified against a live service; the rest are implemented from Orca's
+  source (`src/main/rate-limits/`) and say so. Each provider is a module of
+  pure parsers (`grok`, `cursor`, `kimi`, `zcode`, `antigravity`, `codex`,
+  `claude`, `opencode`) plus one function in `network.rs`; every vendor host is
+  in `ALLOWED_HOSTS` and a test pins that an unlisted host is refused. An
+  expired stored sign-in (a 401, a 403 that is not a missing scope, or a credential with only a refresh token) is `Reason::SessionExpired` and is never refreshed; `Reason::keeps_numbers` says which failures leave the earlier numbers on show (`agent_usage::merge`), marked with their age; `NotSignedIn` is only for no credential at all, with `MissingScope`, `ApiKeyBilling`, `NoSubscription`, `KeyRejected` and `SpendsATurn` (Antigravity's latch, per machine, for the session) as their own reasons. Those run on this computer only and through the `Http` trait
   (`CurlHttp`: the system `curl`, the header on standard input so the token is
   never in a process list, HTTPS to one allowed host, no redirects, a time limit);
   a disabled source reads no credential and makes no call (tested with a
-  scripted client that counts). The credential is a `Secret` (no `Display`, no
+  scripted client that counts). The engine holds the live `NetworkPolicy`
+  (`Engine::set_usage_policy`, applied from the settings on every change, which
+  also asks for a read at once, `Op::CollectUsageNow`), at most one collection
+  at a time (so one request per source), a `Throttle` per source (exponential
+  back-off with jitter, `Retry-After` honoured, at least `Throttle::RATE_LIMIT_MIN` (5 minutes) after a 429, cleared when the source is
+  switched or the user chooses Try again), and a keychain refusal remembered for
+  the session. Nothing is read until the window is up (`defer_usage` /
+  `start_usage`); the schedule (`agent_usage::due`) reads every
+  `usage_refresh_seconds` (600, at least 30) in a focused window only; a scheduled read never calls a vendor within `network::MIN_GAP` (60 s) of its last call (`UsageSetup::last_called`), opening the usage view reads once when the reading is older than the interval, and a manual read goes through. The credential is a `Secret` (no `Display`, no
   `Serialize`, `Debug` prints `***`), read at the moment of the call, dropped with
   the request, and a failed call backs off (`Throttle`) and is shown as unknown,
   never as a number.
@@ -159,20 +179,164 @@ above: the engine writes the store and the UI reads it.
   under a local hash of the account, bounded to 14 days and 300 points a series;
   `Store::forget_usage_history`). `StoreChange::Usage` announces both.
 * **UI.** `agent_usage::Board` is what the window reads. `ui/usage_view.rs` holds
-  the pure model (`bar_model`, `density`, `usage_rows`, `step_scope`, tested
+  the pure model (`bar_model` with its `BarStyle`: detailed, every window, as Orca's footer, or compact; `density`; `usage_rows`, worst first; `step_scope`; tested
   without a window) and the drawing: the footer strip under the main pane (it
   absorbs the status line, and sits level with the sidebar's tools), the usage
   view overlay (`Overlay::Usage`, `Command::ShowUsage`) and the chip in a live
-  session's header. A level is a colour token of the theme **and** a marker.
+  session's header. A level is a colour token of the theme **and** a marker. Percentages go through one function (`present::percent_round`, half away from zero, clamped) and `PercentDisplay` (`usage_percentage_display`: used or left; levels always judge what is used). The default thresholds are Orca's, 60 and 80.
   `agent_usage::start_notice` words the line shown when a session of an agent at
   its critical limit starts.
 * **Settings.** The `Usage` section of the schema: the bar, the agents shown,
   the interval, the thresholds, the notice, the two network opt-ins (each with
   the exact text of what is read and where it is sent) and "Forget stored usage
   history".
+* **Differences from Orca, on purpose** (also in the README's Usage section): no hidden sessions, PTY scraping or `codex app-server`; no refreshing or rewriting of any CLI's credentials; no pasted cookies or multi-account switching; an honest `User-Agent: Leon/<version>` instead of imitating `claude-code` or `codex-cli` (only the protocol headers `anthropic-beta`, `OpenAI-Beta` and `ChatGPT-Account-Id` are sent); a 10 minute default refresh with a 60 second per-vendor floor; the `CLAUDE_CONFIG_DIR` keychain suffix is taken without NFC normalisation.
 * **`leon --diagnose usage`** runs the real collection for this computer and
-  prints no account, e-mail, token or path; a network source runs only with
-  `--network <agent>`.
+  prints no account, e-mail, token or path; its network sources follow the
+  settings (on by default), overridden by `--network <agent>` and
+  `--no-network <agent|all>`.
+
+## Finding agent history (`leon-history`)
+
+Each agent keeps its sessions its own way and Leon reads them without ever
+writing to them:
+
+* **Claude Code**: `<CLAUDE_CONFIG_DIR or ~/.claude>/projects/<project>/<id>.jsonl`;
+  files deeper down are sub-agent transcripts (counted, not listed).
+* **Codex**: `<CODEX_HOME or ~/.codex>/sessions/Y/M/D/rollout-*.jsonl`.
+* **opencode**, from the source of `sst/opencode` and a real 2.0.14 database:
+  the data folder is `xdg-basedir`'s `xdgData` + `opencode` on every OS
+  (`$XDG_DATA_HOME`, else `~/.local/share`; Windows included). The database is
+  `opencode.db`, but a build of another channel names it
+  `opencode-<channel>.db` and `OPENCODE_DB` can move it (absolute, or relative
+  to the data folder). Leon reads every `opencode*.db` beside the configured
+  one. The database runs in WAL mode with `synchronous = NORMAL`: a committed
+  turn survives a hang-up and readers see it through the `-wal` file. A
+  database holds up to two **generations** of tables, and Leon reads every
+  generation it finds: **v1** (`session`, `message`, `part`, opencode 1.x) and
+  **v2** (`session_v2`, `session_message`, opencode 2.x, one row per turn with a
+  `type` and a JSON payload whose assistant content is a list of parts). An
+  upgraded database keeps the v1 tables behind, usually empty, so the sessions
+  of a 2.x install are only in the v2 tables; a mixed one can hold different
+  sessions in each. A session id present in both is imported once, from v2.
+  (An earlier version of this audit read the repository's `session` table and
+  concluded the v1 tables were still the ones written; they are not for 2.x,
+  where the v1 tables stay empty. That is what made new opencode sessions
+  vanish.) The oldest layout is JSON files under `storage/`
+  (`session/<project>/<id>.json`, `message/<session>/<id>.json`,
+  `part/<message>/<id>.json`); opencode leaves that folder behind when it moves
+  to SQLite, so a session in both is imported once, from the database. A session
+  row exists before its first message; it is imported as soon as it gains one
+  (the fingerprint covers the session's update time, its latest message and its
+  parts or turns). Sub-agent sessions (`parent_id`) are not listed but are
+  counted in the report, per generation.
+
+`HistorySource::survey` produces the counts and reasons behind `leon --diagnose
+history`; `HistorySource::stamp` is a metadata-only change marker (it includes
+the `-wal` file) so a poll can skip an import when nothing moved. A source whose
+layout is not known is an error that is reported, never "no sessions".
+
+## Remembering and restoring the open terminals
+
+`leon-core`'s `store/workspace.rs` keeps a `SavedState` (migration 8): one row per
+terminal, tab and workspace, in two slots, `Current` (what the running window
+writes) and `Previous` (the last run's, copied at start so declining or opening
+something new never loses it). It holds machine, folder, agent id, the agent's
+own session id with how sure Leon is (`resumed`, `state-file`,
+`newest-in-folder`), the history row, the user's name, the tab layout tree with
+ratios, focus, zoom, and a clean-shutdown flag; never scrollback.
+
+In the window, `restore_view.rs` compares `snapshot_state` with the last write on
+every render and writes after `Options::save_debounce` (500 ms); programs that
+ended are left out with their pane. `flush` (quit, close, update restart) writes
+once more with `clean_shutdown = true`, before anything is hung up; the start
+clears the flag. `restore.rs` is the pure part (layout conversion, the rows and
+sentence of the question).
+
+Restoring builds every terminal at once as the base shell (`spawn_live`), puts
+them in the saved layout, and decides per terminal with `launch::plan`: a plain
+shell or a launch-only agent becomes a shell (the latter with a note, never a
+fresh agent), a resumable agent with a known session id becomes a **paused**
+session whose resume line is held in `LiveSession::pending`. It is typed when
+its tab is shown (`open_live`), on Enter in it, or in the background three a
+second with `restore_resume = all`. Anything that cannot be reopened (unknown
+machine, missing folder, agent not installed, unknown session id, the session
+already running in another terminal per the elsewhere scan) is listed with its
+reason. A paused session has no agent for the activity dot and sends no
+notification. Known limits: the sidebar selection is restored only as the
+terminal that was on screen; relay terminals are not re-attached yet (the host
+keeps them: `Client::pty_list` / `pty_attach`); scrollback is not stored (the
+seam is `SavedTerminal`, which can carry a screen snapshot later).
+
+### Learning a fresh session's id, and importing promptly
+
+A session started fresh in Leon has no id. `learn.rs` (pure) matches it without
+reading the screen: **by process** (the process scan names the session a live
+agent holds, from Claude Code's own `~/.claude/sessions/<pid>.json` or the
+agent's arguments, and the terminal's shell is an ancestor of that agent; stored
+as `state-file` / `arguments`) and **by folder** (Codex, opencode and the rest:
+the sessions of that folder created after the terminal started; with one
+terminal the newest, with several only a session that exactly one of them could
+own, never two terminals on one session; stored as `newest-in-folder`). The link
+also sets the terminal's history row, so the tree shows one row, live now and
+history later. `history_sync.rs` keeps the history fresh: `Op::SyncHistory` (an
+incremental import, quiet unless a source is unreadable, skipping sources whose
+`stamp` did not move, `-wal` file included) is asked for, after a 2 s pause that
+merges bursts, when an agent starts, goes quiet after output, or ends, when the
+window regains the focus, and every minute.
+
+### Quitting gently
+
+Quitting (the Quit command, closing the window, restarting to update) first
+writes the state of what is open (marked as ended normally), so the agents that
+were running are what a restore resumes; then each local terminal with an agent
+in front of its shell is sent the agent's own exit line (the catalogue's `exit`:
+`/exit` for Claude Code, verified in its command table, and for opencode,
+verified in its source; Codex and the rest have none and skip this step), the
+ones still in front after 1.2 s get SIGTERM on the terminal's foreground process
+group, and after 2.5 s in all whatever is left is hung up as before (SIGHUP,
+then SIGKILL of the group). All terminals are handled in parallel, the wait ends
+when every agent is gone, the status line says "Closing N sessions…", and
+nothing can hold the quit longer than the grace. Terminals on other computers
+are let go of (their program keeps running there), as before. Windows cannot
+tell the foreground program, so there is no gesture or signal there: the
+hang-up is as before.
+
+## Notifications
+
+When a session wants the user or ends, Leon says so twice: the **geek banner**
+over the window (monospace, the agent, the folder, the exit code) and the
+**desktop notification** of the system. Both are the same [`Note`], and which
+events and which of the two ways are said is the `Notifications` section of the
+settings (`notify`, `notify_waiting`, `notify_finished`, `notify_failed`,
+`notify_how`, `notify_only_unfocused`), read by `settings::notifications`.
+
+* **The events are pure** (`ui/notify.rs`): `Event::of_exit(code)` decides
+  between a clean end and a failure, `Event::line` words it, `notify::note`
+  composes the title (`label · folder`) and the body (`what happened · machine`
+  for a remote one), and `notify::system_notification` turns it into the
+  notification GPUI shows, with the session as its stable tag so a newer note
+  replaces the older one in the notification centre.
+* **Where it is raised** (`ui/terminals.rs`): `Shell::set_activity` watches the
+  activity transitions, so the change *to waiting* (quiet, or the bell) is one
+  event; `ViewEvent::Exited` is the other, with the exit code. `Shell::raise`
+  drops the event when the settings do not ask for it or when the session is on
+  screen with the window in front (the dot and the lion are already saying it),
+  then pushes a `Banner` and/or hands the note to `Options::notify`.
+* **The banner** is shell state: at most four, the oldest goes first, each with
+  when it expires. `Shell::keep_banners` runs one timer while any is on screen
+  and ends itself with the last one; the clock is the executor's
+  (`BackgroundExecutor::now`) so tests advance it. Clicking a banner opens the
+  session it came from; the cross dismisses it.
+* **The desktop note** is `cx.show_system_notification` (GPUI: notify-rust on
+  Linux, the Notification Center on macOS, a toast on Windows);
+  `main` sets the application identity first, which is what names Leon in the
+  notification. `Options::notify` is the seam: tests record the notes instead.
+  `notify_only_unfocused` keeps the desktop for when the window is not in
+  front; the banner still appears for a session that is not on screen.
+* **Tests** (`ui/tests_notify.rs`) drive the scripted terminals through
+  waiting, a clean exit and a failure, and hold the settings, the focus rule,
+  the dismissal and the expiry to what they say.
 
 ## Project logos, the filter and the activity dot
 
@@ -390,12 +554,40 @@ toolkit's. A test fails for a command in no menu and not listed in
 `NOT_IN_MENUS`. Linux and Windows have no menu bar: every command stays on its
 chord and in the palette.
 
-Quitting (`Cmd+Q`, `Ctrl+Shift+Q`, closing the window) asks, by the
+Quitting (`Cmd+Q`, `Ctrl+Shift+Q`, closing the window; with an update ready, in the
+automatic mode and with nothing running, it also puts the update in place on the
+way out) asks, by the
 `quit_confirmation` setting, only while a program runs in a terminal (or cannot be known, as over SSH; the default),
 always, or never; then it hangs
 the terminals up and flushes the state beside the settings. The sidebar's
 visibility and width are in `settings.json`; `theme::metrics::SIDEBAR_WIDTH` is
 zero while it is hidden, so every layout that reads it follows.
+
+## Updates
+
+`leon-update` does the work and knows nothing of windows; `updates.rs` is the
+`Service` the application holds (it runs the updater on the engine's runtime and
+hands results back through a channel) with the words for each state, and
+`ui/updates_view.rs` is the glue: the footer's item, the release notes overlay, the
+commands, the timer. The updater publishes a `Snapshot` over a `tokio::sync::watch`
+channel; the window follows it.
+
+The life-cycle is `Idle → Checking → UpToDate | Available | Manual | NoBuild →
+Downloading → Ready → Installing → RestartRequired | Failed`. Applying an update is
+done by a process that works, so that going back is dependable: *Restart to update*
+puts the new build in place and tries it (`--version`) in the running process, the
+window quits, and what is left of the process (`main` after the application's run
+returns) starts the new build, lets it go ahead (the pipe it waits on is closed:
+`wait_for_parent`) and watches it until it confirms or exits badly, in which case the
+old one is put back. Quitting with an update ready in the automatic mode does the
+same swap without starting anything; at the next start, in the automatic mode, an
+update that is still ready is applied before anything is opened. A new build that
+starts and keeps failing before it confirms takes itself out after three starts. All
+of it is exercised on temporary folders through scripted GitHub, `Http` and `Tools`
+(`launch.rs` tests, `updater/tests.rs`, and the window's `tests_updates.rs`).
+
+Not in a development build (`target/`), not with `LEON_NO_UPDATE`, and no process is
+started except through `leon_remote::spawn`. See `docs/UPDATES.md`.
 
 ## The terminal's buffer: find, clear, copy, save
 

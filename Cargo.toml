@@ -11,12 +11,13 @@ members = [
     "crates/leon-host",
     "crates/leon-wire",
     "crates/leon-link",
+    "crates/leon-update",
     "crates/app",
     "crates/xtask",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.85"
@@ -33,6 +34,7 @@ leon-pty = { path = "crates/leon-pty" }
 leon-host = { path = "crates/leon-host" }
 leon-wire = { path = "crates/leon-wire" }
 leon-link = { path = "crates/leon-link" }
+leon-update = { path = "crates/leon-update" }
 
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -62,6 +64,10 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+# One TLS crypto provider, chosen on purpose: ring, which snow already builds on
+# every platform (aws-lc-rs would need cmake and NASM on Windows).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
 
 # Where the per-user data directory lives on each platform.
 dirs = "6"

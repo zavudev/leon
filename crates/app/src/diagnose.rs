@@ -29,10 +29,17 @@
 //! is known. It prints nothing that identifies an account or a place (no
 //! account, no e-mail, no token, no path), and it calls a network source only
 //! when `--network <agent>` names it.
+//!
+//! `--diagnose update` makes the real update check against the GitHub
+//! releases (`leon_update::diagnose`) and prints the running version, the
+//! latest release, the file it would pick for this platform with its size,
+//! whether `SHA256SUMS` lists it, and the decision. `--pretend-version`
+//! compares with another version, and `--download` fetches, verifies and
+//! unpacks the file into a folder of its own, installing nothing.
 
 use crate::cli::Diagnose;
 use crate::launch::{self, Launch, RealSystem, System};
-use leon_core::{AgentKind, MachineId, SessionFilter, Store};
+use leon_core::{AgentId, MachineId, SessionFilter, Store};
 use leon_remote::SshOptions;
 use leon_term::{GridSize, SpawnSpec, Terminal};
 use std::time::{Duration, Instant};
@@ -189,7 +196,7 @@ pub fn plan(args: &Diagnose, system: &dyn System) -> (SpawnSpec, Vec<u8>) {
 /// is shown.
 pub fn resume_lines(
     store: &Store,
-    agent: AgentKind,
+    agent: AgentId,
     system: &dyn System,
 ) -> Result<Vec<String>, String> {
     let filter = SessionFilter {
@@ -242,7 +249,7 @@ pub fn resume_lines(
 /// `--diagnose resume`: imports the real local history of `agent` into memory
 /// and prints [`resume_lines`]. Exit code 0 when a session was found, 1 when
 /// none could be resumed.
-pub fn run_resume(agent: AgentKind) -> i32 {
+pub fn run_resume(agent: AgentId) -> i32 {
     println!(
         "leon diagnose resume ({})",
         crate::format::agent_name(agent)
@@ -465,7 +472,7 @@ pub fn usage_lines(collected: &leon_usage::MachineUsage, now: i64) -> Vec<String
         match &v.body {
             Body::Unknown(reason) => {
                 lines.push(format!("{name}: unknown: {}", reason.short()));
-                lines.push(format!("    {}", reason.sentence()));
+                lines.push(format!("    {}", reason.text()));
             }
             Body::Ready { meters, .. } => {
                 let plan = v
@@ -480,10 +487,18 @@ pub fn usage_lines(collected: &leon_usage::MachineUsage, now: i64) -> Vec<String
                         .map(|text| format!(", {}", text.to_lowercase()))
                         .unwrap_or_default();
                     lines.push(format!(
-                        "    {:<14} {:>3.0}% used{reset}",
+                        "    {:<14} {:>3}% used{reset}",
                         meter.kind.long(),
-                        meter.percent
+                        leon_usage::percent_round(meter.percent)
                     ));
+                }
+                if let Some(footer) = crate::ui::footer_text(
+                    reading,
+                    now,
+                    Thresholds::default(),
+                    leon_usage::PercentDisplay::Used,
+                ) {
+                    lines.push(format!("    footer: {footer}"));
                 }
             }
         }
@@ -491,27 +506,74 @@ pub fn usage_lines(collected: &leon_usage::MachineUsage, now: i64) -> Vec<String
     lines
 }
 
+/// Which network sources a `--diagnose usage` run calls: what the settings
+/// file says (on by default) with the run's own overrides on top.
+pub fn usage_policy_of(
+    file: &std::path::Path,
+    network: &[AgentId],
+    no_network: &[AgentId],
+) -> leon_usage::network::NetworkPolicy {
+    let store = std::fs::read(file)
+        .ok()
+        .and_then(|bytes| crate::schema::Store::parse(&bytes).ok())
+        .unwrap_or_default();
+    let from_settings = |key: &str| matches!(store.value(key), crate::schema::Value::Bool(true));
+    let mut policy = leon_usage::network::NetworkPolicy::none();
+    for agent in leon_usage::network::switchable_agents() {
+        let on = if no_network.contains(&agent) {
+            false
+        } else {
+            network.contains(&agent) || from_settings(&crate::schema::usage_setting(agent, true))
+        };
+        policy.set(agent, on);
+    }
+    policy
+}
+
+/// How an agent's usage is read, in a few words, and whether that has been
+/// checked against the live service.
+pub fn usage_source_text(agent: AgentId) -> (&'static str, bool) {
+    match agent {
+        AgentId::CLAUDE => ("Anthropic's usage endpoint", true),
+        AgentId::CODEX => (
+            "its session log, then OpenAI's backend when the log is old",
+            true,
+        ),
+        AgentId::OPENCODE => ("the opencode Go usage endpoint", false),
+        AgentId::GROK => ("xAI's billing endpoint", false),
+        AgentId::CURSOR => ("cursor.com's usage summary", false),
+        AgentId::KIMI => ("Moonshot's usages endpoint", false),
+        AgentId::ZCODE => ("the GLM Coding Plan quota endpoint", false),
+        AgentId::ANTIGRAVITY => ("its own `agy -p /usage` command", false),
+        _ => ("an unknown source", false),
+    }
+}
+
 /// Runs `--diagnose usage`: the real collection for this computer, through the
-/// real runner. A network source is called only for an agent in `network`
-/// (the opt-in of this run); otherwise it reports "source off".
-pub fn run_usage(network: &[AgentKind]) -> i32 {
-    use leon_usage::network::{CurlHttp, NetworkPolicy, SystemCredentials};
+/// real runner. A network source is called as the settings file says (on by
+/// default), `network` and `no_network` overriding it for this run.
+pub fn run_usage(
+    network: &[AgentId],
+    no_network: &[AgentId],
+    settings_file: &std::path::Path,
+) -> i32 {
+    use leon_usage::network::{CurlHttp, SystemCredentials};
     println!("leon diagnose usage");
-    let policy = NetworkPolicy {
-        claude: network.contains(&AgentKind::Claude),
-        opencode: network.contains(&AgentKind::Opencode),
-    };
-    for (agent, on) in [
-        (AgentKind::Claude, policy.claude),
-        (AgentKind::Opencode, policy.opencode),
-    ] {
+    let policy = usage_policy_of(settings_file, network, no_network);
+    for agent in leon_usage::network::switchable_agents() {
+        let (source, verified) = usage_source_text(agent);
         println!(
-            "network source of {}: {}",
+            "source of {}: {source}; {}{}",
             crate::ui::agent_display_name(agent),
-            if on {
-                "ON for this run (--network)"
+            if policy.allows(agent) {
+                "on (settings, or --network)"
             } else {
-                "off"
+                "off (settings, or --no-network)"
+            },
+            if verified {
+                ""
+            } else {
+                "; implemented from Orca's reference, unverified against the live service"
             }
         );
     }
@@ -536,7 +598,7 @@ pub fn run_usage(network: &[AgentKind]) -> i32 {
         &leon_remote::ProcessRunner::with_time_limit(Duration::from_secs(30)),
         &machine,
         &SshOptions::without_multiplexing(),
-        policy,
+        &policy,
         &SystemCredentials {
             home: dirs::home_dir().unwrap_or_default(),
         },
@@ -624,8 +686,121 @@ fn run_with(args: &Diagnose, system: &dyn System, settle: Duration) -> i32 {
     }
 }
 
+/// Runs `--diagnose update`: the real check, and with `--download` the real
+/// download into a scratch folder, verified and unpacked, never installed.
+pub fn run_update(request: &crate::cli::UpdateDiagnose) -> i32 {
+    use leon_update::{Install, Platform, SystemTools, Tools};
+    println!("leon diagnose update");
+    if let Some(file) = &request.check_archive {
+        return match leon_update::diagnose::check_archive(file, &SystemTools) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{line}");
+                }
+                0
+            }
+            Err(error) => {
+                println!("{error}");
+                1
+            }
+        };
+    }
+    let running = crate::product::VERSION;
+    println!("running: {} {running}", crate::product::PRODUCT_NAME);
+    let install = leon_update::install::detect();
+    println!(
+        "this install: {}",
+        match &install {
+            Install::Updatable(target) => format!(
+                "{} is replaced in place by an update ({})",
+                target.path.display(),
+                match target.kind {
+                    leon_update::package::Kind::Bundle => "an application bundle",
+                    leon_update::package::Kind::File => "a program file",
+                }
+            ),
+            Install::Manual(why) => format!("not replaced by Leon: {}", why.explain()),
+        }
+    );
+    let current = request.pretend_version.as_deref().unwrap_or(running);
+    if request.pretend_version.is_some() {
+        println!("pretending to run version {current} for the comparison");
+    }
+    let Some(current) = leon_update::version::parse_running(current) else {
+        println!("{current:?} is not a version");
+        return 1;
+    };
+    let platform = match request.platform.as_deref() {
+        Some(id) => Platform::parse(id).unwrap_or_else(Platform::current),
+        None => Platform::current(),
+    };
+    let tools = SystemTools;
+    let running_signature = match install.target() {
+        Some(target) => tools.signature(&target.path).unwrap_or_default(),
+        None => leon_update::tools::Signature::none(),
+    };
+    let download_to = request.download.then(|| {
+        request
+            .dir
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().join("leon-update-diagnose"))
+    });
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            println!("cannot start a runtime: {error}");
+            return 1;
+        }
+    };
+    let report = runtime.block_on(leon_update::diagnose::run(
+        &leon_update::CurlHttp::new(),
+        &tools,
+        &leon_update::diagnose::Request {
+            current,
+            prereleases: request.prerelease,
+            platform,
+            download_to,
+            running: running_signature,
+        },
+    ));
+    for line in &report.lines {
+        println!("{line}");
+    }
+    i32::from(!report.ok)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_usage_report_follows_the_settings_file_and_the_overrides() {
+        use leon_core::AgentId;
+        let (claude, opencode) = (AgentId::CLAUDE, AgentId::OPENCODE);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        // No file: the defaults, on.
+        let policy = super::usage_policy_of(&file, &[], &[]);
+        assert!(policy.allows(claude) && policy.allows(opencode));
+        assert!(
+            policy.allows(AgentId::GROK),
+            "every provider is on by default"
+        );
+        std::fs::write(&file, br#"{"usage_claude_network": false}"#).unwrap();
+        let policy = super::usage_policy_of(&file, &[], &[]);
+        assert!(
+            !policy.allows(claude) && policy.allows(opencode),
+            "the file's off is kept"
+        );
+        assert!(
+            super::usage_policy_of(&file, &[claude], &[]).allows(claude),
+            "--network wins"
+        );
+        let policy = super::usage_policy_of(&file, &[], &[opencode]);
+        assert!(!policy.allows(opencode), "--no-network wins");
+    }
+
     #[test]
     fn the_usage_report_names_the_source_the_windows_and_the_reasons_and_nothing_else() {
         use leon_usage::{
@@ -633,7 +808,7 @@ mod tests {
         };
         const NOW: i64 = 1_790_000_000;
         let known = AgentUsage {
-            agent: AgentKind::Codex,
+            agent: AgentId::CODEX,
             machine: "local".into(),
             account_label: Some("secret-label@example.com".into()),
             plan: Some("plus".into()),
@@ -657,8 +832,9 @@ mod tests {
             },
         };
         let collected = MachineUsage {
+            called: Vec::new(),
             readings: vec![
-                AgentUsage::unknown(AgentKind::Claude, "local", Reason::SourceDisabled),
+                AgentUsage::unknown(AgentId::CLAUDE, "local", Reason::SourceDisabled),
                 known,
             ],
             samples: vec![],
@@ -672,6 +848,10 @@ mod tests {
         assert!(text.contains("38% used, resets in 2h 29m"), "{text}");
         assert!(
             text.contains("Weekly") && text.contains("0% used, reset since last seen"),
+            "{text}"
+        );
+        assert!(
+            text.contains("footer: 38% used 2h 29m · 0% used now"),
             "{text}"
         );
         assert!(!text.contains("secret-label"), "{text}");
@@ -766,7 +946,7 @@ mod tests {
             store
                 .upsert_session(
                     &leon_core::NewSession {
-                        agent: AgentKind::Claude,
+                        agent: AgentId::CLAUDE,
                         external_id: id.into(),
                         machine_id: MachineId::local(),
                         cwd: cwd.into(),
@@ -783,7 +963,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let lines = resume_lines(&store, AgentKind::Claude, &Computer).unwrap();
+        let lines = resume_lines(&store, AgentId::CLAUDE, &Computer).unwrap();
         assert_eq!(
             lines,
             [
@@ -795,7 +975,7 @@ mod tests {
         );
         let shown = lines.join("\n");
         assert!(!shown.contains("secret") && !shown.contains("private"));
-        assert!(resume_lines(&store, AgentKind::Codex, &Computer).is_err());
+        assert!(resume_lines(&store, AgentId::CODEX, &Computer).is_err());
     }
 
     #[cfg(unix)]

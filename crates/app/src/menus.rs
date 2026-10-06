@@ -99,6 +99,8 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
         PRODUCT_NAME,
         &[
             Cmd(C::About),
+            Cmd(C::CheckForUpdates),
+            Cmd(C::RestartToUpdate),
             Sep,
             Cmd(C::Settings),
             Cmd(C::ChooseTheme),
@@ -116,6 +118,8 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
         "File",
         &[
             Cmd(C::NewSession),
+            Cmd(C::AddAgent),
+            Cmd(C::RemoveAgent),
             Cmd(C::OpenShell),
             Cmd(C::NewWorktree),
             Cmd(C::OpenProject),
@@ -214,6 +218,8 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
             Cmd(C::OpenTranscript),
             Cmd(C::Refresh),
             Cmd(C::ProbeMachine),
+            Cmd(C::WhyMissing),
+            Cmd(C::RestoreSessions),
         ],
     ),
     (
@@ -226,7 +232,16 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
             Std(Standard::BringAllToFront),
         ],
     ),
-    ("Help", &[Cmd(C::Shortcuts)]),
+    (
+        "Help",
+        &[
+            Cmd(C::Shortcuts),
+            Sep,
+            Cmd(C::ShowReleaseNotes),
+            Cmd(C::SkipVersion),
+            Cmd(C::OpenDownloadPage),
+        ],
+    ),
 ];
 
 /// The commands that are in no menu, and why. Everything else in the registry

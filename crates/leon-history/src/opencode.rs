@@ -1,23 +1,16 @@
 //! Reader for the opencode session database.
 //!
-//! opencode keeps every session in one SQLite database, in one of two
-//! layouts:
+//! opencode keeps every session in one SQLite database. Three tables matter:
 //!
-//! * **V2** (opencode 2.x): `session_v2` holds one row per session, with
-//!   `directory`, `title`, creation and update times in milliseconds and a
-//!   `model` column holding a small JSON object; `session_message` holds one
-//!   row per turn, with a `type` (`user`, `assistant`, `system`, `synthetic`,
-//!   `idle`, `model-switched`) and a `data` column with the turn's payload.
-//!   An assistant turn carries its content as a list of parts (`text`,
-//!   `reasoning`, `tool`, `step-start`, `step-finish`, ...).
-//! * **V1** (older versions): `session`, `message` and `part`. A message's
-//!   `data` is JSON with a `role` (`user` or `assistant`); a part's `data` is
-//!   JSON with a `type`. `text` parts carry the text, `tool` parts describe a
-//!   tool call (`tool`, and a `state` with `title` and `input`); the
-//!   remaining types are bookkeeping.
-//!
-//! An upgraded database keeps the V1 tables behind, empty; the presence of
-//! `session_v2` and `session_message` decides which layout is read.
+//! * `session`: one row per session with `directory`, `title`, creation and
+//!   update times in milliseconds, and (in newer versions) a `model` column
+//!   holding a small JSON object.
+//! * `message`: one row per turn; its `data` column is JSON with a `role`
+//!   (`user` or `assistant`) and, for assistant turns, a `modelID`.
+//! * `part`: the pieces of a turn; `data` is JSON with a `type`. `text` parts
+//!   carry the text, `tool` parts describe a tool call (`tool`, and a `state`
+//!   with `title` and `input`); the remaining types (`reasoning`,
+//!   `step-start`, `step-finish`, `patch`, `file`, ...) are bookkeeping.
 //!
 //! The database belongs to opencode and may be open and in WAL mode while
 //! Leon reads it. It is therefore opened read-only and additionally switched
@@ -28,9 +21,7 @@
 //! * Sessions spawned by another session (sub-agents, marked by `parent_id`)
 //!   are not listed, matching how sidechains are skipped for Claude Code.
 //! * Consecutive text parts of one turn are joined into one message with the
-//!   turn's role. A tool part becomes one [`Role::Tool`] line. Reasoning,
-//!   step markers and the harness's own rows (`system`, `synthetic`, `idle`,
-//!   `model-switched`) are bookkeeping and are skipped.
+//!   turn's role. A tool part becomes one [`Role::Tool`] line.
 //! * A row whose JSON cannot be read is counted and skipped.
 
 use std::collections::HashMap;
@@ -38,7 +29,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use leon_core::{AgentKind, Role};
+use leon_core::{AgentId, Role};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use serde_json::Value;
@@ -61,28 +52,28 @@ pub struct ListedSession {
 }
 
 #[derive(Debug, Deserialize)]
-struct MessageData {
-    role: Option<String>,
+pub(crate) struct MessageData {
+    pub(crate) role: Option<String>,
     #[serde(rename = "modelID")]
-    model_id: Option<String>,
+    pub(crate) model_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct PartData {
+pub(crate) struct PartData {
     #[serde(rename = "type")]
-    kind: Option<String>,
-    text: Option<String>,
+    pub(crate) kind: Option<String>,
+    pub(crate) text: Option<String>,
     /// Tool name as a V1 part writes it.
-    tool: Option<String>,
+    pub(crate) tool: Option<String>,
     /// Tool name as a V2 content part writes it.
-    name: Option<String>,
-    state: Option<ToolState>,
+    pub(crate) name: Option<String>,
+    pub(crate) state: Option<ToolState>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ToolState {
-    title: Option<String>,
-    input: Option<Value>,
+pub(crate) struct ToolState {
+    pub(crate) title: Option<String>,
+    pub(crate) input: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,32 +97,69 @@ struct TurnTime {
     created: Option<i64>,
 }
 
-/// Which tables hold the sessions. opencode V2 moved them into `session_v2`
-/// and `session_message`; an upgraded database keeps the old tables behind,
-/// empty, so the new ones decide.
+/// The two generations of tables opencode keeps its sessions in. A database
+/// may hold either or both (an upgraded one keeps the old tables, usually
+/// empty, and a downgraded or mixed one may have sessions in each); Leon
+/// reads every generation present.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Schema {
+pub enum Generation {
+    /// `session`, `message` and `part` (opencode 1.x).
+    V1,
     /// `session_v2` and `session_message` (opencode 2.x).
     V2,
-    /// `session`, `message` and `part` (older versions).
-    Legacy,
 }
 
-/// The layout of `connection`.
-fn schema(connection: &Connection) -> rusqlite::Result<Schema> {
-    if has_table(connection, "session_v2")? && has_table(connection, "session_message")? {
-        Ok(Schema::V2)
-    } else {
-        Ok(Schema::Legacy)
+impl Generation {
+    /// The generation as the report names it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::V1 => "v1 (session, message, part)",
+            Self::V2 => "v2 (session_v2, session_message)",
+        }
+    }
+
+    fn session_table(self) -> &'static str {
+        match self {
+            Self::V1 => "session",
+            Self::V2 => "session_v2",
+        }
     }
 }
 
-/// Whether the database has a table named `table`. A database written by an
-/// older opencode has no `session_v2` at all.
+const SESSION_COLUMNS_NEEDED: [&str; 5] =
+    ["id", "directory", "title", "time_created", "time_updated"];
+
+/// Whether the database has a table named `table`.
 fn has_table(connection: &Connection, table: &str) -> rusqlite::Result<bool> {
     connection
         .prepare_cached("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?
         .exists([table])
+}
+
+/// The generations of tables present and complete enough to read, V2 first
+/// (it is the newer: a session in both is read from it).
+pub fn generations(connection: &Connection) -> rusqlite::Result<Vec<Generation>> {
+    let mut found = Vec::new();
+    let complete = |generation: Generation, others: &[&str]| -> rusqlite::Result<bool> {
+        for table in others {
+            if !has_table(connection, table)? {
+                return Ok(false);
+            }
+        }
+        for column in SESSION_COLUMNS_NEEDED {
+            if !has_column(connection, generation.session_table(), column)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
+    if complete(Generation::V2, &["session_v2", "session_message"])? {
+        found.push(Generation::V2);
+    }
+    if complete(Generation::V1, &["session", "message", "part"])? {
+        found.push(Generation::V1);
+    }
+    Ok(found)
 }
 
 /// Opens an opencode database for reading only.
@@ -145,44 +173,36 @@ pub fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {
     Ok(connection)
 }
 
-/// Lists the top-level sessions in the database with their fingerprints.
+/// Lists the top-level sessions of every generation in the database with
+/// their fingerprints. A session id held by both generations is listed once,
+/// from the newer.
 pub fn list_sessions(connection: &Connection) -> rusqlite::Result<Vec<ListedSession>> {
-    match schema(connection)? {
-        Schema::V2 => {
-            let top_level = if has_column(connection, "session_v2", "parent_id")? {
-                "WHERE s.parent_id IS NULL"
-            } else {
-                ""
-            };
-            list_sessions_in(
-                connection,
-                "session_v2",
-                "session_message",
-                "session_message",
-                top_level,
-            )
-        }
-        Schema::Legacy => {
-            let top_level = if has_column(connection, "session", "parent_id")? {
-                "WHERE s.parent_id IS NULL"
-            } else {
-                ""
-            };
-            list_sessions_in(connection, "session", "message", "part", top_level)
+    let mut listed: Vec<ListedSession> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for generation in generations(connection)? {
+        for session in list_generation(connection, generation)? {
+            if seen.insert(session.id.clone()) {
+                listed.push(session);
+            }
         }
     }
+    Ok(listed)
 }
 
-/// Lists the sessions of a layout: `sessions` is the session table,
-/// `messages` the table whose latest update marks a change and `items` the
-/// pieces counted (parts in V1, turns in V2).
-fn list_sessions_in(
+/// The top-level sessions of one generation.
+pub fn list_generation(
     connection: &Connection,
-    sessions: &str,
-    messages: &str,
-    items: &str,
-    top_level: &str,
+    generation: Generation,
 ) -> rusqlite::Result<Vec<ListedSession>> {
+    let (sessions, messages, items) = match generation {
+        Generation::V1 => ("session", "message", "part"),
+        Generation::V2 => ("session_v2", "session_message", "session_message"),
+    };
+    let top_level = if has_column(connection, sessions, "parent_id")? {
+        "WHERE s.parent_id IS NULL"
+    } else {
+        ""
+    };
     let mut statement = connection.prepare_cached(&format!(
         "SELECT s.id, s.time_updated,
                 (SELECT COALESCE(MAX(m.time_updated), 0) FROM {messages} m WHERE m.session_id = s.id),
@@ -190,18 +210,18 @@ fn list_sessions_in(
          FROM {sessions} s {top_level}
          ORDER BY s.time_updated"
     ))?;
-    let sessions = statement
+    let listed = statement
         .query_map([], |row| {
             let updated: i64 = row.get(1)?;
             let latest_message: i64 = row.get(2)?;
-            let parts: i64 = row.get(3)?;
+            let count: i64 = row.get(3)?;
             Ok(ListedSession {
                 id: row.get(0)?,
-                fingerprint: format!("{updated}:{latest_message}:{parts}"),
+                fingerprint: format!("{updated}:{latest_message}:{count}"),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(sessions)
+    Ok(listed)
 }
 
 /// Reads one session and its transcript. Returns `None` when the session
@@ -210,14 +230,20 @@ pub fn read_session(
     connection: &Connection,
     session_id: &str,
 ) -> rusqlite::Result<Option<ParsedSession>> {
-    match schema(connection)? {
-        Schema::V2 => read_session_v2(connection, session_id),
-        Schema::Legacy => read_session_legacy(connection, session_id),
+    for generation in generations(connection)? {
+        let found = match generation {
+            Generation::V2 => read_session_v2(connection, session_id)?,
+            Generation::V1 => read_session_v1(connection, session_id)?,
+        };
+        if let Some(parsed) = found {
+            return Ok(Some(parsed));
+        }
     }
+    Ok(None)
 }
 
 /// Reads one V1 session from `session`, `message` and `part`.
-fn read_session_legacy(
+fn read_session_v1(
     connection: &Connection,
     session_id: &str,
 ) -> rusqlite::Result<Option<ParsedSession>> {
@@ -245,7 +271,7 @@ fn read_session_legacy(
         return Ok(None);
     };
 
-    let mut session = SessionBuilder::new(AgentKind::Opencode, session_id);
+    let mut session = SessionBuilder::new(AgentId::OPENCODE, session_id);
     session.see_cwd(directory.as_deref());
     session.see_title(title.as_deref());
 
@@ -291,53 +317,16 @@ fn read_session_legacy(
              ORDER BY m.time_created, m.id, p.id",
         )?;
         let mut rows = statement.query([session_id])?;
-        // Text parts of one turn accumulate here until the turn ends or a
-        // tool call interrupts them.
-        let mut pending: Option<(String, Role, String, Option<DateTime<Utc>>)> = None;
+        let mut pending: Option<Pending> = None;
         while let Some(row) = rows.next()? {
             let message_id: String = row.get(0)?;
             let at = row
                 .get::<_, Option<i64>>(1)?
                 .and_then(DateTime::from_timestamp_millis);
             let data = row.get_ref(2)?.as_bytes().unwrap_or_default();
-            let Ok(part) = serde_json::from_slice::<PartData>(data) else {
-                session.skip_malformed();
-                continue;
-            };
-            let Some(Some(role)) = roles.get(&message_id).copied() else {
-                continue;
-            };
-
-            let continues = pending
-                .as_ref()
-                .is_some_and(|(turn, _, _, _)| *turn == message_id);
-            let is_text = part.kind.as_deref() == Some("text");
-            if !(continues && is_text) {
-                flush(&mut session, pending.take());
-            }
-            match part.kind.as_deref() {
-                Some("text") => {
-                    let text = part.text.unwrap_or_default();
-                    match pending.as_mut() {
-                        Some((_, _, joined, _)) => {
-                            joined.push_str("\n\n");
-                            joined.push_str(&text);
-                        }
-                        None => pending = Some((message_id, role, text, at)),
-                    }
-                }
-                Some("tool") => {
-                    let name = part.tool.as_deref().unwrap_or("");
-                    let state = part.state.as_ref();
-                    let line = match state.and_then(|s| s.title.as_deref()) {
-                        Some(title) if !title.trim().is_empty() => {
-                            tool_line(name, Some(&Value::String(title.to_owned())))
-                        }
-                        _ => tool_line(name, state.and_then(|s| s.input.as_ref())),
-                    };
-                    session.push(Role::Tool, &line, at);
-                }
-                _ => {}
+            match serde_json::from_slice::<PartData>(data) {
+                Ok(part) => apply_part(&mut session, &mut pending, &roles, message_id, at, part),
+                Err(_) => session.skip_malformed(),
             }
         }
         flush(&mut session, pending.take());
@@ -385,7 +374,7 @@ fn read_session_v2(
         return Ok(None);
     };
 
-    let mut session = SessionBuilder::new(AgentKind::Opencode, session_id);
+    let mut session = SessionBuilder::new(AgentId::OPENCODE, session_id);
     session.see_cwd(directory.as_deref());
     session.see_title(title.as_deref());
     let session_model = model
@@ -486,15 +475,6 @@ fn read_session_v2(
     }))
 }
 
-fn flush(
-    session: &mut SessionBuilder,
-    pending: Option<(String, Role, String, Option<DateTime<Utc>>)>,
-) {
-    if let Some((_, role, text, at)) = pending {
-        session.push(role, &text, at);
-    }
-}
-
 /// Appends the text parts collected for one V2 turn as one message.
 fn flush_text(
     session: &mut SessionBuilder,
@@ -503,6 +483,193 @@ fn flush_text(
     if let Some((role, text, at)) = pending {
         session.push(role, &text, at);
     }
+}
+
+/// The text parts of one turn, collected until the turn ends or a tool call
+/// interrupts them: the turn's id, its role, the joined text and its time.
+pub(crate) type Pending = (String, Role, String, Option<DateTime<Utc>>);
+
+/// Feeds one part of a turn to the session being built. Shared by the SQLite
+/// reader and the older JSON-file reader, so both layouts produce the same
+/// transcript. `roles` maps a turn id to its role; a turn that is neither
+/// the user's nor the assistant's contributes nothing.
+pub(crate) fn apply_part(
+    session: &mut SessionBuilder,
+    pending: &mut Option<Pending>,
+    roles: &HashMap<String, Option<Role>>,
+    message_id: String,
+    at: Option<DateTime<Utc>>,
+    part: PartData,
+) {
+    let Some(Some(role)) = roles.get(&message_id).copied() else {
+        return;
+    };
+    let continues = pending
+        .as_ref()
+        .is_some_and(|(turn, _, _, _)| *turn == message_id);
+    let is_text = part.kind.as_deref() == Some("text");
+    if !(continues && is_text) {
+        flush(session, pending.take());
+    }
+    match part.kind.as_deref() {
+        Some("text") => {
+            let text = part.text.unwrap_or_default();
+            match pending.as_mut() {
+                Some((_, _, joined, _)) => {
+                    joined.push_str("\n\n");
+                    joined.push_str(&text);
+                }
+                None => *pending = Some((message_id, role, text, at)),
+            }
+        }
+        Some("tool") => {
+            let name = part.tool.as_deref().or(part.name.as_deref()).unwrap_or("");
+            let state = part.state.as_ref();
+            let line = match state.and_then(|s| s.title.as_deref()) {
+                Some(title) if !title.trim().is_empty() => {
+                    tool_line(name, Some(&Value::String(title.to_owned())))
+                }
+                _ => tool_line(name, state.and_then(|s| s.input.as_ref())),
+            };
+            session.push(Role::Tool, &line, at);
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn flush(session: &mut SessionBuilder, pending: Option<Pending>) {
+    if let Some((_, role, text, at)) = pending {
+        session.push(role, &text, at);
+    }
+}
+
+/// What an opencode database looks like, for deciding whether Leon can read
+/// it and for the history diagnosis. Names and numbers only.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SchemaInfo {
+    /// The tables present, sorted.
+    pub tables: Vec<String>,
+    /// The columns of the `session` table (V1), in table order.
+    pub session_columns: Vec<String>,
+    /// The columns of the `session_v2` table (V2), in table order.
+    pub v2_session_columns: Vec<String>,
+    /// `PRAGMA user_version`.
+    pub user_version: i64,
+    /// `PRAGMA journal_mode`, for example `wal`.
+    pub journal_mode: String,
+}
+
+impl SchemaInfo {
+    fn has(&self, table: &str) -> bool {
+        self.tables.iter().any(|name| name == table)
+    }
+
+    fn generation_problem(&self, generation: Generation) -> Option<String> {
+        let (tables, columns, name): (&[&str], &[String], &str) = match generation {
+            Generation::V1 => (
+                &["session", "message", "part"],
+                &self.session_columns,
+                "session",
+            ),
+            Generation::V2 => (
+                &["session_v2", "session_message"],
+                &self.v2_session_columns,
+                "session_v2",
+            ),
+        };
+        for table in tables {
+            if !self.has(table) {
+                return Some(format!("no `{table}` table"));
+            }
+        }
+        for column in SESSION_COLUMNS_NEEDED {
+            if !columns.iter().any(|found| found == column) {
+                return Some(format!("the `{name}` table has no `{column}` column"));
+            }
+        }
+        None
+    }
+
+    /// The generations Leon can read in this database.
+    pub fn readable(&self) -> Vec<Generation> {
+        [Generation::V2, Generation::V1]
+            .into_iter()
+            .filter(|generation| self.generation_problem(*generation).is_none())
+            .collect()
+    }
+
+    /// Why Leon cannot read this database, or `None` when it can read at
+    /// least one generation. A database that shows signs of V2 is explained
+    /// by what its V2 tables lack; any other by what its V1 tables lack.
+    pub fn unsupported(&self) -> Option<String> {
+        if !self.readable().is_empty() {
+            return None;
+        }
+        let v2 = self.has("session_v2") || self.has("session_message");
+        self.generation_problem(if v2 { Generation::V2 } else { Generation::V1 })
+    }
+}
+
+/// Describes the database's tables and settings.
+pub fn inspect(connection: &Connection) -> rusqlite::Result<SchemaInfo> {
+    let tables = connection
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
+        connection
+            .prepare("SELECT name FROM pragma_table_info(?1)")?
+            .query_map([table], |row| row.get::<_, String>(0))?
+            .collect()
+    };
+    let user_version = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let journal_mode = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+    Ok(SchemaInfo {
+        session_columns: columns("session")?,
+        v2_session_columns: columns("session_v2")?,
+        tables,
+        user_version,
+        journal_mode,
+    })
+}
+
+/// How many sessions a generation holds in all, and how many of them were
+/// spawned by another session (sub-agents), which are not listed.
+pub fn count_generation(
+    connection: &Connection,
+    generation: Generation,
+) -> rusqlite::Result<(usize, usize)> {
+    let table = generation.session_table();
+    let total: i64 = connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+        row.get(0)
+    })?;
+    let children: i64 = if has_column(connection, table, "parent_id")? {
+        connection.query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE parent_id IS NOT NULL"),
+            [],
+            |row| row.get(0),
+        )?
+    } else {
+        0
+    };
+    Ok((total as usize, children as usize))
+}
+
+/// The ids of every session in the database, children included, of every
+/// generation. The older JSON layout is left alone for the sessions the
+/// database already holds.
+pub fn all_ids(connection: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut ids = Vec::new();
+    for generation in generations(connection)? {
+        let table = generation.session_table();
+        ids.extend(
+            connection
+                .prepare_cached(&format!("SELECT id FROM {table}"))?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
+    }
+    Ok(ids)
 }
 
 /// Whether `table` has a column named `column`. opencode adds columns over
@@ -667,11 +834,15 @@ pub(crate) mod fixture {
             serde_json::json!({"type": "text", "text": "delegated work"}),
         );
     }
-
     /// Creates the V2 tables, alongside the empty V1 ones an upgraded
     /// database keeps, and returns the connection ready for sessions.
     pub(crate) fn create_v2(connection: &Connection) {
+        create_v2_only(connection);
         create(connection);
+    }
+
+    /// Only the V2 tables, as a fresh opencode 2.x database has them.
+    pub(crate) fn create_v2_only(connection: &Connection) {
         connection
             .execute_batch(
                 "CREATE TABLE session_v2 (
@@ -843,7 +1014,7 @@ mod tests {
     fn a_session_is_read_with_its_metadata_and_transcript() {
         let session = read_session(&database(), "ses_1").unwrap().unwrap();
 
-        assert_eq!(session.agent, AgentKind::Opencode);
+        assert_eq!(session.agent, AgentId::OPENCODE);
         assert_eq!(session.external_id, "ses_1");
         assert_eq!(session.cwd, "/srv/api");
         assert_eq!(session.title, "Tidy the config loader");
@@ -953,7 +1124,7 @@ mod tests {
     fn a_v2_session_is_read_with_its_metadata_and_transcript() {
         let session = read_session(&database_v2(), "ses_1").unwrap().unwrap();
 
-        assert_eq!(session.agent, AgentKind::Opencode);
+        assert_eq!(session.agent, AgentId::OPENCODE);
         assert_eq!(session.external_id, "ses_1");
         assert_eq!(session.cwd, "/srv/api");
         assert_eq!(session.title, "Tidy the config loader");
@@ -1045,36 +1216,104 @@ mod tests {
     }
 
     #[test]
-    fn the_v2_schema_is_read_when_the_old_tables_are_still_behind() {
+    fn a_database_with_both_generations_lists_the_sessions_of_each_once() {
         let connection = Connection::open_in_memory().unwrap();
         fixture::create_v2(&connection);
-        // An upgraded database keeps the V1 tables behind: a row still
-        // lingering there must not be listed once the V2 tables exist.
+        // One session only in the old tables, one only in the new ones, and
+        // one id held by both (the newer generation wins).
         fixture::session(&connection, "ses_old", None, "Old session", 1, 2);
+        fixture::message(&connection, "m_old", "ses_old", 1, r#"{"role":"user"}"#);
+        fixture::part(
+            &connection,
+            "p_old",
+            "m_old",
+            "ses_old",
+            1,
+            json!({"type": "text", "text": "from the old tables"}),
+        );
         fixture::session_v2(&connection, "ses_new", None, "New session", 3, 4);
         fixture::turn(
             &connection,
-            "msg_new",
+            "t_new",
             "ses_new",
             "user",
             1,
             3,
-            json!({"time": {"created": 3}, "text": "from the new schema"}),
+            json!({"time": {"created": 3}, "text": "from the new tables"}),
+        );
+        fixture::session(&connection, "ses_both", None, "Stale copy", 5, 6);
+        fixture::session_v2(&connection, "ses_both", None, "Fresh copy", 7, 8);
+        fixture::turn(
+            &connection,
+            "t_both",
+            "ses_both",
+            "user",
+            1,
+            7,
+            json!({"time": {"created": 7}, "text": "the newer one"}),
         );
 
-        let listed = list_sessions(&connection).unwrap();
+        let mut ids: Vec<String> = list_sessions(&connection)
+            .unwrap()
+            .into_iter()
+            .map(|session| session.id)
+            .collect();
+        ids.sort();
         assert_eq!(
-            listed
-                .iter()
-                .map(|session| session.id.as_str())
-                .collect::<Vec<_>>(),
-            ["ses_new"]
+            ids,
+            ["ses_both", "ses_new", "ses_old"],
+            "none dropped, none twice"
         );
+        let old = read_session(&connection, "ses_old").unwrap().unwrap();
+        assert_eq!(roles_and_texts(&old), [(Role::User, "from the old tables")]);
+        let new = read_session(&connection, "ses_new").unwrap().unwrap();
+        assert_eq!(roles_and_texts(&new), [(Role::User, "from the new tables")]);
+        let both = read_session(&connection, "ses_both").unwrap().unwrap();
+        assert_eq!(roles_and_texts(&both), [(Role::User, "the newer one")]);
+        assert_eq!(both.title, "Fresh copy");
+        let info = inspect(&connection).unwrap();
+        assert_eq!(info.readable(), [Generation::V2, Generation::V1]);
+        assert_eq!(all_ids(&connection).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn a_two_x_only_database_has_no_old_tables_and_is_read() {
+        let connection = Connection::open_in_memory().unwrap();
+        fixture::create_v2_only(&connection);
+        fixture::session_v2(&connection, "ses_new", None, "New session", 3, 4);
+        fixture::turn(
+            &connection,
+            "t",
+            "ses_new",
+            "user",
+            1,
+            3,
+            json!({"time": {"created": 3}, "text": "hello 2.x"}),
+        );
+        let info = inspect(&connection).unwrap();
+        assert_eq!(info.unsupported(), None);
+        assert_eq!(info.readable(), [Generation::V2]);
+        assert_eq!(list_sessions(&connection).unwrap().len(), 1);
         let session = read_session(&connection, "ses_new").unwrap().unwrap();
+        assert_eq!(roles_and_texts(&session), [(Role::User, "hello 2.x")]);
         assert_eq!(
-            roles_and_texts(&session),
-            [(Role::User, "from the new schema")]
+            count_generation(&connection, Generation::V2).unwrap(),
+            (1, 0)
         );
+    }
+
+    #[test]
+    fn a_half_made_v2_database_is_unsupported_and_says_what_is_missing() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE session_v2 (id TEXT, directory TEXT);")
+            .unwrap();
+        let info = inspect(&connection).unwrap();
+        assert_eq!(
+            info.unsupported().as_deref(),
+            Some("no `session_message` table")
+        );
+        assert!(list_sessions(&connection).unwrap().is_empty());
     }
 
     #[test]
