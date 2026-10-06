@@ -46,6 +46,7 @@ fn shell() -> ExecSpec {
             ("ENV".into(), "/dev/null".into()),
         ],
         cwd: None,
+        stdin: None,
     }
 }
 
@@ -241,11 +242,26 @@ async fn a_command_runs_on_the_host_and_its_output_comes_back() {
         args: vec!["-c".into(), "echo $LEON_X; echo oops >&2; exit 2".into()],
         env: vec![("LEON_X".into(), "hello".into())],
         cwd: None,
+        stdin: None,
     };
     let out = world.client.exec(spec, None).await.unwrap();
     assert_eq!(out.stdout, b"hello\n");
     assert_eq!(out.stderr, b"oops\n");
     assert_eq!(out.status, Some(2));
+}
+
+#[tokio::test]
+async fn a_commands_standard_input_travels_to_the_host() {
+    let world = paired().await;
+    let spec = ExecSpec {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), "cat > /dev/stdout".into()],
+        stdin: Some("one\ntwo\n".as_bytes().to_vec()),
+        ..ExecSpec::default()
+    };
+    let out = world.client.exec(spec, None).await.unwrap();
+    assert_eq!(out.stdout, b"one\ntwo\n");
+    assert_eq!(out.status, Some(0));
 }
 
 #[tokio::test]

@@ -35,6 +35,6 @@ pub use frame::{decode_frame, encode_frame, FrameDecoder, FrameError, MAX_FRAME_
 pub use id::{base32, HostId, IdError};
 pub use message::{
     ErrorCode, ExecOutput, ExecSpec, Exit, Grid, Message, PtyInfo, SpawnSpec, WireError,
-    MAX_EXEC_OUTPUT, MAX_PTY_CHUNK, PROTOCOL_VERSION, REPLAY_BUFFER_BYTES,
+    MAX_EXEC_INPUT, MAX_EXEC_OUTPUT, MAX_PTY_CHUNK, PROTOCOL_VERSION, REPLAY_BUFFER_BYTES,
 };
 pub use relay::{RelayError, RelayErrorCode, RelayLimits};

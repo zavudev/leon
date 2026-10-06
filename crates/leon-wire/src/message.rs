@@ -16,9 +16,15 @@ use serde::{Deserialize, Serialize};
 use crate::frame::FrameError;
 
 /// The protocol version this crate speaks.
-pub const PROTOCOL_VERSION: u16 = 1;
+///
+/// 2 added standard input to [`ExecSpec`]: a 1 client and a 2 host (or the
+/// other way round) meet, compare versions and refuse each other, rather than
+/// misreading each other's frames.
+pub const PROTOCOL_VERSION: u16 = 2;
 /// The most terminal bytes one [`Message::PtyData`] carries.
 pub const MAX_PTY_CHUNK: usize = 32 * 1024;
+/// The most bytes one [`ExecSpec::stdin`] carries.
+pub const MAX_EXEC_INPUT: usize = 4 * 1024 * 1024;
 /// The most bytes kept of a command's output, per stream; the rest is
 /// dropped and `truncated` is set.
 pub const MAX_EXEC_OUTPUT: usize = 4 * 1024 * 1024;
@@ -39,6 +45,12 @@ pub struct ExecSpec {
     pub env: Vec<(String, String)>,
     /// Working directory.
     pub cwd: Option<String>,
+    /// Bytes written to the program's standard input, up to
+    /// [`MAX_EXEC_INPUT`], and then closed. `None` closes it at once, so a
+    /// command that asks a question sees end of file and fails instead of
+    /// hanging. A terminal's spec ([`Message::PtyOpen`]) ignores this: input
+    /// reaches a terminal through [`Message::PtyData`].
+    pub stdin: Option<Vec<u8>>,
 }
 
 /// A program to run in a terminal.
@@ -289,6 +301,13 @@ impl Message {
             if spec.args.len() > MAX_ITEMS || spec.env.len() > MAX_ITEMS {
                 return Err(FrameError::OverLimit("too many arguments"));
             }
+            if spec
+                .stdin
+                .as_ref()
+                .is_some_and(|bytes| bytes.len() > MAX_EXEC_INPUT)
+            {
+                return Err(FrameError::OverLimit("standard input"));
+            }
             Ok(())
         }
         match self {
@@ -351,6 +370,7 @@ mod tests {
             args: vec!["status".into(), "--porcelain".into()],
             env: vec![("LANG".into(), "C".into())],
             cwd: Some("/srv/api".into()),
+            stdin: Some(b"a line\n".to_vec()),
         }
     }
 
@@ -528,6 +548,18 @@ mod tests {
     fn an_exec_with_too_many_arguments_is_refused() {
         let mut spec = spec();
         spec.args = vec!["x".into(); 5000];
+        let message = Message::Exec {
+            id: 1,
+            spec,
+            timeout_ms: None,
+        };
+        assert!(encode_frame(&message).is_err());
+    }
+
+    #[test]
+    fn an_exec_with_more_standard_input_than_the_limit_is_refused() {
+        let mut spec = spec();
+        spec.stdin = Some(vec![0; MAX_EXEC_INPUT + 1]);
         let message = Message::Exec {
             id: 1,
             spec,

@@ -12,7 +12,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use leon_wire::{ErrorCode, ExecOutput, ExecSpec, WireError, MAX_EXEC_OUTPUT};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 /// The longest a command may run when the client asks for no limit.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -48,7 +48,7 @@ pub async fn run(spec: &ExecSpec, timeout_ms: Option<u32>) -> Result<ExecOutput,
     command
         .args(&spec.args)
         .envs(spec.env.iter().map(|(name, value)| (name, value)))
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -59,9 +59,19 @@ pub async fn run(spec: &ExecSpec, timeout_ms: Option<u32>) -> Result<ExecOutput,
         code: ErrorCode::SpawnFailed,
         message: format!("cannot start {}: {}", spec.program, error.kind()),
     })?;
+    let stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("piped");
     let stderr = child.stderr.take().expect("piped");
+    let input = spec.stdin.clone();
     let work = async {
+        // The bytes go in first; dropping the handle closes the pipe, so a
+        // command that reads reaches end of file. A write that fails because
+        // the program closed its side is not a failure of the command.
+        if let Some(mut handle) = stdin {
+            if let Some(bytes) = &input {
+                let _ = handle.write_all(bytes).await;
+            }
+        }
         let ((out, out_cut), (err, err_cut), status) =
             tokio::join!(capped(stdout), capped(stderr), child.wait());
         (out, err, out_cut || err_cut, status)
@@ -126,6 +136,24 @@ mod tests {
     async fn standard_input_is_closed_so_a_question_fails_instead_of_hanging() {
         let out = run(&sh("read x || exit 7"), Some(20_000)).await.unwrap();
         assert_eq!(out.status, Some(7));
+    }
+
+    #[tokio::test]
+    async fn standard_input_carries_the_request_bytes() {
+        let mut spec = sh("cat");
+        spec.stdin = Some(b"two\nlines\n".to_vec());
+        let out = run(&spec, Some(20_000)).await.unwrap();
+        assert_eq!(out.status, Some(0));
+        assert_eq!(out.stdout, b"two\nlines\n");
+    }
+
+    #[tokio::test]
+    async fn a_command_that_ignores_its_input_still_finishes() {
+        let mut spec = sh("echo done");
+        spec.stdin = Some(vec![b'x'; 512 * 1024]);
+        let out = run(&spec, Some(20_000)).await.unwrap();
+        assert_eq!(out.status, Some(0));
+        assert_eq!(out.stdout, b"done\n");
     }
 
     #[tokio::test]
