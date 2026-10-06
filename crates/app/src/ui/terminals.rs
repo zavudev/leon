@@ -273,6 +273,10 @@ impl Shell {
             Launch::Agent { kind, resume } => (Some(*kind), resume.clone()),
             Launch::Shell => (None, None),
         };
+        // Whatever starts here is what new dialogs offer first.
+        if agent.is_some() {
+            self.last_agent = agent;
+        }
         let subscriptions = vec![
             cx.subscribe_in(
                 &view,

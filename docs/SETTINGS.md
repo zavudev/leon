@@ -55,152 +55,152 @@ How each coding agent is started and resumed.
 | Your own agents | `custom_agents` | a list of text | empty | Any command line tool, added with Add a custom agent: a name, the command, its arguments and how to resume a session. |
 | Claude Code | `agent_claude_enabled` | on, off | `on` | Offer Claude Code for new sessions. |
 | Claude Code executable | `agent_claude_executable` | a path | empty | The program that starts Claude Code. Empty lets the login shell find `claude`. |
-| Claude Code arguments, new session | `agent_claude_args` | text | empty | Extra arguments typed after the command of a new Claude Code session. |
+| Claude Code arguments, new session | `agent_claude_args` | text | `--dangerously-skip-permissions` | Extra arguments typed after the command of a new Claude Code session. Empty clears the default, which is what starts Claude Code without stopping to ask. |
 | Claude Code arguments, resume | `agent_claude_resume_args` | text | empty | Extra arguments typed after the command that resumes a Claude Code session. |
 | Codex | `agent_codex_enabled` | on, off | `on` | Offer Codex for new sessions. |
 | Codex executable | `agent_codex_executable` | a path | empty | The program that starts Codex. Empty lets the login shell find `codex`. |
-| Codex arguments, new session | `agent_codex_args` | text | empty | Extra arguments typed after the command of a new Codex session. |
+| Codex arguments, new session | `agent_codex_args` | text | empty | Extra arguments typed after the command of a new Codex session. Empty clears the default, which is what starts Codex without stopping to ask. |
 | Codex arguments, resume | `agent_codex_resume_args` | text | empty | Extra arguments typed after the command that resumes a Codex session. |
 | opencode | `agent_opencode_enabled` | on, off | `on` | Offer opencode for new sessions. |
 | opencode executable | `agent_opencode_executable` | a path | empty | The program that starts opencode. Empty lets the login shell find `opencode`. |
-| opencode arguments, new session | `agent_opencode_args` | text | empty | Extra arguments typed after the command of a new opencode session. |
+| opencode arguments, new session | `agent_opencode_args` | text | empty | Extra arguments typed after the command of a new opencode session. Empty clears the default, which is what starts opencode without stopping to ask. |
 | opencode arguments, resume | `agent_opencode_resume_args` | text | empty | Extra arguments typed after the command that resumes a opencode session. |
 | Grok | `agent_grok_enabled` | on, off | `on` | Offer Grok for new sessions. |
 | Grok executable | `agent_grok_executable` | a path | empty | The program that starts Grok. Empty lets the login shell find `grok`. |
-| Grok arguments, new session | `agent_grok_args` | text | empty | Extra arguments typed after the command of a new Grok session. |
+| Grok arguments, new session | `agent_grok_args` | text | empty | Extra arguments typed after the command of a new Grok session. Empty clears the default, which is what starts Grok without stopping to ask. |
 | Grok arguments, resume | `agent_grok_resume_args` | text | empty | Extra arguments typed after the command that resumes a Grok session. |
 | Cursor | `agent_cursor_enabled` | on, off | `on` | Offer Cursor for new sessions. |
 | Cursor executable | `agent_cursor_executable` | a path | empty | The program that starts Cursor. Empty lets the login shell find `cursor-agent`. |
-| Cursor arguments, new session | `agent_cursor_args` | text | empty | Extra arguments typed after the command of a new Cursor session. |
+| Cursor arguments, new session | `agent_cursor_args` | text | empty | Extra arguments typed after the command of a new Cursor session. Empty clears the default, which is what starts Cursor without stopping to ask. |
 | Cursor arguments, resume | `agent_cursor_resume_args` | text | empty | Extra arguments typed after the command that resumes a Cursor session. |
 | GitHub Copilot | `agent_copilot_enabled` | on, off | `on` | Offer GitHub Copilot for new sessions. |
 | GitHub Copilot executable | `agent_copilot_executable` | a path | empty | The program that starts GitHub Copilot. Empty lets the login shell find `copilot`. |
-| GitHub Copilot arguments, new session | `agent_copilot_args` | text | empty | Extra arguments typed after the command of a new GitHub Copilot session. |
+| GitHub Copilot arguments, new session | `agent_copilot_args` | text | empty | Extra arguments typed after the command of a new GitHub Copilot session. Empty clears the default, which is what starts GitHub Copilot without stopping to ask. |
 | GitHub Copilot arguments, resume | `agent_copilot_resume_args` | text | empty | Extra arguments typed after the command that resumes a GitHub Copilot session. |
 | Muse | `agent_muse_enabled` | on, off | `on` | Offer Muse for new sessions. |
 | Muse executable | `agent_muse_executable` | a path | empty | The program that starts Muse. Empty lets the login shell find `muse`. |
-| Muse arguments, new session | `agent_muse_args` | text | empty | Extra arguments typed after the command of a new Muse session. |
+| Muse arguments, new session | `agent_muse_args` | text | empty | Extra arguments typed after the command of a new Muse session. Empty clears the default, which is what starts Muse without stopping to ask. |
 | Muse arguments, resume | `agent_muse_resume_args` | text | empty | Extra arguments typed after the command that resumes a Muse session. |
 | DeepSeek Harness | `agent_dsh_enabled` | on, off | `on` | Offer DeepSeek Harness for new sessions. |
 | DeepSeek Harness executable | `agent_dsh_executable` | a path | empty | The program that starts DeepSeek Harness. Empty lets the login shell find `dsh-tui`. |
-| DeepSeek Harness arguments, new session | `agent_dsh_args` | text | empty | Extra arguments typed after the command of a new DeepSeek Harness session. |
+| DeepSeek Harness arguments, new session | `agent_dsh_args` | text | empty | Extra arguments typed after the command of a new DeepSeek Harness session. Empty clears the default, which is what starts DeepSeek Harness without stopping to ask. |
 | DeepSeek Harness arguments, resume | `agent_dsh_resume_args` | text | empty | Extra arguments typed after the command that resumes a DeepSeek Harness session. |
 | ZCode | `agent_zcode_enabled` | on, off | `on` | Offer ZCode for new sessions. |
 | ZCode executable | `agent_zcode_executable` | a path | empty | The program that starts ZCode. Empty lets the login shell find `zcode`. |
-| ZCode arguments, new session | `agent_zcode_args` | text | empty | Extra arguments typed after the command of a new ZCode session. |
+| ZCode arguments, new session | `agent_zcode_args` | text | empty | Extra arguments typed after the command of a new ZCode session. Empty clears the default, which is what starts ZCode without stopping to ask. |
 | ZCode arguments, resume | `agent_zcode_resume_args` | text | empty | Extra arguments typed after the command that resumes a ZCode session. |
 | MiMo Code | `agent_mimo_code_enabled` | on, off | `on` | Offer MiMo Code for new sessions. |
 | MiMo Code executable | `agent_mimo_code_executable` | a path | empty | The program that starts MiMo Code. Empty lets the login shell find `mimo`. |
-| MiMo Code arguments, new session | `agent_mimo_code_args` | text | empty | Extra arguments typed after the command of a new MiMo Code session. |
+| MiMo Code arguments, new session | `agent_mimo_code_args` | text | empty | Extra arguments typed after the command of a new MiMo Code session. Empty clears the default, which is what starts MiMo Code without stopping to ask. |
 | MiMo Code arguments, resume | `agent_mimo_code_resume_args` | text | empty | Extra arguments typed after the command that resumes a MiMo Code session. |
 | Amp | `agent_amp_enabled` | on, off | `on` | Offer Amp for new sessions. |
 | Amp executable | `agent_amp_executable` | a path | empty | The program that starts Amp. Empty lets the login shell find `amp`. |
-| Amp arguments, new session | `agent_amp_args` | text | empty | Extra arguments typed after the command of a new Amp session. |
+| Amp arguments, new session | `agent_amp_args` | text | empty | Extra arguments typed after the command of a new Amp session. Empty clears the default, which is what starts Amp without stopping to ask. |
 | OpenClaude | `agent_openclaude_enabled` | on, off | `on` | Offer OpenClaude for new sessions. |
 | OpenClaude executable | `agent_openclaude_executable` | a path | empty | The program that starts OpenClaude. Empty lets the login shell find `openclaude`. |
-| OpenClaude arguments, new session | `agent_openclaude_args` | text | empty | Extra arguments typed after the command of a new OpenClaude session. |
+| OpenClaude arguments, new session | `agent_openclaude_args` | text | empty | Extra arguments typed after the command of a new OpenClaude session. Empty clears the default, which is what starts OpenClaude without stopping to ask. |
 | Antigravity | `agent_antigravity_enabled` | on, off | `on` | Offer Antigravity for new sessions. |
 | Antigravity executable | `agent_antigravity_executable` | a path | empty | The program that starts Antigravity. Empty lets the login shell find `agy`. |
-| Antigravity arguments, new session | `agent_antigravity_args` | text | empty | Extra arguments typed after the command of a new Antigravity session. |
+| Antigravity arguments, new session | `agent_antigravity_args` | text | empty | Extra arguments typed after the command of a new Antigravity session. Empty clears the default, which is what starts Antigravity without stopping to ask. |
 | Antigravity arguments, resume | `agent_antigravity_resume_args` | text | empty | Extra arguments typed after the command that resumes a Antigravity session. |
 | Pi | `agent_pi_enabled` | on, off | `on` | Offer Pi for new sessions. |
 | Pi executable | `agent_pi_executable` | a path | empty | The program that starts Pi. Empty lets the login shell find `pi`. |
-| Pi arguments, new session | `agent_pi_args` | text | empty | Extra arguments typed after the command of a new Pi session. |
+| Pi arguments, new session | `agent_pi_args` | text | empty | Extra arguments typed after the command of a new Pi session. Empty clears the default, which is what starts Pi without stopping to ask. |
 | oh-my-pi | `agent_omp_enabled` | on, off | `on` | Offer oh-my-pi for new sessions. |
 | oh-my-pi executable | `agent_omp_executable` | a path | empty | The program that starts oh-my-pi. Empty lets the login shell find `omp`. |
-| oh-my-pi arguments, new session | `agent_omp_args` | text | empty | Extra arguments typed after the command of a new oh-my-pi session. |
+| oh-my-pi arguments, new session | `agent_omp_args` | text | empty | Extra arguments typed after the command of a new oh-my-pi session. Empty clears the default, which is what starts oh-my-pi without stopping to ask. |
 | Hermes Agent | `agent_hermes_enabled` | on, off | `on` | Offer Hermes Agent for new sessions. |
 | Hermes Agent executable | `agent_hermes_executable` | a path | empty | The program that starts Hermes Agent. Empty lets the login shell find `hermes`. |
-| Hermes Agent arguments, new session | `agent_hermes_args` | text | empty | Extra arguments typed after the command of a new Hermes Agent session. |
+| Hermes Agent arguments, new session | `agent_hermes_args` | text | empty | Extra arguments typed after the command of a new Hermes Agent session. Empty clears the default, which is what starts Hermes Agent without stopping to ask. |
 | Devin | `agent_devin_enabled` | on, off | `on` | Offer Devin for new sessions. |
 | Devin executable | `agent_devin_executable` | a path | empty | The program that starts Devin. Empty lets the login shell find `devin`. |
-| Devin arguments, new session | `agent_devin_args` | text | empty | Extra arguments typed after the command of a new Devin session. |
+| Devin arguments, new session | `agent_devin_args` | text | empty | Extra arguments typed after the command of a new Devin session. Empty clears the default, which is what starts Devin without stopping to ask. |
 | Devin arguments, resume | `agent_devin_resume_args` | text | empty | Extra arguments typed after the command that resumes a Devin session. |
 | Goose | `agent_goose_enabled` | on, off | `on` | Offer Goose for new sessions. |
 | Goose executable | `agent_goose_executable` | a path | empty | The program that starts Goose. Empty lets the login shell find `goose`. |
-| Goose arguments, new session | `agent_goose_args` | text | empty | Extra arguments typed after the command of a new Goose session. |
+| Goose arguments, new session | `agent_goose_args` | text | empty | Extra arguments typed after the command of a new Goose session. Empty clears the default, which is what starts Goose without stopping to ask. |
 | Auggie | `agent_auggie_enabled` | on, off | `on` | Offer Auggie for new sessions. |
 | Auggie executable | `agent_auggie_executable` | a path | empty | The program that starts Auggie. Empty lets the login shell find `auggie`. |
-| Auggie arguments, new session | `agent_auggie_args` | text | empty | Extra arguments typed after the command of a new Auggie session. |
+| Auggie arguments, new session | `agent_auggie_args` | text | empty | Extra arguments typed after the command of a new Auggie session. Empty clears the default, which is what starts Auggie without stopping to ask. |
 | Autohand Code | `agent_autohand_enabled` | on, off | `on` | Offer Autohand Code for new sessions. |
 | Autohand Code executable | `agent_autohand_executable` | a path | empty | The program that starts Autohand Code. Empty lets the login shell find `autohand`. |
-| Autohand Code arguments, new session | `agent_autohand_args` | text | empty | Extra arguments typed after the command of a new Autohand Code session. |
+| Autohand Code arguments, new session | `agent_autohand_args` | text | empty | Extra arguments typed after the command of a new Autohand Code session. Empty clears the default, which is what starts Autohand Code without stopping to ask. |
 | Charm Crush | `agent_crush_enabled` | on, off | `on` | Offer Charm Crush for new sessions. |
 | Charm Crush executable | `agent_crush_executable` | a path | empty | The program that starts Charm Crush. Empty lets the login shell find `crush`. |
-| Charm Crush arguments, new session | `agent_crush_args` | text | empty | Extra arguments typed after the command of a new Charm Crush session. |
+| Charm Crush arguments, new session | `agent_crush_args` | text | empty | Extra arguments typed after the command of a new Charm Crush session. Empty clears the default, which is what starts Charm Crush without stopping to ask. |
 | Cline | `agent_cline_enabled` | on, off | `on` | Offer Cline for new sessions. |
 | Cline executable | `agent_cline_executable` | a path | empty | The program that starts Cline. Empty lets the login shell find `cline`. |
-| Cline arguments, new session | `agent_cline_args` | text | empty | Extra arguments typed after the command of a new Cline session. |
+| Cline arguments, new session | `agent_cline_args` | text | empty | Extra arguments typed after the command of a new Cline session. Empty clears the default, which is what starts Cline without stopping to ask. |
 | CodeBuddy | `agent_codebuddy_enabled` | on, off | `on` | Offer CodeBuddy for new sessions. |
 | CodeBuddy executable | `agent_codebuddy_executable` | a path | empty | The program that starts CodeBuddy. Empty lets the login shell find `codebuddy`. |
-| CodeBuddy arguments, new session | `agent_codebuddy_args` | text | empty | Extra arguments typed after the command of a new CodeBuddy session. |
+| CodeBuddy arguments, new session | `agent_codebuddy_args` | text | empty | Extra arguments typed after the command of a new CodeBuddy session. Empty clears the default, which is what starts CodeBuddy without stopping to ask. |
 | CodeBuddy arguments, resume | `agent_codebuddy_resume_args` | text | empty | Extra arguments typed after the command that resumes a CodeBuddy session. |
 | Codebuff | `agent_codebuff_enabled` | on, off | `on` | Offer Codebuff for new sessions. |
 | Codebuff executable | `agent_codebuff_executable` | a path | empty | The program that starts Codebuff. Empty lets the login shell find `codebuff`. |
-| Codebuff arguments, new session | `agent_codebuff_args` | text | empty | Extra arguments typed after the command of a new Codebuff session. |
+| Codebuff arguments, new session | `agent_codebuff_args` | text | empty | Extra arguments typed after the command of a new Codebuff session. Empty clears the default, which is what starts Codebuff without stopping to ask. |
 | Freebuff | `agent_freebuff_enabled` | on, off | `on` | Offer Freebuff for new sessions. |
 | Freebuff executable | `agent_freebuff_executable` | a path | empty | The program that starts Freebuff. Empty lets the login shell find `freebuff`. |
-| Freebuff arguments, new session | `agent_freebuff_args` | text | empty | Extra arguments typed after the command of a new Freebuff session. |
+| Freebuff arguments, new session | `agent_freebuff_args` | text | empty | Extra arguments typed after the command of a new Freebuff session. Empty clears the default, which is what starts Freebuff without stopping to ask. |
 | Command Code | `agent_command_code_enabled` | on, off | `on` | Offer Command Code for new sessions. |
 | Command Code executable | `agent_command_code_executable` | a path | empty | The program that starts Command Code. Empty lets the login shell find `command-code`. |
-| Command Code arguments, new session | `agent_command_code_args` | text | empty | Extra arguments typed after the command of a new Command Code session. |
+| Command Code arguments, new session | `agent_command_code_args` | text | empty | Extra arguments typed after the command of a new Command Code session. Empty clears the default, which is what starts Command Code without stopping to ask. |
 | Continue | `agent_continue_enabled` | on, off | `on` | Offer Continue for new sessions. |
 | Continue executable | `agent_continue_executable` | a path | empty | The program that starts Continue. Empty lets the login shell find `cn`. |
-| Continue arguments, new session | `agent_continue_args` | text | empty | Extra arguments typed after the command of a new Continue session. |
+| Continue arguments, new session | `agent_continue_args` | text | empty | Extra arguments typed after the command of a new Continue session. Empty clears the default, which is what starts Continue without stopping to ask. |
 | Droid | `agent_droid_enabled` | on, off | `on` | Offer Droid for new sessions. |
 | Droid executable | `agent_droid_executable` | a path | empty | The program that starts Droid. Empty lets the login shell find `droid`. |
-| Droid arguments, new session | `agent_droid_args` | text | empty | Extra arguments typed after the command of a new Droid session. |
+| Droid arguments, new session | `agent_droid_args` | text | empty | Extra arguments typed after the command of a new Droid session. Empty clears the default, which is what starts Droid without stopping to ask. |
 | Droid arguments, resume | `agent_droid_resume_args` | text | empty | Extra arguments typed after the command that resumes a Droid session. |
 | Kilocode | `agent_kilo_enabled` | on, off | `on` | Offer Kilocode for new sessions. |
 | Kilocode executable | `agent_kilo_executable` | a path | empty | The program that starts Kilocode. Empty lets the login shell find `kilo`. |
-| Kilocode arguments, new session | `agent_kilo_args` | text | empty | Extra arguments typed after the command of a new Kilocode session. |
+| Kilocode arguments, new session | `agent_kilo_args` | text | empty | Extra arguments typed after the command of a new Kilocode session. Empty clears the default, which is what starts Kilocode without stopping to ask. |
 | Kimi | `agent_kimi_enabled` | on, off | `on` | Offer Kimi for new sessions. |
 | Kimi executable | `agent_kimi_executable` | a path | empty | The program that starts Kimi. Empty lets the login shell find `kimi`. |
-| Kimi arguments, new session | `agent_kimi_args` | text | empty | Extra arguments typed after the command of a new Kimi session. |
+| Kimi arguments, new session | `agent_kimi_args` | text | empty | Extra arguments typed after the command of a new Kimi session. Empty clears the default, which is what starts Kimi without stopping to ask. |
 | Kimi arguments, resume | `agent_kimi_resume_args` | text | empty | Extra arguments typed after the command that resumes a Kimi session. |
 | Kiro | `agent_kiro_enabled` | on, off | `on` | Offer Kiro for new sessions. |
 | Kiro executable | `agent_kiro_executable` | a path | empty | The program that starts Kiro. Empty lets the login shell find `kiro-cli`. |
-| Kiro arguments, new session | `agent_kiro_args` | text | empty | Extra arguments typed after the command of a new Kiro session. |
+| Kiro arguments, new session | `agent_kiro_args` | text | empty | Extra arguments typed after the command of a new Kiro session. Empty clears the default, which is what starts Kiro without stopping to ask. |
 | Mistral Vibe | `agent_mistral_vibe_enabled` | on, off | `on` | Offer Mistral Vibe for new sessions. |
 | Mistral Vibe executable | `agent_mistral_vibe_executable` | a path | empty | The program that starts Mistral Vibe. Empty lets the login shell find `vibe`. |
-| Mistral Vibe arguments, new session | `agent_mistral_vibe_args` | text | empty | Extra arguments typed after the command of a new Mistral Vibe session. |
+| Mistral Vibe arguments, new session | `agent_mistral_vibe_args` | text | empty | Extra arguments typed after the command of a new Mistral Vibe session. Empty clears the default, which is what starts Mistral Vibe without stopping to ask. |
 | Qwen Code | `agent_qwen_code_enabled` | on, off | `on` | Offer Qwen Code for new sessions. |
 | Qwen Code executable | `agent_qwen_code_executable` | a path | empty | The program that starts Qwen Code. Empty lets the login shell find `qwen`. |
-| Qwen Code arguments, new session | `agent_qwen_code_args` | text | empty | Extra arguments typed after the command of a new Qwen Code session. |
+| Qwen Code arguments, new session | `agent_qwen_code_args` | text | empty | Extra arguments typed after the command of a new Qwen Code session. Empty clears the default, which is what starts Qwen Code without stopping to ask. |
 | Qwen Code arguments, resume | `agent_qwen_code_resume_args` | text | empty | Extra arguments typed after the command that resumes a Qwen Code session. |
 | Rovo Dev | `agent_rovo_enabled` | on, off | `on` | Offer Rovo Dev for new sessions. |
 | Rovo Dev executable | `agent_rovo_executable` | a path | empty | The program that starts Rovo Dev. Empty lets the login shell find `rovo`. |
-| Rovo Dev arguments, new session | `agent_rovo_args` | text | empty | Extra arguments typed after the command of a new Rovo Dev session. |
+| Rovo Dev arguments, new session | `agent_rovo_args` | text | empty | Extra arguments typed after the command of a new Rovo Dev session. Empty clears the default, which is what starts Rovo Dev without stopping to ask. |
 | Gemini | `agent_gemini_enabled` | on, off | `on` | Offer Gemini for new sessions. |
 | Gemini executable | `agent_gemini_executable` | a path | empty | The program that starts Gemini. Empty lets the login shell find `gemini`. |
-| Gemini arguments, new session | `agent_gemini_args` | text | empty | Extra arguments typed after the command of a new Gemini session. |
+| Gemini arguments, new session | `agent_gemini_args` | text | empty | Extra arguments typed after the command of a new Gemini session. Empty clears the default, which is what starts Gemini without stopping to ask. |
 | Gemini arguments, resume | `agent_gemini_resume_args` | text | empty | Extra arguments typed after the command that resumes a Gemini session. |
 | Aider | `agent_aider_enabled` | on, off | `on` | Offer Aider for new sessions. |
 | Aider executable | `agent_aider_executable` | a path | empty | The program that starts Aider. Empty lets the login shell find `aider`. |
-| Aider arguments, new session | `agent_aider_args` | text | empty | Extra arguments typed after the command of a new Aider session. |
+| Aider arguments, new session | `agent_aider_args` | text | empty | Extra arguments typed after the command of a new Aider session. Empty clears the default, which is what starts Aider without stopping to ask. |
 | Ante | `agent_ante_enabled` | on, off | `on` | Offer Ante for new sessions. |
 | Ante executable | `agent_ante_executable` | a path | empty | The program that starts Ante. Empty lets the login shell find `ante`. |
-| Ante arguments, new session | `agent_ante_args` | text | empty | Extra arguments typed after the command of a new Ante session. |
+| Ante arguments, new session | `agent_ante_args` | text | empty | Extra arguments typed after the command of a new Ante session. Empty clears the default, which is what starts Ante without stopping to ask. |
 | Trae | `agent_trae_enabled` | on, off | `on` | Offer Trae for new sessions. |
 | Trae executable | `agent_trae_executable` | a path | empty | The program that starts Trae. Empty lets the login shell find `traecli`. |
-| Trae arguments, new session | `agent_trae_args` | text | empty | Extra arguments typed after the command of a new Trae session. |
+| Trae arguments, new session | `agent_trae_args` | text | empty | Extra arguments typed after the command of a new Trae session. Empty clears the default, which is what starts Trae without stopping to ask. |
 | Qoder CLI | `agent_qoder_enabled` | on, off | `on` | Offer Qoder CLI for new sessions. |
 | Qoder CLI executable | `agent_qoder_executable` | a path | empty | The program that starts Qoder CLI. Empty lets the login shell find `qodercli`. |
-| Qoder CLI arguments, new session | `agent_qoder_args` | text | empty | Extra arguments typed after the command of a new Qoder CLI session. |
+| Qoder CLI arguments, new session | `agent_qoder_args` | text | empty | Extra arguments typed after the command of a new Qoder CLI session. Empty clears the default, which is what starts Qoder CLI without stopping to ask. |
 | Qoder CLI arguments, resume | `agent_qoder_resume_args` | text | empty | Extra arguments typed after the command that resumes a Qoder CLI session. |
 | Qoder CLI China | `agent_qoder_cn_enabled` | on, off | `on` | Offer Qoder CLI China for new sessions. |
 | Qoder CLI China executable | `agent_qoder_cn_executable` | a path | empty | The program that starts Qoder CLI China. Empty lets the login shell find `qoderclicn`. |
-| Qoder CLI China arguments, new session | `agent_qoder_cn_args` | text | empty | Extra arguments typed after the command of a new Qoder CLI China session. |
+| Qoder CLI China arguments, new session | `agent_qoder_cn_args` | text | empty | Extra arguments typed after the command of a new Qoder CLI China session. Empty clears the default, which is what starts Qoder CLI China without stopping to ask. |
 | Qoder CLI China arguments, resume | `agent_qoder_cn_resume_args` | text | empty | Extra arguments typed after the command that resumes a Qoder CLI China session. |
 | Prime Agent | `agent_prime_agent_enabled` | on, off | `on` | Offer Prime Agent for new sessions. |
 | Prime Agent executable | `agent_prime_agent_executable` | a path | empty | The program that starts Prime Agent. Empty lets the login shell find `prime-agent`. |
-| Prime Agent arguments, new session | `agent_prime_agent_args` | text | empty | Extra arguments typed after the command of a new Prime Agent session. |
+| Prime Agent arguments, new session | `agent_prime_agent_args` | text | empty | Extra arguments typed after the command of a new Prime Agent session. Empty clears the default, which is what starts Prime Agent without stopping to ask. |
 | OpenClaw | `agent_openclaw_enabled` | on, off | `on` | Offer OpenClaw for new sessions. |
 | OpenClaw executable | `agent_openclaw_executable` | a path | empty | The program that starts OpenClaw. Empty lets the login shell find `openclaw`. |
-| OpenClaw arguments, new session | `agent_openclaw_args` | text | empty | Extra arguments typed after the command of a new OpenClaw session. |
+| OpenClaw arguments, new session | `agent_openclaw_args` | text | empty | Extra arguments typed after the command of a new OpenClaw session. Empty clears the default, which is what starts OpenClaw without stopping to ask. |
 | Jcode | `agent_jcode_enabled` | on, off | `on` | Offer Jcode for new sessions. |
 | Jcode executable | `agent_jcode_executable` | a path | empty | The program that starts Jcode. Empty lets the login shell find `jcode`. |
-| Jcode arguments, new session | `agent_jcode_args` | text | empty | Extra arguments typed after the command of a new Jcode session. |
+| Jcode arguments, new session | `agent_jcode_args` | text | empty | Extra arguments typed after the command of a new Jcode session. Empty clears the default, which is what starts Jcode without stopping to ask. |
 | Jcode arguments, resume | `agent_jcode_resume_args` | text | empty | Extra arguments typed after the command that resumes a Jcode session. |
 
 ## Sessions & history

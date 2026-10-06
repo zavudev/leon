@@ -2007,7 +2007,7 @@ fn the_new_worktree_dialog_offers_name_base_agent_more_and_create(cx: &mut TestA
     assert!(h.shows("worktree-more", cx));
     assert!(h.shows("worktree-create", cx));
     // Tab walks to the agent row and opens its list; the arrows walk it and
-    // Enter picks.
+    // Enter picks and closes the list.
     h.press("tab", cx);
     h.press("tab", cx);
     assert!(h.shows("agent-list", cx));
@@ -2019,10 +2019,71 @@ fn the_new_worktree_dialog_offers_name_base_agent_more_and_create(cx: &mut TestA
         h.shell(cx, |s| s.new_worktree_ui.as_ref().unwrap().agent),
         Some(AgentId::OPENCODE)
     );
-    h.press("escape", cx); // closes the agent list
+    assert!(
+        h.shell(cx, |s| !s.new_worktree_ui.as_ref().unwrap().agent_list),
+        "picking closes the list"
+    );
     h.press("escape", cx); // closes the dialog
     assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
     assert!(h.shell(cx, |s| s.new_worktree_ui.is_none()));
+}
+
+#[gpui_kit::test]
+fn clicking_an_agent_option_picks_it_and_closes_the_list(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    let api = h
+        .store
+        .projects(Some(&MachineId::local()))
+        .unwrap()
+        .into_iter()
+        .find(|project| project.name == "api")
+        .unwrap()
+        .id;
+    put_cursor(&h, cx, NodeId::Project(api));
+    h.press("ctrl-shift-n", cx);
+    h.press("tab", cx);
+    h.press("tab", cx);
+    assert!(h.shows("agent-list", cx));
+    h.mouse_on("agent-option-1".to_owned(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(
+        h.shell(cx, |s| s.new_worktree_ui.as_ref().unwrap().agent),
+        Some(AgentId::CLAUDE)
+    );
+    assert!(
+        h.shell(cx, |s| !s.new_worktree_ui.as_ref().unwrap().agent_list),
+        "a click must not reopen the list through the row beneath"
+    );
+    assert!(h.shows("new-worktree", cx), "the dialog stays open");
+    h.press("escape", cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+}
+
+#[gpui_kit::test]
+fn the_new_worktree_dialog_offers_the_last_agent_started(cx: &mut TestAppContext) {
+    let h = live::open_live(cx);
+    let (_dir, _path) = live::real_worktree(&h, cx);
+    h.press("ctrl-n", cx);
+    h.press("enter", cx); // Claude Code
+    live::wait_until(&h, cx, "the agent's first line", |h, cx| {
+        live::screen(h, cx, 1).contains("FAKE-CLAUDE")
+    });
+    assert_eq!(h.shell(cx, |s| s.last_agent), Some(AgentId::CLAUDE));
+    let api = h
+        .store
+        .projects(Some(&MachineId::local()))
+        .unwrap()
+        .into_iter()
+        .find(|project| project.name == "api")
+        .unwrap()
+        .id;
+    put_cursor(&h, cx, NodeId::Project(api));
+    h.press("ctrl-shift-n", cx);
+    assert_eq!(
+        h.shell(cx, |s| s.new_worktree_ui.as_ref().unwrap().agent),
+        Some(AgentId::CLAUDE),
+        "the last agent started is on offer"
+    );
+    h.press("escape", cx);
 }
 
 #[gpui_kit::test]

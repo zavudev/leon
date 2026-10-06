@@ -386,6 +386,34 @@ fn the_default_agent_starts_without_a_question(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_new_claude_session_starts_without_the_permission_questions(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let (_dir, _) = real_worktree(&h, cx);
+    h.press("ctrl-n", cx);
+    h.press("enter", cx); // Claude Code
+    wait_until(&h, cx, "the line typed", |h, cx| {
+        screen(h, cx, 1).contains("FAKE-CLAUDE --dangerously-skip-permissions")
+    });
+}
+
+#[gpui_kit::test]
+fn clearing_the_arguments_brings_the_permission_questions_back(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let (_dir, _) = real_worktree(&h, cx);
+    set(&h, cx, "agent_claude_args", Value::Text(String::new()));
+    h.press("ctrl-n", cx);
+    h.press("enter", cx); // Claude Code
+    wait_until(&h, cx, "the line typed", |h, cx| {
+        screen(h, cx, 1).contains("FAKE-CLAUDE")
+    });
+    assert!(
+        !screen(&h, cx, 1).contains("--dangerously-skip-permissions"),
+        "{}",
+        screen(&h, cx, 1)
+    );
+}
+
+#[gpui_kit::test]
 fn the_executable_override_and_the_extra_arguments_are_typed_for_a_new_session(
     cx: &mut TestAppContext,
 ) {

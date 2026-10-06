@@ -360,6 +360,13 @@ impl Shell {
         }
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("feature/login"));
         let base = cx.new(|cx| InputState::new(window, cx).placeholder("HEAD"));
+        // The choice on offer: the agent the settings name, else the last one
+        // started. "Ask" is not an agent, so it falls through.
+        let prefs = super::shell::Shell::step_prefs(cx);
+        let agent = prefs
+            .default_agent
+            .filter(|agent| prefs.offered().contains(agent))
+            .or(self.last_agent);
         self.new_worktree_ui = Some(super::dialogs::NewWorktreeUi {
             project: project.clone(),
             name,
@@ -371,7 +378,7 @@ impl Shell {
             agent_list: false,
             agent_cursor: 0,
             cursor: 0,
-            agent: None,
+            agent,
             create_more: false,
         });
         self.overlay = Overlay::NewWorktree;
@@ -1100,6 +1107,8 @@ impl Shell {
                                             move |style| style.bg(hover)
                                         })
                                         .on_click(cx.listener(move |this, _, window, cx| {
+                                            // Not the row beneath: it would reopen the list.
+                                            cx.stop_propagation();
                                             if let Some(ui) = &this.new_worktree_ui {
                                                 ui.base.clone().update(cx, |field, cx| {
                                                     field.set_value(value.clone(), window, cx)
@@ -1216,13 +1225,17 @@ impl Shell {
                                                     })
                                                     .on_click(cx.listener(
                                                         move |this, _, window, cx| {
+                                                            // Not the row beneath, and not through
+                                                            // focus_worktree_row either: opening
+                                                            // the list is what just ended.
+                                                            cx.stop_propagation();
                                                             if let Some(ui) =
                                                                 this.new_worktree_ui.as_mut()
                                                             {
                                                                 ui.agent = picked;
                                                                 ui.agent_list = false;
                                                             }
-                                                            this.focus_worktree_row(window, cx);
+                                                            this.focus.focus(window, cx);
                                                             cx.notify();
                                                         },
                                                     ))

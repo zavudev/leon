@@ -375,6 +375,23 @@ const PROGRAM: Kind = K::Path {
     placeholder: "found by the login shell",
 };
 
+/// What a new Claude Code session is started with: the agent works without
+/// stopping to ask, which is what a session inside Leon is for. Clearing the
+/// setting brings the questions back.
+const CLAUDE_SKIP_PERMISSIONS: &str = "--dangerously-skip-permissions";
+
+/// What a new session of `id` starts with. Claude Code works without stopping
+/// to ask, which is what a session inside Leon is for; every other agent
+/// starts with nothing. Clearing the setting in Settings brings the questions
+/// back.
+fn default_args(id: leon_core::AgentId) -> &'static str {
+    if id == leon_core::AgentId::CLAUDE {
+        CLAUDE_SKIP_PERMISSIONS
+    } else {
+        ""
+    }
+}
+
 /// The registry of settings.
 const BASE: &[Def] = &[
     // ----- appearance
@@ -1154,11 +1171,13 @@ fn agent_defs(spec: &AgentSpec) -> Vec<Def> {
                 S::Agents,
                 leak(format!("{name} arguments, new session")),
                 leak(format!(
-                    "Extra arguments typed after the command of a new {name} session."
+                    "Extra arguments typed after the command of a new {name} session. \
+                     Empty clears the default, which is what starts {name} without \
+                     stopping to ask."
                 )),
                 leak(format!("{words} flags options")),
                 NO_ARGS,
-                D::Text(""),
+                D::Text(default_args(id)),
             ),
             id,
         ),

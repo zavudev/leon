@@ -477,6 +477,8 @@ pub struct Shell {
     pub(super) new_worktree_ui: Option<super::dialogs::NewWorktreeUi>,
     /// The wait for a worktree an agent should start in, while it runs.
     pub(super) worktree_task: Option<Task<()>>,
+    /// The agent of the last session started: new dialogs offer it first.
+    pub(super) last_agent: Option<leon_core::AgentId>,
     pub(super) sheet_scroll: ScrollHandle,
     /// The find bar of each terminal pane that has had one.
     pub(super) find: std::collections::HashMap<LiveId, FindBar>,
@@ -707,6 +709,7 @@ impl Shell {
             add_project_ui: super::dialogs::AddProjectUi::default(),
             new_worktree_ui: None,
             worktree_task: None,
+            last_agent: None,
             sheet_scroll: ScrollHandle::new(),
             find: std::collections::HashMap::new(),
             find_input,
