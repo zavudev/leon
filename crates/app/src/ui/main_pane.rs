@@ -62,6 +62,7 @@ impl Shell {
                             .items_center()
                             .gap_2()
                             .child(self.sidebar_toggle_button("sidebar-toggle-main", colours, cx))
+                            .child(self.files_toggle_button("files-toggle-main", colours, cx))
                             // With the sidebar away the product's mark stays.
                             .when(!crate::settings::get(cx).sidebar_visible, |this| {
                                 this.child(super::widgets::mark(
@@ -327,6 +328,8 @@ impl Shell {
             .child(line(Command::GoTo))
             .child(line(Command::Commands))
             .child(line(Command::SearchHistory))
+            .child(line(Command::OpenFile))
+            .child(line(Command::ToggleFiles))
             .child(line(Command::NewSession))
             .child(line(Command::AddMachine))
             .child(line(Command::Shortcuts));

@@ -413,7 +413,11 @@ unsaved becomes a draft in `Shell::drafts`: reopening the file brings it back,
 marked unsaved, and the quit question counts it.
 
 The files panel (`ui/files.rs`) is the listing of the project or worktree the
-keyboard is on, on the right of the main pane and hidden until `ToggleFiles`.
+keyboard is on, on the right of the main pane and hidden until `ToggleFiles`
+(the chord, the palette, or the folder button in the main pane's header, beside
+the sidebar's toggle). With nothing selected it falls back to the first project
+of the machine in view, and it follows the project or worktree opened while it
+is visible.
 `Engine::list_files` asks git for the tracked and untracked-not-ignored files
 (`git ls-files --cached --others --exclude-standard`, no shell involved, so it
 works on Windows too) and walks the folder when it is not a repository. The

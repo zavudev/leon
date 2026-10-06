@@ -1390,6 +1390,9 @@ impl Shell {
         self.leave_document(cx);
         self.main = Main::Project(id.clone());
         self.show(&NodeId::Project(id.clone()));
+        if self.files.visible {
+            self.files_reload(cx);
+        }
         cx.notify();
     }
 
@@ -1410,6 +1413,9 @@ impl Shell {
         self.leave_document(cx);
         self.main = Main::Worktree(project.clone(), worktree.clone());
         self.show(&NodeId::Worktree(worktree.clone()));
+        if self.files.visible {
+            self.files_reload(cx);
+        }
         cx.notify();
     }
 

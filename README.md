@@ -622,8 +622,10 @@ marked `UNSAVED` in the header, and quitting asks first. Files larger than
 which and why. The panel on the right lists the files of the project or
 worktree the keyboard is on — git's own view of them when it is a repository,
 so `target/` and `node_modules/` stay out — and marks the Markdown files with
-the accent; it is closed until `⇧⌘E` (`Ctrl+Shift+Alt+E` elsewhere) or the
-palette brings it in.
+the accent; it is closed until `⇧⌘E` (`Ctrl+Shift+Alt+E` elsewhere), the
+folder button in the main pane's header, or the palette brings it in. With
+nothing selected it shows the first project of the machine in view, and it
+follows the project or worktree you open while it is visible.
 
 ### The context menu
 

@@ -2126,6 +2126,8 @@ fn the_empty_state_lists_the_keys_from_the_registry(cx: &mut TestAppContext) {
         Command::GoTo,
         Command::Commands,
         Command::SearchHistory,
+        Command::OpenFile,
+        Command::ToggleFiles,
         Command::NewSession,
         Command::Shortcuts,
     ] {
@@ -5870,7 +5872,13 @@ fn the_files_panel_is_on_the_right_hidden_until_asked_for_and_folds_folders(
     );
     focus_row(&h, NodeId::Worktree(worktree_id(&h, "main")), cx);
     assert!(!h.shows("files-panel", cx), "hidden to begin with");
-    h.press_chord("cmd-shift-e", "ctrl-alt-shift-e", cx);
+    // The header has a button of its own, beside the sidebar's.
+    assert!(h.shows("files-toggle-main", cx));
+    h.mouse_on(
+        "files-toggle-main".to_owned(),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
     assert!(h.shows("files-panel", cx), "shown");
     assert!(h.shows("files", cx), "listed");
     // The panel hugs the window's right edge.
@@ -5890,6 +5898,30 @@ fn the_files_panel_is_on_the_right_hidden_until_asked_for_and_folds_folders(
     h.mouse_on("file-row-0".into(), gpui_kit::MouseButton::Left, cx);
     assert_eq!(h.shell(cx, |shell| shell.files.flattened.len()), 4);
     assert!(h.shows_dynamic("file-row-3".into(), cx));
+    // The chord (and the button) close it again.
+    h.press_chord("cmd-shift-e", "ctrl-alt-shift-e", cx);
+    assert!(!h.shows("files-panel", cx));
+    h.press_chord("cmd-shift-e", "ctrl-alt-shift-e", cx);
+    assert!(h.shows("files-panel", cx));
+}
+
+#[gpui_kit::test]
+fn the_files_panel_falls_back_to_the_first_project_when_nothing_is_selected(
+    cx: &mut TestAppContext,
+) {
+    let h = open(cx, ScriptedRunner::new().reply(Output::ok("README.md\0")));
+    // The cursor sits on the machine's row: no folder to show.
+    focus_row(&h, NodeId::Machine(MachineId::local()), cx);
+    h.press_chord("cmd-shift-e", "ctrl-alt-shift-e", cx);
+    assert!(h.shows("files-panel", cx));
+    let (root, entries) = h.shell(cx, |shell| {
+        (
+            shell.files.root.as_ref().map(|root| root.path.clone()),
+            shell.files.entries.clone(),
+        )
+    });
+    assert!(root.is_some(), "a project was picked");
+    assert_eq!(entries, ["README.md"]);
 }
 
 // ----- what the toolkit really renders ---------------------------------------------------

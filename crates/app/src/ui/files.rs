@@ -15,6 +15,7 @@
 use super::shell::{Overlay, Shell};
 use crate::engine::EngineError;
 use crate::theme::{metrics, px, Palette};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::*;
 use gpui_kit::{
     div, uniform_list, AnyElement, Context, Div, Stateful, Task, UniformListScrollHandle, Window,
@@ -192,18 +193,14 @@ impl Shell {
     }
 
     /// Lists the files of the folder the keyboard is on: the worktree or
-    /// project open, the cursor's folder, or the open document's folder.
+    /// project open, the cursor's folder, or, with nothing selected, the
+    /// first project of the machine in view.
     pub(super) fn files_reload(&mut self, cx: &mut Context<Self>) {
-        let Some(here) = self.here() else {
+        let Some(root) = self.files_root() else {
             self.files.state =
                 FilesState::Failed("Select a project, worktree or folder first.".to_owned());
             cx.notify();
             return;
-        };
-        let root = FilesRoot {
-            machine: here.machine.clone(),
-            machine_name: here.machine_name.clone(),
-            path: here.cwd.clone(),
         };
         self.files.root = Some(root.clone());
         self.files.expanded.clear();
@@ -224,6 +221,33 @@ impl Shell {
                 .ok();
         }));
         cx.notify();
+    }
+
+    /// What the panel should be showing: where the keyboard is, or the first
+    /// project of the machine in view.
+    fn files_root(&self) -> Option<FilesRoot> {
+        if let Some(here) = self.here() {
+            return Some(FilesRoot {
+                machine: here.machine,
+                machine_name: here.machine_name,
+                path: here.cwd,
+            });
+        }
+        let machine = self.current_machine();
+        let entry = self
+            .snapshot
+            .projects
+            .iter()
+            .find(|entry| entry.project.machine_id == machine)
+            .or_else(|| self.snapshot.projects.first())?;
+        Some(FilesRoot {
+            machine: entry.project.machine_id.clone(),
+            machine_name: self
+                .snapshot
+                .machine(&entry.project.machine_id)
+                .map_or_else(String::new, |machine| machine.name.clone()),
+            path: entry.project.root.clone(),
+        })
     }
 
     fn files_listed(
@@ -391,6 +415,43 @@ impl Shell {
             .cursor_pointer()
             .child(super::widgets::mono(label).text_color(colour))
             .on_click(cx.listener(move |this, _, window, cx| action(this, window, cx)))
+    }
+
+    /// The main header's button that shows or hides the panel, beside the
+    /// sidebar's own toggle.
+    pub(super) fn files_toggle_button(
+        &self,
+        id: &'static str,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let hover = colours.surface;
+        let tip: gpui_kit::SharedString =
+            super::sidebar::tooltip_text(crate::keys::Command::ToggleFiles).into();
+        div()
+            .id(id)
+            .debug_selector(move || id.into())
+            .flex_none()
+            .size(metrics::HEADER_TITLE_LINE())
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(metrics::RADIUS())
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.run_command(crate::keys::Command::ToggleFiles, window, cx);
+            }))
+            .child(crate::icons::icon(
+                if self.files.visible {
+                    crate::icons::IconName::FolderOpen
+                } else {
+                    crate::icons::IconName::Folder
+                },
+                px(14.),
+                colours.text_muted,
+            ))
     }
 }
 
