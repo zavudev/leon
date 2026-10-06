@@ -163,6 +163,10 @@ impl Shell {
     /// Notices a change of what is open and writes it after a pause. Cheap:
     /// called from `render`.
     pub(super) fn watch_workspace(&mut self, cx: &mut Context<Self>) {
+        // Once the end has been written, what is left is not a change.
+        if self.closing.quitting {
+            return;
+        }
         // Until the previous run has been dealt with the new state must not
         // replace it: an empty window would erase what could be restored.
         if self.overlay == Overlay::Restore

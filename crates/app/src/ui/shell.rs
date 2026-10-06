@@ -192,6 +192,11 @@ pub struct Options {
     pub import_debounce: Duration,
     /// How often history is imported on a timer; zero is never.
     pub import_interval: Duration,
+    /// How long a quit waits after typing an agent's exit line before it sends
+    /// SIGTERM to what still runs.
+    pub quit_gesture_wait: Duration,
+    /// The longest a quit waits for agents to end by themselves.
+    pub quit_grace: Duration,
     /// How an image file is picked on this computer, for a project's logo.
     pub pick_image: PickFolder,
     /// Where a file is saved: the system's save dialog.
@@ -272,6 +277,8 @@ impl Default for Options {
             save_debounce: Duration::from_millis(500),
             import_debounce: Duration::from_secs(2),
             import_interval: Duration::from_secs(60),
+            quit_gesture_wait: Duration::from_millis(1_200),
+            quit_grace: Duration::from_millis(2_500),
             pick_image: super::projects::default_image_picker(),
             save_file: Rc::new(super::terminal_tools::system_save_dialog),
             read_clipboard: Rc::new(|cx| cx.read_from_clipboard()),
@@ -426,6 +433,8 @@ pub struct Shell {
     pub(super) restore: super::restore_view::RestoreUi,
     /// Prompt history imports (see `history_sync.rs`).
     pub(super) sync: super::history_sync::SyncUi,
+    /// Closing sessions gently on the way out (see `quit_gently.rs`).
+    pub(super) closing: super::quit_gently::Closing,
     /// Watches the terminals' activity while any is live.
     pub(super) ticker: Option<Task<()>>,
     /// The notifications shown for what sessions just did, oldest first.
@@ -652,6 +661,7 @@ impl Shell {
             history_scroll: ScrollHandle::new(),
             restore: Default::default(),
             sync: Default::default(),
+            closing: Default::default(),
             ticker: None,
             banners: Vec::new(),
             banner_ticker: None,
@@ -2257,8 +2267,9 @@ impl Shell {
     fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !self.quit_asks(cx) {
             self.install_on_quit(cx);
-            self.flush(cx);
-            return true;
+            // Agents are given their chance to save; the window closes by
+            // itself when they are done, within the grace.
+            return self.begin_quit(cx);
         }
         self.begin_flow(Command::Quit, window, cx);
         false
@@ -2277,8 +2288,9 @@ impl Shell {
     /// [`Shell::quit_now`] without looking at updates: the restart that has
     /// just installed one ends here.
     pub(super) fn quit_now_without_update(&mut self, cx: &mut Context<Self>) {
-        self.flush(cx);
-        (self.options.quit)(cx);
+        if self.begin_quit(cx) {
+            (self.options.quit)(cx);
+        }
     }
 
     /// What must not be lost when the application ends: the terminals are hung
@@ -2287,8 +2299,11 @@ impl Shell {
     /// every change.
     pub(super) fn flush(&mut self, cx: &mut Context<Self>) {
         // Before anything is hung up: what is open now, marked as ended
-        // normally.
-        self.remember_clean_shutdown(cx);
+        // normally (a gentle quit has written it already, before the agents
+        // ended).
+        if !self.closing.quitting {
+            self.remember_clean_shutdown(cx);
+        }
         for id in self.live.ids() {
             if let Some(session) = self.live.get(id) {
                 let terminal = session.view.read(cx).terminal();

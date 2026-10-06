@@ -290,6 +290,8 @@ struct Harness {
     key_answer: Rc<std::cell::RefCell<Picked>>,
     /// The addresses the browser was asked to open.
     urls: Rc<std::cell::RefCell<Vec<String>>>,
+    /// How many times the application was asked to end.
+    quits: Rc<std::cell::Cell<usize>>,
 }
 
 /// Opens the window over an in-memory store, with nothing waiting on the
@@ -368,6 +370,8 @@ fn open_core(
     let key_answer_in = key_answer.clone();
     let urls = Rc::new(std::cell::RefCell::new(Vec::new()));
     let urls_in = urls.clone();
+    let quits = Rc::new(std::cell::Cell::new(0usize));
+    let quits_in = quits.clone();
     let updates = updates(runtime.handle());
     let options = Options {
         backend: computer.clone(),
@@ -388,10 +392,12 @@ fn open_core(
         save_debounce: std::time::Duration::ZERO,
         import_debounce: std::time::Duration::ZERO,
         import_interval: std::time::Duration::ZERO,
+        quit_gesture_wait: std::time::Duration::from_millis(200),
+        quit_grace: std::time::Duration::from_millis(500),
         pick_image: Rc::new(|_| Task::ready(Picked::Cancelled)),
         save_file: Rc::new(|_, _| Task::ready(Picked::Cancelled)),
         read_clipboard: Rc::new(|_| None),
-        quit: Rc::new(|_| {}),
+        quit: Rc::new(move |_| quits_in.set(quits_in.get() + 1)),
         theme_poll: None,
         elsewhere_poll: None,
         usage_timer: false,
@@ -436,6 +442,7 @@ fn open_core(
         ssh,
         key_answer,
         urls,
+        quits,
     }
 }
 

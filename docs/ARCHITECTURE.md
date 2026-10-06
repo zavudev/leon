@@ -274,6 +274,23 @@ incremental import, quiet unless a source is unreadable, skipping sources whose
 merges bursts, when an agent starts, goes quiet after output, or ends, when the
 window regains the focus, and every minute.
 
+### Quitting gently
+
+Quitting (the Quit command, closing the window, restarting to update) first
+writes the state of what is open (marked as ended normally), so the agents that
+were running are what a restore resumes; then each local terminal with an agent
+in front of its shell is sent the agent's own exit line (the catalogue's `exit`:
+`/exit` for Claude Code, verified in its command table, and for opencode,
+verified in its source; Codex and the rest have none and skip this step), the
+ones still in front after 1.2 s get SIGTERM on the terminal's foreground process
+group, and after 2.5 s in all whatever is left is hung up as before (SIGHUP,
+then SIGKILL of the group). All terminals are handled in parallel, the wait ends
+when every agent is gone, the status line says "Closing N sessions…", and
+nothing can hold the quit longer than the grace. Terminals on other computers
+are let go of (their program keeps running there), as before. Windows cannot
+tell the foreground program, so there is no gesture or signal there: the
+hang-up is as before.
+
 ## Notifications
 
 When a session wants the user or ends, Leon says so twice: the **geek banner**

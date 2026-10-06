@@ -499,6 +499,38 @@ impl Terminal {
         }
     }
 
+    /// Asks the program running in front of the shell to end: SIGTERM to the
+    /// terminal's foreground process group. `false` when nothing was sent:
+    /// the shell itself is in front, the terminal is on another computer, the
+    /// foreground cannot be told (Windows) or the signal failed.
+    pub fn terminate_foreground(&self) -> bool {
+        if let Some(script) = &self.script {
+            return script.terminate();
+        }
+        #[cfg(unix)]
+        {
+            let Some(pid) = self.pid else { return false };
+            let Some(leader) = self
+                .master
+                .lock()
+                .as_ref()
+                .and_then(|master| master.process_group_leader())
+            else {
+                return false;
+            };
+            if leader as u32 == pid || leader <= 1 {
+                return false;
+            }
+            // SAFETY: plain signal delivery to the terminal's foreground
+            // process group, which the pseudo-terminal itself reported.
+            unsafe { libc::kill(-leader, libc::SIGTERM) == 0 }
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
     /// The events since the last call.
     pub fn drain_events(&self) -> Vec<TerminalEvent> {
         self.shared.events_pending.store(false, Ordering::Release);
@@ -1277,6 +1309,23 @@ mod foreground_tests {
             Box::new(|| {}),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_program_in_front_is_asked_to_end_and_the_shell_is_left_alone() {
+        let terminal = shell();
+        wait_for("the prompt", || terminal.screen_text().contains("READY>"));
+        // Nothing runs in front of the shell: there is nobody to ask.
+        assert!(!terminal.terminate_foreground());
+        terminal.write(&b"cat\n"[..]);
+        wait_for("cat to take the terminal", || {
+            terminal.shell_is_foreground() == Some(false)
+        });
+        assert!(terminal.terminate_foreground(), "SIGTERM reached cat");
+        wait_for("the shell to get the terminal back", || {
+            terminal.shell_is_foreground() == Some(true)
+        });
+        assert!(terminal.exit_info().is_none(), "the shell was not touched");
     }
 
     #[test]

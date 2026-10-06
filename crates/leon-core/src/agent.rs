@@ -250,6 +250,10 @@ pub struct AgentSpec {
     pub docs: Option<String>,
     /// Whether the user added it.
     pub custom: bool,
+    /// The line typed (then Enter) to make it quit by itself and save its
+    /// session, when that is known: `/exit` for Claude Code (its own command)
+    /// and opencode (its `/exit`). Absent where it could not be verified.
+    pub exit: Option<String>,
 }
 
 impl AgentSpec {
@@ -303,6 +307,7 @@ struct Row {
     detect: &'static [&'static str],
     mark: Option<&'static str>,
     docs: &'static str,
+    exit: &'static str,
 }
 
 const fn row(
@@ -320,6 +325,7 @@ const fn row(
         detect: &[],
         mark: None,
         docs,
+        exit: "",
     }
 }
 
@@ -340,6 +346,12 @@ impl Row {
         self.mark = Some(mark);
         self
     }
+    /// What is typed to make the agent quit by itself, so it can save its
+    /// session first. Only for agents whose command is verified.
+    const fn exit(mut self, exit: &'static str) -> Self {
+        self.exit = exit;
+        self
+    }
 }
 
 /// The built-in agents, in display order. The commands are Orca's
@@ -355,6 +367,7 @@ const ROWS: &[Row] = &[
         "https://code.claude.com/docs",
     )
     .resume(&["--resume", "{id}"])
+    .exit("/exit")
     .mark("claude"),
     row("codex", "Codex", "codex", "https://github.com/openai/codex")
         .resume(&["resume", "{id}"])
@@ -366,6 +379,7 @@ const ROWS: &[Row] = &[
         "https://opencode.ai/docs/cli/",
     )
     .resume(&["--session", "{id}"])
+    .exit("/exit")
     .mark("opencode"),
     row("grok", "Grok", "grok", "https://x.ai/cli").resume(&["--resume", "{id}"]),
     row("cursor", "Cursor", "cursor-agent", "https://cursor.com/cli")
@@ -632,6 +646,7 @@ fn from_row(row: &Row) -> AgentSpec {
         tint,
         docs: Some(row.docs.to_owned()),
         custom: false,
+        exit: (!row.exit.is_empty()).then(|| row.exit.to_owned()),
     }
 }
 
@@ -876,6 +891,7 @@ impl CustomAgent {
             tint: Tint::Neutral,
             docs: None,
             custom: true,
+            exit: None,
         })
     }
 }
@@ -1187,5 +1203,19 @@ mod tests {
             fresh,
             "README.md is stale: run `LEON_BLESS=1 cargo test -p leon-core the_readme_list_is_the_catalogue`"
         );
+    }
+
+    #[test]
+    fn only_the_agents_whose_exit_command_was_verified_have_one() {
+        let with: Vec<&str> = builtin()
+            .iter()
+            .filter(|spec| spec.exit.is_some())
+            .map(|spec| spec.id.as_str())
+            .collect();
+        assert_eq!(with, ["claude", "opencode"]);
+        assert!(builtin()
+            .iter()
+            .filter_map(|spec| spec.exit.as_deref())
+            .all(|line| line == "/exit"));
     }
 }

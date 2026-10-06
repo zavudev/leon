@@ -601,3 +601,89 @@ fn an_agent_started_in_leon_is_imported_without_a_refresh(cx: &mut TestAppContex
         .iter()
         .any(|s| s.external_id == "claude-later"));
 }
+
+// ----- quitting gently --------------------------------------------------------------------------
+
+fn agent_in_front(cx: &mut TestAppContext) -> (Harness, tempfile::TempDir, String) {
+    let h = open_live(cx);
+    let (dir, path) = real_worktree(&h, cx);
+    start_fresh(&h, cx, leon_core::AgentId::CLAUDE, &path);
+    // The agent runs in front of the shell.
+    super::live::script_of(&h, 1).set_foreground(false);
+    (h, dir, path)
+}
+
+fn quit(h: &Harness, cx: &mut TestAppContext) {
+    cx.update(|cx| h.shell.update(cx, |s, cx| s.quit_now(cx)));
+}
+
+fn pass(cx: &mut TestAppContext, millis: u64) {
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(millis));
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn quitting_types_the_agents_exit_line_and_waits_for_it_to_leave(cx: &mut TestAppContext) {
+    let (h, _dir, _path) = agent_in_front(cx);
+    quit(&h, cx);
+    assert!(
+        super::live::script_of(&h, 1)
+            .written_text()
+            .contains("/exit\r"),
+        "the agent was told to quit by its own command"
+    );
+    assert_eq!(h.quits.get(), 0, "not yet: it has not left");
+    assert!(h.status().contains("Closing 1 session"), "{}", h.status());
+    // The agent saves and leaves: the shell has the terminal back.
+    super::live::script_of(&h, 1).set_foreground(true);
+    pass(cx, 60);
+    assert_eq!(
+        h.quits.get(),
+        1,
+        "quit as soon as nothing is left to wait for"
+    );
+    assert!(!super::live::script_of(&h, 1).was_terminated());
+}
+
+#[gpui_kit::test]
+fn an_agent_that_stays_gets_sigterm_and_then_the_hang_up_within_the_grace(cx: &mut TestAppContext) {
+    let (h, _dir, _path) = agent_in_front(cx);
+    quit(&h, cx);
+    pass(cx, 150);
+    assert!(!super::live::script_of(&h, 1).was_terminated(), "too early");
+    pass(cx, 100);
+    assert!(
+        super::live::script_of(&h, 1).was_terminated(),
+        "after the gesture's wait SIGTERM goes to the foreground"
+    );
+    assert_eq!(h.quits.get(), 0);
+    // It ignores both: the grace ends and the terminal is hung up, quit is
+    // never held longer.
+    pass(cx, 400);
+    assert_eq!(h.quits.get(), 1);
+    assert!(h.shell(cx, |s| s.live.all().len()) == 1);
+}
+
+#[gpui_kit::test]
+fn a_quit_with_no_agent_running_does_not_wait(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let (_dir, _) = real_worktree(&h, cx);
+    h.press("ctrl-t", cx);
+    quit(&h, cx);
+    assert_eq!(h.quits.get(), 1, "a plain shell is hung up at once");
+}
+
+#[gpui_kit::test]
+fn the_state_written_before_the_agents_leave_still_names_them(cx: &mut TestAppContext) {
+    let (h, _dir, _path) = agent_in_front(cx);
+    new_session(&h, leon_core::AgentId::CLAUDE, "claude-new", &_path, 6);
+    h.settle(cx);
+    quit(&h, cx);
+    super::live::script_of(&h, 1).set_foreground(true);
+    pass(cx, 60);
+    let state = h.store.load_workspace(Slot::Current).unwrap().unwrap();
+    assert!(state.clean_shutdown);
+    assert_eq!(state.terminals[0].agent.as_deref(), Some("claude"));
+    assert_eq!(state.terminals[0].session.as_deref(), Some("claude-new"));
+}

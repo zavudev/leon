@@ -6,6 +6,11 @@
 
 ### Added
 
+* Quitting is gentle: before the terminals are hung up, an agent in front of its
+  shell is told to exit with its own command (`/exit` for Claude Code and
+  opencode), then sent SIGTERM, with a short bounded grace (2.5 s in all, the
+  status line says "Closing N sessions…") so it can save its session. Quitting
+  never hangs.
 * A session started in Leon shows up in the tree within seconds: history is
   imported again (only what changed) when an agent starts, goes quiet or ends,
   when the window regains the focus and every minute. Leon also learns the
