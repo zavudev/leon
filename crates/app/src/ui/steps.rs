@@ -221,6 +221,8 @@ pub struct World {
     /// Git repositories found on the machines (by the Connect screen), by
     /// machine: offered as folders when a project is added.
     pub repositories: Vec<(MachineId, String)>,
+    /// Documents with unsaved changes: quitting would lose them.
+    pub unsaved: usize,
 }
 
 impl World {
@@ -278,6 +280,7 @@ impl World {
             scale,
             prefs: Prefs::default(),
             repositories: Vec::new(),
+            unsaved: 0,
         }
     }
 
@@ -322,6 +325,12 @@ impl World {
     /// The same world knowing the session the keyboard is on runs elsewhere.
     pub fn with_elsewhere(mut self, elsewhere: Option<ElsewhereTarget>) -> Self {
         self.elsewhere = elsewhere;
+        self
+    }
+
+    /// The same world knowing how many documents have unsaved changes.
+    pub fn with_unsaved(mut self, unsaved: usize) -> Self {
+        self.unsaved = unsaved;
         self
     }
 
@@ -1133,31 +1142,40 @@ fn choose_theme(answers: &[String], world: &World) -> Outcome {
 /// answer, which `Enter` takes, is to quit.
 fn quit(answers: &[String], world: &World) -> Outcome {
     let busy = world.live.iter().filter(|session| session.busy).count();
-    let ask = world.prefs.quit.asks(busy);
+    let unsaved = world.unsaved;
+    let ask = world.prefs.quit.asks(busy) || unsaved > 0;
     match answers {
         [] if !ask => Outcome::Run(Action::Quit),
-        [] => choices(
-            "Quit Leon?",
-            vec![
-                Choice::new(
-                    match busy {
-                        0 => format!("Quit {}", crate::product::PRODUCT_NAME),
-                        1 => format!(
-                            "Quit {}: 1 running session will be closed.",
-                            crate::product::PRODUCT_NAME
-                        ),
-                        busy => format!(
-                            "Quit {}: {busy} running sessions will be closed.",
-                            crate::product::PRODUCT_NAME
-                        ),
-                    },
-                    "hangs the terminals up",
-                    "yes",
+        [] => {
+            let mut what = Vec::new();
+            match busy {
+                0 => {}
+                1 => what.push("1 running session will be closed".to_owned()),
+                busy => what.push(format!("{busy} running sessions will be closed")),
+            }
+            match unsaved {
+                0 => {}
+                1 => what.push(
+                    "1 document with unsaved changes keeps its last saved version".to_owned(),
                 ),
-                Choice::new("Cancel", "keep working", "no"),
-            ],
-            Custom::No,
-        ),
+                unsaved => what.push(format!(
+                    "{unsaved} documents with unsaved changes keep their last saved version"
+                )),
+            }
+            let detail = what.join(" and ");
+            choices(
+                "Quit Leon?",
+                vec![
+                    Choice::new(
+                        format!("Quit {}", crate::product::PRODUCT_NAME),
+                        detail,
+                        "yes",
+                    ),
+                    Choice::new("Cancel", "keep working", "no"),
+                ],
+                Custom::No,
+            )
+        }
         [chosen, ..] if chosen == "yes" => Outcome::Run(Action::Quit),
         _ => Outcome::Run(Action::Nothing),
     }
@@ -1422,6 +1440,7 @@ mod tests {
             scale: 100,
             prefs: Prefs::default(),
             repositories: Vec::new(),
+            unsaved: 0,
         }
     }
 
@@ -2357,6 +2376,28 @@ mod tests {
         assert_eq!(
             advance(Command::Quit, &[], &idle),
             Outcome::Run(Action::Quit)
+        );
+    }
+
+    #[test]
+    fn unsaved_documents_make_quitting_ask_whatever_the_setting_says() {
+        let mut world = with(Prefs {
+            quit: QuitConfirm::Never,
+            ..Prefs::default()
+        });
+        world.unsaved = 2;
+        let Outcome::Ask(step) = advance(Command::Quit, &[], &world) else {
+            panic!("a question");
+        };
+        let StepKind::Choices { choices, .. } = step.kind else {
+            panic!("choices");
+        };
+        assert!(
+            choices[0]
+                .detail
+                .contains("2 documents with unsaved changes"),
+            "{}",
+            choices[0].detail
         );
     }
 

@@ -40,7 +40,8 @@ use crate::launch::{self, System};
 use crate::settings::{self, AppearanceChoice};
 use crate::theme::{self, metrics, palette, px, Appearance, Palette as Colours};
 use chrono::{DateTime, Utc};
-use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::input::{EditorState, InputEvent, InputState};
+use gpui_kit::component::text::TextViewState;
 use gpui_kit::prelude::*;
 use gpui_kit::{
     div, App, Context, Div, Entity, FocusHandle, Keystroke, ListAlignment, ListOffset, ListState,
@@ -108,6 +109,8 @@ pub enum Overlay {
 pub enum Picked {
     /// The folder that was chosen.
     Folder(PathBuf),
+    /// The file that was chosen.
+    File(PathBuf),
     /// Nothing was chosen.
     Cancelled,
     /// The platform has no folder picker to show.
@@ -140,6 +143,22 @@ pub fn system_picker(cx: &mut App) -> Task<Picked> {
     })
 }
 
+/// The system's own file picker, for "Open file…".
+pub fn system_file_picker(cx: &mut App) -> Task<Picked> {
+    tracing::info!("opening the system file dialog (prompt_for_paths)");
+    let paths = cx.prompt_for_paths(PathPromptOptions {
+        files: true,
+        directories: false,
+        multiple: false,
+        prompt: Some("Open file".into()),
+    });
+    cx.spawn(async move |_| match paths.await {
+        Ok(Ok(Some(mut paths))) => paths.pop().map_or(Picked::Cancelled, Picked::File),
+        Ok(Ok(None)) => Picked::Cancelled,
+        _ => Picked::Unavailable,
+    })
+}
+
 /// What tests replace so that nothing waits on the clock, the calendar or a
 /// system dialog.
 #[derive(Clone)]
@@ -154,6 +173,10 @@ pub struct Options {
     pub now: fn() -> DateTime<Utc>,
     /// How a folder is picked on this computer.
     pub pick_folder: PickFolder,
+    /// How a file is picked on this computer, for "Open file…".
+    pub pick_file: PickFolder,
+    /// A file to open when the window opens: the command line's argument.
+    pub start: Option<PathBuf>,
     /// What this computer is asked when a session starts: where the agents
     /// are, which shell is the login shell, whether a folder exists.
     pub system: Rc<dyn System>,
@@ -227,6 +250,8 @@ impl Default for Options {
             search_debounce: super::palette::SEARCH_DEBOUNCE,
             now: Utc::now,
             pick_folder: Rc::new(system_picker),
+            pick_file: Rc::new(system_file_picker),
+            start: None,
             system: Rc::new(launch::RealSystem),
             reveal: Rc::new(|cx, path| cx.reveal_path(path)),
             backend: Rc::new(Pty::default()),
@@ -321,6 +346,48 @@ impl Transcript {
     }
 }
 
+/// Whether a document is being read, or written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocMode {
+    /// The rendered long text.
+    Rendered,
+    /// The source, in the editor.
+    Editing,
+}
+
+/// A Markdown file open in the main pane.
+pub struct Document {
+    /// Where it lives.
+    pub machine: MachineId,
+    /// That machine's name, as the header shows it.
+    pub machine_name: String,
+    /// Its absolute path on that machine.
+    pub path: String,
+    /// The text as it was last read or saved: what "unsaved" is about.
+    pub contents: String,
+    /// Edited text that is not the file's (a draft brought back, or the
+    /// rendered view's working copy), when there is one.
+    pub draft: Option<String>,
+    /// The revision a save insists on finding again.
+    pub revision: Option<String>,
+    /// Whether the read came back.
+    pub loaded: bool,
+    /// Rendered or editing.
+    pub mode: DocMode,
+    /// The rich text, kept so its scroll and selection survive a re-render.
+    pub rendered: Entity<TextViewState>,
+    /// The editor, made the first time this document is edited.
+    pub editor: Option<Entity<EditorState>>,
+    /// The editor's edits, while this document holds one.
+    pub changes: Option<Subscription>,
+    /// Changes made and not saved.
+    pub dirty: bool,
+    /// A write is on its way.
+    pub saving: bool,
+    /// Why it could not be read.
+    pub failed: Option<String>,
+}
+
 /// What the main pane shows.
 pub enum Main {
     /// Nothing is open.
@@ -331,6 +398,8 @@ pub enum Main {
     Worktree(ProjectId, WorktreeId),
     /// A session's transcript.
     Session(Box<Transcript>),
+    /// A Markdown file.
+    Document(Box<Document>),
     /// A live terminal session.
     Live(LiveId),
 }
@@ -350,6 +419,16 @@ pub struct Shell {
     pub(super) cursor: Option<usize>,
     pub(super) tree_scroll: UniformListScrollHandle,
     pub(super) main: Main,
+    /// Edited but unsaved document text, by machine and path, kept while the
+    /// application lives so browsing away loses nothing.
+    pub(super) drafts: std::collections::HashMap<String, String>,
+    /// Which document was asked for last: a read that lands late only fills
+    /// its own.
+    pub(super) document_seq: u64,
+    /// The read or write of the open document, while one runs.
+    pub(super) document_task: Option<Task<()>>,
+    /// The files panel on the right.
+    pub(super) files: super::files::FilesUi,
     /// The terminals that are running.
     pub(super) live: Sessions,
     /// How the terminals are laid out: workspaces of tabs of split panes.
@@ -397,7 +476,7 @@ pub struct Shell {
     menu_state: crate::menus::Availability,
     pub(super) viewport: Size<gpui_kit::Pixels>,
     loading: Option<Task<()>>,
-    picking: Option<Task<()>>,
+    pub(super) picking: Option<Task<()>>,
     opening: Option<Task<()>>,
     /// The check of a remote machine and folder before a session is resumed
     /// there.
@@ -554,6 +633,7 @@ impl Shell {
         });
         let focus = cx.focus_handle();
         focus.focus(window, cx);
+        let start = options.start.clone();
         let mut shell = Self {
             engine,
             options,
@@ -568,6 +648,10 @@ impl Shell {
             cursor,
             tree_scroll: UniformListScrollHandle::new(),
             main: Main::Empty,
+            drafts: std::collections::HashMap::new(),
+            document_seq: 0,
+            document_task: None,
+            files: super::files::FilesUi::default(),
             live: Sessions::default(),
             workspaces: Workspaces::default(),
             palette,
@@ -610,6 +694,10 @@ impl Shell {
         shell.load_logos(cx);
         shell.watch_themes(cx);
         shell.watch_elsewhere(window, cx);
+        // The command line may have named a file to open.
+        if let Some(path) = start {
+            shell.open_document(MachineId::local(), path.to_string_lossy().into_owned(), cx);
+        }
         shell.usage_reload();
         shell.watch_usage(window, cx);
         // Values of settings.json that could not be used were read as defaults.
@@ -741,7 +829,7 @@ impl Shell {
                 .project(project)
                 .is_some_and(|entry| entry.worktrees.iter().any(|w| &w.id == worktree)),
             Main::Live(id) => self.live.get(*id).is_none(),
-            Main::Empty | Main::Session(_) => false,
+            Main::Empty | Main::Session(_) | Main::Document(_) => false,
         };
         if gone {
             self.main = Main::Empty;
@@ -835,6 +923,7 @@ impl Shell {
                 likely: !found.is_certain(),
             })
         }))
+        .with_unsaved(self.unsaved_documents())
         .with_resume(self.here_session().map(|session| {
             let root = tree::workspace_root(&self.snapshot, &session.machine_id, &session.cwd);
             let project = tree::detail_of_root(&self.snapshot, &session.machine_id, &root)
@@ -1063,6 +1152,7 @@ impl Shell {
                 .project(id)
                 .map(|entry| entry.project.machine_id.clone()),
             Main::Session(transcript) => Some(transcript.session.machine_id.clone()),
+            Main::Document(document) => Some(document.machine.clone()),
             Main::Live(id) => self.live.get(*id).map(|session| session.machine.clone()),
             Main::Empty => None,
         };
@@ -1127,6 +1217,12 @@ impl Shell {
                     transcript.session.machine_id.clone(),
                     transcript.session.project_id.clone(),
                     transcript.session.cwd.clone(),
+                )),
+                Main::Document(document) => Some((
+                    document.machine.clone(),
+                    None,
+                    super::document::folder_of(&document.path)
+                        .unwrap_or_else(|| document.path.clone()),
                 )),
                 Main::Live(id) => {
                     let session = self.live.get(*id)?;
@@ -1291,6 +1387,7 @@ impl Shell {
         if self.snapshot.project(id).is_none() {
             return;
         }
+        self.leave_document(cx);
         self.main = Main::Project(id.clone());
         self.show(&NodeId::Project(id.clone()));
         cx.notify();
@@ -1310,6 +1407,7 @@ impl Shell {
         if !known {
             return;
         }
+        self.leave_document(cx);
         self.main = Main::Worktree(project.clone(), worktree.clone());
         self.show(&NodeId::Worktree(worktree.clone()));
         cx.notify();
@@ -1337,6 +1435,7 @@ impl Shell {
     ) {
         let id = session.id.clone();
         self.show(&NodeId::Session(id.clone()));
+        self.leave_document(cx);
         self.main = Main::Session(Box::new(Transcript {
             session,
             messages: None,
@@ -1384,6 +1483,7 @@ impl Shell {
             let picked = picking.await;
             this.update_in(cx, |this, window, cx| match picked {
                 Picked::Folder(path) => this.open_folder(path, cx),
+                Picked::File(path) => this.open_folder(path, cx),
                 Picked::Cancelled => {}
                 Picked::Unavailable => {
                     let _ = window;
@@ -1513,6 +1613,16 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> bool {
         use Command as C;
+        // Escape leaves the document's editor first; a second one goes back.
+        if command == C::Close
+            && self.overlay == Overlay::None
+            && matches!(&self.main, Main::Document(document) if matches!(document.mode, DocMode::Editing))
+        {
+            self.toggle_document_mode(window, cx);
+            self.sync_focus(window, cx);
+            cx.notify();
+            return true;
+        }
         // What acts on the tree has the tree showing first.
         if matches!(
             command,
@@ -1579,6 +1689,10 @@ impl Shell {
             C::CopySessionId => self.copy_session_id_here(cx),
             C::Reveal => self.reveal_here(cx),
             C::OpenTranscript => self.open_transcript_here(cx),
+            C::OpenFile => self.open_file(window, cx),
+            C::SaveDocument => self.save_document(cx),
+            C::ToggleDocumentMode => self.toggle_document_mode(window, cx),
+            C::ToggleFiles => self.toggle_files(window, cx),
             C::FocusTerminal => self.focus_terminal(window, cx),
             C::SplitRight => self.split_pane(Axis::Row, window, cx),
             C::SplitDown => self.split_pane(Axis::Column, window, cx),
@@ -1754,7 +1868,7 @@ impl Shell {
 
     /// Moves the cursor of the pane that has the keyboard (or scrolls the
     /// sheet, while it is open).
-    fn move_cursor(&mut self, command: Command, _cx: &mut Context<Self>) {
+    fn move_cursor(&mut self, command: Command, cx: &mut Context<Self>) {
         use Command as C;
         if matches!(self.overlay, Overlay::Shortcuts | Overlay::Problems) {
             let page = (self.viewport.height.as_f32() * 0.6).max(120.);
@@ -1790,9 +1904,9 @@ impl Shell {
                 }
             }
             Pane::Main => {
-                if let Main::Session(transcript) = &self.main {
-                    let page = px((self.viewport.height.as_f32() * 0.7).max(120.));
-                    match command {
+                let page = px((self.viewport.height.as_f32() * 0.7).max(120.));
+                match &self.main {
+                    Main::Session(transcript) => match command {
                         C::Down => transcript.list.scroll_by(px(48.)),
                         C::Up => transcript.list.scroll_by(px(-48.)),
                         C::PageDown => transcript.list.scroll_by(page),
@@ -1809,7 +1923,11 @@ impl Shell {
                             })
                         }
                         _ => {}
+                    },
+                    Main::Document(document) => {
+                        super::document::scroll_document(document, command, page, cx);
                     }
+                    _ => {}
                 }
             }
         }
@@ -1843,6 +1961,7 @@ impl Shell {
                     None => self.resume_session(session, window, cx),
                 }
             }
+            (Pane::Main, Main::Document(_)) => self.toggle_document_mode(window, cx),
             (Pane::Main, _) => {}
         }
     }
@@ -2190,6 +2309,11 @@ impl Shell {
                 window.viewport_size().height.as_f32(),
             ),
             sidebar: metrics::SIDEBAR_WIDTH().as_f32(),
+            files: if self.files.visible {
+                metrics::FILES_WIDTH().as_f32()
+            } else {
+                0.0
+            },
             header: metrics::HEADER_HEIGHT().as_f32(),
             status: metrics::FOOTER_HEIGHT().as_f32(),
             tools: metrics::TOOLS_HEIGHT().as_f32(),
@@ -2309,6 +2433,16 @@ impl Render for Shell {
                 this.child(self.render_sidebar(&colours, cx))
             })
             .child(self.render_main_pane(&colours, cx))
+            .when(self.files.visible, |this| {
+                this.child(self.render_files(&colours, cx))
+            })
+            // A Markdown file dropped anywhere but on a terminal (the
+            // terminal handles its own drops and stops them here) opens.
+            .on_drop(
+                cx.listener(|this, dropped: &gpui_kit::ExternalPaths, window, cx| {
+                    this.open_dropped(dropped, window, cx);
+                }),
+            )
             // The crosshairs, where the rules of the window meet.
             .children(lines::crosshairs(&self.line_frame(window), &colours))
             .when(settings::get(cx).sidebar_visible, |this| {

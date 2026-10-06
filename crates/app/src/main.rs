@@ -218,6 +218,8 @@ fn main() {
         appearance: options.theme,
         theme: theme_name,
     };
+    // The file the command line asked for, if any.
+    let start_file = options.open.clone();
     let settings_file = data_dir.join(settings::FILE_NAME);
     gpui_kit::application()
         .with_assets(icons::Assets)
@@ -251,6 +253,7 @@ fn main() {
                     let options = ui::Options {
                         backend: backend.clone(),
                         remote: Some(remote_services.clone()),
+                        start: start_file.clone(),
                         ..ui::Options::default()
                     };
                     ui::Shell::new(engine, options, window, cx)

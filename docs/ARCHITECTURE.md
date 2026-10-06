@@ -392,10 +392,35 @@ chord and in the palette.
 
 Quitting (`Cmd+Q`, `Ctrl+Shift+Q`, closing the window) asks, by the
 `quit_confirmation` setting, only while a program runs in a terminal (or cannot be known, as over SSH; the default),
-always, or never; then it hangs
+always, or never; a document edited but not saved makes it ask whatever the
+setting says, and says how many. Then it hangs
 the terminals up and flushes the state beside the settings. The sidebar's
 visibility and width are in `settings.json`; `theme::metrics::SIDEBAR_WIDTH` is
 zero while it is hidden, so every layout that reads it follows.
+
+## Markdown documents and the files panel
+
+A `.md` file opens in the main pane as a `Main::Document` (`ui/shell.rs`), read
+and written through the engine: `Engine::read_file` and `write_file` for a file
+on any machine (one `leon_remote::files` command each on another one, through
+SSH or the relay; local files directly) and `Engine::list_files` for a folder.
+The pane renders the file with the component library's rich text view and edits
+it with its code editor (`ui/document.rs`); `E` switches between them and
+`Cmd`/`Ctrl+S` saves. A read carries a revision — a `cksum` on another machine,
+modification time and size locally — and a save that finds a different one is
+refused rather than overwriting somebody else's change. A file edited and left
+unsaved becomes a draft in `Shell::drafts`: reopening the file brings it back,
+marked unsaved, and the quit question counts it.
+
+The files panel (`ui/files.rs`) is the listing of the project or worktree the
+keyboard is on, on the right of the main pane and hidden until `ToggleFiles`.
+`Engine::list_files` asks git for the tracked and untracked-not-ignored files
+(`git ls-files --cached --others --exclude-standard`, no shell involved, so it
+works on Windows too) and walks the folder when it is not a repository. The
+tree itself — folders first at every level, what an open folder reveals — is the
+pure `rows` function. Clicking a Markdown row opens the file. The panel is a
+flex child after the main pane; `lines::Frame::files` keeps the crosshairs on
+its rule.
 
 ## The terminal's buffer: find, clear, copy, save
 

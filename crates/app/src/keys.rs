@@ -160,6 +160,14 @@ pub enum Command {
     /// Shows the stored transcript of the history session the keyboard is on
     /// (or that the focused terminal resumed), without starting anything.
     OpenTranscript,
+    /// Opens a Markdown file with the system's file dialog.
+    OpenFile,
+    /// Saves the document open in the main pane where it lives.
+    SaveDocument,
+    /// Switches the open document between the rendered view and the editor.
+    ToggleDocumentMode,
+    /// Shows or hides the files panel on the right.
+    ToggleFiles,
     /// Removes the history session the keyboard is on from the store, after
     /// asking.
     RemoveFromHistory,
@@ -898,6 +906,17 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::ToggleFiles,
+        "Show or hide the files",
+        S::Panes,
+        W::Anywhere,
+        &[
+            mac(secondary_shift("e")),
+            other(with_alt(secondary_shift("e"))),
+        ],
+        true,
+    ),
+    bind(
         C::FocusMain,
         "Focus the main pane",
         S::Panes,
@@ -1186,6 +1205,33 @@ pub const BINDINGS: &[Binding] = &[
         S::Create,
         W::Anywhere,
         &[secondary_shift("l")],
+        true,
+    ),
+    bind(
+        C::OpenFile,
+        "Open a file\u{2026}",
+        S::Create,
+        W::Anywhere,
+        &[
+            mac(secondary_shift("o")),
+            other(with_alt(secondary_shift("o"))),
+        ],
+        true,
+    ),
+    bind(
+        C::SaveDocument,
+        "Save the document",
+        S::Create,
+        W::Anywhere,
+        &[secondary("s")],
+        true,
+    ),
+    bind(
+        C::ToggleDocumentMode,
+        "Edit the document",
+        S::Create,
+        W::Panes,
+        &[key("e")],
         true,
     ),
     bind(
@@ -1735,6 +1781,10 @@ pub fn keywords(command: Command) -> &'static str {
         C::ShowUsage | C::RefreshUsage => "limits quota rate tokens credits remaining percent reset five hour weekly claude codex opencode",
         C::OpenSettingsFile => "preferences json edit configuration config file",
         C::RevealSettingsFolder => "preferences json configuration config finder directory data",
+        C::OpenFile => "open markdown md readme document view preview read file",
+        C::SaveDocument => "save write document markdown md file",
+        C::ToggleDocumentMode => "edit markdown md document source preview write toggle",
+        C::ToggleFiles => "files tree explorer browser panel right markdown project",
         _ => "",
     }
 }
@@ -1908,6 +1958,10 @@ mod tests {
             C::CopySessionId,
             C::Reveal,
             C::OpenTranscript,
+            C::OpenFile,
+            C::SaveDocument,
+            C::ToggleDocumentMode,
+            C::ToggleFiles,
             C::RemoveFromHistory,
             C::ContextMenu,
             C::CloseSession,
@@ -2022,6 +2076,10 @@ mod tests {
                 | C::CopySessionId
                 | C::Reveal
                 | C::OpenTranscript
+                | C::OpenFile
+                | C::SaveDocument
+                | C::ToggleDocumentMode
+                | C::ToggleFiles
                 | C::RemoveFromHistory
                 | C::ContextMenu
                 | C::CloseSession
@@ -2130,7 +2188,7 @@ mod tests {
                     if let Some((other, other_when)) =
                         taken.insert(id, (binding.command, binding.when))
                     {
-                        // The one deliberate sharing: a chord that means
+                        // The deliberate sharings: a chord that means
                         // something only while a terminal has the keyboard,
                         // listed before (so winning over) the command it
                         // shares the chord with everywhere else.
@@ -2138,7 +2196,9 @@ mod tests {
                             && binding.when != When::Terminal
                             && matches!(
                                 (other, binding.command),
-                                (C::ClearBuffer, C::GoTo) | (C::Find, C::FilterProjects)
+                                (C::ClearBuffer, C::GoTo)
+                                    | (C::Find, C::FilterProjects)
+                                    | (C::SaveOutput, C::SaveDocument)
                             );
                         assert!(
                             deliberate,

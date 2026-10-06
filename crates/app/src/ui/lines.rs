@@ -47,6 +47,9 @@ pub struct Frame<'a> {
     pub viewport: (f32, f32),
     /// Width of the sidebar, its rule included.
     pub sidebar: f32,
+    /// Width of the files panel on the right, its rule included; zero while
+    /// it is hidden.
+    pub files: f32,
     /// Height of the header strips, their rule included.
     pub header: f32,
     /// Height of the status strip, its rule included.
@@ -150,6 +153,9 @@ pub fn marks(frame: &Frame, set: Crosshairs) -> Vec<Mark> {
         return all;
     }
     let (width, height) = frame.viewport;
+    // The right edge of the main area: the window's, or the files panel's
+    // rule.
+    let right = width - frame.files;
     // ...the rule over the status strip and the one over the sidebar's tools,
     // which are one rule where the theme aligns them...
     if ruled {
@@ -174,13 +180,25 @@ pub fn marks(frame: &Frame, set: Crosshairs) -> Vec<Mark> {
         }
         None => frame.header,
     };
+    // The files panel's rule meets the header, tab and status rules.
+    if frame.files > 0.0 {
+        put("header-files".to_owned(), right, frame.header);
+        put(
+            "footer-files".to_owned(),
+            right,
+            height - frame.status + 1.0,
+        );
+        if let Some(tabs) = frame.tabs {
+            put("tabs-files".to_owned(), right, frame.header + tabs);
+        }
+    }
     // Split panes: each divider ends on a rule (the header or tab rule, the
     // status rule, the sidebar's rule or the divider of a split around it).
     if let Some(layout) = frame.layout {
         let area = [
             frame.sidebar,
             top,
-            width - frame.sidebar,
+            right - frame.sidebar,
             height - frame.status - top,
         ];
         for divider in dividers(layout, area) {
@@ -388,6 +406,7 @@ mod tests {
         Frame {
             viewport: (1000.0, 600.0),
             sidebar: 320.0,
+            files: 0.0,
             header: 48.0,
             status: 41.0,
             tools: 41.0,
@@ -445,6 +464,32 @@ mod tests {
         let mut tabbed = frame(None);
         tabbed.tabs = Some(30.0);
         assert_eq!(at(&marks(&tabbed, Crosshairs::All), "tabs"), (320.0, 78.0));
+    }
+
+    #[test]
+    fn the_files_panel_rule_is_marked_where_it_meets_the_others() {
+        let mut panel = frame(None);
+        panel.files = 272.0;
+        panel.tabs = Some(30.0);
+        let all = marks(&panel, Crosshairs::All);
+        assert_eq!(at(&all, "header-files"), (1000.0 - 272.0, 48.0));
+        assert_eq!(
+            at(&all, "footer-files"),
+            (1000.0 - 272.0, 600.0 - 41.0 + 1.0)
+        );
+        assert_eq!(at(&all, "tabs-files"), (1000.0 - 272.0, 78.0));
+    }
+
+    #[test]
+    fn a_divider_ends_on_the_files_panels_rule_when_it_is_open() {
+        let layout = two();
+        let mut panel = frame(Some(&layout));
+        panel.files = 272.0;
+        let all = marks(&panel, Crosshairs::All);
+        // The area is now 408 wide: the first pane is 204, the divider's
+        // right edge is at 525.
+        assert_eq!(at(&all, "divider--start"), (525.0, 48.0));
+        assert_eq!(at(&all, "divider--end"), (525.0, 600.0 - 41.0 + 1.0));
     }
 
     #[test]

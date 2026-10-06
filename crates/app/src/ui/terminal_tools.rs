@@ -226,6 +226,7 @@ impl Shell {
         self.saving = Some(cx.spawn(async move |_, cx| {
             let path = match dialog.await {
                 Picked::Folder(path) => path,
+                Picked::File(path) => path,
                 Picked::Cancelled => return,
                 Picked::Unavailable => {
                     engine.report(StatusKind::Error, "This system has no save dialog.");

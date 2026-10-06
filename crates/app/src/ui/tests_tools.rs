@@ -467,9 +467,7 @@ fn quitting_with_a_program_running_asks_and_escape_cancels_and_enter_quits_and_h
     assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Palette);
     let titles = h.palette_titles(cx);
     assert!(
-        titles
-            .iter()
-            .any(|title| title == "Quit Leon: 1 running session will be closed."),
+        titles.iter().any(|title| title == "Quit Leon"),
         "{titles:?}"
     );
     h.press("escape", cx);

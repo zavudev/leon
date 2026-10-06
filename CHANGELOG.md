@@ -4,6 +4,21 @@
 
 ### Added
 
+* **Markdown documents.** `.md` files open in the main pane, rendered
+  (headings, lists, tables, quotes, task lists, code, links and images) or
+  edited in place with the component library's editor. `Cmd`/`Ctrl+S` saves;
+  a file somebody else changed since it was read is not overwritten; and
+  changes left unsaved survive browsing away as drafts. A file opens from the
+  system's dialog (`Open a file…`), the command line (`leon README.md`), a drop
+  on the window, or the files panel.
+* **A files panel** on the right, hidden until asked for (`Show or hide the
+  files`), listing the files of the project or worktree the keyboard is on as
+  git sees them (tracked and untracked-not-ignored, so `target/` and
+  `node_modules/` stay out) — on this computer or another machine.
+* Reading, writing and listing files on a machine: `leon-remote::files` builds
+  one command per file, the engine runs it where the file lives, and a write on
+  another computer carries its bytes as the command's standard input (wire
+  protocol version 2).
 * Usage limits: a footer with each agent's primary window (five-hour, weekly,
   per-model) for the machine in context, a usage view (`Show usage`) with
   Detailed and Compact modes, per-machine readings, a burn-rate estimate, a

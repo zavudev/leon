@@ -590,6 +590,14 @@ pub mod metrics {
     pub fn SETTINGS_WIDTH() -> Pixels {
         token(960.0)
     }
+    /// Width of the files panel on the right of the main pane.
+    pub fn FILES_WIDTH() -> Pixels {
+        token(272.0)
+    }
+    /// The widest a document's column of text grows; a wider pane centres it.
+    pub fn DOCUMENT_WIDTH() -> Pixels {
+        token(760.0)
+    }
     /// Width of the Settings card's list of sections.
     pub fn SETTINGS_NAV() -> Pixels {
         token(208.0)

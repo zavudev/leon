@@ -92,19 +92,22 @@ pub struct Options {
     pub theme: Option<AppearanceChoice>,
     /// The theme for this run, over the saved one.
     pub theme_name: Option<ThemeId>,
+    /// A file to open in the window: the command line's positional argument.
+    pub open: Option<PathBuf>,
 }
 
 /// The text printed by `--help`.
 pub fn usage() -> String {
     format!(
         "{name} {version}\n\n\
-         Usage: {slug} [options]\n       {slug} host [--pair] | pair | devices | status | revoke <device>   (share this computer; see `{slug} host --help`)\n\n\
+         Usage: {slug} [options] [file.md]\n       {slug} host [--pair] | pair | devices | status | revoke <device>   (share this computer; see `{slug} host --help`)\n\n\
          Options:\n  \
          --data-dir <path>              Keep the database and settings here\n  \
          --theme <light|dark|system>    Use this appearance for this run\n  \
          --theme-name <id>              Use this theme for this run: {names}, or a user theme's id\n  \
          -h, --help                     Print this help\n  \
-         -V, --version                  Print the version",
+         -V, --version                  Print the version\n\n\
+         A Markdown file on its own opens it in the window.",
         name = product::PRODUCT_NAME,
         version = product::VERSION,
         slug = product::SLUG,
@@ -270,7 +273,16 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                 }
                 options.theme_name = Some(crate::theme::registry::id_of(&text));
             }
-            other => return Err(format!("Unknown option {other:?}.")),
+            other => {
+                // A path on its own opens that file in the window.
+                if other.starts_with('-') {
+                    return Err(format!("Unknown option {other:?}."));
+                }
+                if options.open.is_some() {
+                    return Err("Only one file can be opened.".to_owned());
+                }
+                options.open = Some(PathBuf::from(other));
+            }
         }
     }
     if usage {
@@ -348,6 +360,7 @@ mod tests {
             data_dir: Some(PathBuf::from("/tmp/leon")),
             theme: None,
             theme_name: None,
+            open: None,
         }));
         assert_eq!(parsed(&["--data-dir", "/tmp/leon"]), expected);
         assert_eq!(parsed(&["--data-dir=/tmp/leon"]), expected);
@@ -361,6 +374,7 @@ mod tests {
                 data_dir: None,
                 theme: Some(AppearanceChoice::Light),
                 theme_name: None,
+                open: None,
             }))
         );
     }
@@ -373,6 +387,7 @@ mod tests {
                 data_dir: Some(PathBuf::from("d")),
                 theme: Some(AppearanceChoice::Dark),
                 theme_name: None,
+                open: None,
             }))
         );
     }
@@ -385,6 +400,7 @@ mod tests {
                 data_dir: None,
                 theme: Some(AppearanceChoice::Light),
                 theme_name: Some(ThemeId::Leon),
+                open: None,
             }))
         );
         assert_eq!(
@@ -394,6 +410,27 @@ mod tests {
                 ..Options::default()
             }))
         );
+    }
+
+    #[test]
+    fn a_path_on_its_own_is_the_file_to_open() {
+        assert_eq!(
+            parsed(&["README.md"]),
+            Ok(Command::Run(Options {
+                open: Some(PathBuf::from("README.md")),
+                ..Options::default()
+            }))
+        );
+        assert_eq!(
+            parsed(&["--theme=dark", "docs/NOTES.md"]),
+            Ok(Command::Run(Options {
+                theme: Some(AppearanceChoice::Dark),
+                open: Some(PathBuf::from("docs/NOTES.md")),
+                ..Options::default()
+            }))
+        );
+        assert!(parsed(&["one.md", "two.md"]).is_err());
+        assert!(parsed(&["--nope"]).is_err(), "an option is still an option");
     }
 
     #[test]
@@ -442,7 +479,9 @@ mod tests {
         assert!(parsed(&["--theme", "solarized"])
             .unwrap_err()
             .contains("solarized"));
-        assert!(parsed(&["stray"]).is_err());
+        // A word that is not an option is a file to open, so the error case
+        // is an option-like word.
+        assert!(parsed(&["-x"]).is_err());
     }
 
     #[test]

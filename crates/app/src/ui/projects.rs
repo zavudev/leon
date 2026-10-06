@@ -202,6 +202,7 @@ impl Shell {
             let picked = picking.await;
             this.update(cx, |this, _| match picked {
                 Picked::Folder(path) => this.engine.submit(Op::SetIcon { project, path }),
+                Picked::File(_) => {}
                 Picked::Cancelled => {}
                 Picked::Unavailable => this.engine.report(
                     StatusKind::Error,

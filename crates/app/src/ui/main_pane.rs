@@ -29,6 +29,7 @@ impl Shell {
             Main::Project(id) => self.render_project(id, colours),
             Main::Worktree(project, worktree) => self.render_worktree(project, worktree, colours),
             Main::Session(transcript) => self.render_transcript(transcript, colours, cx),
+            Main::Document(document) => self.render_document(document, colours),
             Main::Live(id) => self.render_live(*id, colours, cx),
         };
         let agent = self.main_agent();
@@ -153,6 +154,7 @@ impl Shell {
             }),
             Main::Live(id) => self.live.get(*id).map(|session| session.cwd.clone()),
             Main::Session(transcript) => Some(transcript.session.cwd.clone()),
+            Main::Document(document) => Some(document.path.clone()),
             Main::Empty => None,
         };
         match path.filter(|path| !path.is_empty()).and_then(|path| {
@@ -293,6 +295,11 @@ impl Shell {
                     ),
                 )
             }
+            Main::Document(document) => (
+                "Document",
+                super::document::name_of(&document.path),
+                self.document_meta(document),
+            ),
         }
     }
 

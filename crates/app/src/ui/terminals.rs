@@ -526,6 +526,7 @@ impl Shell {
         let thresholds = self.options.activity;
         self.set_activity(id, &thresholds, cx);
         self.workspaces.focus(id);
+        self.leave_document(cx);
         self.main = Main::Live(id);
         self.pane = Pane::Main;
         // A terminal that resumed a history session is that session's row.
@@ -570,6 +571,7 @@ impl Shell {
             Closed::Focus(next) if was_open => self.open_live(next, window, cx),
             Closed::Empty if was_open => {
                 let root = tree::workspace_root(&self.snapshot, &place.0, &place.1);
+                self.leave_document(cx);
                 self.main = match tree::detail_of_root(&self.snapshot, &place.0, &root) {
                     Some((project, Some(worktree))) => Main::Worktree(project, worktree),
                     Some((project, None)) => Main::Project(project),

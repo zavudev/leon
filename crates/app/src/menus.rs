@@ -119,9 +119,11 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
             Cmd(C::OpenShell),
             Cmd(C::NewWorktree),
             Cmd(C::OpenProject),
+            Cmd(C::OpenFile),
             Cmd(C::AddMachine),
             Cmd(C::ShareMachine),
             Sep,
+            Cmd(C::SaveDocument),
             Cmd(C::SaveOutput),
             Cmd(C::SaveOutputAnsi),
             Sep,
@@ -161,6 +163,8 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
             Cmd(C::GoTo),
             Sep,
             Cmd(C::ToggleSidebar),
+            Cmd(C::ToggleFiles),
+            Cmd(C::ToggleDocumentMode),
             Cmd(C::ShowUsage),
             Cmd(C::RefreshUsage),
             Cmd(C::FocusSidebar),
@@ -403,6 +407,17 @@ pub fn menu_chord(command: Command, mac: bool) -> Option<Chord> {
         .find(|chord| chord.secondary || chord.alt || chord.control)
 }
 
+/// The chord a menu item shows. `Cmd+S` saves the terminal's output while a
+/// terminal is on screen and the open document otherwise, so each menu shows
+/// the chord only on the command that has it now.
+pub fn menu_chord_for(command: Command, mac: bool, available: Availability) -> Option<Chord> {
+    match command {
+        C::SaveOutput if !available.terminal => None,
+        C::SaveDocument if available.terminal => None,
+        _ => menu_chord(command, mac),
+    }
+}
+
 /// A chord as GPUI writes keystrokes: `cmd-shift-k`.
 pub fn keystroke_of(chord: &Chord) -> String {
     let mut text = String::new();
@@ -435,7 +450,7 @@ pub fn spec(available: Availability, mac: bool) -> Vec<Spec> {
                     Entry::Separator => Item::Separator,
                     Entry::Standard(standard) => Item::Standard(*standard),
                     Entry::Command(command) => {
-                        let chord = menu_chord(*command, mac);
+                        let chord = menu_chord_for(*command, mac, available);
                         // The sidebar's item says what it will do.
                         let label = match command {
                             C::ToggleSidebar if available.sidebar => "Hide the sidebar",
@@ -610,7 +625,8 @@ mod tests {
                 if command != Command::ToggleSidebar {
                     assert_eq!(label, keys::label(command), "{command:?}");
                 }
-                let expected = menu_chord(command, true).map(|chord| chord.label_for(true));
+                let expected =
+                    menu_chord_for(command, true, everything()).map(|chord| chord.label_for(true));
                 assert_eq!(chord, expected, "{command:?}");
             }
         }

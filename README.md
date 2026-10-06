@@ -307,6 +307,7 @@ platform (see below).
 | Jump to machine 1 to 9 | `⌘1` | `Ctrl+1` |
 | Focus the sidebar | `⌘L` `⇧⌘B` | `Ctrl+L` `Ctrl+Shift+S` |
 | Show or hide the sidebar | `⌘B` | `Ctrl+Shift+B` |
+| Show or hide the files | `⇧⌘E` | `Ctrl+Shift+Alt+E` |
 | Make the sidebar wider | palette only | palette only |
 | Make the sidebar narrower | palette only | palette only |
 | Reset the sidebar's width | palette only | palette only |
@@ -349,6 +350,9 @@ platform (see below).
 | Copy the session id | palette only | palette only |
 | Reveal in the file manager | palette only | palette only |
 | Open the transcript | `⇧⌘L` | `Ctrl+Shift+L` |
+| Open a file… | `⇧⌘O` | `Ctrl+Shift+Alt+O` |
+| Save the document | `⌘S` | `Ctrl+S` |
+| Edit the document | `E` | `E` |
 | Remove from history | palette only | palette only |
 | **Terminal** | | |
 | Find in the terminal… | `⌘F` | `Ctrl+Shift+F` |
@@ -594,6 +598,29 @@ chords, in steps of two cells, never below a pane of 20 by 5 cells. The focused
 pane has the accent's outline when there are several; the cursor of an
 unfocused pane is hollow.
 
+### Documents: reading and editing Markdown
+
+Leon opens Markdown files where they live, on this computer or on any machine
+it reaches. `⇧⌘O` (`Ctrl+Shift+Alt+O` elsewhere) opens the system's file
+dialog; a `.md` file dropped on the window opens too; and the files panel
+(below) opens the ones of the project. The rendered view shows headings,
+lists, tables, quotes, task lists, code blocks, links and images, with links
+opening in the system's browser.
+
+`E` (or `Enter`, or the palette) switches between the rendered view and the
+editor: one plain text with undo, selection and the interface theme's colours.
+`⌘S` (`Ctrl+S` elsewhere) writes the file back where it lives, keeping its
+permissions; a file somebody else changed since it was read is not
+overwritten — the save says so and the text is kept. Leaving a document with
+unsaved changes keeps them as a draft: reopening the file brings them back,
+marked `UNSAVED` in the header, and quitting asks first. Files larger than
+2 MB and files that are not UTF-8 text are refused with a sentence that says
+which and why. The panel on the right lists the files of the project or
+worktree the keyboard is on — git's own view of them when it is a repository,
+so `target/` and `node_modules/` stay out — and marks the Markdown files with
+the accent; it is closed until `⇧⌘E` (`Ctrl+Shift+Alt+E` elsewhere) or the
+palette brings it in.
+
 ### The context menu
 
 Right-click a row, or press `Shift+F10`, the menu key or `m` while the tree
@@ -626,9 +653,11 @@ is on its chord and in the palette.
 `Cmd+Q` (`Ctrl+Shift+Q` on Linux and Windows, where a plain `Ctrl+Q` stays the
 program's) quits, and so does closing the window. With nothing running it quits
 at once; with programs running in terminals (or sessions whose state cannot be
-known, as over SSH) it asks first, `Enter` quits and `Esc` cancels: "Quit Leon:
-3 running sessions will be closed." Quitting hangs every terminal up and saves
-what is kept beside the settings. `About Leon` shows the version.
+known, as over SSH), or with documents edited but not saved, it asks first,
+`Enter` quits and `Esc` cancels: "Quit Leon", with "3 running sessions will be
+closed and 1 document with unsaved changes keeps its last saved version" under
+it. Quitting hangs every terminal up and saves what is kept beside the
+settings. `About Leon` shows the version.
 
 ### Find, clear, copy and save in a terminal
 

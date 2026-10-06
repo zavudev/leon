@@ -77,10 +77,13 @@ pub enum Read {
 }
 
 /// What the write command did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Write {
-    /// The file now holds the new bytes.
-    Saved,
+    /// The file now holds the new bytes, with this revision.
+    Saved {
+        /// The revision the file has after the write.
+        revision: String,
+    },
     /// The file changed since it was read; nothing was written.
     Changed,
     /// The file is gone; nothing was written.
@@ -113,7 +116,7 @@ if ! base64 -d > "$tmp" 2>/dev/null; then
   fi
 fi
 mv "$tmp" "$f" || { rm -f "$tmp"; printf 'LEON-FILE 1\nTMP\n'; exit 5; }
-printf 'LEON-FILE 1\nSAVED\n'
+printf 'LEON-FILE 1\nSAVED %s\n' "$(cksum < "$f")"
 "#;
 
 /// The command that lists the files under a folder: a git repository's
@@ -170,11 +173,12 @@ pub fn parse_write(output: &str) -> Option<Write> {
         return None;
     }
     match lines.next().unwrap_or_default() {
-        "SAVED" => Some(Write::Saved),
         "CHANGED" => Some(Write::Changed),
         "MISSING" => Some(Write::Missing),
         "SYMLINK" => Some(Write::Symlink),
-        _ => None,
+        line => line.strip_prefix("SAVED ").map(|revision| Write::Saved {
+            revision: revision.to_owned(),
+        }),
     }
 }
 
@@ -276,7 +280,12 @@ mod tests {
 
     #[test]
     fn the_write_parser_understands_every_answer() {
-        assert_eq!(parse_write("LEON-FILE 1\nSAVED\n"), Some(Write::Saved));
+        assert_eq!(
+            parse_write("LEON-FILE 1\nSAVED 1 2\n"),
+            Some(Write::Saved {
+                revision: "1 2".to_owned()
+            })
+        );
         assert_eq!(parse_write("LEON-FILE 1\nCHANGED\n"), Some(Write::Changed));
         assert_eq!(parse_write("LEON-FILE 1\nMISSING\n"), Some(Write::Missing));
         assert_eq!(parse_write("LEON-FILE 1\nSYMLINK\n"), Some(Write::Symlink));
@@ -368,10 +377,11 @@ mod shell_tests {
             &write_command(&path.to_string_lossy(), &revision),
             payload.as_bytes(),
         );
-        assert_eq!(
-            parse_write(&String::from_utf8_lossy(&output.stdout)),
-            Some(Write::Saved)
-        );
+        let written = parse_write(&String::from_utf8_lossy(&output.stdout)).expect("an answer");
+        let Write::Saved { revision } = written else {
+            panic!("expected a save, got {written:?}");
+        };
+        assert!(!revision.is_empty());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
     }
 

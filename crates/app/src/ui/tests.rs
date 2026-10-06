@@ -8,7 +8,7 @@
 
 use super::activity::Thresholds;
 use super::palette::{Item, Look, Scope};
-use super::shell::{Main, Options, Overlay, Pane, Picked, Shell};
+use super::shell::{DocMode, Main, Options, Overlay, Pane, Picked, Shell};
 use super::steps::StepKind;
 use super::terminals::Readiness;
 use super::tree::{self, Kind, NodeId};
@@ -286,6 +286,8 @@ struct Harness {
     ssh: Arc<tests_connect::FakeSsh>,
     /// What the key file dialog answers.
     key_answer: Rc<std::cell::RefCell<Picked>>,
+    /// What the "Open file…" dialog answers.
+    file_answer: Rc<std::cell::RefCell<Picked>>,
 }
 
 /// Opens the window over an in-memory store, with nothing waiting on the
@@ -348,6 +350,8 @@ fn open_full(
     let ssh = Arc::new(tests_connect::FakeSsh::default());
     let key_answer = Rc::new(std::cell::RefCell::new(Picked::Cancelled));
     let key_answer_in = key_answer.clone();
+    let file_answer = Rc::new(std::cell::RefCell::new(Picked::Cancelled));
+    let file_answer_in = file_answer.clone();
     let options = Options {
         backend: computer.clone(),
         ready: READY_NOW,
@@ -358,6 +362,8 @@ fn open_full(
             dialogs_in.set(dialogs_in.get() + 1);
             Task::ready(picked.clone())
         }),
+        pick_file: Rc::new(move |_| Task::ready(file_answer_in.borrow().clone())),
+        start: None,
         system: FakeSystem::new(),
         reveal: Rc::new(move |_, path| revealed_in.borrow_mut().push(path.to_path_buf())),
         activity: Thresholds::default(),
@@ -405,6 +411,7 @@ fn open_full(
         computer,
         ssh,
         key_answer,
+        file_answer,
     }
 }
 
@@ -631,6 +638,7 @@ impl Harness {
                 format!("worktree:{branch}")
             }
             Main::Session(transcript) => format!("session:{}", transcript.session.title),
+            Main::Document(document) => format!("document:{}", document.path),
             Main::Live(id) => format!("live:{id}"),
         })
     }
@@ -5731,6 +5739,157 @@ mod live {
             );
         }
     }
+}
+
+// ----- documents and the files panel -----------------------------------------------------
+
+/// A Markdown file in a folder of its own, for a test to open.
+fn markdown_file(name: &str, text: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(name);
+    std::fs::write(&path, text).unwrap();
+    (dir, path)
+}
+
+/// Replaces the open document's editor text in one step, as a pasting user
+/// would (which is what emits the change the shell tracks).
+fn set_document_text(h: &Harness, text: &str, cx: &mut TestAppContext) {
+    let editor = h
+        .shell(cx, |shell| match &shell.main {
+            Main::Document(document) => document.editor.clone(),
+            _ => None,
+        })
+        .expect("an editor");
+    cx.update_window(h.window.into(), |_, window, cx| {
+        editor.update(cx, |state, cx| {
+            state.replace_all(text.to_owned(), window, cx)
+        })
+    })
+    .unwrap();
+    h.settle(cx);
+}
+
+/// Puts the keyboard on a tree row, as clicking it would.
+fn focus_row(h: &Harness, node: NodeId, cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        h.shell.update(cx, |shell, _| {
+            shell.show(&node);
+            shell.pane = Pane::Sidebar;
+        });
+    });
+}
+
+#[gpui_kit::test]
+fn opening_a_markdown_file_from_the_dialog_shows_it_rendered(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    let (_dir, path) = markdown_file("README.md", "# Title\n\n- one\n- two\n");
+    *h.file_answer.borrow_mut() = Picked::File(path.clone());
+    h.press_chord("cmd-shift-o", "ctrl-alt-shift-o", cx);
+    assert_eq!(h.main_kind(cx), format!("document:{}", path.display()));
+    assert!(h.shows("document-rendered", cx), "the rendered view");
+    let (contents, dirty, editing) = h.shell(cx, |shell| match &shell.main {
+        Main::Document(document) => (
+            document.contents.clone(),
+            document.dirty,
+            matches!(document.mode, DocMode::Editing),
+        ),
+        _ => panic!("a document"),
+    });
+    assert_eq!(contents, "# Title\n\n- one\n- two\n");
+    assert!(!dirty && !editing);
+}
+
+#[gpui_kit::test]
+fn editing_a_document_and_saving_writes_the_file(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    let (_dir, path) = markdown_file("NOTES.md", "# One\n");
+    *h.file_answer.borrow_mut() = Picked::File(path.clone());
+    h.press_chord("cmd-shift-o", "ctrl-alt-shift-o", cx);
+    h.press("e", cx);
+    assert!(h.shows("document-editor", cx), "the editor");
+    set_document_text(&h, "# Two\n", cx);
+    assert!(
+        h.shell(cx, |shell| match &shell.main {
+            Main::Document(document) => document.dirty,
+            _ => false,
+        }),
+        "an edit makes it unsaved"
+    );
+    h.press_chord("cmd-s", "ctrl-s", cx);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Two\n");
+    assert!(
+        !h.shell(cx, |shell| match &shell.main {
+            Main::Document(document) => document.dirty,
+            _ => true,
+        }),
+        "saved"
+    );
+    assert!(h.status().contains("Saved NOTES.md"), "{}", h.status());
+}
+
+#[gpui_kit::test]
+fn leaving_a_document_with_unsaved_changes_keeps_a_draft(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    let (_dir, path) = markdown_file("DRAFT.md", "first\n");
+    *h.file_answer.borrow_mut() = Picked::File(path.clone());
+    h.press_chord("cmd-shift-o", "ctrl-alt-shift-o", cx);
+    h.press("e", cx);
+    set_document_text(&h, "second\n", cx);
+
+    // Navigate away to a project: the change becomes a draft.
+    h.press("ctrl-p", cx);
+    h.set_palette_text("web", cx);
+    h.press("enter", cx);
+    assert_eq!(h.main_kind(cx), "project:web");
+    assert_eq!(h.shell(cx, |shell| shell.drafts.len()), 1, "a draft");
+
+    // Reopening the file brings the draft back, marked unsaved.
+    *h.file_answer.borrow_mut() = Picked::File(path.clone());
+    h.press_chord("cmd-shift-o", "ctrl-alt-shift-o", cx);
+    assert_eq!(h.main_kind(cx), format!("document:{}", path.display()));
+    let (contents, draft, dirty) = h.shell(cx, |shell| match &shell.main {
+        Main::Document(document) => (
+            document.contents.clone(),
+            document.draft.clone(),
+            document.dirty,
+        ),
+        _ => panic!("a document"),
+    });
+    assert_eq!(contents, "first\n", "the file's own text is the baseline");
+    assert_eq!(draft.as_deref(), Some("second\n"));
+    assert!(dirty, "and the draft is unsaved");
+}
+
+#[gpui_kit::test]
+fn the_files_panel_is_on_the_right_hidden_until_asked_for_and_folds_folders(
+    cx: &mut TestAppContext,
+) {
+    let h = open(
+        cx,
+        ScriptedRunner::new().reply(Output::ok("docs/A.md\0README.md\0src/main.rs\0")),
+    );
+    focus_row(&h, NodeId::Worktree(worktree_id(&h, "main")), cx);
+    assert!(!h.shows("files-panel", cx), "hidden to begin with");
+    h.press_chord("cmd-shift-e", "ctrl-alt-shift-e", cx);
+    assert!(h.shows("files-panel", cx), "shown");
+    assert!(h.shows("files", cx), "listed");
+    // The panel hugs the window's right edge.
+    let panel = h.bounds_of("files-panel".into(), cx).unwrap();
+    let viewport = h.shell(cx, |shell| shell.viewport.width);
+    assert_eq!(panel.right(), viewport);
+    assert_eq!(panel.size.width, crate::theme::metrics::FILES_WIDTH());
+    // Folders first: docs, src, then README.md; opening docs reveals A.md.
+    let listed = h.shell(cx, |shell| {
+        (
+            shell.files.entries.clone(),
+            shell.files.state.clone(),
+            shell.files.flattened.len(),
+        )
+    });
+    assert_eq!(listed.2, 3, "{listed:?}");
+    h.mouse_on("file-row-0".into(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(h.shell(cx, |shell| shell.files.flattened.len()), 4);
+    assert!(h.shows_dynamic("file-row-3".into(), cx));
 }
 
 // ----- what the toolkit really renders ---------------------------------------------------
