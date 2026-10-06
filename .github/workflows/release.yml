@@ -283,6 +283,14 @@ jobs:
           ../../target/release/xtask.exe package --platform "$PLATFORM" --out-dir ../../dist \
             --input leon.exe --input LICENSE --input NOTICE
 
+      # The updater has to be able to use what was just built: its own
+      # extraction code takes the program out of every archive. It is built for
+      # this computer (the Intel Mac's binary is not run here), so it works for
+      # the cross build as well. Nothing is published unless this passes.
+      - name: Check that the updater can use the archive
+        shell: bash
+        run: cargo run --release --locked --package leon-update --example check_archive -- dist/leon-*
+
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.platform }}
@@ -333,6 +341,10 @@ jobs:
         run: |
           cargo xtask checksums --dir dist
           cat dist/SHA256SUMS
+          # The updater reads this file: it has to list exactly the files that
+          # are published, one line each, and every line has to hold.
+          (cd dist && sha256sum --check --strict SHA256SUMS)
+          diff <(ls dist | grep -v '^SHA256SUMS$' | sort) <(awk '{print $2}' dist/SHA256SUMS | sort)
 
       - name: Write the notes
         run: |

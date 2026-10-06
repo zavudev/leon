@@ -6,6 +6,29 @@
 
 ### Added
 
+* **Updates, from the GitHub releases of this repository and nowhere else.** A
+  few seconds after the window opens and every six hours Leon asks the GitHub API
+  for the latest release (conditional requests with the `ETag`, so asking again
+  costs nothing; a rate limit is waited out quietly), picks the file for the
+  platform by name, downloads it (resumable, with progress, only from GitHub's
+  release storage), holds it to the release's `SHA256SUMS` and the size GitHub
+  states, unpacks it, and installs it when you **Restart to update** or, with
+  nothing running, when you quit. A signed macOS or Windows install is replaced
+  only by a build with the same Team ID or certificate; an unsigned install takes
+  an unsigned update and says so. The old version is kept until the new one has
+  started and put back if it does not (and that version is not tried again until
+  a newer release exists). Leon never restarts by itself, and the confirmation
+  names how many sessions a restart closes. Settings, Advanced & About: `Updates`
+  (`Automatic`, `Tell me`, `Off`) and `Pre-release versions`; commands `Check for
+  updates…`, `Restart to update`, `Show release notes`, `Skip this version` and
+  `Open the download page` (palette and the macOS menu); a footer item, release
+  notes as plain text, and the update's state in About. Not done in a development
+  build, `LEON_NO_UPDATE=1`, a disk image, a translocated or read-only install, a
+  package manager's install. New crate `leon-update`; `leon --diagnose update`
+  (`--pretend-version`, `--download`, `--check-archive`); the release workflow
+  checks every archive it builds with the updater's own extraction. What this
+  protects against and what it does not (anyone who can publish a release here):
+  `docs/UPDATES.md`, `SECURITY.md`.
 * **Agents are a catalogue, not three.** Leon now knows 43 command line agents
   (everything in Orca's list: Grok, Cursor, GitHub Copilot, Muse, DeepSeek
   Harness, ZCode, MiMo Code, Amp, OpenClaude, Antigravity, Pi, oh-my-pi, Hermes

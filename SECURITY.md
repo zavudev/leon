@@ -36,8 +36,32 @@ are by design and worth knowing when you assess a report:
   relay operated by Zavu sees only metadata and ciphertext. The code in
   `leon-wire`, `leon-link` and `leon-host` has had no independent security
   review yet; reports about it are especially welcome.
-* **It has no account or telemetry.** The only server is the optional relay, used
-  only when you connect or share with a code.
+* **It updates itself from this repository's GitHub releases, and nowhere
+  else.** A few seconds after start and every six hours it asks the GitHub API for
+  the latest release (the setting `updates_mode` turns it to `notify` or `off`,
+  and `LEON_NO_UPDATE=1` stops it). A newer version is downloaded only from
+  `github.com/zavudev/leon/releases/download/…` and the hosts GitHub redirects
+  release assets to, and is installed only if its SHA-256 and size are the ones the
+  release states in `SHA256SUMS`, it is strictly newer, and (when the running
+  build is signed) it carries the same macOS Team ID or Windows certificate. It is
+  never installed without the person's restart or quit and never restarts Leon on
+  its own. The old version is kept until the new one has started and put back if
+  it does not.
+
+  **The trust model is the repository.** There is no update key of ours: whoever
+  can publish a release in `zavudev/leon` can publish an update, and an unsigned
+  install (every build until signing certificates are configured, see
+  `docs/RELEASING.md`) cannot tell it from a genuine one. That is the owner's
+  decision (updates only from the GitHub releases), so protecting the
+  repository's write access and the release workflow's secrets is what protects
+  updates. What is checked, and what is not, in full: `docs/UPDATES.md`. Reports
+  about the updater (a way to make it install something the release does not
+  list, to downgrade, to leave its allowed hosts, or to cross from a signed
+  build to an unsigned one) are in scope and welcome.
+* **It has no account or telemetry.** The servers it talks to are GitHub (for
+  updates and, optionally, project avatars), the services of the agents whose
+  usage you let it read (optional), and the optional relay, used only when you
+  connect or share with a code.
 
 Reports about a shell command, a path or a host name from stored data or from a
 remote machine that Leon quotes or executes unsafely are in scope and welcome.

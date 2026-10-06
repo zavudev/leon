@@ -12,10 +12,12 @@ app (leon)  ── ui, engine, keys, theme, launch, diagnose
  │   ├── leon-remote   commands on this machine or over SSH
  │   ├── leon-history  importers for the agents' own session files
 │   ├── leon-usage    the agents' usage limits, per machine
+ │   ├── leon-update   updates from the GitHub releases (no window)
  │   └── leon-core     the model and the SQLite store
 leon-remote ── leon-core
 leon-history ── leon-core
 leon-usage ── leon-core, leon-remote
+leon-update ── leon-remote (only for `spawn`)
 leon-term ── gpui-kit only (no other Leon crate)
 leon-mark ── gpui-kit only (no other Leon crate)
 ```
@@ -26,6 +28,7 @@ leon-mark ── gpui-kit only (no other Leon crate)
 | `leon-history` | Reads the history Claude Code, Codex and opencode keep on disk and turns it into sessions and messages. |
 | `leon-remote` | A `CommandSpec` says what to run and where; `run_on` and `interactive_on` place it on a machine (unchanged locally, `ssh` remotely, with shell quoting and optional connection sharing). Git worktree operations, how each agent starts and resumes, the machine probe and the connection checklist (`connect`, `diagnosis`) are built on it. A scripted runner makes all of it testable without a process. |
 | `leon-usage` | How much of each agent's limits is left. A provider-neutral model (`AgentUsage`: windows with a used percentage, a reset time and a length, or an explicit `Reason` why nothing is known; staleness is part of it), pure parsers for each source (`codex`, `claude`, `opencode`), the burn-rate `forecast`, the wording (`present`, `view`), `collect_machine` (one bounded command per machine through a `Runner`) and the opt-in `network` sources behind an `Http` trait. No UI. |
+| `leon-update` | Updates from the GitHub releases of this repository. `version` (which tags count, which is newer), `release` (the API's answer, the platform's file), `http` (an `Http` trait and the system `curl` behind it, with the host allow-list), `download` (redirects by hand, resumable, bounded), `checksums` (`SHA256SUMS`, constant-time), `package` (the program out of the dmg, tarball or zip, strictly), `trust` (the signature rules), `install` (where Leon is installed and the swap with its way back), `launch` (the hand-over, the watch, the confirmation, the rollback), `updater` (the state machine published over a watch channel) and `state` (what is kept). No UI; every system tool (`hdiutil`, `ditto`, `codesign`, PowerShell) is behind a `Tools` trait. |
 | `leon-wire` | The wire protocol: versioned length-prefixed frames, the application messages (run a command, terminals, re-attach) and the relay rendezvous messages. Pure (`postcard` over `serde`); every decoder is bounded and fuzz-style tested. |
 | `leon-link` | Everything that keeps a remote session private: identity, the short pairing code (SPAKE2 then Noise `XXpsk3`), the Noise `IK` session with fragmentation and rekeying, the device registry, the relay WebSocket adapter, the durable `Client` (reconnection, exact terminal re-attach) and, behind `test-support`, an in-process test relay. |
 | `leon-pty` | The GPUI-free part of terminals: `SpawnSpec`, grid maths and `PtyProcess` (a child in a pseudo-terminal driven by channels). `leon-term` re-exports it. |
@@ -408,12 +411,40 @@ toolkit's. A test fails for a command in no menu and not listed in
 `NOT_IN_MENUS`. Linux and Windows have no menu bar: every command stays on its
 chord and in the palette.
 
-Quitting (`Cmd+Q`, `Ctrl+Shift+Q`, closing the window) asks, by the
+Quitting (`Cmd+Q`, `Ctrl+Shift+Q`, closing the window; with an update ready, in the
+automatic mode and with nothing running, it also puts the update in place on the
+way out) asks, by the
 `quit_confirmation` setting, only while a program runs in a terminal (or cannot be known, as over SSH; the default),
 always, or never; then it hangs
 the terminals up and flushes the state beside the settings. The sidebar's
 visibility and width are in `settings.json`; `theme::metrics::SIDEBAR_WIDTH` is
 zero while it is hidden, so every layout that reads it follows.
+
+## Updates
+
+`leon-update` does the work and knows nothing of windows; `updates.rs` is the
+`Service` the application holds (it runs the updater on the engine's runtime and
+hands results back through a channel) with the words for each state, and
+`ui/updates_view.rs` is the glue: the footer's item, the release notes overlay, the
+commands, the timer. The updater publishes a `Snapshot` over a `tokio::sync::watch`
+channel; the window follows it.
+
+The life-cycle is `Idle → Checking → UpToDate | Available | Manual | NoBuild →
+Downloading → Ready → Installing → RestartRequired | Failed`. Applying an update is
+done by a process that works, so that going back is dependable: *Restart to update*
+puts the new build in place and tries it (`--version`) in the running process, the
+window quits, and what is left of the process (`main` after the application's run
+returns) starts the new build, lets it go ahead (the pipe it waits on is closed:
+`wait_for_parent`) and watches it until it confirms or exits badly, in which case the
+old one is put back. Quitting with an update ready in the automatic mode does the
+same swap without starting anything; at the next start, in the automatic mode, an
+update that is still ready is applied before anything is opened. A new build that
+starts and keeps failing before it confirms takes itself out after three starts. All
+of it is exercised on temporary folders through scripted GitHub, `Http` and `Tools`
+(`launch.rs` tests, `updater/tests.rs`, and the window's `tests_updates.rs`).
+
+Not in a development build (`target/`), not with `LEON_NO_UPDATE`, and no process is
+started except through `leon_remote::spawn`. See `docs/UPDATES.md`.
 
 ## The terminal's buffer: find, clear, copy, save
 

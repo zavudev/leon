@@ -68,9 +68,9 @@ signed:
   `xattr -dr com.apple.quarantine /Applications/Leon.app`.
 * Windows: SmartScreen warns about an unknown publisher: `More info`, `Run anyway`.
 
-Leon does not update itself: download the next release to upgrade. The Linux and
-Windows builds have not been tried by a human yet (see the
-[changelog](CHANGELOG.md)); please report what you find.
+Leon updates itself from these same releases and from nowhere else: see
+[Updates](#updates). The Linux and Windows builds have not been tried by a human
+yet (see the [changelog](CHANGELOG.md)); please report what you find.
 
 The agents themselves are not part of Leon: install the ones you use (`claude`,
 `codex`, `opencode`, or any of the [agents Leon knows](#agents)) on every machine
@@ -425,6 +425,11 @@ platform (see below).
 | Quit Leon | `⌘Q` | `Ctrl+Shift+Q` |
 | Close the window | `⇧⌘W` | palette only |
 | About Leon | palette only | palette only |
+| Check for updates… | palette only | palette only |
+| Restart to update | palette only | palette only |
+| Show release notes | palette only | palette only |
+| Skip this version | palette only | palette only |
+| Open the download page | palette only | palette only |
 | Close, or go back | `Esc` | `Esc` |
 
 ### While a terminal has the keyboard
@@ -791,6 +796,37 @@ The choice is saved in `settings.json` as `theme_id` (the appearance is
 `theme`). A file without `theme_id`, or with an id this version does not know,
 wears the default theme.
 
+## Updates
+
+Leon follows its own [GitHub releases](https://github.com/zavudev/leon/releases)
+and nothing else: there is no update server, manifest or key of ours. A few
+seconds after the window opens, and every six hours after that (spread a little
+so that computers do not all ask at once), it asks GitHub for the latest
+release. A newer version is downloaded in the background, checked against the
+`SHA256SUMS` of the same release, and installed when you **restart to update**
+or, with nothing running, when you quit. Leon never restarts by itself: a restart
+ends every terminal, so it is always your choice, and the question says how many
+sessions it would close.
+
+* **Settings, Advanced & About, `Updates`**: `Automatic` (the default: download,
+  install at the next restart), `Tell me` (look and say, you decide) or `Off`
+  (never ask GitHub). `Pre-release versions` also follows release candidates.
+* **Commands** (palette, and the macOS menu): `Check for updates…`, `Restart to
+  update`, `Show release notes`, `Skip this version` and `Open the download
+  page`. The footer shows `Update available`, `Downloading 0.2.1 · 42%` and
+  `Restart to update · 0.2.1`; About shows the state.
+* **Checked**: the file is the one the release lists in `SHA256SUMS` (and of the
+  size GitHub states), and a signed install is only replaced by a build signed by
+  the same Team ID (macOS) or certificate (Windows). An unsigned install takes an
+  unsigned update and says so. The old version is kept until the new one has
+  started, and put back if it does not.
+* **Not done**: a development build, an application run from a disk image, a
+  read-only folder, or one a package manager owns is not touched; Leon points to
+  the download page. `LEON_NO_UPDATE=1` switches it all off.
+
+What this protects against, what it does not, where the files go and how to roll
+back by hand: [docs/UPDATES.md](docs/UPDATES.md).
+
 ## Settings
 
 `Cmd+,` (`Ctrl+,` on Linux and Windows), the gear in the sidebar's footer,
@@ -827,8 +863,10 @@ Advanced & About.
   probe, edit (the Connect screen, filled in) and remove, and `Connect a machine…`; the Projects
   section lists the project roots you removed, which discovery does not bring
   back by itself, with a button to let it.
-* **The only network call** Leon makes is the project avatar from the Git host
-  (GitHub); `Fetch owner avatars from the Git host` turns it off.
+* **The network calls** Leon makes by itself are the project avatar from the Git
+  host (`Fetch owner avatars from the Git host` turns it off), the usage limits'
+  network sources (Settings, Usage), and the look at its own GitHub releases
+  for an update (Settings, `Updates`: `off` stops it).
 
 ## Agents
 
