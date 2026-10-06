@@ -252,7 +252,7 @@ impl Default for Options {
             reveal_app: Rc::new(|_, bundle| {
                 // `open` on a running application brings it forward.
                 #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("open").arg(bundle).spawn();
+                let _ = leon_remote::spawn::std_child("open").arg(bundle).spawn();
                 #[cfg(not(target_os = "macos"))]
                 let _ = bundle;
             }),

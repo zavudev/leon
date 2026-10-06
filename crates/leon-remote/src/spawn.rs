@@ -50,9 +50,83 @@ pub fn child(program: impl AsRef<OsStr>) -> Command {
     command
 }
 
+/// [`child`] for the few places that start a short command and wait for it
+/// without an async runtime (the macOS `security` and `open` tools): the same
+/// flag, a `std` command.
+pub fn std_child(program: impl AsRef<OsStr>) -> std::process::Command {
+    #[cfg(windows)]
+    let mut command = std::process::Command::new(program);
+    #[cfg(not(windows))]
+    let command = std::process::Command::new(program);
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut command, creation_flags());
+    command
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No part of Leon that is not a pseudo-terminal child may start a process
+    /// by hand: each would flash a console window on Windows. Every
+    /// `Command::new` of the sources is either in this module (the helper), in
+    /// `leon-host`'s own copy of it (that crate does not depend on this one),
+    /// in `leon-pty` (a PTY child keeps its pseudo-console), in `xtask`
+    /// (a developer tool), or in test code.
+    #[test]
+    fn no_source_starts_a_process_without_the_helper() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut offenders = Vec::new();
+        let mut stack = vec![crates];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if path.is_dir() {
+                    if !matches!(
+                        name.as_str(),
+                        "target" | "xtask" | "leon-pty" | "tests" | "examples"
+                    ) {
+                        stack.push(path);
+                    }
+                    continue;
+                }
+                let text_path = path.to_string_lossy().replace('\\', "/");
+                let allowed = text_path.ends_with("leon-remote/src/spawn.rs")
+                    || text_path.ends_with("leon-host/src/exec.rs")
+                    || name == "tests.rs"
+                    || name.starts_with("tests_")
+                    || path.extension().is_none_or(|e| e != "rs");
+                if allowed {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).unwrap();
+                for (number, line) in source.lines().enumerate() {
+                    // Test modules sit at the end of a file.
+                    if line.trim() == "#[cfg(test)]" {
+                        break;
+                    }
+                    let code = line.split("//").next().unwrap_or_default();
+                    if code.contains("Command::new(") && !code.contains("CommandSpec::new(") {
+                        offenders.push(format!("{}:{}: {}", text_path, number + 1, line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "start the process with leon_remote::spawn::child or std_child:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    #[test]
+    fn the_std_variant_keeps_its_program_and_arguments() {
+        let mut command = std_child("security");
+        command.arg("find-generic-password");
+        assert_eq!(command.get_program(), OsStr::new("security"));
+        assert_eq!(command.get_args().count(), 1);
+    }
 
     #[test]
     fn the_flag_is_asked_for_on_windows_and_nowhere_else() {

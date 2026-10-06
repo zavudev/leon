@@ -461,7 +461,7 @@ impl SystemCredentials {
     /// The token `cursor-agent` keeps in the macOS keychain.
     #[cfg(target_os = "macos")]
     fn cursor_keychain(&self) -> Read<String> {
-        let output = std::process::Command::new("security")
+        let output = leon_remote::spawn::std_child("security")
             .args([
                 "find-generic-password",
                 "-s",
@@ -517,7 +517,7 @@ impl Credentials for SystemCredentials {
         {
             // The keychain item the CLI itself writes. The first read may make
             // macOS ask the user for permission.
-            let output = std::process::Command::new("security")
+            let output = leon_remote::spawn::std_child("security")
                 .args([
                     "find-generic-password",
                     "-s",

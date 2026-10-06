@@ -52,4 +52,4 @@ pub use probe::{
 pub use quote::{sh_join, sh_quote};
 pub use relay::{RelayHub, RoutingRunner};
 pub use runner::{Output, ProcessRunner, RunError, Runner, ScriptedRunner};
-pub use spawn::child;
+pub use spawn::{child, std_child};
