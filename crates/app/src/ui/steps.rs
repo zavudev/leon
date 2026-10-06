@@ -9,7 +9,7 @@
 
 use leon_core::{
     AgentId, AgentSpec, CustomAgent, Machine, MachineId, MachineKind, Project, ProjectId,
-    SessionId, Worktree,
+    SessionId, Worktree, WorktreeId,
 };
 
 use super::live::LiveId;
@@ -526,6 +526,17 @@ pub enum Action {
     RenameLive(LiveId, String),
     /// Close a live session.
     CloseLive(LiveId),
+    /// Remove a worktree, its confirmation already answered. `force` passes
+    /// `--force` to git, which deletes its uncommitted and untracked files:
+    /// the window asks for it when git refused the worktree for them.
+    RemoveWorktree {
+        /// The project the worktree belongs to.
+        project: ProjectId,
+        /// The worktree to remove.
+        worktree: WorktreeId,
+        /// Whether its local changes may be deleted with it.
+        force: bool,
+    },
     /// Resume a history session in another folder of its machine.
     ResumeIn(SessionId, String),
     /// Resume, in a terminal of Leon, a session that runs in another terminal.
@@ -1349,6 +1360,10 @@ fn remove_project(answers: &[String], world: &World) -> Outcome {
     }
 }
 
+/// The answer the window adds when git refused a worktree for the files it
+/// holds: the question it leads to is the one about forcing them away.
+pub const REFUSED: &str = "refused";
+
 fn remove_worktree(answers: &[String], world: &World) -> Outcome {
     let linked = || {
         world.projects.iter().flat_map(|info| {
@@ -1363,6 +1378,22 @@ fn remove_worktree(answers: &[String], world: &World) -> Outcome {
             .branch
             .clone()
             .unwrap_or_else(|| worktree.path.clone())
+    };
+    let name = |chosen: &str| {
+        linked()
+            .find(|(info, worktree)| format!("{}|{}", info.project.id, worktree.id) == chosen)
+            .map_or_else(
+                || "this worktree".to_owned(),
+                |(_, worktree)| label(worktree),
+            )
+    };
+    let run = |chosen: &str, force: bool| match chosen.split_once('|') {
+        Some((project, worktree)) => Outcome::Run(Action::RemoveWorktree {
+            project: ProjectId::from_string(project),
+            worktree: WorktreeId::from_string(worktree),
+            force,
+        }),
+        None => Outcome::Refuse("That worktree is not known.".to_owned()),
     };
     match answers {
         [] => {
@@ -1381,32 +1412,44 @@ fn remove_worktree(answers: &[String], world: &World) -> Outcome {
                 choices("Worktree", list, Custom::No)
             }
         }
-        [chosen] => {
-            let name = linked()
-                .find(|(info, worktree)| format!("{}|{}", info.project.id, worktree.id) == *chosen)
-                .map_or_else(
-                    || "this worktree".to_owned(),
-                    |(_, worktree)| label(worktree),
-                );
-            choices(
-                "Confirm",
-                vec![
-                    Choice::new(format!("Remove {name}"), "git worktree remove", "yes"),
-                    Choice::new("Cancel", "keep it", "no"),
-                ],
-                Custom::No,
-            )
+        [chosen] => choices(
+            "Confirm",
+            vec![
+                Choice::new(
+                    format!("Remove {}", name(chosen)),
+                    "git worktree remove",
+                    "yes",
+                ),
+                Choice::new("Cancel", "keep it", "no"),
+            ],
+            Custom::No,
+        ),
+        // git refused it for the modified or untracked files it holds: the
+        // only way is `--force`, which deletes them, so ask once more.
+        [chosen, refused] if refused == REFUSED => choices(
+            "Confirm",
+            vec![
+                Choice::new(
+                    format!("Force remove {}", name(chosen)),
+                    "deletes its uncommitted and untracked files",
+                    "yes",
+                ),
+                Choice::new("Cancel", "keep it", "no"),
+            ],
+            Custom::No,
+        ),
+        [chosen, refused, confirmed, ..] if refused == REFUSED => {
+            if confirmed == "yes" {
+                run(chosen, true)
+            } else {
+                Outcome::Run(Action::Nothing)
+            }
         }
         [chosen, confirmed, ..] => {
-            if confirmed != "yes" {
-                return Outcome::Run(Action::Nothing);
-            }
-            match chosen.split_once('|') {
-                Some((project, worktree)) => Outcome::Run(Action::Engine(Op::RemoveWorktree {
-                    project: ProjectId::from_string(project),
-                    worktree: leon_core::WorktreeId::from_string(worktree),
-                })),
-                None => Outcome::Refuse("That worktree is not known.".to_owned()),
+            if confirmed == "yes" {
+                run(chosen, false)
+            } else {
+                Outcome::Run(Action::Nothing)
             }
         }
     }
@@ -2423,14 +2466,49 @@ mod tests {
                 &strings(&["api|a1", "yes"]),
                 &world
             ),
-            Outcome::Run(Action::Engine(Op::RemoveWorktree {
+            Outcome::Run(Action::RemoveWorktree {
                 project: ProjectId::from_string("api"),
                 worktree: WorktreeId::from_string("a1"),
-            }))
+                force: false,
+            })
         );
         assert_eq!(
             advance(Command::RemoveWorktree, &strings(&["api|a1", "no"]), &world),
             Outcome::Run(Action::Nothing)
+        );
+    }
+
+    #[test]
+    fn a_worktree_git_refused_is_asked_about_again_and_only_force_removes_it() {
+        let world = world();
+        // The refusal comes back as the question of forcing it, which says
+        // what is deleted with it.
+        let confirm = advance(
+            Command::RemoveWorktree,
+            &strings(&["api|a1", REFUSED]),
+            &world,
+        );
+        assert_eq!(labels(&confirm), ["Force remove x", "Cancel"]);
+        assert_eq!(
+            advance(
+                Command::RemoveWorktree,
+                &strings(&["api|a1", REFUSED, "yes"]),
+                &world
+            ),
+            Outcome::Run(Action::RemoveWorktree {
+                project: ProjectId::from_string("api"),
+                worktree: WorktreeId::from_string("a1"),
+                force: true,
+            })
+        );
+        assert_eq!(
+            advance(
+                Command::RemoveWorktree,
+                &strings(&["api|a1", REFUSED, "no"]),
+                &world
+            ),
+            Outcome::Run(Action::Nothing),
+            "declining the force question keeps the worktree"
         );
     }
 

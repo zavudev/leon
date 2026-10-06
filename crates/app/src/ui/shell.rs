@@ -30,14 +30,14 @@ use super::notify;
 use super::palette::PaletteState;
 use super::panes::{Axis, Dir};
 use super::settings_screen::SettingsUi;
-use super::steps::{LiveInfo, Where, World};
+use super::steps::{LiveInfo, Where, World, REFUSED};
 use super::terminals::Readiness;
 use super::tree::{
     self, build_rows_filtered, Kind, LiveEntry, NodeId, Order, Placement, Row, TreeOrder,
 };
 use super::workspace::Workspaces;
 use crate::elsewhere::{self, Found, OwnTerminal};
-use crate::engine::Engine;
+use crate::engine::{Engine, Removal, StatusKind};
 use crate::keys::{self, Command};
 use crate::launch::{self, System};
 use crate::settings::{self, AppearanceChoice};
@@ -507,6 +507,8 @@ pub struct Shell {
     pub(super) resuming: Option<Task<()>>,
     /// The look for a process that holds a session, before it is opened.
     pub(super) checking: Option<Task<()>>,
+    /// The removal of a worktree, while it runs.
+    pub(super) removing: Option<Task<()>>,
     /// The coarse timer of that look, while the window lives.
     elsewhere_ticker: Option<Task<()>>,
     /// Whether the window has the focus: the lion sleeps without it.
@@ -725,6 +727,7 @@ impl Shell {
             opening: None,
             resuming: None,
             checking: None,
+            removing: None,
             elsewhere_ticker: None,
             window_active: window.is_window_active(),
             mark_error: false,
@@ -1849,6 +1852,46 @@ impl Shell {
         self.main = Main::Worktree(project.clone(), worktree.clone());
         self.show(&NodeId::Worktree(worktree.clone()));
         cx.notify();
+    }
+
+    /// Removes a worktree, off the UI thread. A worktree git refuses for the
+    /// modified or untracked files it holds is not forced behind the person's
+    /// back: it is left whole and they are asked; only their answer passes
+    /// `--force`, which deletes those files with it.
+    pub(super) fn remove_worktree(
+        &mut self,
+        project: ProjectId,
+        worktree: WorktreeId,
+        force: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let removal = self
+            .engine
+            .remove_worktree(project.clone(), worktree.clone(), force);
+        self.removing = Some(cx.spawn_in(window, async move |this, cx| {
+            let outcome = removal.await;
+            this.update_in(cx, |this, window, cx| {
+                match outcome {
+                    Ok(Ok(Removal::Removed(text))) => {
+                        this.engine.report(StatusKind::Info, text);
+                    }
+                    Ok(Ok(Removal::NeedsForce)) => this.begin_flow_with(
+                        Command::RemoveWorktree,
+                        vec![format!("{project}|{worktree}"), REFUSED.to_owned()],
+                        window,
+                        cx,
+                    ),
+                    Ok(Err(error)) => {
+                        this.engine.report(StatusKind::Error, error.to_string());
+                    }
+                    // The job was dropped before it finished: nothing to say.
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// Opens a session's transcript, read off the UI thread. With `hit`, the

@@ -659,7 +659,10 @@ typing selects an item. Every item shows the shortcut it has.
 | History session | Open (resumes it in a terminal), Open transcript, Pin or Unpin, Move up, Move down, Copy session id, Remove from history |
 | Live terminal | Focus, Split right, Split down, Rename, Close |
 
-Removals and closing a terminal with a program running in it ask first.
+Removals and closing a terminal with a program running in it ask first. A
+worktree git refuses for the modified or untracked files it holds is left
+whole and asks once more: only that answer passes `--force`, which deletes
+those files with it.
 
 ### The menu bar and quitting
 

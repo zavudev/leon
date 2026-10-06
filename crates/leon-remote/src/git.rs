@@ -198,6 +198,17 @@ impl<'a, R: Runner> Git<'a, R> {
             .map(drop)
     }
 
+    /// Whether the worktree at `path` holds modified or untracked files:
+    /// what `git worktree remove` refuses to delete without `--force`.
+    /// `--porcelain` is meant for reading, and any line at all is a change.
+    pub async fn worktree_has_changes(&self, path: &str) -> Result<bool, GitError> {
+        reject_option_like("path", path)?;
+        let stdout = self
+            .run("status", git(path, ["status", "--porcelain"]))
+            .await?;
+        Ok(!stdout.trim().is_empty())
+    }
+
     /// The branch checked out in `cwd`, or `None` when the head is detached.
     pub async fn current_branch(&self, cwd: &str) -> Result<Option<String>, GitError> {
         let stdout = self
@@ -896,5 +907,55 @@ prunable gitdir file points to non-existent location
 
         let missing = git.remove_worktree(&project, &feature, false).await;
         assert!(matches!(missing, Err(GitError::Failed { .. })));
+    }
+
+    #[tokio::test]
+    async fn a_worktree_with_an_untracked_file_has_changes_and_needs_force() {
+        let runner = ProcessRunner::new();
+        if runner
+            .run(&CommandSpec::new("git").arg("--version"))
+            .await
+            .map_or(true, |output| !output.success())
+        {
+            eprintln!("skipped: git is not available");
+            return;
+        }
+
+        let scratch = tempfile::tempdir().unwrap();
+        let base = plain_path(scratch.path().canonicalize().unwrap());
+        let root = base.join("repo");
+        std::fs::create_dir(&root).unwrap();
+        let root = root.to_string_lossy().into_owned();
+        setup(&runner, &root, &["init", "--quiet"]).await;
+        setup(&runner, &root, &["checkout", "--quiet", "-B", "main"]).await;
+        setup(
+            &runner,
+            &root,
+            &["commit", "--quiet", "--allow-empty", "-m", "initial"],
+        )
+        .await;
+
+        let machine = local();
+        let ssh = SshOptions::without_multiplexing();
+        let git = Git::new(&runner, &machine, &ssh);
+        let project = project(&machine, &root);
+        let feature = base.join("wt feature").to_string_lossy().into_owned();
+        git.add_worktree(&project, "feature/one", &feature, Some("main"))
+            .await
+            .unwrap();
+
+        assert!(
+            !git.worktree_has_changes(&feature).await.unwrap(),
+            "a worktree nothing touched has no changes"
+        );
+        std::fs::write(std::path::Path::new(&feature).join("notes.txt"), "x").unwrap();
+        assert!(git.worktree_has_changes(&feature).await.unwrap());
+        // What the window asks about before it forces: git refuses here.
+        assert!(matches!(
+            git.remove_worktree(&project, &feature, false).await,
+            Err(GitError::Failed { .. })
+        ));
+        git.remove_worktree(&project, &feature, true).await.unwrap();
+        assert_eq!(git.list_worktrees(&project).await.unwrap().len(), 1);
     }
 }
