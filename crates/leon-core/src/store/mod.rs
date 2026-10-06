@@ -33,7 +33,10 @@ mod projects;
 pub mod search;
 mod usage;
 
-pub use history::{set_import_cursor_in, upsert_session_in, SessionFilter};
+pub use history::{
+    history_overview_at, import_cursors_at, set_import_cursor_in, upsert_session_in, AgentOverview,
+    ImportRun, SessionFilter,
+};
 pub use usage::{UsagePoint, UsageRow};
 
 /// How long a connection waits for a lock held by another connection before

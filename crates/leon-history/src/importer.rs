@@ -15,10 +15,15 @@
 use std::ops::AddAssign;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use leon_core::{set_import_cursor_in, upsert_session_in, MachineId, Store, StoreChange};
+use std::time::Instant;
+
+use chrono::{DateTime, Utc};
+use leon_core::{
+    set_import_cursor_in, upsert_session_in, ImportRun, MachineId, Store, StoreChange,
+};
 
 use crate::roots::HistoryRoots;
-use crate::source::{HistorySource, SourceItem};
+use crate::source::{HistoryError, HistorySource, SourceItem};
 
 /// Upper bound on the number of threads used by one import run.
 const MAX_WORKERS: usize = 8;
@@ -40,6 +45,9 @@ pub struct ImportReport {
     pub failed: usize,
     /// Lines or rows inside imported items that were skipped as unreadable.
     pub malformed: usize,
+    /// Sources whose layout Leon does not know (a database without the
+    /// tables or columns it reads). They are also counted in `failed`.
+    pub unsupported: usize,
 }
 
 impl AddAssign for ImportReport {
@@ -50,6 +58,7 @@ impl AddAssign for ImportReport {
         self.empty += other.empty;
         self.failed += other.failed;
         self.malformed += other.malformed;
+        self.unsupported += other.unsupported;
     }
 }
 
@@ -60,10 +69,43 @@ pub struct Importer;
 impl Importer {
     /// Imports everything found under `roots` on this machine's file system
     /// and attributes it to `machine_id`. Safe to call repeatedly.
+    ///
+    /// Each source is imported on its own and what it did is recorded in the
+    /// store (when, how long, how it ended) for the history diagnosis.
     pub fn run(store: &Store, machine_id: &MachineId, roots: &HistoryRoots) -> ImportReport {
-        let sources = roots.sources();
-        let sources: Vec<&dyn HistorySource> = sources.iter().map(Box::as_ref).collect();
-        Self::run_sources(store, machine_id, &sources)
+        Self::run_with_clock(store, machine_id, roots, Utc::now)
+    }
+
+    /// [`Importer::run`] with the clock that stamps the recorded runs, for
+    /// tests.
+    pub fn run_with_clock(
+        store: &Store,
+        machine_id: &MachineId,
+        roots: &HistoryRoots,
+        now: impl Fn() -> DateTime<Utc>,
+    ) -> ImportReport {
+        let mut total = ImportReport::default();
+        for source in roots.sources() {
+            let started = Instant::now();
+            let report = Self::run_sources(store, machine_id, &[source.as_ref()]);
+            let run = ImportRun {
+                agent: source.agent().as_str().to_owned(),
+                at: now(),
+                duration_ms: started.elapsed().as_millis() as u64,
+                scanned: report.scanned as u64,
+                imported: report.imported as u64,
+                unchanged: report.skipped_unchanged as u64,
+                empty: report.empty as u64,
+                failed: report.failed as u64,
+                malformed: report.malformed as u64,
+                unsupported: report.unsupported as u64,
+            };
+            if let Err(error) = store.record_import_run(machine_id, &run) {
+                tracing::debug!(%error, "cannot record an import run");
+            }
+            total += report;
+        }
+        total
     }
 
     /// Imports everything the given sources provide and attributes it to
@@ -88,6 +130,13 @@ impl Importer {
         for source in sources {
             match source.list() {
                 Ok(items) => {
+                    // A part of the source that could not be read is still a
+                    // problem to report, though the rest was listed.
+                    let problems = source.problems();
+                    if !problems.is_empty() {
+                        report.failed += 1;
+                        report.unsupported += 1;
+                    }
                     for item in items {
                         report.scanned += 1;
                         if cursors.get(&item.key) == Some(&item.fingerprint) {
@@ -100,6 +149,9 @@ impl Importer {
                 Err(error) => {
                     tracing::warn!(agent = source.agent().as_str(), %error, "cannot list history source");
                     report.failed += 1;
+                    if matches!(error, HistoryError::Unsupported { .. }) {
+                        report.unsupported += 1;
+                    }
                 }
             }
         }
@@ -557,5 +609,31 @@ mod tests {
         fs::write(&file, claude_line("user", "hello", 0) + "\n").unwrap();
         let later = Importer::run(&store, &MachineId::local(), &roots);
         assert_eq!(later.imported, 1, "{later:?}");
+    }
+
+    #[test]
+    fn each_run_is_recorded_per_agent_and_an_unknown_layout_is_counted() {
+        let home = tempfile::tempdir().unwrap();
+        let mut roots = fixture(home.path());
+        let store = Store::open_in_memory().unwrap();
+        let stamp = DateTime::from_timestamp_millis(7_000).unwrap();
+        Importer::run_with_clock(&store, &MachineId::local(), &roots, || stamp);
+        let overview = store.history_overview(&MachineId::local()).unwrap();
+        assert_eq!(overview.len(), 3);
+        let claude = overview.iter().find(|row| row.agent == "claude").unwrap();
+        assert_eq!(claude.sessions, 1);
+        assert_eq!(claude.last_run.as_ref().unwrap().at, stamp);
+        assert_eq!(claude.last_run.as_ref().unwrap().imported, 1);
+
+        // A database with another layout is reported, not silently empty.
+        let odd = home.path().join("odd.db");
+        rusqlite::Connection::open(&odd)
+            .unwrap()
+            .execute_batch("CREATE TABLE other (id TEXT);")
+            .unwrap();
+        roots.opencode_db = Some(odd);
+        let report = Importer::run(&store, &MachineId::local(), &roots);
+        assert_eq!(report.unsupported, 1);
+        assert!(report.failed >= 1);
     }
 }

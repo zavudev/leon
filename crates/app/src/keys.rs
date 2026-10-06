@@ -253,6 +253,9 @@ pub enum Command {
     ShowUsage,
     /// Reads the agents' usage limits again now.
     RefreshUsage,
+    /// Explains why a session may be missing: where each agent's history is
+    /// looked for and what was found.
+    WhyMissing,
     /// Opens `settings.json` in the system's editor.
     OpenSettingsFile,
     /// Shows the folder that holds `settings.json` in the file manager.
@@ -1514,6 +1517,14 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::WhyMissing,
+        "Why is a session missing?",
+        S::Data,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::ProbeMachine,
         "Probe the machine on screen",
         S::Data,
@@ -1811,6 +1822,7 @@ pub fn keywords(command: Command) -> &'static str {
         C::EditMachine => "ssh host user port identity key server remote change connect",
         C::WhyOffline => "offline unreachable diagnose test connection ssh remote server",
         C::Settings => "preferences options configuration config",
+        C::WhyMissing => "history sessions lost gone disappeared import diagnose opencode claude codex report",
         C::ShowUsage | C::RefreshUsage => "limits quota rate tokens credits remaining percent reset five hour weekly claude codex opencode",
         C::OpenSettingsFile => "preferences json edit configuration config file",
         C::RevealSettingsFolder => "preferences json configuration config finder directory data",
@@ -2014,6 +2026,7 @@ mod tests {
             C::Settings,
             C::ShowUsage,
             C::RefreshUsage,
+            C::WhyMissing,
             C::OpenSettingsFile,
             C::RevealSettingsFolder,
             C::Larger,
@@ -2135,6 +2148,7 @@ mod tests {
                 | C::Settings
                 | C::ShowUsage
                 | C::RefreshUsage
+                | C::WhyMissing
                 | C::OpenSettingsFile
                 | C::RevealSettingsFolder
                 | C::Larger

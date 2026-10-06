@@ -52,25 +52,25 @@ pub struct ListedSession {
 }
 
 #[derive(Debug, Deserialize)]
-struct MessageData {
-    role: Option<String>,
+pub(crate) struct MessageData {
+    pub(crate) role: Option<String>,
     #[serde(rename = "modelID")]
-    model_id: Option<String>,
+    pub(crate) model_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct PartData {
+pub(crate) struct PartData {
     #[serde(rename = "type")]
-    kind: Option<String>,
-    text: Option<String>,
-    tool: Option<String>,
-    state: Option<ToolState>,
+    pub(crate) kind: Option<String>,
+    pub(crate) text: Option<String>,
+    pub(crate) tool: Option<String>,
+    pub(crate) state: Option<ToolState>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ToolState {
-    title: Option<String>,
-    input: Option<Value>,
+pub(crate) struct ToolState {
+    pub(crate) title: Option<String>,
+    pub(crate) input: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -195,53 +195,16 @@ pub fn read_session(
              ORDER BY m.time_created, m.id, p.id",
         )?;
         let mut rows = statement.query([session_id])?;
-        // Text parts of one turn accumulate here until the turn ends or a
-        // tool call interrupts them.
-        let mut pending: Option<(String, Role, String, Option<DateTime<Utc>>)> = None;
+        let mut pending: Option<Pending> = None;
         while let Some(row) = rows.next()? {
             let message_id: String = row.get(0)?;
             let at = row
                 .get::<_, Option<i64>>(1)?
                 .and_then(DateTime::from_timestamp_millis);
             let data = row.get_ref(2)?.as_bytes().unwrap_or_default();
-            let Ok(part) = serde_json::from_slice::<PartData>(data) else {
-                session.skip_malformed();
-                continue;
-            };
-            let Some(Some(role)) = roles.get(&message_id).copied() else {
-                continue;
-            };
-
-            let continues = pending
-                .as_ref()
-                .is_some_and(|(turn, _, _, _)| *turn == message_id);
-            let is_text = part.kind.as_deref() == Some("text");
-            if !(continues && is_text) {
-                flush(&mut session, pending.take());
-            }
-            match part.kind.as_deref() {
-                Some("text") => {
-                    let text = part.text.unwrap_or_default();
-                    match pending.as_mut() {
-                        Some((_, _, joined, _)) => {
-                            joined.push_str("\n\n");
-                            joined.push_str(&text);
-                        }
-                        None => pending = Some((message_id, role, text, at)),
-                    }
-                }
-                Some("tool") => {
-                    let name = part.tool.as_deref().unwrap_or("");
-                    let state = part.state.as_ref();
-                    let line = match state.and_then(|s| s.title.as_deref()) {
-                        Some(title) if !title.trim().is_empty() => {
-                            tool_line(name, Some(&Value::String(title.to_owned())))
-                        }
-                        _ => tool_line(name, state.and_then(|s| s.input.as_ref())),
-                    };
-                    session.push(Role::Tool, &line, at);
-                }
-                _ => {}
+            match serde_json::from_slice::<PartData>(data) {
+                Ok(part) => apply_part(&mut session, &mut pending, &roles, message_id, at, part),
+                Err(_) => session.skip_malformed(),
             }
         }
         flush(&mut session, pending.take());
@@ -260,13 +223,141 @@ pub fn read_session(
     }))
 }
 
-fn flush(
+/// The text parts of one turn, collected until the turn ends or a tool call
+/// interrupts them: the turn's id, its role, the joined text and its time.
+pub(crate) type Pending = (String, Role, String, Option<DateTime<Utc>>);
+
+/// Feeds one part of a turn to the session being built. Shared by the SQLite
+/// reader and the older JSON-file reader, so both layouts produce the same
+/// transcript. `roles` maps a turn id to its role; a turn that is neither
+/// the user's nor the assistant's contributes nothing.
+pub(crate) fn apply_part(
     session: &mut SessionBuilder,
-    pending: Option<(String, Role, String, Option<DateTime<Utc>>)>,
+    pending: &mut Option<Pending>,
+    roles: &HashMap<String, Option<Role>>,
+    message_id: String,
+    at: Option<DateTime<Utc>>,
+    part: PartData,
 ) {
+    let Some(Some(role)) = roles.get(&message_id).copied() else {
+        return;
+    };
+    let continues = pending
+        .as_ref()
+        .is_some_and(|(turn, _, _, _)| *turn == message_id);
+    let is_text = part.kind.as_deref() == Some("text");
+    if !(continues && is_text) {
+        flush(session, pending.take());
+    }
+    match part.kind.as_deref() {
+        Some("text") => {
+            let text = part.text.unwrap_or_default();
+            match pending.as_mut() {
+                Some((_, _, joined, _)) => {
+                    joined.push_str("\n\n");
+                    joined.push_str(&text);
+                }
+                None => *pending = Some((message_id, role, text, at)),
+            }
+        }
+        Some("tool") => {
+            let name = part.tool.as_deref().unwrap_or("");
+            let state = part.state.as_ref();
+            let line = match state.and_then(|s| s.title.as_deref()) {
+                Some(title) if !title.trim().is_empty() => {
+                    tool_line(name, Some(&Value::String(title.to_owned())))
+                }
+                _ => tool_line(name, state.and_then(|s| s.input.as_ref())),
+            };
+            session.push(Role::Tool, &line, at);
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn flush(session: &mut SessionBuilder, pending: Option<Pending>) {
     if let Some((_, role, text, at)) = pending {
         session.push(role, &text, at);
     }
+}
+
+/// What an opencode database looks like, for deciding whether Leon can read
+/// it and for the history diagnosis. Names and numbers only.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SchemaInfo {
+    /// The tables present, sorted.
+    pub tables: Vec<String>,
+    /// The columns of the `session` table, in table order.
+    pub session_columns: Vec<String>,
+    /// `PRAGMA user_version`.
+    pub user_version: i64,
+    /// `PRAGMA journal_mode`, for example `wal`.
+    pub journal_mode: String,
+}
+
+impl SchemaInfo {
+    /// Why Leon cannot read this database, or `None` when it can. A database
+    /// is readable when it has the three tables with the columns the
+    /// importer selects; optional columns (`parent_id`, `model`) are not
+    /// required.
+    pub fn unsupported(&self) -> Option<String> {
+        for table in ["session", "message", "part"] {
+            if !self.tables.iter().any(|name| name == table) {
+                return Some(format!("no `{table}` table"));
+            }
+        }
+        for column in ["id", "directory", "title", "time_created", "time_updated"] {
+            if !self.session_columns.iter().any(|name| name == column) {
+                return Some(format!("the `session` table has no `{column}` column"));
+            }
+        }
+        None
+    }
+}
+
+/// Describes the database's tables and settings.
+pub fn inspect(connection: &Connection) -> rusqlite::Result<SchemaInfo> {
+    let tables = connection
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let session_columns = connection
+        .prepare("SELECT name FROM pragma_table_info('session')")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let user_version = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let journal_mode = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+    Ok(SchemaInfo {
+        tables,
+        session_columns,
+        user_version,
+        journal_mode,
+    })
+}
+
+/// How many sessions the database holds in all, and how many of them were
+/// spawned by another session (sub-agents), which are not listed.
+pub fn count_sessions(connection: &Connection) -> rusqlite::Result<(usize, usize)> {
+    let total: i64 = connection.query_row("SELECT COUNT(*) FROM session", [], |row| row.get(0))?;
+    let children: i64 = if has_column(connection, "session", "parent_id")? {
+        connection.query_row(
+            "SELECT COUNT(*) FROM session WHERE parent_id IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?
+    } else {
+        0
+    };
+    Ok((total as usize, children as usize))
+}
+
+/// The ids of every session in the database, children included. The older
+/// JSON layout is left alone for the sessions the database already holds.
+pub fn all_ids(connection: &Connection) -> rusqlite::Result<Vec<String>> {
+    connection
+        .prepare_cached("SELECT id FROM session")?
+        .query_map([], |row| row.get(0))?
+        .collect()
 }
 
 /// Whether `table` has a column named `column`. opencode adds columns over

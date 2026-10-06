@@ -23,6 +23,7 @@ mod elsewhere;
 mod engine;
 mod format;
 mod fuzzy;
+mod history_report;
 mod icons;
 mod keys;
 mod launch;
@@ -95,6 +96,10 @@ fn main() {
         }) => {
             let file = product::data_dir().join(settings::FILE_NAME);
             std::process::exit(diagnose::run_usage(&network, &no_network, &file));
+        }
+        Ok(cli::Command::DiagnoseHistory { agent, data_dir }) => {
+            let dir = data_dir.unwrap_or_else(product::data_dir);
+            std::process::exit(history_report::run(agent, &dir));
         }
         Ok(cli::Command::DiagnoseConnect { destination }) => {
             std::process::exit(diagnose::run_connect(&destination));

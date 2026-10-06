@@ -13,6 +13,9 @@
 //! `--diagnose resume [--agent <claude|codex|opencode>]` prints what opening
 //! the newest local history session of that agent would start, without
 //! starting it.
+//! `--diagnose history [--agent <id>]` prints where each agent's history is
+//! looked for, what is found there and why sessions are missing (counts and
+//! paths only; see `history_report.rs`).
 //! `--diagnose connect <user@host[:port]>` runs the checklist of "Connect a
 //! machine" from the command line and prints each check with its diagnosis;
 //! it only attempts an SSH connection in batch mode (see `diagnose.rs`).
@@ -66,6 +69,15 @@ pub enum Command {
     /// Run the real detection of sessions running in another terminal on this
     /// computer and print what it found.
     DiagnoseElsewhere,
+    /// Print where each agent's history is looked for, what was found there
+    /// and why sessions are missing: counts and paths, no content.
+    DiagnoseHistory {
+        /// Only this agent, or every agent with an importer.
+        agent: Option<AgentId>,
+        /// Leon's data folder, to count what it imported; the platform's
+        /// when absent.
+        data_dir: Option<PathBuf>,
+    },
     /// Collect the usage limits of this computer and print them.
     DiagnoseUsage {
         /// The network sources switched on for this run, whatever the settings say.
@@ -183,12 +195,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
     let mut connect: Option<String> = None;
     let mut folder_dialog = false;
     let mut resume = false;
+    let mut history = false;
     let mut elsewhere = false;
     let mut usage = false;
     let mut update: Option<UpdateDiagnose> = None;
     let mut network: Vec<AgentId> = Vec::new();
     let mut no_network: Vec<AgentId> = Vec::new();
     let mut agent = AgentId::CLAUDE;
+    let mut history_agent: Option<AgentId> = None;
     let mut dialog_timeout = 4u64;
     let mut args = args.into_iter();
     while let Some(argument) = args.next() {
@@ -224,6 +238,10 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                     resume = true;
                     continue;
                 }
+                if what == "history" {
+                    history = true;
+                    continue;
+                }
                 if what == "sessions-elsewhere" {
                     elsewhere = true;
                     continue;
@@ -243,7 +261,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                 }
                 if what != "terminal" {
                     return Err(format!(
-                        "Cannot diagnose {what:?}: only \"terminal\", \"folder-dialog\", \"resume\", \"sessions-elsewhere\", \"usage\", \"update\" and \"connect\"."
+                        "Cannot diagnose {what:?}: only \"terminal\", \"folder-dialog\", \"resume\", \"history\", \"sessions-elsewhere\", \"usage\", \"update\" and \"connect\"."
                     ));
                 }
                 diagnose = Some(Diagnose {
@@ -325,14 +343,15 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
             }
             "--agent" => {
                 let text = value("claude, codex or opencode")?;
-                if !resume {
-                    return Err("--agent only goes with --diagnose resume.".to_owned());
+                if !resume && !history {
+                    return Err("--agent only goes with --diagnose resume or history.".to_owned());
                 }
                 agent = AgentId::parse(&text)
                     .filter(|a| a.spec().is_some_and(|spec| spec.history.is_some()))
                     .ok_or_else(|| {
                         format!("Unknown agent {text:?}: use claude, codex or opencode.")
                     })?;
+                history_agent = Some(agent);
             }
             "--input" => {
                 let text = value("text to type")?;
@@ -391,6 +410,12 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
     }
     if let Some(destination) = connect {
         return Ok(Command::DiagnoseConnect { destination });
+    }
+    if history {
+        return Ok(Command::DiagnoseHistory {
+            agent: history_agent,
+            data_dir: options.data_dir,
+        });
     }
     if resume {
         return Ok(Command::DiagnoseResume { agent });
@@ -684,6 +709,32 @@ mod tests {
         assert!(parsed(&["--diagnose", "resume", "--agent", "gemini"]).is_err());
         assert!(parsed(&["--agent", "claude"]).is_err());
         assert!(!usage().contains("resume"));
+    }
+
+    #[test]
+    fn the_history_diagnostic_is_hidden_and_takes_an_agent_and_a_data_dir() {
+        assert_eq!(
+            parsed(&["--diagnose", "history"]),
+            Ok(Command::DiagnoseHistory {
+                agent: None,
+                data_dir: None
+            })
+        );
+        assert_eq!(
+            parsed(&[
+                "--diagnose=history",
+                "--agent",
+                "opencode",
+                "--data-dir",
+                "/d"
+            ]),
+            Ok(Command::DiagnoseHistory {
+                agent: Some(AgentId::OPENCODE),
+                data_dir: Some("/d".into())
+            })
+        );
+        assert!(parsed(&["--diagnose", "history", "--agent", "gemini"]).is_err());
+        assert!(!usage().contains("history"));
     }
 
     #[test]

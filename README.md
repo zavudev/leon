@@ -37,6 +37,11 @@ switching to one never restarts it.
   the agent runs on the server and only the terminal travels.
 * **History**: Claude Code, Codex and opencode sessions are imported from
   their own files into a local SQLite database and searched from the palette.
+  A session missing from the tree? The palette's **Why is a session missing?**
+  (or `leon --diagnose history [--agent <id>]`) lists every place Leon looked,
+  the format it found, how many sessions the source holds against how many
+  were imported, and why the rest were skipped. It prints counts, paths and
+  times only: no titles, no messages, no account data.
 
 ## Screenshots
 
@@ -400,6 +405,7 @@ platform (see below).
 | **Data** | | |
 | Import history and sync worktrees | `⌘R` | `Ctrl+R` |
 | Probe the machine on screen | `⇧⌘R` | `Ctrl+Shift+R` |
+| Why is a session missing? | palette only | palette only |
 | **View** | | |
 | Toggle light and dark | `⇧⌘Y` | `Ctrl+Shift+Y` |
 | Choose appearance… | palette only | palette only |

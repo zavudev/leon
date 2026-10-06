@@ -19,6 +19,7 @@ mod connect_view;
 mod expansion;
 mod filter;
 mod find;
+mod history_view;
 mod lines;
 mod lion;
 mod live;

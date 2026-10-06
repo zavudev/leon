@@ -196,6 +196,35 @@ above: the engine writes the store and the UI reads it.
   settings (on by default), overridden by `--network <agent>` and
   `--no-network <agent|all>`.
 
+## Finding agent history (`leon-history`)
+
+Each agent keeps its sessions its own way and Leon reads them without ever
+writing to them:
+
+* **Claude Code**: `<CLAUDE_CONFIG_DIR or ~/.claude>/projects/<project>/<id>.jsonl`;
+  files deeper down are sub-agent transcripts (counted, not listed).
+* **Codex**: `<CODEX_HOME or ~/.codex>/sessions/Y/M/D/rollout-*.jsonl`.
+* **opencode**, from the source of `sst/opencode`: the data folder is
+  `xdg-basedir`'s `xdgData` + `opencode` on every OS (`$XDG_DATA_HOME`, else
+  `~/.local/share`; Windows included). The database is `opencode.db`, but a
+  build of another channel names it `opencode-<channel>.db` and `OPENCODE_DB`
+  can move it (absolute, or relative to the data folder). Leon reads every
+  `opencode*.db` beside the configured one. The database runs in WAL mode with
+  `synchronous = NORMAL`: a committed turn survives a hang-up of opencode, and
+  readers see it through the `-wal` file. The older layout is JSON files under
+  `storage/` (`session/<project>/<id>.json`, `message/<session>/<id>.json`,
+  `part/<message>/<id>.json`); opencode leaves that folder behind when it moves
+  to SQLite, so a session in both is imported once, from the database. A
+  session row exists before its first message; it is imported as soon as it
+  gains one (the fingerprint covers the session's update time, its latest
+  message and its parts). Sub-agent sessions (`parent_id`) are not listed but
+  are counted in the report.
+
+`HistorySource::survey` produces the counts and reasons behind `leon --diagnose
+history`; `HistorySource::stamp` is a metadata-only change marker (it includes
+the `-wal` file) so a poll can skip an import when nothing moved. A source whose
+layout is not known is an error that is reported, never "no sessions".
+
 ## Notifications
 
 When a session wants the user or ends, Leon says so twice: the **geek banner**

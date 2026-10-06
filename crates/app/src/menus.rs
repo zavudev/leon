@@ -218,6 +218,7 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
             Cmd(C::OpenTranscript),
             Cmd(C::Refresh),
             Cmd(C::ProbeMachine),
+            Cmd(C::WhyMissing),
         ],
     ),
     (

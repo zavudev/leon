@@ -11,6 +11,7 @@
 //! Sources are synchronous and may block on I/O; callers on an async runtime
 //! run an import on a blocking thread.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -20,7 +21,9 @@ use leon_core::AgentId;
 use rusqlite::Connection;
 use thiserror::Error;
 
+use crate::opencode_json::{self, JsonMessage, JsonOutcome};
 use crate::session::ParsedSession;
+use crate::survey::{Place, SkipReason, Survey};
 use crate::{claude, codex, opencode};
 
 /// Why a source could not be listed or an item could not be loaded.
@@ -41,6 +44,15 @@ pub enum HistoryError {
         path: String,
         /// The underlying error.
         source: rusqlite::Error,
+    },
+    /// The database opened but its layout is not one Leon knows. This is
+    /// reported, never treated as "no sessions".
+    #[error("{path} has a layout Leon does not know: {detail}")]
+    Unsupported {
+        /// The database file.
+        path: String,
+        /// What is missing.
+        detail: String,
     },
 }
 
@@ -70,6 +82,28 @@ pub trait HistorySource: Send + Sync {
     /// Loads and parses one item. `Ok(None)` means the item was readable but
     /// holds no messages.
     fn load(&self, item: &SourceItem) -> Result<Option<ParsedSession>, HistoryError>;
+
+    /// A cheap marker that changes whenever something in the source may have
+    /// changed (file sizes and times, including a database's `-wal` file),
+    /// without listing or parsing anything. `None` when the source cannot say.
+    /// Callers use it to skip a whole import when nothing moved.
+    fn stamp(&self) -> Option<String> {
+        None
+    }
+
+    /// What the last [`list`](Self::list) could not read although it listed
+    /// other things: a database of a layout Leon does not know next to one
+    /// it does. Words only, no content.
+    fn problems(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Looks at everything the source holds and reports what it found and
+    /// why parts of it are not imported. Reads transcripts but stores
+    /// nothing, and the report carries no content.
+    fn survey(&self) -> Survey {
+        Survey::new(self.agent())
+    }
 }
 
 /// Claude Code transcripts on the local file system.
@@ -113,6 +147,43 @@ impl HistorySource for ClaudeFiles {
         let path = Path::new(&item.locator);
         let bytes = read_file(path)?;
         Ok(claude::parse_session(&file_stem(path), &bytes))
+    }
+
+    fn stamp(&self) -> Option<String> {
+        Some(tree_stamp(&self.root, 2))
+    }
+
+    fn survey(&self) -> Survey {
+        let mut survey = Survey::new(AgentId::CLAUDE);
+        let mut place = Place::new("configured", &self.root, self.root.is_dir());
+        let projects: Vec<_> = read_dir(&self.root)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|path| path.is_dir())
+            .collect();
+        place
+            .details
+            .push("layout: <projects>/<project>/<session>.jsonl".to_owned());
+        place
+            .details
+            .push(format!("{} project folders", projects.len()));
+        survey.places.push(place);
+        for project in projects {
+            for entry in read_dir(&project).unwrap_or_default() {
+                if entry.is_dir() {
+                    // Sub-agent transcripts live deeper than the session files.
+                    for _ in jsonl_below(&entry, 4) {
+                        survey.skip(SkipReason::ChildSession);
+                    }
+                } else if has_extension(&entry, "jsonl") {
+                    survey.found += 1;
+                    survey_transcript(&mut survey, &entry, |bytes| {
+                        claude::parse_session(&file_stem(&entry), bytes)
+                    });
+                }
+            }
+        }
+        survey
     }
 }
 
@@ -163,6 +234,30 @@ impl HistorySource for CodexFiles {
         let bytes = read_file(path)?;
         Ok(codex::parse_session(&rollout_id(&file_stem(path)), &bytes))
     }
+
+    fn stamp(&self) -> Option<String> {
+        Some(tree_stamp(&self.root, MAX_ROLLOUT_DEPTH))
+    }
+
+    fn survey(&self) -> Survey {
+        let mut survey = Survey::new(AgentId::CODEX);
+        let mut place = Place::new("configured", &self.root, self.root.is_dir());
+        place
+            .details
+            .push("layout: <sessions>/<year>/<month>/<day>/rollout-*.jsonl".to_owned());
+        survey.places.push(place);
+        for entry in jsonl_below(&self.root, MAX_ROLLOUT_DEPTH) {
+            if file_stem(&entry).starts_with("rollout-") {
+                survey.found += 1;
+                survey_transcript(&mut survey, &entry, |bytes| {
+                    codex::parse_session(&rollout_id(&file_stem(&entry)), bytes)
+                });
+            } else {
+                survey.skip(SkipReason::NotATranscript);
+            }
+        }
+        survey
+    }
 }
 
 /// How deep below the sessions root rollouts are looked for. The layout needs
@@ -208,30 +303,463 @@ impl OpencodeDb {
     }
 }
 
-impl HistorySource for OpencodeDb {
-    fn agent(&self) -> AgentId {
-        AgentId::OPENCODE
-    }
-
-    fn list(&self) -> Result<Vec<SourceItem>, HistoryError> {
+impl OpencodeDb {
+    /// The top-level sessions and the ids of every session, children
+    /// included. A database whose layout Leon does not know is an
+    /// [`HistoryError::Unsupported`], not an empty list.
+    fn list_with_ids(&self) -> Result<(Vec<SourceItem>, Vec<String>), HistoryError> {
         if !self.path.is_file() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let schema = self.with_connection(opencode::inspect)?;
+        if let Some(detail) = schema.unsupported() {
+            return Err(HistoryError::Unsupported {
+                path: self.path.display().to_string(),
+                detail,
+            });
         }
         let sessions = self.with_connection(opencode::list_sessions)?;
+        let ids = self.with_connection(opencode::all_ids)?;
         let database = self.path.display();
-        Ok(sessions
+        let items = sessions
             .into_iter()
             .map(|session| SourceItem {
                 key: format!("opencode:{database}#{}", session.id),
                 fingerprint: session.fingerprint,
                 locator: session.id,
             })
-            .collect())
+            .collect();
+        Ok((items, ids))
+    }
+}
+
+impl HistorySource for OpencodeDb {
+    fn agent(&self) -> AgentId {
+        AgentId::OPENCODE
+    }
+
+    fn list(&self) -> Result<Vec<SourceItem>, HistoryError> {
+        self.list_with_ids().map(|(items, _)| items)
     }
 
     fn load(&self, item: &SourceItem) -> Result<Option<ParsedSession>, HistoryError> {
         self.with_connection(|connection| opencode::read_session(connection, &item.locator))
     }
+}
+
+/// Every `.jsonl` file below `directory`, at most `depth` levels down.
+fn jsonl_below(directory: &Path, depth: usize) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![(directory.to_path_buf(), 0usize)];
+    while let Some((directory, level)) = pending.pop() {
+        for entry in read_dir(&directory).unwrap_or_default() {
+            if entry.is_dir() {
+                if level < depth {
+                    pending.push((entry, level + 1));
+                }
+            } else if has_extension(&entry, "jsonl") {
+                found.push(entry);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Parses one transcript for a survey and files what it finds.
+fn survey_transcript(
+    survey: &mut Survey,
+    path: &Path,
+    parse: impl FnOnce(&[u8]) -> Option<ParsedSession>,
+) {
+    let Ok(bytes) = fs::read(path) else {
+        survey.skip(SkipReason::Unreadable);
+        return;
+    };
+    match parse(&bytes) {
+        None => survey.skip(SkipReason::Empty),
+        Some(parsed) => see_parsed(survey, &parsed),
+    }
+}
+
+fn see_parsed(survey: &mut Survey, parsed: &ParsedSession) {
+    survey.malformed += parsed.malformed;
+    survey.see_time(parsed.updated_at);
+    if !Survey::is_usable_folder(&parsed.cwd) {
+        survey.without_folder += 1;
+    }
+}
+
+/// A marker for a directory tree: the size and modification time of every
+/// directory and `.jsonl` file down to `depth`. Cheap (metadata only) and it
+/// changes when a transcript is added, grows or is rewritten.
+fn tree_stamp(root: &Path, depth: usize) -> String {
+    let mut files = 0usize;
+    let mut newest = 0u128;
+    let mut bytes = 0u64;
+    let mut pending = vec![(root.to_path_buf(), 0usize)];
+    while let Some((directory, level)) = pending.pop() {
+        for entry in read_dir(&directory).unwrap_or_default() {
+            let Ok(metadata) = fs::metadata(&entry) else {
+                continue;
+            };
+            if metadata.is_dir() {
+                if level < depth {
+                    pending.push((entry, level + 1));
+                }
+            } else if has_extension(&entry, "jsonl") {
+                files += 1;
+                bytes += metadata.len();
+                newest = newest.max(modified_millis(&metadata));
+            }
+        }
+    }
+    format!("{files}:{bytes}:{newest}")
+}
+
+fn modified_millis(metadata: &fs::Metadata) -> u128 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_millis())
+}
+
+/// Size and modification time of a file, or `-` when it is not there.
+fn file_stamp(path: &Path) -> String {
+    match fs::metadata(path) {
+        Ok(metadata) => format!("{}@{}", metadata.len(), modified_millis(&metadata)),
+        Err(_) => "-".to_owned(),
+    }
+}
+
+/// opencode's own data: every database in its folder and the older JSON
+/// layout beside them. See [`opencode`] and [`crate::opencode_json`].
+///
+/// opencode names its database `opencode.db`, but builds from other channels
+/// use `opencode-<channel>.db` and `OPENCODE_DB` can point anywhere, so every
+/// `opencode*.db` next to the configured one is read too. A session held by
+/// both a database and the JSON folder (opencode leaves the folder behind
+/// when it moves to SQLite) is imported once, from the database.
+#[derive(Debug)]
+pub struct OpencodeData {
+    primary: PathBuf,
+    problems: Mutex<Vec<String>>,
+}
+
+impl OpencodeData {
+    /// A source for the database at `primary`; the folder it sits in is
+    /// searched for the others and for `storage/`.
+    pub fn new(primary: impl Into<PathBuf>) -> Self {
+        Self {
+            primary: primary.into(),
+            problems: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn folder(&self) -> PathBuf {
+        self.primary
+            .parent()
+            .map_or_else(PathBuf::new, Path::to_path_buf)
+    }
+
+    fn storage(&self) -> PathBuf {
+        self.folder().join("storage")
+    }
+
+    /// The database files: the configured one, then the others beside it.
+    fn databases(&self) -> Vec<PathBuf> {
+        let mut found = vec![self.primary.clone()];
+        let mut beside: Vec<PathBuf> = read_dir(&self.folder())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|path| {
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                path.is_file()
+                    && name.ends_with(".db")
+                    && (name == "opencode.db" || name.starts_with("opencode-"))
+                    && *path != self.primary
+            })
+            .collect();
+        beside.sort();
+        found.extend(beside);
+        found.retain(|path| path.is_file());
+        found
+    }
+
+    fn session_files(&self) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for project in read_dir(&self.storage().join("session")).unwrap_or_default() {
+            if project.is_dir() {
+                files.extend(
+                    read_dir(&project)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|file| has_extension(file, "json")),
+                );
+            }
+        }
+        files.sort();
+        files
+    }
+
+    fn json_fingerprint(&self, session_file: &Path, id: &str) -> String {
+        let messages = self.storage().join("message").join(id);
+        let count = read_dir(&messages).map_or(0, |entries| entries.len());
+        format!(
+            "{}:{}:{count}",
+            file_stamp(session_file),
+            file_stamp(&messages)
+        )
+    }
+
+    fn read_json(&self, session_file: &Path) -> Result<JsonOutcome, HistoryError> {
+        let info = read_file(session_file)?;
+        let Some((id, _)) = opencode_json::peek(&info) else {
+            return Ok(JsonOutcome::Unreadable);
+        };
+        let mut messages = Vec::new();
+        for file in read_dir(&self.storage().join("message").join(&id))? {
+            if !has_extension(&file, "json") {
+                continue;
+            }
+            let Ok(message) = fs::read(&file) else {
+                continue;
+            };
+            let mut parts = Vec::new();
+            let message_id = file_stem(&file);
+            for part in read_dir(&self.storage().join("part").join(message_id))? {
+                if has_extension(&part, "json") {
+                    if let Ok(bytes) = fs::read(&part) {
+                        parts.push(bytes);
+                    }
+                }
+            }
+            messages.push(JsonMessage {
+                info: message,
+                parts,
+            });
+        }
+        Ok(opencode_json::parse_session(&info, &messages))
+    }
+}
+
+impl HistorySource for OpencodeData {
+    fn agent(&self) -> AgentId {
+        AgentId::OPENCODE
+    }
+
+    fn list(&self) -> Result<Vec<SourceItem>, HistoryError> {
+        let mut items = Vec::new();
+        let mut ids: HashSet<String> = HashSet::new();
+        let mut first_error = None;
+        let mut problems = Vec::new();
+        for path in self.databases() {
+            let db = OpencodeDb::new(&path);
+            match db.list_with_ids() {
+                Ok((listed, all)) => {
+                    ids.extend(all);
+                    items.extend(listed.into_iter().map(|item| SourceItem {
+                        locator: format!("sqlite\t{}\t{}", path.display(), item.locator),
+                        ..item
+                    }));
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "cannot list an opencode database");
+                    problems.push(error.to_string());
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        for file in self.session_files() {
+            let Ok(info) = read_file(&file) else { continue };
+            let Some((id, child)) = opencode_json::peek(&info) else {
+                continue;
+            };
+            if child || ids.contains(&id) {
+                continue;
+            }
+            items.push(SourceItem {
+                key: format!("opencode:{}", file.display()),
+                fingerprint: self.json_fingerprint(&file, &id),
+                locator: format!("json\t{}", file.display()),
+            });
+        }
+        *self.problems.lock().unwrap_or_else(PoisonError::into_inner) = problems;
+        match first_error {
+            // One unreadable database must not hide the rest, but when nothing
+            // at all could be listed the failure is the answer.
+            Some(error) if items.is_empty() => Err(error),
+            _ => Ok(items),
+        }
+    }
+
+    fn load(&self, item: &SourceItem) -> Result<Option<ParsedSession>, HistoryError> {
+        let mut parts = item.locator.splitn(3, '\t');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some("sqlite"), Some(path), Some(id)) => OpencodeDb::new(path).load(&SourceItem {
+                locator: id.to_owned(),
+                ..item.clone()
+            }),
+            (Some("json"), Some(path), None) => Ok(match self.read_json(Path::new(path))? {
+                JsonOutcome::Session(parsed) => Some(*parsed),
+                _ => None,
+            }),
+            _ => Ok(None),
+        }
+    }
+
+    fn problems(&self) -> Vec<String> {
+        self.problems
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn stamp(&self) -> Option<String> {
+        let mut stamp = String::new();
+        for path in self.databases() {
+            let mut wal = path.clone().into_os_string();
+            wal.push("-wal");
+            stamp.push_str(&format!(
+                "{}|{};",
+                file_stamp(&path),
+                file_stamp(Path::new(&wal))
+            ));
+        }
+        stamp.push_str(&file_stamp(&self.storage().join("session")));
+        stamp.push_str(&file_stamp(&self.storage().join("message")));
+        Some(stamp)
+    }
+
+    fn survey(&self) -> Survey {
+        let mut survey = Survey::new(AgentId::OPENCODE);
+        let mut ids: HashSet<String> = HashSet::new();
+        let databases = self.databases();
+        if databases.is_empty() {
+            survey
+                .places
+                .push(Place::new("configured", &self.primary, false));
+        }
+        for path in &databases {
+            let origin = if *path == self.primary {
+                "configured"
+            } else {
+                "found beside"
+            };
+            survey_database(&mut survey, origin, path, &mut ids);
+        }
+        let storage = self.storage();
+        let mut place = Place::new("json layout", &storage, storage.is_dir());
+        let files = self.session_files();
+        if !files.is_empty() {
+            place
+                .details
+                .push("layout: storage/session, message, part (older opencode)".to_owned());
+            place.details.push(format!("{} session files", files.len()));
+        }
+        survey.places.push(place);
+        for file in files {
+            match self.read_json(&file) {
+                Err(_) | Ok(JsonOutcome::Unreadable) => survey.skip(SkipReason::Unreadable),
+                Ok(JsonOutcome::Child) => survey.skip(SkipReason::ChildSession),
+                Ok(JsonOutcome::Empty) => {
+                    survey.found += 1;
+                    survey.skip(SkipReason::Empty);
+                }
+                Ok(JsonOutcome::Session(parsed)) => {
+                    if ids.contains(&parsed.external_id) {
+                        survey.skip(SkipReason::DuplicateId);
+                    } else {
+                        survey.found += 1;
+                        see_parsed(&mut survey, &parsed);
+                    }
+                }
+            }
+        }
+        survey
+    }
+}
+
+/// Reads one opencode database into a survey: layout, journal, sizes and
+/// the sessions with the reasons some of them are not imported.
+fn survey_database(survey: &mut Survey, origin: &str, path: &Path, ids: &mut HashSet<String>) {
+    let mut place = Place::new(origin, path, true);
+    let mut wal = path.to_path_buf().into_os_string();
+    wal.push("-wal");
+    let wal = PathBuf::from(wal);
+    place.details.push(format!(
+        "size: {} bytes",
+        fs::metadata(path).map_or(0, |m| m.len())
+    ));
+    match fs::metadata(&wal) {
+        Ok(metadata) => place
+            .details
+            .push(format!("-wal file present, {} bytes", metadata.len())),
+        Err(_) => place.details.push("no -wal file".to_owned()),
+    }
+    let connection = match opencode::open_read_only(path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            survey
+                .problems
+                .push(format!("cannot open {}: {error}", path.display()));
+            survey.skip(SkipReason::Unreadable);
+            survey.places.push(place);
+            return;
+        }
+    };
+    match opencode::inspect(&connection) {
+        Err(error) => {
+            survey
+                .problems
+                .push(format!("cannot inspect {}: {error}", path.display()));
+            survey.skip(SkipReason::Unreadable);
+        }
+        Ok(schema) => {
+            place
+                .details
+                .push("layout: SQLite (session, message, part)".to_owned());
+            place
+                .details
+                .push(format!("tables: {}", schema.tables.join(", ")));
+            place.details.push(format!(
+                "session columns: {}",
+                schema.session_columns.join(", ")
+            ));
+            place
+                .details
+                .push(format!("user_version: {}", schema.user_version));
+            place
+                .details
+                .push(format!("journal_mode: {}", schema.journal_mode));
+            if let Some(detail) = schema.unsupported() {
+                survey
+                    .problems
+                    .push(format!("{}: unsupported layout: {detail}", path.display()));
+                survey.skip(SkipReason::UnsupportedSchema);
+            } else {
+                ids.extend(opencode::all_ids(&connection).unwrap_or_default());
+                if let Ok((_, children)) = opencode::count_sessions(&connection) {
+                    for _ in 0..children {
+                        survey.skip(SkipReason::ChildSession);
+                    }
+                }
+                for session in opencode::list_sessions(&connection).unwrap_or_default() {
+                    survey.found += 1;
+                    match opencode::read_session(&connection, &session.id) {
+                        Ok(Some(parsed)) => see_parsed(survey, &parsed),
+                        Ok(None) => survey.skip(SkipReason::Empty),
+                        Err(_) => survey.skip(SkipReason::Unreadable),
+                    }
+                }
+            }
+        }
+    }
+    survey.places.push(place);
 }
 
 /// The entries of a directory. A directory that does not exist has none.
@@ -438,5 +966,164 @@ mod tests {
             OpencodeDb::new(&path).list(),
             Err(HistoryError::Database { .. })
         ));
+    }
+
+    fn json_session(root: &Path, id: &str, parent: Option<&str>, text: &str) {
+        let storage = root.join("storage");
+        let info = serde_json::json!({"id": id, "projectID": "p", "directory": "/srv/api",
+            "title": "t", "parentID": parent, "time": {"created": 1000, "updated": 2000}});
+        write(
+            &storage.join(format!("session/p/{id}.json")),
+            &info.to_string(),
+        );
+        write(
+            &storage.join(format!("message/{id}/msg_{id}.json")),
+            &serde_json::json!({"id": format!("msg_{id}"), "role": "user",
+                "time": {"created": 1000}})
+            .to_string(),
+        );
+        write(
+            &storage.join(format!("part/msg_{id}/prt_{id}.json")),
+            &serde_json::json!({"id": format!("prt_{id}"), "type": "text", "text": text})
+                .to_string(),
+        );
+    }
+
+    #[test]
+    fn the_older_json_layout_is_listed_and_loaded_and_children_are_left_out() {
+        let dir = tempfile::tempdir().unwrap();
+        json_session(dir.path(), "ses_old", None, "from the json layout");
+        json_session(dir.path(), "ses_kid", Some("ses_old"), "delegated");
+
+        let source = OpencodeData::new(dir.path().join("opencode.db"));
+        let items = source.list().unwrap();
+        assert_eq!(items.len(), 1);
+        let session = source.load(&items[0]).unwrap().unwrap();
+        assert_eq!(session.external_id, "ses_old");
+        assert_eq!(session.messages[0].text, "from the json layout");
+
+        let survey = source.survey();
+        assert_eq!(survey.found, 1);
+        assert_eq!(survey.skipped[&SkipReason::ChildSession], 1);
+    }
+
+    #[test]
+    fn a_json_session_that_grows_changes_its_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        json_session(dir.path(), "ses_old", None, "one");
+        let source = OpencodeData::new(dir.path().join("opencode.db"));
+        let before = source.list().unwrap();
+        write(
+            &dir.path().join("storage/message/ses_old/msg_two.json"),
+            r#"{"id":"msg_two","role":"assistant","time":{"created":3000}}"#,
+        );
+        assert_ne!(source.list().unwrap()[0].fingerprint, before[0].fingerprint);
+    }
+
+    #[test]
+    fn a_session_held_by_the_database_and_the_json_folder_is_listed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        opencode::fixture::populate(&Connection::open(dir.path().join("opencode.db")).unwrap());
+        json_session(dir.path(), "ses_1", None, "stale copy");
+        json_session(dir.path(), "ses_only_json", None, "old");
+
+        let source = OpencodeData::new(dir.path().join("opencode.db"));
+        let items = source.list().unwrap();
+        let ids: Vec<_> = items
+            .iter()
+            .map(|item| source.load(item).unwrap().unwrap().external_id)
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"ses_1".to_owned()) && ids.contains(&"ses_only_json".to_owned()));
+        let survey = source.survey();
+        assert_eq!(survey.skipped[&SkipReason::DuplicateId], 1);
+    }
+
+    #[test]
+    fn a_channel_database_beside_the_configured_one_is_read_too() {
+        let dir = tempfile::tempdir().unwrap();
+        opencode::fixture::populate(&Connection::open(dir.path().join("opencode.db")).unwrap());
+        let other = Connection::open(dir.path().join("opencode-dev.db")).unwrap();
+        opencode::fixture::create(&other);
+        opencode::fixture::session(&other, "ses_dev", None, "dev build", 5, 6);
+        opencode::fixture::message(&other, "m", "ses_dev", 5, r#"{"role":"user"}"#);
+        opencode::fixture::part(
+            &other,
+            "p",
+            "m",
+            "ses_dev",
+            5,
+            serde_json::json!({"type": "text", "text": "hi"}),
+        );
+        drop(other);
+
+        let source = OpencodeData::new(dir.path().join("opencode.db"));
+        assert_eq!(source.list().unwrap().len(), 2);
+        let places = source.survey().places;
+        assert!(places
+            .iter()
+            .any(|p| p.origin == "found beside" && p.exists));
+    }
+
+    #[test]
+    fn an_unknown_database_layout_is_an_error_and_a_reported_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE sessions_v2 (id TEXT, cwd TEXT);")
+            .unwrap();
+        let source = OpencodeData::new(&path);
+        assert!(matches!(
+            source.list(),
+            Err(HistoryError::Unsupported { .. })
+        ));
+        let survey = source.survey();
+        assert_eq!(survey.skipped[&SkipReason::UnsupportedSchema], 1);
+        assert!(survey.problems[0].contains("no `session` table"));
+    }
+
+    #[test]
+    fn a_session_row_without_messages_is_imported_once_it_gains_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        let connection = Connection::open(&path).unwrap();
+        opencode::fixture::create(&connection);
+        opencode::fixture::session(&connection, "ses_new", None, "New", 10, 10);
+        let source = OpencodeData::new(&path);
+        let before = source.list().unwrap();
+        assert_eq!(before.len(), 1);
+        assert!(source.load(&before[0]).unwrap().is_none());
+
+        opencode::fixture::message(&connection, "m", "ses_new", 20, r#"{"role":"user"}"#);
+        opencode::fixture::part(
+            &connection,
+            "p",
+            "m",
+            "ses_new",
+            20,
+            serde_json::json!({"type": "text", "text": "first words"}),
+        );
+        let after = source.list().unwrap();
+        assert_ne!(after[0].fingerprint, before[0].fingerprint);
+        assert!(source.load(&after[0]).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_change_that_only_reached_the_wal_file_moves_the_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        let writer = Connection::open(&path).unwrap();
+        writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+        // Keep the log from being folded back into the main file.
+        writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        opencode::fixture::populate(&writer);
+        let source = OpencodeData::new(&path);
+        let before = source.stamp().unwrap();
+        let main_before = fs::metadata(&path).unwrap().len();
+
+        opencode::fixture::message(&writer, "m9", "ses_1", 9_500, r#"{"role":"user"}"#);
+        assert_eq!(fs::metadata(&path).unwrap().len(), main_before);
+        assert_ne!(source.stamp().unwrap(), before);
     }
 }

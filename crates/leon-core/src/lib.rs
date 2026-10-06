@@ -35,7 +35,8 @@ pub use store::search::{
     SNIPPET_START,
 };
 pub use store::{
-    set_import_cursor_in, upsert_session_in, SessionFilter, Store, UsagePoint, UsageRow,
+    history_overview_at, import_cursors_at, set_import_cursor_in, upsert_session_in, AgentOverview,
+    ImportRun, SessionFilter, Store, UsagePoint, UsageRow,
 };
 
 /// The SQLite binding the store is built on, re-exported so that code using

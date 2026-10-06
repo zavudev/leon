@@ -118,6 +118,8 @@ pub enum Op {
     /// Import the local agent history.
     #[allow(dead_code)] // As above: `Refresh` is what the UI asks for today.
     ImportHistory,
+    /// Collect the history report of "Why is a session missing?".
+    DiagnoseHistory,
     /// Ask git for the worktrees of a project.
     #[allow(dead_code)] // The vocabulary of the engine; the UI asks through `Refresh` for now.
     SyncWorktrees(ProjectId),
@@ -256,6 +258,8 @@ pub enum EngineEvent {
     Elsewhere,
     /// A usage collection started or ended.
     Usage,
+    /// The history report of "Why is a session missing?" changed.
+    History,
 }
 
 /// Why an operation failed. The text is what the status line says.
@@ -355,6 +359,9 @@ struct Scanner {
 }
 
 struct State {
+    /// The history report: `None` before it was asked, empty while it is
+    /// being collected.
+    history_report: Option<Vec<String>>,
     status: Option<StatusLine>,
     machines: HashMap<MachineId, MachineState>,
     elsewhere: HashMap<MachineId, Arc<Elsewhere>>,
@@ -395,6 +402,8 @@ struct Inner {
     fetcher: Mutex<Arc<dyn IconFetcher>>,
     scanner: Mutex<Option<Arc<Scanner>>>,
     usage: Mutex<Option<UsageSetup>>,
+    /// The home folder the history report writes as `~`.
+    history_home: Mutex<Option<std::path::PathBuf>>,
     /// Which network sources are switched on.
     usage_policy: Mutex<leon_usage::network::NetworkPolicy>,
     /// How many jobs run on the blocking pool right now. They run on threads
@@ -441,6 +450,7 @@ impl Engine {
                 }),
                 handle,
                 state: Mutex::new(State {
+                    history_report: None,
                     status: None,
                     machines: HashMap::new(),
                     elsewhere: HashMap::new(),
@@ -449,6 +459,7 @@ impl Engine {
                 fetcher: Mutex::new(Arc::new(NoFetch)),
                 scanner: Mutex::new(None),
                 usage: Mutex::new(None),
+                history_home: Mutex::new(leon_history::home_dir()),
                 usage_policy: Mutex::new(leon_usage::network::NetworkPolicy::default()),
                 blocking: std::sync::atomic::AtomicUsize::new(0),
                 local_posix_shell: std::sync::atomic::AtomicBool::new(
@@ -1082,6 +1093,10 @@ impl Engine {
         match op {
             Op::Refresh => self.refresh().await.map(Some),
             Op::ImportHistory => self.import_history().await.map(Some),
+            Op::DiagnoseHistory => {
+                self.diagnose_history().await?;
+                Ok(None)
+            }
             Op::SyncWorktrees(project) => {
                 let count = self.sync_worktrees(&project).await?;
                 let name = self.inner.store.project(&project)?.name;
@@ -1147,6 +1162,61 @@ impl Engine {
             .blocking(move || Importer::run(&store, &MachineId::local(), &roots))
             .await?;
         Ok(describe_import(&report))
+    }
+
+    /// The report of "Why is a session missing?": reads every history source
+    /// off the UI thread and keeps the lines for the overlay.
+    async fn diagnose_history(&self) -> Result<(), EngineError> {
+        self.state().history_report = Some(Vec::new());
+        let _ = self.inner.events.send(EngineEvent::History);
+        let store = self.inner.store.clone();
+        let roots = self.prefs().roots;
+        let home = self
+            .inner
+            .history_home
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let lines = self
+            .blocking(move || {
+                let machine = MachineId::local();
+                let stored = store
+                    .history_overview(&machine)
+                    .and_then(|overview| {
+                        Ok(crate::history_report::Stored {
+                            overview,
+                            cursors: store.import_cursors(&machine)?,
+                        })
+                    })
+                    .map_err(|error| error.to_string());
+                let report = crate::history_report::collect(
+                    &roots,
+                    home.as_deref(),
+                    &leon_history::env_variable,
+                    stored,
+                    None,
+                );
+                crate::history_report::render(&report, &crate::platform::describe())
+            })
+            .await?;
+        self.state().history_report = Some(lines);
+        let _ = self.inner.events.send(EngineEvent::History);
+        Ok(())
+    }
+
+    /// The lines of the history report, once asked for.
+    pub fn history_report(&self) -> Option<Vec<String>> {
+        self.state().history_report.clone()
+    }
+
+    /// Where the history report says the home folder is. For tests.
+    #[cfg(test)]
+    pub(crate) fn set_history_home(&self, home: Option<std::path::PathBuf>) {
+        *self
+            .inner
+            .history_home
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = home;
     }
 
     // ----- worktrees -------------------------------------------------------
@@ -2010,6 +2080,10 @@ fn plural(count: usize, noun: &str) -> String {
     }
 }
 
+/// What the import's line adds when a history source has a layout Leon cannot
+/// read: that is never reported as "no sessions".
+const UNSUPPORTED_NOTICE: &str = " A history source has a layout Leon cannot read; run \"Why is a session missing?\" from the palette.";
+
 fn describe_import(report: &ImportReport) -> String {
     let mut text = format!(
         "Imported {} ({} unchanged",
@@ -2020,6 +2094,9 @@ fn describe_import(report: &ImportReport) -> String {
         text.push_str(&format!(", {} failed", report.failed));
     }
     text.push_str(").");
+    if report.unsupported > 0 {
+        text.push_str(UNSUPPORTED_NOTICE);
+    }
     text
 }
 
@@ -2423,6 +2500,53 @@ branch refs/heads/feature/login
             "{}",
             line.text
         );
+    }
+
+    fn odd_database_roots() -> (tempfile::TempDir, HistoryRoots) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("opencode.db");
+        leon_core::rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch("CREATE TABLE sessions_v2 (id TEXT);")
+            .unwrap();
+        let roots = HistoryRoots {
+            opencode_db: Some(db),
+            ..Default::default()
+        };
+        (dir, roots)
+    }
+
+    #[tokio::test]
+    async fn a_history_source_of_an_unknown_layout_is_never_reported_as_no_sessions() {
+        let rig = rig(ScriptedRunner::new());
+        let (_dir, roots) = odd_database_roots();
+        let mut prefs = rig.engine.prefs();
+        prefs.roots = roots;
+        rig.engine.set_prefs(prefs);
+        rig.engine.run(Op::ImportHistory).await;
+        let text = status(&rig.engine).text;
+        assert!(text.contains("cannot read"), "{text}");
+        assert!(text.contains("Why is a session missing?"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn the_history_report_is_collected_off_the_ui_thread_and_kept() {
+        let rig = rig(ScriptedRunner::new());
+        assert_eq!(rig.engine.history_report(), None);
+        let (dir, roots) = odd_database_roots();
+        rig.engine.set_history_home(Some(dir.path().to_path_buf()));
+        let mut prefs = rig.engine.prefs();
+        prefs.roots = roots;
+        rig.engine.set_prefs(prefs);
+        let mut events = rig.engine.subscribe();
+        rig.engine.run(Op::DiagnoseHistory).await;
+        let lines = rig.engine.history_report().unwrap();
+        let text = lines.join("\n");
+        assert!(
+            text.contains("PROBLEM: ~/opencode.db: unsupported layout"),
+            "{text}"
+        );
+        assert_eq!(events.try_recv().unwrap(), EngineEvent::History);
     }
 
     #[tokio::test]

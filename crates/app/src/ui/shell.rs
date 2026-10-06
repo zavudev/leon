@@ -106,6 +106,8 @@ pub enum Overlay {
     Share,
     /// The release notes of the version on offer.
     Notes,
+    /// "Why is a session missing?": the history report.
+    History,
 }
 
 /// What the folder picker answered.
@@ -406,6 +408,8 @@ pub struct Shell {
     pub(super) labels: std::collections::HashMap<ProjectId, String>,
     /// The project logos read from the store.
     pub(super) logos: Logos,
+    /// The scroll of the history report.
+    pub(super) history_scroll: ScrollHandle,
     /// Watches the terminals' activity while any is live.
     pub(super) ticker: Option<Task<()>>,
     /// The notifications shown for what sessions just did, oldest first.
@@ -622,6 +626,7 @@ impl Shell {
             filter: None,
             labels,
             logos: Logos::default(),
+            history_scroll: ScrollHandle::new(),
             ticker: None,
             banners: Vec::new(),
             banner_ticker: None,
@@ -1719,6 +1724,7 @@ impl Shell {
             C::Settings => self.open_settings(window, cx),
             C::ShowUsage => self.toggle_usage(window, cx),
             C::RefreshUsage => self.refresh_usage(cx),
+            C::WhyMissing => self.open_history_report(window, cx),
             C::Refresh => self.engine.submit(crate::engine::Op::Refresh),
             C::ProbeMachine => {
                 let machine = self.current_machine();
@@ -1799,6 +1805,7 @@ impl Shell {
                 | Overlay::Menu
                 | Overlay::About
                 | Overlay::Notes
+                | Overlay::History
                 | Overlay::Problems
                 | Overlay::Connect
                 | Overlay::Usage
@@ -1835,7 +1842,11 @@ impl Shell {
             Overlay::Connect => self.close_connect(window, cx),
             Overlay::Pair => self.close_pair(window, cx),
             Overlay::Share => self.close_share(window, cx),
-            Overlay::About | Overlay::Notes | Overlay::Problems | Overlay::Usage => {
+            Overlay::About
+            | Overlay::Notes
+            | Overlay::History
+            | Overlay::Problems
+            | Overlay::Usage => {
                 self.overlay = Overlay::None;
                 self.focus.focus(window, cx);
             }
@@ -2462,6 +2473,7 @@ impl Shell {
             Overlay::Pair => self.render_pair(colours, cx).into_any_element(),
             Overlay::Share => self.render_share(colours, cx).into_any_element(),
             Overlay::Notes => self.render_notes(colours, cx).into_any_element(),
+            Overlay::History => self.render_history_report(colours, cx).into_any_element(),
         };
         let top = match self.overlay {
             Overlay::Palette => self.palette_top(),

@@ -6,6 +6,16 @@
 
 ### Added
 
+* **Why is a session missing?** A palette command and `leon --diagnose history
+  [--agent <id>]` report where each agent's history is looked for (defaults,
+  environment variables, Settings), what format was found (SQLite tables and
+  columns, `user_version`, journal mode, the `-wal` file), how many sessions
+  the source holds against how many Leon imported, why the rest are skipped,
+  and when the last import ran. Counts, paths and times only.
+* opencode: databases of other channels (`opencode-<channel>.db`) and
+  `OPENCODE_DB` are found, the older JSON `storage/` layout is read too, an
+  unknown database layout is reported instead of looking like "no sessions",
+  and a change that only reached the `-wal` file moves the source's stamp.
 * **The usage counters follow Orca's rules.** The footer now shows every window
   of each agent, Orca's way (`10% used 2h 29m · 91% used 1d 11h !! · 0% used
   Fable`: the countdown to the reset for the five-hour and weekly windows,

@@ -580,3 +580,14 @@ impl Harness {
         self.mouse_on(selector, gpui_kit::MouseButton::Left, cx);
     }
 }
+
+#[gpui_kit::test]
+fn why_is_a_session_missing_opens_the_history_report(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (h, _) = open_with_updates(cx, &fixture, Install::Updatable(fixture.target.clone()));
+    run(&h, cx, "why is a session missing");
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::History);
+    assert!(h.shows("history-report", cx));
+    h.press("escape", cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+}
