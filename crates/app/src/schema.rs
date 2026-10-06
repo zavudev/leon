@@ -34,6 +34,8 @@ pub enum Section {
     Machines,
     /// How much of each agent's limits is left.
     Usage,
+    /// What Leon says when a session wants the user or finishes.
+    Notifications,
     /// The sidebar and quitting.
     Window,
     /// Every command with its chords (read-only).
@@ -44,7 +46,7 @@ pub enum Section {
 
 impl Section {
     /// Every section, in order.
-    pub const ALL: [Section; 10] = [
+    pub const ALL: [Section; 11] = [
         Section::Appearance,
         Section::Terminal,
         Section::Agents,
@@ -52,6 +54,7 @@ impl Section {
         Section::Projects,
         Section::Machines,
         Section::Usage,
+        Section::Notifications,
         Section::Window,
         Section::Keyboard,
         Section::Advanced,
@@ -67,6 +70,7 @@ impl Section {
             Section::Projects => "Projects",
             Section::Machines => "Machines",
             Section::Usage => "Usage",
+            Section::Notifications => "Notifications",
             Section::Window => "Sidebar & window",
             Section::Keyboard => "Keyboard",
             Section::Advanced => "Advanced & About",
@@ -86,6 +90,9 @@ impl Section {
             }
             Section::Usage => {
                 "How much of each agent's limits is left, and where the numbers come from."
+            }
+            Section::Notifications => {
+                "What Leon says when a session wants you or finishes, and how it says it."
             }
             Section::Window => "The sidebar and what quitting asks.",
             Section::Keyboard => "Every command and its shortcuts.",
@@ -335,6 +342,11 @@ const QUIT: Choices = Choices::Fixed(&[
     ("running", "When programs are running"),
     ("always", "Always"),
     ("never", "Never"),
+]);
+const NOTIFY_HOW: Choices = Choices::Fixed(&[
+    ("both", "Banner and desktop"),
+    ("banner", "Banner only"),
+    ("system", "Desktop only"),
 ]);
 const LEVELS: Choices = Choices::Fixed(&[
     ("error", "Error"),
@@ -1023,6 +1035,61 @@ pub const SETTINGS: &[Def] = &[
         "clear delete sparkline history limits",
         K::Action,
         D::None,
+    ),
+    // ----- notifications
+    def(
+        "notify",
+        S::Notifications,
+        "Notify",
+        "Say when a session wants you or finishes.",
+        "alerts sounds desktop banner notify",
+        K::Toggle,
+        D::Bool(true),
+    ),
+    def(
+        "notify_waiting",
+        S::Notifications,
+        "When an agent wants you",
+        "An agent finished its turn, went quiet or rang the bell.",
+        "waiting prompt question input idle finished turn",
+        K::Toggle,
+        D::Bool(true),
+    ),
+    def(
+        "notify_finished",
+        S::Notifications,
+        "When a session ends",
+        "A program ended with exit code zero.",
+        "exit done complete closed",
+        K::Toggle,
+        D::Bool(true),
+    ),
+    def(
+        "notify_failed",
+        S::Notifications,
+        "When a session fails",
+        "A program ended with an error.",
+        "exit error crash code",
+        K::Toggle,
+        D::Bool(true),
+    ),
+    def(
+        "notify_how",
+        S::Notifications,
+        "How to say it",
+        "The geek banner in the window, the desktop notification, or both.",
+        "desktop system toast popup banner",
+        K::Choice(NOTIFY_HOW),
+        D::Text("both"),
+    ),
+    def(
+        "notify_only_unfocused",
+        S::Notifications,
+        "Desktop only without focus",
+        "Show the desktop notification only while the Leon window does not have the focus. The banner still appears for a session that is not on screen.",
+        "focus foreground quiet mute",
+        K::Toggle,
+        D::Bool(true),
     ),
     // ----- sidebar and window
     def(
