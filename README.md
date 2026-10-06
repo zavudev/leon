@@ -983,7 +983,11 @@ a test fails when it is stale.
   that finds `git`) and then the rest, dimmed, with "not installed" and the
   agent's docs link. Type to filter: the list is long.
 * Settings ▸ Agents has, per agent, whether it is offered, the program and the
-  extra arguments (the three headline agents keep their old setting keys).
+  extra arguments (the three headline agents keep their old setting keys). A
+  new session starts working without stopping to ask: Claude Code gets
+  `--dangerously-skip-permissions` and Codex `--ask-for-approval never`. Both
+  are only the setting's default, so clearing the field brings the questions
+  back, and every other agent starts with nothing.
 * **Your own agents.** The palette's **Add a custom agent…** asks for a name, the
   command, the arguments of a new session and, optionally, the arguments that
   resume one: with `{id}` they resume that session (`--resume {id}`), without

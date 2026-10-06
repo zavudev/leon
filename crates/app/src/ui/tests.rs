@@ -3985,6 +3985,94 @@ mod live {
     }
 
     #[gpui_kit::test]
+    fn creating_a_worktree_with_codex_starts_it_without_the_approval_questions(
+        cx: &mut TestAppContext,
+    ) {
+        let h = open_live(cx);
+        // A project in a real folder, so its worktree can really be added and
+        // the agent really starts in it.
+        let (_dir, path) = real_worktree(&h, cx);
+        let project = h
+            .shell(cx, |shell| shell.snapshot.projects.clone())
+            .into_iter()
+            .find(|entry| entry.project.name == "real")
+            .expect("the project the worktree belongs to")
+            .project
+            .id;
+        // The dialog asks git for the branches; then git adds the worktree and
+        // lists it, and that listing is what puts it in the sidebar and where
+        // the agent starts.
+        h.runner.queue(Output::ok("trunk\n"));
+        h.runner.queue(Output::ok(String::new()));
+        // git would have made the folder; the agent starts inside it.
+        let added = crate::address::worktree_path(&path, "feature/preferencias");
+        std::fs::create_dir_all(&added).unwrap();
+        let listing = format!(
+            "worktree {path}\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/trunk\n\
+             worktree {added}\nHEAD 2222222222222222222222222222222222222222\n\
+             branch refs/heads/feature/preferencias\n",
+        );
+        for _ in 0..4 {
+            h.runner.queue(Output::ok(listing.clone()));
+        }
+        put_cursor_on(&h, cx, NodeId::Project(project));
+        h.press("ctrl-shift-n", cx);
+        h.type_text("feature/preferencias", cx);
+        h.press("tab", cx);
+        h.press("tab", cx);
+        h.press("down", cx); // None -> Claude Code
+        h.press("down", cx); // -> Codex
+        h.press("enter", cx); // the list closes on Codex
+        assert_eq!(
+            h.shell(cx, |s| s.new_worktree_ui.as_ref().unwrap().agent),
+            Some(AgentId::CODEX)
+        );
+        // Down on the agent row opens its list again, so Tab is what walks to
+        // the button.
+        h.press("tab", cx); // create more
+        h.press("tab", cx); // create the worktree
+        assert_eq!(
+            h.shell(cx, |s| s.new_worktree_ui.as_ref().unwrap().cursor),
+            4
+        );
+        h.press("enter", cx);
+        // The dialog waits on a clock for the worktree to appear in the list.
+        cx.executor().advance_clock(Duration::from_secs(1));
+        h.settle(cx);
+        wait_until(&h, cx, "the worktree's codex", |h, cx| {
+            screen(h, cx, 1).contains("codex --ask-for-approval never")
+        });
+    }
+
+    #[gpui_kit::test]
+    fn the_new_worktree_dialog_offers_the_last_agent_started(cx: &mut TestAppContext) {
+        let h = open_live(cx);
+        let (_dir, _path) = real_worktree(&h, cx);
+        h.press("ctrl-n", cx);
+        h.press("enter", cx); // Claude Code
+        wait_until(&h, cx, "the agent's first line", |h, cx| {
+            screen(h, cx, 1).contains("FAKE-CLAUDE")
+        });
+        assert_eq!(h.shell(cx, |s| s.last_agent), Some(AgentId::CLAUDE));
+        let api = h
+            .store
+            .projects(Some(&MachineId::local()))
+            .unwrap()
+            .into_iter()
+            .find(|project| project.name == "api")
+            .unwrap()
+            .id;
+        put_cursor(&h, cx, NodeId::Project(api));
+        h.press("ctrl-shift-n", cx);
+        assert_eq!(
+            h.shell(cx, |s| s.new_worktree_ui.as_ref().unwrap().agent),
+            Some(AgentId::CLAUDE),
+            "the last agent started is on offer"
+        );
+        h.press("escape", cx);
+    }
+
+    #[gpui_kit::test]
     fn a_new_session_runs_the_agent_in_a_terminal_that_fills_the_main_pane(
         cx: &mut TestAppContext,
     ) {
@@ -6356,34 +6444,6 @@ mod live {
                 fn kill(pid: i32, signal: i32) -> i32;
             }
             unsafe { kill(pid, 0) }
-        }
-
-        #[gpui_kit::test]
-        fn the_new_worktree_dialog_offers_the_last_agent_started(cx: &mut TestAppContext) {
-            let h = open_live(cx);
-            let (_dir, _path) = real_worktree(&h, cx);
-            h.press("ctrl-n", cx);
-            h.press("enter", cx); // Claude Code
-            wait_until(&h, cx, "the agent's first line", |h, cx| {
-                screen(h, cx, 1).contains("FAKE-CLAUDE")
-            });
-            assert_eq!(h.shell(cx, |s| s.last_agent), Some(AgentId::CLAUDE));
-            let api = h
-                .store
-                .projects(Some(&MachineId::local()))
-                .unwrap()
-                .into_iter()
-                .find(|project| project.name == "api")
-                .unwrap()
-                .id;
-            put_cursor(&h, cx, NodeId::Project(api));
-            h.press("ctrl-shift-n", cx);
-            assert_eq!(
-                h.shell(cx, |s| s.new_worktree_ui.as_ref().unwrap().agent),
-                Some(AgentId::CLAUDE),
-                "the last agent started is on offer"
-            );
-            h.press("escape", cx);
         }
 
         #[gpui_kit::test]

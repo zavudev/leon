@@ -380,13 +380,18 @@ const PROGRAM: Kind = K::Path {
 /// setting brings the questions back.
 const CLAUDE_SKIP_PERMISSIONS: &str = "--dangerously-skip-permissions";
 
-/// What a new session of `id` starts with. Claude Code works without stopping
-/// to ask, which is what a session inside Leon is for; every other agent
-/// starts with nothing. Clearing the setting in Settings brings the questions
-/// back.
+/// Codex asks when to ask; `never` is how a session inside Leon runs.
+const CODEX_NEVER_ASKS: &str = "--ask-for-approval never";
+
+/// What a new session of `id` starts with, when the setting was never
+/// changed: the agent works without stopping to ask, which is what a session
+/// inside Leon is for. Every other agent starts with nothing. Clearing the
+/// setting in Settings brings the questions back.
 fn default_args(id: leon_core::AgentId) -> &'static str {
     if id == leon_core::AgentId::CLAUDE {
         CLAUDE_SKIP_PERMISSIONS
+    } else if id == leon_core::AgentId::CODEX {
+        CODEX_NEVER_ASKS
     } else {
         ""
     }
@@ -1170,11 +1175,7 @@ fn agent_defs(spec: &AgentSpec) -> Vec<Def> {
                 leak(agent_setting(id, "args")),
                 S::Agents,
                 leak(format!("{name} arguments, new session")),
-                leak(format!(
-                    "Extra arguments typed after the command of a new {name} session. \
-                     Empty clears the default, which is what starts {name} without \
-                     stopping to ask."
-                )),
+                leak(args_description(name, default_args(id))),
                 leak(format!("{words} flags options")),
                 NO_ARGS,
                 D::Text(default_args(id)),
@@ -1199,6 +1200,21 @@ fn agent_defs(spec: &AgentSpec) -> Vec<Def> {
         ));
     }
     defs
+}
+
+/// What the arguments setting of an agent says, naming the default when it
+/// has one: an agent that starts without asking says so, and says how to get
+/// the questions back.
+fn args_description(name: &str, default: &str) -> String {
+    if default.is_empty() {
+        format!("Extra arguments typed after the command of a new {name} session.")
+    } else {
+        format!(
+            "Extra arguments typed after the command of a new {name} session. The \
+             default, `{default}`, starts it without stopping to ask; empty brings \
+             the questions back."
+        )
+    }
 }
 
 /// The label, description and search words of the switch of a usage source.
