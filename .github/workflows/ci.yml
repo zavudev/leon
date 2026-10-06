@@ -69,6 +69,8 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all --check
+      - name: Linux installer
+        run: packaging/linux/test.sh
 
   # Clippy checks the workspace, which is a build of its own, so it has its own
   # jobs: it runs beside the tests and not in front of them.

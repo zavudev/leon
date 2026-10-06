@@ -39,12 +39,18 @@ Other commands: `cargo xtask version`, `cargo xtask check-tag <TAG>`,
 | `leon-<v>-macos-aarch64.dmg` | macOS (Apple Silicon) | `Leon.app` and an Applications link |
 | `leon-<v>-macos-x86_64.dmg` | macOS (Apple silicon, cross build for Intel) | the same |
 | `leon-<v>-linux-x86_64.tar.gz` | Ubuntu 22.04 | binary, desktop entry, icons, `INSTALL.txt`, `LICENSE`, `NOTICE` |
+| `install.sh` | Ubuntu 22.04 | rootless Linux installer under `~/.local`; verifies the tarball with `SHA256SUMS` |
+| `leon_<v>_amd64.deb`, `leon-<v>-1.x86_64.rpm` | Ubuntu 22.04 | the Linux archive installed under `/usr`, owned by the package manager |
 | `leon-<v>-windows-x86_64.zip` | Windows | `leon.exe` (icon embedded), `LICENSE`, `NOTICE` |
 | `SHA256SUMS` | | checksum of every file above |
 
 The release is created with generated notes, and marked pre-release when the
 version has a `-suffix`. Nothing is published unless all four platforms built.
-There is no auto-updater, so there is no update manifest or update key.
+There is no auto-updater, so there is no update manifest or update key. Linux
+users rerun `install.sh` to upgrade a home install, or install the next `.deb` or
+`.rpm`. The publish job builds those packages with nFPM and copies `install.sh`
+into `dist` before `SHA256SUMS` is generated; a packaging failure stops the
+release.
 
 ## Secrets
 
@@ -109,6 +115,14 @@ hangs fails early.
 Note: the release's Linux binary links against the glibc of the machine that
 builds it. The `ubuntu-22.04` fallback is deliberate (it runs on any distribution
 that old or newer); a custom `RUNNER_LINUX` decides the baseline instead.
+
+The same Linux files reach users in three forms. The tarball remains the portable
+manual option. `packaging/linux/install.sh` downloads that tarball, checks its
+entry in `SHA256SUMS`, installs the binary and desktop assets under `~/.local`,
+and writes an absolute `Exec` path so graphical sessions do not depend on the
+shell's `PATH`. `packaging/linux/package.sh` turns the tarball into `.deb` and
+`.rpm` packages with nFPM; those install under `/usr` and are owned by the system
+package manager.
 
 What the workflows already do for speed: `fmt` is its own job and fails in
 seconds; clippy runs beside the tests, not before them; `--locked`;
