@@ -4224,7 +4224,7 @@ mod live {
     }
 
     #[gpui_kit::test]
-    fn non_editing_ctrl_chords_escape_tab_and_the_arrows_reach_the_program(
+    fn ctrl_c_without_a_selection_ctrl_d_escape_tab_and_the_arrows_reach_the_program(
         cx: &mut TestAppContext,
     ) {
         let h = open_live(cx);
@@ -4236,22 +4236,18 @@ mod live {
         });
         let script = script_of(&h, 1);
         let before = script.written().len();
-        let mut keys = vec!["ctrl-d", "escape", "tab", "up", "left", "enter"];
-        if crate::platform::is_mac() {
-            keys.insert(0, "ctrl-c");
-        }
-        for key in keys {
-            // These are the program's: the secondary chords here are not
-            // Leon's while a terminal has the keyboard, on every platform.
+        for key in ["ctrl-c", "ctrl-d", "escape", "tab", "up", "left", "enter"] {
+            // Ctrl+C is the native copy chord off macOS, but nothing is
+            // selected, so it is the program's; the rest are not Leon's while
+            // a terminal has the keyboard, on every platform.
             cx.update_window(h.window.into(), |_, window, cx| window.press(key, cx))
                 .unwrap();
         }
-        let expected = if crate::platform::is_mac() {
-            &b"\x03\x04\x1b\t\x1b[A\x1b[D\r"[..]
-        } else {
-            &b"\x04\x1b\t\x1b[A\x1b[D\r"[..]
-        };
-        assert_eq!(script.written()[before..], *expected, "the terminal bytes");
+        assert_eq!(
+            script.written()[before..],
+            *b"\x03\x04\x1b\t\x1b[A\x1b[D\r",
+            "the terminal bytes"
+        );
         // Leon did not move: still on the terminal, still the main pane.
         assert_eq!(h.main_kind(cx), "live:1");
         assert_eq!(

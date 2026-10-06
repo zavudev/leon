@@ -1374,28 +1374,34 @@ impl Shell {
         view.update(cx, |view, cx| view.handle_keystroke(stroke, cx))
     }
 
-    /// Copy, paste and the scrollback keys, for the terminal on screen.
+    /// Copy, paste and the scrollback keys, for the terminal on screen. `true`
+    /// when it did something: a copy without a selection does nothing, and the
+    /// caller may then give the key to the program.
     pub(super) fn terminal_action(
         &mut self,
         command: crate::keys::Command,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         use crate::keys::Command as C;
-        let Main::Live(id) = self.main else { return };
+        let Main::Live(id) = self.main else {
+            return false;
+        };
         let Some(view) = self.live.get(id).map(|session| session.view.clone()) else {
-            return;
+            return false;
         };
         view.update(cx, |view, cx| match command {
-            C::Copy => {
-                view.copy(cx);
+            C::Copy => view.copy(cx),
+            C::Paste => view.paste(cx),
+            C::ScrollPageUp => {
+                view.scroll_page_up(cx);
+                true
             }
-            C::Paste => {
-                view.paste(cx);
+            C::ScrollPageDown => {
+                view.scroll_page_down(cx);
+                true
             }
-            C::ScrollPageUp => view.scroll_page_up(cx),
-            C::ScrollPageDown => view.scroll_page_down(cx),
-            _ => {}
-        });
+            _ => false,
+        })
     }
 
     // ----- drawing -------------------------------------------------------------------------

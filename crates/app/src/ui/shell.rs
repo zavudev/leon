@@ -2157,6 +2157,14 @@ impl Shell {
             // keyboard; plain text reaches it through the text input path.
             return terminal && !finding && self.terminal_key(stroke, cx);
         };
+        // The terminal's own copy chord (Cmd+C on macOS, Ctrl+C elsewhere)
+        // copies only when there is a selection: without one the key belongs
+        // to the program, so Ctrl+C still interrupts it (the 0x03 byte)
+        // instead of being swallowed. The Shift alias stays Leon's: with
+        // nothing selected it copies nothing.
+        if command == Command::Copy && terminal && !finding && !stroke.modifiers.shift {
+            return self.terminal_action(command, cx) || self.terminal_key(stroke, cx);
+        }
         self.run_command(command, window, cx)
     }
 
@@ -2261,7 +2269,9 @@ impl Shell {
             C::Paste => self.paste_terminal(Self::paste_mode(cx), cx),
             C::PasteText => self.paste_terminal(super::paste::How::Text, cx),
             C::PasteImage => self.paste_terminal(super::paste::How::Image, cx),
-            C::Copy | C::ScrollPageUp | C::ScrollPageDown => self.terminal_action(command, cx),
+            C::Copy | C::ScrollPageUp | C::ScrollPageDown => {
+                self.terminal_action(command, cx);
+            }
             C::NewSession
             | C::AddAgent
             | C::RemoveAgent

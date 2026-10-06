@@ -799,7 +799,10 @@ no overlay) the shell's key interceptor first asks the registry
 (`keys::resolve` with `Context { terminal: true }`) and only chords that
 `keys::kept_in_terminal` allows can match: on macOS every `Cmd` chord; on
 Linux and Windows the native `Ctrl+C` / `Ctrl+V` editing chords and chords
-that also hold `Shift`, plus the scrollback keys. Chords are per platform
+that also hold `Shift`, plus the scrollback keys. A copy chord is taken only
+when the terminal has a selection: `handle_key` gives it back to the program
+when there is none, so plain `Ctrl+C` keeps interrupting. Chords are per
+platform
 (`mac(..)` and `other(..)` in the registry,
 and `alt` / `control` modifiers), which is how the iTerm2 chords coexist with
 `Ctrl+Shift` equivalents. Every other key goes to `TerminalView`, which turns
