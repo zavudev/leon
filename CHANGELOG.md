@@ -24,6 +24,12 @@
 * New crates `leon-wire`, `leon-link`, `leon-pty` and `leon-host`; settings for
   the relay address, the device name, sharing and approval.
 
+### Fixed
+
+* opencode 2.x sessions appear in the history again: the database moved its
+  sessions to `session_v2` and `session_message`, and Leon now reads that
+  layout as well as the older `session`/`message`/`part` one.
+
 ### Not yet
 
 * The relay service at `wss://relay.zavu.dev` is not deployed.
