@@ -701,10 +701,10 @@ const BASE: &[Def] = &[
         "discover_projects",
         S::Projects,
         "Discover projects from session folders",
-        "Add the repositories your sessions ran in as projects.",
+        "Add the repositories your sessions ran in as projects. Off by default: the history stays searchable without filling the sidebar.",
         "find automatic folders repositories",
         K::Toggle,
-        D::Bool(true),
+        D::Bool(false),
     ),
     def(
         "detect_logos",

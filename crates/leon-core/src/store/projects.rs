@@ -246,7 +246,9 @@ impl Store {
     ///
     /// Worktrees are matched by path: one that is still present keeps its id,
     /// its place in the sidebar order and has its branch and head refreshed,
-    /// a new one goes last and one that is no longer reported is removed.
+    /// a new one goes last and one that is no longer reported is removed, and
+    /// its folder is remembered as dismissed like a removed project's root,
+    /// until git reports it again.
     /// When a path is listed more than once the last entry wins. Returns the
     /// resulting worktrees.
     pub fn replace_worktrees(
@@ -278,7 +280,7 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?
             {
                 by_key.insert(crate::path::key(&path), id.clone());
-                stale.insert(id.clone(), id);
+                stale.insert(id, path);
             }
             let next: i64 = tx
                 .prepare_cached(
@@ -313,6 +315,7 @@ impl Store {
             for worktree in &reported {
                 let path = trim_trailing_separators(&worktree.path);
                 let key = crate::path::key(path);
+                forget_dismissed(tx, &project.machine_id, path)?;
                 match by_key.get(&key) {
                     Some(id) => {
                         stale.remove(id);
@@ -357,9 +360,13 @@ impl Store {
                     }
                 }
             }
-            for id in stale.values() {
+            for (id, path) in &stale {
                 tx.prepare_cached("DELETE FROM worktree WHERE id = ?1")?
                     .execute([id])?;
+                tx.prepare_cached(
+                    "INSERT OR IGNORE INTO dismissed_root (machine_id, root) VALUES (?1, ?2)",
+                )?
+                .execute(params![project.machine_id.as_str(), path])?;
             }
 
             let relinked = relink_sessions(tx, &project.machine_id)?;
@@ -1210,6 +1217,35 @@ mod tests {
         assert!(
             store.dismissed_roots(&local()).unwrap().is_empty(),
             "adding it by hand forgives it"
+        );
+    }
+
+    #[test]
+    fn a_worktree_git_stops_reporting_is_dismissed_until_git_reports_it_again() {
+        let store = Store::open_in_memory().unwrap();
+        let project = store.add_project(&local(), "api", "/srv/api").unwrap();
+        let main = worktree("/srv/api", Some("main"), true);
+        let feature = worktree("/srv/api/.claude/worktrees/feature", Some("feature"), false);
+        store
+            .replace_worktrees(&project.id, vec![main.clone(), feature.clone()])
+            .unwrap();
+        assert!(store.dismissed_roots(&local()).unwrap().is_empty());
+
+        store
+            .replace_worktrees(&project.id, vec![main.clone()])
+            .unwrap();
+        assert_eq!(
+            store.dismissed_roots(&local()).unwrap(),
+            HashSet::from(["/srv/api/.claude/worktrees/feature".to_owned()]),
+            "its folder is remembered, as a removed project's root is"
+        );
+
+        store
+            .replace_worktrees(&project.id, vec![main, feature])
+            .unwrap();
+        assert!(
+            store.dismissed_roots(&local()).unwrap().is_empty(),
+            "a worktree that exists again is not a removed one"
         );
     }
 

@@ -2,7 +2,7 @@
 //!
 //! [`Snapshot`] is one consistent read of everything the tree needs: every
 //! machine, every project with its worktrees and the recent sessions of every
-//! machine. It takes five queries whatever the size of the history; grouping
+//! machine. It takes a handful of queries whatever the size of the history; grouping
 //! the sessions under their worktrees is then done in memory, by
 //! [`tree::Placement`](super::tree::Placement).
 
@@ -35,11 +35,13 @@ pub struct Snapshot {
     pub sessions: Vec<Session>,
     /// The logo in effect of every project that has one (no image bytes).
     pub icons: HashMap<ProjectId, ProjectIcon>,
+    /// The folders somebody removed (projects and worktrees), by machine.
+    pub dismissed: Vec<(MachineId, String)>,
 }
 
 impl Snapshot {
     /// Reads the machines, the projects with their worktrees and the recent
-    /// sessions: four queries in all.
+    /// sessions and the removed folders.
     pub fn load(store: &Store) -> Result<Self> {
         let mut machines = store.machines()?;
         machines.sort_by_key(|machine| !machine.id.is_local());
@@ -62,11 +64,18 @@ impl Snapshot {
 
         let sessions = store.recent_sessions(&SessionFilter::default(), SESSION_LIMIT)?;
         let icons = store.project_icons()?;
+        let mut dismissed = Vec::new();
+        for machine in &machines {
+            for root in store.dismissed_roots(&machine.id)? {
+                dismissed.push((machine.id.clone(), root));
+            }
+        }
         Ok(Self {
             machines,
             projects,
             sessions,
             icons,
+            dismissed,
         })
     }
 

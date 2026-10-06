@@ -904,8 +904,9 @@ Advanced & About.
   generated from the schema.
 * **Machines and projects**: the Machines section lists the SSH machines with
   probe, edit (the Connect screen, filled in) and remove, and `Connect a machine…`; the Projects
-  section lists the project roots you removed, which discovery does not bring
-  back by itself, with a button to let it.
+  section lists the project roots and worktree folders you removed, which
+  discovery does not bring back by itself, with a button to let it. Discovery is
+  off until you turn on *Discover projects from session folders*.
 * **The network calls** Leon makes by itself are the project avatar from the Git
   host (`Fetch owner avatars from the Git host` turns it off), the usage limits'
   network sources (Settings, Usage), and the look at its own GitHub releases

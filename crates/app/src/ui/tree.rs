@@ -260,6 +260,10 @@ pub struct Placement {
 enum Owner<'a> {
     Worktree(&'a WorktreeId),
     Project(&'a ProjectId),
+    /// A folder inside a project that somebody removed (a worktree): the
+    /// sessions that ran there are history only, and the project that
+    /// contains the folder does not take them.
+    Removed,
 }
 
 /// For each machine, which project or worktree owns each root path.
@@ -286,6 +290,18 @@ fn owner_tables(snapshot: &Snapshot) -> HashMap<&MachineId, HashMap<String, Owne
                     Owner::Worktree(&worktree.id),
                 );
             }
+        }
+    }
+    // Only inside a project: a removed project's own folder has no owner above
+    // it, and its sessions stay among the unsorted.
+    for (machine, folder) in &snapshot.dismissed {
+        let Some(table) = owners.get_mut(machine) else {
+            continue;
+        };
+        let keys = leon_core::path::ancestor_keys(folder);
+        let inside = keys.iter().skip(1).any(|key| table.contains_key(key));
+        if let Some(key) = keys.into_iter().next().filter(|_| inside) {
+            table.entry(key).or_insert(Owner::Removed);
         }
     }
     owners
@@ -317,7 +333,7 @@ impl Placement {
             let owner = owners.get(&entry.machine).and_then(|table| {
                 leon_core::path::ancestor_keys(&entry.cwd)
                     .iter()
-                    .find_map(|folder| table.get(folder))
+                    .find_map(|folder| table.get(folder).filter(|o| !matches!(o, Owner::Removed)))
             });
             match owner {
                 Some(Owner::Worktree(id)) => self
@@ -330,7 +346,7 @@ impl Placement {
                     .entry((*id).clone())
                     .or_default()
                     .push(index),
-                None => self
+                Some(Owner::Removed) | None => self
                     .live_loose
                     .entry(entry.machine.clone())
                     .or_default()
@@ -377,6 +393,7 @@ impl Placement {
                         .or_default()
                         .push(index);
                 }
+                Some(Owner::Removed) => {}
                 None => {
                     let list = placement
                         .unsorted
@@ -1028,6 +1045,7 @@ mod tests {
             ],
             sessions,
             icons: Default::default(),
+            dismissed: Vec::new(),
         }
     }
 
@@ -1145,6 +1163,33 @@ mod tests {
             placement.unsorted[&MachineId::local()][0].cwd,
             "/srv/api-old",
             "a folder that only shares a prefix is not inside"
+        );
+    }
+
+    #[test]
+    fn a_session_of_a_removed_worktree_inside_a_project_is_not_placed_again() {
+        let mut snapshot = fixture(vec![
+            session("kept", "local", "/srv/api/src", 1),
+            session("gone", "local", "/srv/api/.claude/worktrees/x/src", 2),
+            session("sibling", "local", "/srv/api-worktrees/old", 3),
+        ]);
+        snapshot.dismissed = vec![
+            (
+                MachineId::local(),
+                "/srv/api/.claude/worktrees/x".to_owned(),
+            ),
+            (MachineId::local(), "/srv/api-worktrees/old".to_owned()),
+        ];
+        let placement = Placement::compute(&snapshot);
+        assert_eq!(
+            placement.of_worktree(&WorktreeId::from_string("api-main")),
+            [0],
+            "the main checkout does not take the sessions of a worktree that is gone"
+        );
+        assert_eq!(
+            placement.unsorted[&MachineId::local()][0].cwd,
+            "/srv/api-worktrees/old",
+            "outside every project the history stays where it was"
         );
     }
 

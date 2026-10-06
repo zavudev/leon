@@ -226,7 +226,7 @@ How projects are found and what they show.
 
 | Setting | Key | Values | Default | Description |
 | --- | --- | --- | --- | --- |
-| Discover projects from session folders | `discover_projects` | on, off | `on` | Add the repositories your sessions ran in as projects. |
+| Discover projects from session folders | `discover_projects` | on, off | `off` | Add the repositories your sessions ran in as projects. Off by default: the history stays searchable without filling the sidebar. |
 | Detect project logos | `detect_logos` | on, off | `on` | Look in the repository for an icon to show beside the project. |
 | Fetch owner avatars from the Git host | `fetch_avatars` | on, off | `on` | When a repository has no icon, download its owner's avatar from the Git host (GitHub). This is the only network call Leon makes. |
 
@@ -318,7 +318,7 @@ Folders, logging and starting over.
 | Updates | `updates_mode` | `automatic`, `notify`, `off` | `automatic` | How Leon follows its releases on GitHub: download them and install at the next restart, only tell you and let you decide, or never ask. |
 | Pre-release versions | `updates_prereleases` | on, off | `off` | Also offer pre-releases (release candidates and betas). Off follows the stable releases only. |
 | Check for updates |  | button |  | Ask GitHub now whether a newer version of Leon is out. |
-| About Leon |  | button |  | Version 0.2.0, by Zavu: the About panel. |
+| About Leon |  | button |  | Version 0.3.0, by Zavu: the About panel. |
 | Data folder |  | button |  | Show the folder that holds the database and these settings. |
 | Themes folder |  | button |  | Show the folder of your theme files. |
 | Reset all settings |  | button |  | Put every setting back to its default. Theme files, projects and history are not touched. |

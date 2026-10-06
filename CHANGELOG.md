@@ -1,6 +1,39 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-10-06
+
+### Added
+
+* Linux: the installer sets up the complete desktop app (binary, icon and
+  desktop entry), not only the executable.
+* Sidebar: projects, worktrees and sessions can be reordered by dragging, and
+  the add, clone and create dialogs are there for new projects. A worktree
+  whose pull request is merged says so, as GitHub reports it.
+* The new-worktree dialog starts on the agent of the last session you started,
+  and its rows answer the mouse.
+* Copy and paste use the chords of the platform (Cmd on macOS, Ctrl+Shift on
+  Linux and Windows terminals).
+
+### Changed
+
+* New agent sessions start without the agent's own questions: Claude Code is
+  typed with `--dangerously-skip-permissions` and Codex with
+  `--ask-for-approval never`. Both are only the default of each agent's launch
+  arguments in Settings; clearing the field brings the questions back.
+* A fresh install no longer turns every folder of the agents' history into a
+  project. *Discover projects from session folders* is now **off** by default:
+  the history is still imported and found with the history search, and the
+  projects you open by hand keep their sessions. Projects you already have
+  stay; turn the setting on to get the old behaviour.
+
+### Fixed
+
+* The sessions of a worktree that was removed no longer come back on their own.
+  A worktree git stops reporting (removed from Leon, from a terminal, or by an
+  agent) is remembered like a removed project, so the project that contains its
+  folder does not take its sessions again; they stay in the history. A
+  worktree whose folder was deleted behind git's back (git still lists it as
+  prunable) is no longer kept in the tree.
 
 ## [0.2.0] - 2026-10-05
 
