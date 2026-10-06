@@ -13,16 +13,24 @@
 
 #![warn(missing_docs)]
 
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod collect;
+pub mod cursor;
 pub mod forecast;
+pub mod grok;
+pub mod kimi;
 pub mod model;
 pub mod network;
 pub mod opencode;
 pub mod present;
 pub mod secret;
 pub mod view;
+pub mod zcode;
+
+#[cfg(test)]
+mod providers_tests;
 
 pub use collect::{collect_machine, collect_machine_on, series_key, MachineUsage};
 pub use forecast::{forecast, Forecast, Sample};

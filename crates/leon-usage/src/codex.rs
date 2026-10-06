@@ -9,7 +9,7 @@
 //! what it means now.
 
 use chrono::DateTime;
-use leon_core::AgentKind;
+use leon_core::AgentId;
 use serde_json::Value;
 
 use crate::forecast::Sample;
@@ -96,7 +96,7 @@ pub fn parse_rollout_lines(text: &str, machine: &str) -> Collected {
             Some(first) => first.limit_id.clone(),
             None => {
                 return Collected {
-                    usage: AgentUsage::unknown(AgentKind::Codex, machine, Reason::NoData),
+                    usage: AgentUsage::unknown(AgentId::CODEX, machine, Reason::NoData),
                     samples: Vec::new(),
                 }
             }
@@ -123,13 +123,13 @@ pub fn parse_rollout_lines(text: &str, machine: &str) -> Collected {
         .collect();
     let Some(latest) = events.pop() else {
         return Collected {
-            usage: AgentUsage::unknown(AgentKind::Codex, machine, Reason::NoData),
+            usage: AgentUsage::unknown(AgentId::CODEX, machine, Reason::NoData),
             samples: Vec::new(),
         };
     };
     Collected {
         usage: AgentUsage {
-            agent: AgentKind::Codex,
+            agent: AgentId::CODEX,
             machine: machine.to_owned(),
             account_label: latest.plan.clone(),
             plan: latest.plan,
@@ -143,9 +143,143 @@ pub fn parse_rollout_lines(text: &str, machine: &str) -> Collected {
     }
 }
 
+/// The host the backend call goes to, and nowhere else.
+pub const BACKEND_HOST: &str = "chatgpt.com";
+/// The endpoint Codex's own usage screen reads.
+pub const BACKEND_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+
+/// How old the newest observation of the session log may be (seconds) before
+/// the backend is asked for a fresher one: while Codex is being used its log is
+/// as fresh as the backend, and costs nothing.
+pub const LOG_FRESH: i64 = 10 * 60;
+
+/// What Codex's `auth.json` held for the backend call.
+#[derive(Debug)]
+pub struct Credential {
+    /// The ChatGPT access token.
+    pub token: crate::secret::Secret,
+    /// The account id the endpoint is also told (an identifier, not a secret).
+    pub account_id: Option<String>,
+}
+
+/// Reads `auth.json` (`{"tokens":{"access_token":..,"account_id":..}}`). An
+/// API-key login has no tokens: not signed in with an account.
+pub fn parse_credential(json: &str) -> Option<Credential> {
+    let value: Value = serde_json::from_str(json).ok()?;
+    let tokens = value.get("tokens")?;
+    let token = tokens.get("access_token")?.as_str()?.trim();
+    if token.is_empty() {
+        return None;
+    }
+    Some(Credential {
+        token: crate::secret::Secret::new(token),
+        account_id: tokens
+            .get("account_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && id.len() <= 128)
+            .map(str::to_owned),
+    })
+}
+
+fn backend_window(raw: Option<&Value>) -> Option<UsageWindow> {
+    let raw = raw.filter(|r| r.is_object())?;
+    let used = raw
+        .get("used_percent")?
+        .as_f64()
+        .filter(|p| p.is_finite())?;
+    let minutes = raw
+        .get("limit_window_seconds")
+        .and_then(Value::as_f64)
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .map(|s| (s / 60.0).ceil() as i64);
+    Some(UsageWindow {
+        kind: minutes.map_or(WindowKind::Custom("limit".into()), kind_for_minutes),
+        used_percent: used.clamp(0.0, 100.0),
+        resets_at: raw.get("reset_at").and_then(Value::as_i64),
+        window_length: minutes.map(|m| m * MINUTE),
+    })
+}
+
+/// Parses the backend's answer: `plan_type` and `rate_limit.primary_window`
+/// and `secondary_window`, each with `used_percent`, `limit_window_seconds`
+/// and `reset_at` in Unix seconds. An answer without a plan or without a
+/// window is a [`Reason::ParseError`].
+pub fn parse_backend(body: &str, machine: &str, now: i64) -> AgentUsage {
+    let fail = || AgentUsage::unknown(AgentId::CODEX, machine, Reason::ParseError);
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return fail();
+    };
+    let Some(plan) = value.get("plan_type").and_then(Value::as_str) else {
+        return fail();
+    };
+    let windows: Vec<UsageWindow> = ["primary_window", "secondary_window"]
+        .iter()
+        .filter_map(|key| backend_window(value.pointer(&format!("/rate_limit/{key}"))))
+        .collect();
+    if windows.is_empty() {
+        return fail();
+    }
+    AgentUsage {
+        agent: AgentId::CODEX,
+        machine: machine.to_owned(),
+        account_label: Some(plan.to_owned()),
+        plan: Some(plan.to_owned()),
+        source: Some(Source::VendorApi),
+        observed_at: Some(now),
+        state: State::Known { windows },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_backend_answer_gives_the_two_windows_and_the_plan() {
+        let body = r#"{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":12.5,"limit_window_seconds":18000,"reset_at":1790003600},"secondary_window":{"used_percent":40,"limit_window_seconds":604800,"reset_at":1790500000}}}"#;
+        let usage = parse_backend(body, "local", 1_790_000_000);
+        assert_eq!(usage.plan.as_deref(), Some("plus"));
+        assert_eq!(usage.source, Some(Source::VendorApi));
+        let State::Known { windows } = usage.state else {
+            panic!("expected windows")
+        };
+        assert_eq!(windows[0].kind, WindowKind::FiveHour);
+        assert_eq!(windows[0].used_percent, 12.5);
+        assert_eq!(windows[0].resets_at, Some(1_790_003_600));
+        assert_eq!(windows[1].kind, WindowKind::Weekly);
+        assert_eq!(windows[1].window_length, Some(7 * 86_400));
+    }
+
+    #[test]
+    fn a_backend_answer_that_is_not_understood_is_a_parse_error() {
+        for body in [
+            "nope",
+            "{}",
+            r#"{"plan_type":"plus"}"#,
+            r#"{"plan_type":"plus","rate_limit":{"primary_window":null}}"#,
+            r#"{"rate_limit":{"primary_window":{"used_percent":1}}}"#,
+        ] {
+            assert_eq!(
+                parse_backend(body, "local", 1).state,
+                State::Unknown {
+                    reason: Reason::ParseError
+                },
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_credential_is_the_account_token_and_an_api_key_login_has_none() {
+        let json =
+            r#"{"tokens":{"access_token":" tok ","account_id":"acct"},"OPENAI_API_KEY":null}"#;
+        let credential = parse_credential(json).unwrap();
+        assert_eq!(credential.token.expose(), "tok");
+        assert_eq!(credential.account_id.as_deref(), Some("acct"));
+        assert!(parse_credential(r#"{"OPENAI_API_KEY":"sk-x"}"#).is_none());
+        assert!(parse_credential(r#"{"tokens":{"access_token":""}}"#).is_none());
+        assert!(parse_credential("nope").is_none());
+    }
     use crate::model::Effective;
 
     fn line(

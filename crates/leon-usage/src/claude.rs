@@ -8,7 +8,7 @@
 //! pure parts (reading the credential file, parsing the answer); the call
 //! lives in [`crate::network`].
 
-use leon_core::AgentKind;
+use leon_core::AgentId;
 use serde_json::Value;
 
 use crate::model::{AgentUsage, Reason, Source, State, UsageWindow, WindowKind, DAY, HOUR};
@@ -100,7 +100,7 @@ fn title(model: &str) -> String {
 /// `weekly_scoped`). An answer with no five-hour and no weekly window is a
 /// [`Reason::ParseError`].
 pub fn parse_usage(body: &str, machine: &str, plan: Option<String>, now: i64) -> AgentUsage {
-    let fail = || AgentUsage::unknown(AgentKind::Claude, machine, Reason::ParseError);
+    let fail = || AgentUsage::unknown(AgentId::CLAUDE, machine, Reason::ParseError);
     let Ok(value) = serde_json::from_str::<Value>(body) else {
         return fail();
     };
@@ -157,7 +157,7 @@ pub fn parse_usage(body: &str, machine: &str, plan: Option<String>, now: i64) ->
         }
     }
     AgentUsage {
-        agent: AgentKind::Claude,
+        agent: AgentId::CLAUDE,
         machine: machine.to_owned(),
         account_label: plan.clone(),
         plan,

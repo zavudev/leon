@@ -6,7 +6,7 @@
 //! (`auth.json`, entry `opencode-go`). That reads a credential, so it is an
 //! opt-in source; this module holds the pure parts.
 
-use leon_core::AgentKind;
+use leon_core::AgentId;
 use serde_json::Value;
 
 use crate::claude::parse_reset;
@@ -44,7 +44,7 @@ fn meter(kind: WindowKind, raw: Option<&Value>, length: i64) -> Option<UsageWind
 /// Parses `{"usage":{"rolling":{"percent":..,"resetsAt":..},"weekly":..,
 /// "monthly":..}}`. The rolling window is the five-hour one.
 pub fn parse_usage(body: &str, machine: &str, now: i64) -> AgentUsage {
-    let fail = || AgentUsage::unknown(AgentKind::Opencode, machine, Reason::ParseError);
+    let fail = || AgentUsage::unknown(AgentId::OPENCODE, machine, Reason::ParseError);
     let Ok(value) = serde_json::from_str::<Value>(body) else {
         return fail();
     };
@@ -63,7 +63,7 @@ pub fn parse_usage(body: &str, machine: &str, now: i64) -> AgentUsage {
         return fail();
     }
     AgentUsage {
-        agent: AgentKind::Opencode,
+        agent: AgentId::OPENCODE,
         machine: machine.to_owned(),
         account_label: Some("Go".into()),
         plan: Some("Go".into()),

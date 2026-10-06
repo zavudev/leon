@@ -11,7 +11,7 @@
 //! never as the old percentage, and a reading older than anything useful
 //! becomes unknown.
 
-use leon_core::AgentKind;
+use leon_core::AgentId;
 use serde::{Deserialize, Serialize};
 
 /// Seconds in a minute, an hour and a day.
@@ -99,14 +99,15 @@ pub enum Source {
 
 impl Source {
     /// A plain description, as shown in the usage view.
-    pub fn describe(self, agent: AgentKind) -> String {
+    pub fn describe(self, agent: AgentId) -> String {
         match (self, agent) {
-            (Source::Local, AgentKind::Codex) => "Codex's own session log".into(),
+            (Source::Local, AgentId::CODEX) => "Codex's own session log".into(),
             (Source::Local, _) => "the agent's own files".into(),
             (Source::Cli, _) => "the agent's command line".into(),
-            (Source::VendorApi, AgentKind::Claude) => "Anthropic's usage endpoint".into(),
-            (Source::VendorApi, AgentKind::Opencode) => "opencode's usage endpoint".into(),
-            (Source::VendorApi, AgentKind::Codex) => "OpenAI's usage endpoint".into(),
+            (Source::VendorApi, AgentId::CLAUDE) => "Anthropic's usage endpoint".into(),
+            (Source::VendorApi, AgentId::OPENCODE) => "opencode's usage endpoint".into(),
+            (Source::VendorApi, AgentId::CODEX) => "OpenAI's usage endpoint".into(),
+            (Source::VendorApi, other) => format!("{}'s usage endpoint", other.name()),
         }
     }
 }
@@ -144,6 +145,11 @@ pub enum Reason {
     /// The system refused to hand over the agent's sign-in (a keychain prompt
     /// that was denied or dismissed).
     KeychainDenied,
+    /// The agent's stored sign-in has expired. Leon never refreshes it: the
+    /// agent does that the next time it runs.
+    SessionExpired,
+    /// The plan has no limit to measure.
+    Unlimited,
 }
 
 impl Reason {
@@ -163,6 +169,10 @@ impl Reason {
             Reason::VendorError(_) => "The service answered with an error.",
             Reason::RateLimited(_) => "Rate limited: the service asked for fewer calls.",
             Reason::KeychainDenied => "The sign-in could not be read: access was denied.",
+            Reason::SessionExpired => {
+                "The sign-in has expired. Run the agent once: it refreshes it by itself."
+            }
+            Reason::Unlimited => "The plan has no limit to measure.",
         }
     }
 
@@ -213,6 +223,8 @@ impl Reason {
             Reason::VendorError(_) => "error",
             Reason::RateLimited(_) => "rate limited",
             Reason::KeychainDenied => "access denied",
+            Reason::SessionExpired => "sign-in expired",
+            Reason::Unlimited => "no limit",
         }
     }
 }
@@ -237,7 +249,7 @@ pub enum State {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentUsage {
     /// Which agent.
-    pub agent: AgentKind,
+    pub agent: AgentId,
     /// The machine's id.
     pub machine: String,
     /// A label for the account that never identifies it: the plan or nothing.
@@ -294,7 +306,7 @@ pub const MAX_AGE: i64 = 8 * DAY;
 
 impl AgentUsage {
     /// A reading with nothing known.
-    pub fn unknown(agent: AgentKind, machine: &str, reason: Reason) -> Self {
+    pub fn unknown(agent: AgentId, machine: &str, reason: Reason) -> Self {
         Self {
             agent,
             machine: machine.to_owned(),
@@ -383,7 +395,7 @@ mod tests {
 
     fn reading(observed_at: i64, windows: Vec<UsageWindow>) -> AgentUsage {
         AgentUsage {
-            agent: AgentKind::Codex,
+            agent: AgentId::CODEX,
             machine: "local".into(),
             account_label: None,
             plan: Some("plus".into()),
@@ -451,7 +463,7 @@ mod tests {
 
     #[test]
     fn an_unknown_reading_keeps_its_reason() {
-        let usage = AgentUsage::unknown(AgentKind::Claude, "local", Reason::SourceDisabled);
+        let usage = AgentUsage::unknown(AgentId::CLAUDE, "local", Reason::SourceDisabled);
         assert_eq!(
             usage.effective(NOW),
             Effective::Unknown(Reason::SourceDisabled)

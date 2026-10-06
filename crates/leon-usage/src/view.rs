@@ -6,7 +6,7 @@
 //! All wording that is not a layout decision lives here, so the window, the
 //! diagnostic command and the tests read the same sentences.
 
-use leon_core::AgentKind;
+use leon_core::AgentId;
 
 use crate::model::{AgentUsage, Effective, EffectiveWindow, Reason, Source, WindowKind};
 use crate::present::{ago, compact_duration, Level, Thresholds};
@@ -81,7 +81,7 @@ pub enum Body {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentView {
     /// The agent.
-    pub agent: AgentKind,
+    pub agent: AgentId,
     /// The machine's id.
     pub machine: String,
     /// The plan, when known.
@@ -152,7 +152,7 @@ mod tests {
 
     fn usage(windows: Vec<UsageWindow>) -> AgentUsage {
         AgentUsage {
-            agent: AgentKind::Codex,
+            agent: AgentId::CODEX,
             machine: "local".into(),
             account_label: None,
             plan: Some("plus".into()),
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn an_unknown_reading_gives_its_reason() {
         let v = view(
-            &AgentUsage::unknown(AgentKind::Claude, "local", Reason::SourceDisabled),
+            &AgentUsage::unknown(AgentId::CLAUDE, "local", Reason::SourceDisabled),
             NOW,
             Thresholds::default(),
         );
