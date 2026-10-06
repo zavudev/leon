@@ -42,6 +42,10 @@ pub struct CommandSpec {
     pub env: Vec<(String, String)>,
     /// Working directory; the default of the machine when absent.
     pub cwd: Option<String>,
+    /// Bytes written to the program's standard input and then closed. `None`
+    /// closes it at once, so a command that asks a question fails instead of
+    /// hanging.
+    pub stdin: Option<Vec<u8>>,
     /// For a machine reached through a relay: where to send the command (see
     /// [`crate::relay::route`]). The runner that starts the process routes on
     /// it; `None` means "start it here".
@@ -82,6 +86,12 @@ impl CommandSpec {
     /// Sets the working directory.
     pub fn cwd(mut self, cwd: impl Into<String>) -> Self {
         self.cwd = Some(cwd.into());
+        self
+    }
+
+    /// Sets the program's standard input.
+    pub fn stdin(mut self, bytes: impl Into<Vec<u8>>) -> Self {
+        self.stdin = Some(bytes.into());
         self
     }
 }
@@ -210,6 +220,8 @@ fn place(
         args,
         env: Vec::new(),
         cwd: None,
+        // `ssh` hands its standard input to the remote command.
+        stdin: command.stdin.clone(),
         route: None,
     }
 }
@@ -402,6 +414,14 @@ mod tests {
         );
         let batch = run_on(&machine, &command, &SshOptions::without_multiplexing());
         assert!(!batch.args.contains(&"-t".to_owned()));
+    }
+
+    #[test]
+    fn an_ssh_command_carries_its_standard_input() {
+        let machine = ssh_machine("build.example", None, None, None);
+        let command = git_status().stdin(b"payload\n".to_vec());
+        let placed = run_on(&machine, &command, &SshOptions::without_multiplexing());
+        assert_eq!(placed.stdin.as_deref(), Some(&b"payload\n"[..]));
     }
 
     #[test]

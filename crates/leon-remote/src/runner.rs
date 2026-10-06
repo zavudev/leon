@@ -16,6 +16,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 
 use crate::command::CommandSpec;
 
@@ -87,8 +88,9 @@ pub trait Runner: Send + Sync {
 
 /// The real runner: starts an operating-system process.
 ///
-/// The process gets no standard input, so a command that unexpectedly asks a
-/// question fails instead of hanging, and it is killed if the future driving
+/// The process's standard input carries [`CommandSpec::stdin`], if any, and is
+/// then closed: a command that unexpectedly asks a question reads end of file
+/// and fails instead of hanging. The process is killed if the future driving
 /// it is dropped.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProcessRunner {
@@ -115,20 +117,29 @@ impl Runner for ProcessRunner {
         command
             .args(&spec.args)
             .envs(spec.env.iter().map(|(name, value)| (name, value)))
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);
         }
+        let child = command.spawn().map_err(|source| RunError::Spawn {
+            program: spec.program.clone(),
+            source,
+        })?;
+        let feed = feed(child, spec.stdin.clone());
 
         let finished = match self.time_limit {
-            Some(limit) => tokio::time::timeout(limit, command.output())
-                .await
-                .map_err(|_| RunError::TimedOut {
-                    program: spec.program.clone(),
-                    limit,
-                })?,
-            None => command.output().await,
+            Some(limit) => {
+                tokio::time::timeout(limit, feed)
+                    .await
+                    .map_err(|_| RunError::TimedOut {
+                        program: spec.program.clone(),
+                        limit,
+                    })?
+            }
+            None => feed.await,
         };
         let output = finished.map_err(|source| RunError::Spawn {
             program: spec.program.clone(),
@@ -141,6 +152,24 @@ impl Runner for ProcessRunner {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
     }
+}
+
+/// Writes the command's standard input and collects its output.
+///
+/// The pipe is closed after the bytes, or at once when there are none, so a
+/// command that unexpectedly asks a question reads end of file and fails
+/// instead of hanging. A write that fails because the program closed its side
+/// first is not a failure of the command.
+async fn feed(
+    mut child: tokio::process::Child,
+    stdin: Option<Vec<u8>>,
+) -> std::io::Result<std::process::Output> {
+    if let Some(mut handle) = child.stdin.take() {
+        if let Some(bytes) = &stdin {
+            let _ = handle.write_all(bytes).await;
+        }
+    }
+    child.wait_with_output().await
 }
 
 /// A runner for tests: replies with pre-arranged results and records what it
@@ -280,6 +309,16 @@ mod tests {
         let spec = CommandSpec::new("sh").args(["-c", "read line; echo \"got:$line\""]);
         let output = ProcessRunner::new().run(&spec).await.unwrap();
         assert_eq!(output.stdout.trim_end(), "got:");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_standard_input_of_the_spec_reaches_the_program() {
+        let spec = CommandSpec::new("sh")
+            .args(["-c", "cat"])
+            .stdin(b"two\nlines\n".to_vec());
+        let output = ProcessRunner::new().run(&spec).await.unwrap();
+        assert_eq!(output.stdout, "two\nlines\n");
     }
 
     #[cfg(unix)]
