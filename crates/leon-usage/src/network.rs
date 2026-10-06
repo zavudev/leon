@@ -255,7 +255,7 @@ impl Http for CurlHttp {
             if !host_allowed(request.url) {
                 return Err(HttpError::Refused);
             }
-            let mut command = tokio::process::Command::new("curl");
+            let mut command = leon_remote::spawn::child("curl");
             command
                 .args([
                     "--silent",
