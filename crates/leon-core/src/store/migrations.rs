@@ -25,7 +25,7 @@ use crate::error::{Result, StoreError};
 /// branches that both wanted "version 4". Neither was ever released: the only
 /// public schema is version 3, so version 4 never existed in the wild and this
 /// order (usage, then relay) is the one every database goes through.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
 
 const V1: &str = r#"
 CREATE TABLE machine (
@@ -222,6 +222,50 @@ CREATE TABLE import_run (
 ) WITHOUT ROWID;
 "#;
 
+/// Version 8: the open terminals, remembered for the next start (see
+/// `workspace.rs`). Two slots (current, previous); one small row per
+/// terminal, tab and workspace; no scrollback.
+const V8: &str = r#"
+CREATE TABLE saved_meta (
+    slot     INTEGER PRIMARY KEY,
+    saved_at INTEGER NOT NULL,
+    clean    INTEGER NOT NULL,
+    selection TEXT,
+    main     INTEGER
+);
+CREATE TABLE saved_workspace (
+    slot     INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    key      TEXT NOT NULL,
+    active   INTEGER NOT NULL,
+    PRIMARY KEY (slot, position)
+) WITHOUT ROWID;
+CREATE TABLE saved_tab (
+    slot      INTEGER NOT NULL,
+    workspace INTEGER NOT NULL,
+    position  INTEGER NOT NULL,
+    layout    TEXT NOT NULL,
+    focus     INTEGER NOT NULL,
+    zoomed    INTEGER NOT NULL,
+    PRIMARY KEY (slot, workspace, position)
+) WITHOUT ROWID;
+CREATE TABLE saved_terminal (
+    slot       INTEGER NOT NULL,
+    position   INTEGER NOT NULL,
+    id         INTEGER NOT NULL,
+    machine    TEXT NOT NULL,
+    cwd        TEXT NOT NULL,
+    agent      TEXT,
+    session    TEXT,
+    confidence TEXT,
+    history    TEXT,
+    name       TEXT,
+    title      TEXT,
+    started_at INTEGER NOT NULL,
+    PRIMARY KEY (slot, position)
+) WITHOUT ROWID;
+"#;
+
 /// Brings the database up to the latest schema version.
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     let supported = MIGRATIONS.len() as u32;
@@ -269,7 +313,7 @@ mod tests {
             )
             .unwrap();
         migrate(&mut connection).unwrap();
-        assert_eq!(version(&connection), 7);
+        assert_eq!(version(&connection), 8);
         let (host, key): (String, Option<String>) = connection
             .query_row(
                 "SELECT host, relay_host_key FROM machine WHERE id = 'm1'",
@@ -364,7 +408,7 @@ mod tests {
     fn a_fresh_database_has_both_the_usage_tables_and_the_relay_columns() {
         let mut connection = Connection::open_in_memory().unwrap();
         migrate(&mut connection).unwrap();
-        assert_eq!(version(&connection), 7);
+        assert_eq!(version(&connection), 8);
         connection
             .execute(
                 "INSERT INTO usage_history (machine_id, agent, account, window, observed_at, used_percent)

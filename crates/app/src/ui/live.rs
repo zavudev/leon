@@ -141,6 +141,15 @@ pub struct LiveSession {
     /// How it is doing, as the worktree's dot reads it; kept up to date by
     /// terminal wake-ups and the coarse timer.
     pub activity: Activity,
+    /// The line that resumes the agent, held back until the session is shown
+    /// or the person asks: a restored session is "paused" while it is set.
+    pub pending: Option<String>,
+    /// The agent's own session id and how sure Leon is of it: `resumed` when
+    /// it was started with it, `state-file` or `newest-in-folder` when it was
+    /// learned afterwards.
+    pub learned: Option<(String, String)>,
+    /// When it was started, in milliseconds since the epoch.
+    pub started_ms: i64,
     /// What keeps the shell told about the terminal.
     pub _subscriptions: Vec<Subscription>,
 }
@@ -172,7 +181,8 @@ impl LiveSession {
                 .can_detect
                 .then(|| terminal.shell_is_foreground())
                 .flatten(),
-            agent: self.agent.is_some(),
+            // A restored session that is still paused has no agent running.
+            agent: self.agent.is_some() && !self.is_paused(),
             quiet_for: terminal.quiet_for(),
             bell: self.bell,
         }
@@ -181,6 +191,12 @@ impl LiveSession {
     /// How it is doing now.
     pub fn read_activity(&self, cx: &App, thresholds: &Thresholds) -> Activity {
         terminal_activity(&self.signals(cx), thresholds)
+    }
+
+    /// Whether the session waits for the person (or its tab) before its agent
+    /// is resumed.
+    pub fn is_paused(&self) -> bool {
+        self.pending.is_some()
     }
 
     /// The agent to show for this session: the one that was started in its

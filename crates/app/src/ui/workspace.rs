@@ -61,6 +61,33 @@ impl Workspaces {
         workspace.active = workspace.tabs.len() - 1;
     }
 
+    /// The workspaces, in the order they were opened.
+    pub fn all(&self) -> &[Workspace] {
+        &self.items
+    }
+
+    /// Adds restored tabs to the workspace `key` (made when it is the
+    /// first) and shows tab `active` of them.
+    pub fn restore(&mut self, key: &str, tabs: Vec<Tab>, active: usize) {
+        if tabs.is_empty() {
+            return;
+        }
+        let workspace = match self.items.iter_mut().position(|w| w.key == key) {
+            Some(at) => &mut self.items[at],
+            None => {
+                self.items.push(Workspace {
+                    key: key.to_owned(),
+                    tabs: Vec::new(),
+                    active: 0,
+                });
+                self.items.last_mut().expect("just pushed")
+            }
+        };
+        let before = workspace.tabs.len();
+        workspace.tabs.extend(tabs);
+        workspace.active = (before + active).min(workspace.tabs.len() - 1);
+    }
+
     /// The workspace and tab holding a terminal.
     pub fn locate(&self, id: LiveId) -> Option<(usize, usize)> {
         self.items.iter().enumerate().find_map(|(w, workspace)| {

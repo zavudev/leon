@@ -256,6 +256,8 @@ pub enum Command {
     /// Explains why a session may be missing: where each agent's history is
     /// looked for and what was found.
     WhyMissing,
+    /// Offers the terminals that were open last time again.
+    RestoreSessions,
     /// Opens `settings.json` in the system's editor.
     OpenSettingsFile,
     /// Shows the folder that holds `settings.json` in the file manager.
@@ -1525,6 +1527,14 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::RestoreSessions,
+        "Restore last sessions",
+        S::Data,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::ProbeMachine,
         "Probe the machine on screen",
         S::Data,
@@ -1822,6 +1832,7 @@ pub fn keywords(command: Command) -> &'static str {
         C::EditMachine => "ssh host user port identity key server remote change connect",
         C::WhyOffline => "offline unreachable diagnose test connection ssh remote server",
         C::Settings => "preferences options configuration config",
+        C::RestoreSessions => "reopen open terminals tabs panes crash power quit previous session workspace",
         C::WhyMissing => "history sessions lost gone disappeared import diagnose opencode claude codex report",
         C::ShowUsage | C::RefreshUsage => "limits quota rate tokens credits remaining percent reset five hour weekly claude codex opencode",
         C::OpenSettingsFile => "preferences json edit configuration config file",
@@ -2027,6 +2038,7 @@ mod tests {
             C::ShowUsage,
             C::RefreshUsage,
             C::WhyMissing,
+            C::RestoreSessions,
             C::OpenSettingsFile,
             C::RevealSettingsFolder,
             C::Larger,
@@ -2149,6 +2161,7 @@ mod tests {
                 | C::ShowUsage
                 | C::RefreshUsage
                 | C::WhyMissing
+                | C::RestoreSessions
                 | C::OpenSettingsFile
                 | C::RevealSettingsFolder
                 | C::Larger

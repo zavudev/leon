@@ -217,6 +217,8 @@ What is imported and shown of the agents' history.
 | Detect sessions running elsewhere | `detect_elsewhere` | on, off | `on` | Look for agent processes Leon did not start and mark the sessions they hold. |
 | Detection interval | `elsewhere_interval` | 2 to 120s | `5` | How often, in seconds, this computer is looked at while the window is focused. |
 | Re-import now |  | button |  | Read the agents' history again and sync every project's worktrees. |
+| Restore the last sessions | `restore_sessions` | `ask`, `always`, `never` | `ask` | At start, offer the terminals that were open last time (ask), reopen them (always) or leave them (never; the palette's "Restore last sessions" still brings them back). Agents are resumed where they can be; scrollback is not restored. |
+| Resume restored agents | `restore_resume` | `shown`, `all` | `shown` | When a restored agent session is resumed: when its tab is first shown (nothing is spent until you look) or all at once, a few at a time. |
 
 ## Projects
 

@@ -35,6 +35,11 @@ switching to one never restarts it.
   project or worktree.
 * **Local and remote alike**: a remote session is `ssh -t` into the folder, so
   the agent runs on the server and only the terminal travels.
+* **Sessions come back**: Leon remembers which terminals were open (tabs, panes,
+  focus, the agent's session) as they change, and at the next start offers to
+  reopen them (setting *Restore the last sessions*: ask, always, never).
+  Agents resume paused until you open their tab or press Enter. Scrollback is
+  not restored.
 * **History**: Claude Code, Codex and opencode sessions are imported from
   their own files into a local SQLite database and searched from the palette.
   A session missing from the tree? The palette's **Why is a session missing?**
@@ -406,6 +411,7 @@ platform (see below).
 | Import history and sync worktrees | `⌘R` | `Ctrl+R` |
 | Probe the machine on screen | `⇧⌘R` | `Ctrl+Shift+R` |
 | Why is a session missing? | palette only | palette only |
+| Restore last sessions | palette only | palette only |
 | **View** | | |
 | Toggle light and dark | `⇧⌘Y` | `Ctrl+Shift+Y` |
 | Choose appearance… | palette only | palette only |

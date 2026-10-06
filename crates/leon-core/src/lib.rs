@@ -36,7 +36,8 @@ pub use store::search::{
 };
 pub use store::{
     history_overview_at, import_cursors_at, set_import_cursor_in, upsert_session_in, AgentOverview,
-    ImportRun, SessionFilter, Store, UsagePoint, UsageRow,
+    ImportRun, SavedLayout, SavedState, SavedTab, SavedTerminal, SavedWorkspace, SessionFilter,
+    Slot, Store, UsagePoint, UsageRow,
 };
 
 /// The SQLite binding the store is built on, re-exported so that code using

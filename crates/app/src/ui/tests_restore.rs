@@ -1,0 +1,457 @@
+//! Remembering what is open and restoring it at the next start.
+//!
+//! A restart is simulated by reading the state the first window wrote into
+//! its store and handing it to a second window as the previous run's state.
+//! The terminals are the scripted computer of the other UI tests (a real
+//! `/bin/sh` with a fake `claude`), nothing touches the user's agents.
+
+use super::live::{open_live, real_worktree, screen, terminal_of, wait_until};
+use super::*;
+use crate::ui::live::LiveId;
+use crate::ui::panes::Layout;
+use leon_core::{SavedState, SavedTerminal, Slot};
+
+fn settings_with(dir: &tempfile::TempDir, json: &str) -> std::path::PathBuf {
+    let file = dir.path().join("settings.json");
+    std::fs::write(&file, json).unwrap();
+    file
+}
+
+fn saved_of(h: &Harness, cx: &mut TestAppContext) -> SavedState {
+    cx.run_until_parked();
+    h.store
+        .load_workspace(Slot::Current)
+        .unwrap()
+        .expect("the window wrote its state")
+}
+
+/// A second window whose store holds `state` as the previous run's.
+fn restart(
+    cx: &mut TestAppContext,
+    settings: Option<std::path::PathBuf>,
+    state: &SavedState,
+) -> Harness {
+    cx.executor().allow_parking();
+    let state = state.clone();
+    open_full(
+        cx,
+        ScriptedRunner::new(),
+        settings,
+        Picked::Cancelled,
+        move |store| store.save_workspace(Slot::Current, &state).unwrap(),
+    )
+}
+
+fn terminal(id: u64, cwd: &str, agent: Option<&str>, session: Option<&str>) -> SavedTerminal {
+    SavedTerminal {
+        id,
+        machine: MachineId::local().as_str().to_owned(),
+        cwd: cwd.to_owned(),
+        agent: agent.map(str::to_owned),
+        session: session.map(str::to_owned),
+        confidence: session.map(|_| "resumed".to_owned()),
+        history: None,
+        name: None,
+        title: None,
+        started_at: 0,
+    }
+}
+
+fn one_tab_each(cwd: &str, agent: &str, session: Option<&str>, ids: &[u64]) -> SavedState {
+    use leon_core::{SavedLayout, SavedTab, SavedWorkspace};
+    SavedState {
+        saved_at: 1,
+        clean_shutdown: true,
+        selection: None,
+        main: Some(ids[0]),
+        workspaces: vec![SavedWorkspace {
+            key: crate::ui::workspace::key_of(MachineId::local().as_str(), cwd),
+            active: 0,
+            tabs: ids
+                .iter()
+                .map(|id| SavedTab {
+                    layout: SavedLayout::Leaf(*id),
+                    focus: *id,
+                    zoomed: false,
+                })
+                .collect(),
+        }],
+        terminals: ids
+            .iter()
+            .map(|id| terminal(*id, cwd, Some(agent), session))
+            .collect(),
+    }
+}
+
+fn click(h: &Harness, selector: String, cx: &mut TestAppContext) {
+    h.mouse_on(selector, gpui_kit::MouseButton::Left, cx);
+}
+
+fn live_count(h: &Harness, cx: &mut TestAppContext) -> usize {
+    h.shell(cx, |s| s.live.ids().len())
+}
+
+#[gpui_kit::test]
+fn every_change_to_the_terminals_is_written_with_layout_ratio_and_focus(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let (_dir, path) = real_worktree(&h, cx);
+    h.press("ctrl-t", cx);
+    h.press_chord("cmd-d", "ctrl-shift-d", cx);
+    cx.update(|cx| {
+        h.shell.update(cx, |s, cx| {
+            if let Some(tab) = s.workspaces.tab_of_mut(LiveId(1)) {
+                if let Layout::Split { ratio, .. } = &mut tab.layout {
+                    *ratio = 0.3;
+                }
+            }
+            cx.notify();
+        })
+    });
+    let state = saved_of(&h, cx);
+    assert_eq!(state.terminals.len(), 2);
+    assert!(state
+        .terminals
+        .iter()
+        .all(|t| t.cwd == path && t.agent.is_none()));
+    assert_eq!(state.main, Some(2), "the focused pane");
+    let tab = &state.workspaces[0].tabs[0];
+    assert_eq!(tab.focus, 2);
+    match &tab.layout {
+        leon_core::SavedLayout::Split { ratio, axis, .. } => {
+            assert!((ratio - 0.3).abs() < 1e-6 && axis == "row");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!state.clean_shutdown, "a running window is not a clean end");
+}
+
+#[gpui_kit::test]
+fn a_clean_quit_marks_the_run_and_a_start_clears_the_mark(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let (_dir, _) = real_worktree(&h, cx);
+    h.press("ctrl-t", cx);
+    saved_of(&h, cx);
+    cx.update(|cx| h.shell.update(cx, |s, cx| s.flush(cx)));
+    assert!(
+        h.store
+            .load_workspace(Slot::Current)
+            .unwrap()
+            .unwrap()
+            .clean_shutdown
+    );
+
+    let h2 = restart(
+        cx,
+        None,
+        &h.store.load_workspace(Slot::Current).unwrap().unwrap(),
+    );
+    assert!(
+        !h2.store
+            .load_workspace(Slot::Current)
+            .unwrap()
+            .unwrap()
+            .clean_shutdown,
+        "the new run is not over"
+    );
+}
+
+#[gpui_kit::test]
+fn ask_offers_the_sessions_and_restore_all_reopens_the_same_layout_and_focus(
+    cx: &mut TestAppContext,
+) {
+    let h = open_live(cx);
+    let (_dir, _path) = real_worktree(&h, cx);
+    h.press("ctrl-t", cx);
+    h.press_chord("cmd-d", "ctrl-shift-d", cx);
+    cx.update(|cx| {
+        h.shell.update(cx, |s, cx| {
+            if let Some(Layout::Split { ratio, .. }) =
+                s.workspaces.tab_of_mut(LiveId(1)).map(|t| &mut t.layout)
+            {
+                *ratio = 0.3;
+            }
+            cx.notify();
+        })
+    });
+    let mut state = saved_of(&h, cx);
+    state.clean_shutdown = false;
+
+    let h2 = restart(cx, None, &state);
+    assert_eq!(h2.shell(cx, |s| s.overlay), Overlay::Restore);
+    assert!(
+        h2.shell(cx, |s| s.restore.unclean),
+        "Leon did not close normally"
+    );
+    assert_eq!(live_count(&h2, cx), 0, "nothing starts before the answer");
+    assert!(h2.shows("restore-all", cx) && h2.shows("restore-choose", cx));
+    assert!(h2.shows("restore-not-now", cx));
+
+    click(&h2, "restore-all".to_owned(), cx);
+    wait_until(&h2, cx, "both shells", |h, cx| live_count(h, cx) == 2);
+    assert_eq!(h2.shell(cx, |s| s.overlay), Overlay::None);
+    let (layout, focus) = h2.shell(cx, |s| {
+        let tab = s.workspaces.tab_of(LiveId(1)).expect("restored workspace");
+        (tab.layout.clone(), tab.focus)
+    });
+    match layout {
+        Layout::Split { ratio, .. } => assert!((ratio - 0.3).abs() < 1e-6),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(focus, LiveId(2), "the same pane has the keyboard");
+    assert_eq!(h2.main_kind(cx), "live:2");
+}
+
+#[gpui_kit::test]
+fn choose_restores_only_the_rows_picked(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let mut state = one_tab_each(&cwd, "claude", Some("s1"), &[1, 2]);
+    state.terminals[0].agent = None;
+    state.terminals[1].agent = None;
+    let h = restart(cx, None, &state);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Restore);
+    click(&h, "restore-choose".to_owned(), cx);
+    click(&h, "restore-row-1".to_owned(), cx);
+    click(&h, "restore-chosen".to_owned(), cx);
+    wait_until(&h, cx, "one shell", |h, cx| live_count(h, cx) == 1);
+    assert_eq!(h.shell(cx, |s| s.live.all()[0].cwd.clone()), cwd);
+}
+
+#[gpui_kit::test]
+fn not_now_keeps_the_sessions_for_the_palette_command(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let mut state = one_tab_each(&cwd, "claude", None, &[1]);
+    state.terminals[0].agent = None;
+    let h = restart(cx, None, &state);
+    click(&h, "restore-not-now".to_owned(), cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+    assert_eq!(live_count(&h, cx), 0);
+    h.press("ctrl-shift-p", cx);
+    h.set_palette_text(">restore last", cx);
+    assert!(h
+        .palette_titles(cx)
+        .contains(&"Restore last sessions".to_owned()));
+    h.press("enter", cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Restore);
+    click(&h, "restore-all".to_owned(), cx);
+    wait_until(&h, cx, "the shell", |h, cx| live_count(h, cx) == 1);
+}
+
+#[gpui_kit::test]
+fn always_reopens_without_asking_and_never_asks_nothing(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let mut state = one_tab_each(&cwd, "claude", None, &[1]);
+    state.terminals[0].agent = None;
+
+    let always = settings_with(&dir, r#"{"restore_sessions": "always"}"#);
+    let h = restart(cx, Some(always), &state);
+    wait_until(&h, cx, "the shell", |h, cx| live_count(h, cx) == 1);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+
+    let never = settings_with(&dir, r#"{"restore_sessions": "never"}"#);
+    let h = restart(cx, Some(never), &state);
+    assert_eq!(live_count(&h, cx), 0);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+    // The command still brings the sessions back.
+    h.press("ctrl-shift-p", cx);
+    h.set_palette_text(">restore last", cx);
+    h.press("enter", cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Restore);
+}
+
+#[gpui_kit::test]
+fn agents_are_paused_and_resume_when_their_tab_is_shown(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let state = one_tab_each(&cwd, "claude", Some("sid-7"), &[1, 2]);
+    let always = settings_with(&dir, r#"{"restore_sessions": "always"}"#);
+    let h = restart(cx, Some(always), &state);
+    wait_until(&h, cx, "both shells", |h, cx| live_count(h, cx) == 2);
+    // The focused tab (1) resumed at once; the other one waits.
+    wait_until(&h, cx, "the shown agent", |h, cx| {
+        screen(h, cx, 1).contains("FAKE-CLAUDE --resume sid-7")
+    });
+    assert!(h.shell(cx, |s| s.live.get(LiveId(2)).unwrap().is_paused()));
+    assert!(h.shell(cx, |s| s
+        .live
+        .get(LiveId(2))
+        .unwrap()
+        .label()
+        .contains("paused")));
+    assert!(
+        !screen(&h, cx, 2).contains("FAKE-CLAUDE"),
+        "{}",
+        screen(&h, cx, 2)
+    );
+
+    // Showing its tab wakes it.
+    cx.update(|cx| {
+        h.shell.update(cx, |s, cx| {
+            s.pending_open_for_test(LiveId(2), cx);
+        })
+    });
+    wait_until(&h, cx, "the second agent", |h, cx| {
+        screen(h, cx, 2).contains("FAKE-CLAUDE --resume sid-7")
+    });
+    assert!(!h.shell(cx, |s| s.live.get(LiveId(2)).unwrap().is_paused()));
+    let _ = terminal_of;
+}
+
+#[gpui_kit::test]
+fn enter_in_a_paused_terminal_resumes_it_instead_of_reaching_the_shell(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let state = one_tab_each(&cwd, "claude", Some("sid-9"), &[1, 2]);
+    let always = settings_with(&dir, r#"{"restore_sessions": "always"}"#);
+    let h = restart(cx, Some(always), &state);
+    wait_until(&h, cx, "both shells", |h, cx| live_count(h, cx) == 2);
+    // Put the keyboard on the paused one without showing its tab.
+    cx.update(|cx| {
+        h.shell.update(cx, |s, _| {
+            s.main = Main::Live(LiveId(2));
+        })
+    });
+    assert!(h.shell(cx, |s| s.live.get(LiveId(2)).unwrap().is_paused()));
+    h.press("enter", cx);
+    wait_until(&h, cx, "the resumed agent", |h, cx| {
+        screen(h, cx, 2).contains("FAKE-CLAUDE --resume sid-9")
+    });
+}
+
+#[gpui_kit::test]
+fn what_cannot_be_restored_is_listed_with_its_reason(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let gone = dir.path().join("deleted").to_string_lossy().into_owned();
+    let launch_only = leon_core::agent::builtin()
+        .iter()
+        .find(|spec| !spec.can_resume() && spec.history.is_none())
+        .map(|spec| spec.id.as_str().to_owned())
+        .expect("the catalogue has an agent that is launch only");
+    let mut state = one_tab_each(&cwd, "claude", Some("ok"), &[1, 2, 3, 4, 5]);
+    state.terminals[1].cwd = gone;
+    state.terminals[2].session = None;
+    state.terminals[3].machine = "no-such-machine".into();
+    state.terminals[4].agent = Some(launch_only);
+    state.terminals[4].session = None;
+    let always = settings_with(&dir, r#"{"restore_sessions": "always"}"#);
+    let h = restart(cx, Some(always), &state);
+    wait_until(&h, cx, "the report", |h, cx| {
+        h.shell(cx, |s| s.restore.report_open)
+    });
+    let failures = h.shell(cx, |s| s.restore.failures.clone());
+    let reasons: Vec<&str> = failures.iter().map(|(_, why)| why.as_str()).collect();
+    assert_eq!(failures.len(), 3, "{failures:?}");
+    assert!(
+        reasons.iter().any(|r| r.contains("no longer exists")),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons.iter().any(|r| r.contains("never learned")),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.contains("machine is no longer known")),
+        "{reasons:?}"
+    );
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Restore);
+    // The launch-only agent became a plain shell with a note, not an agent.
+    assert_eq!(live_count(&h, cx), 2);
+    let notes: Vec<String> = h.shell(cx, |s| s.live.all().iter().map(|l| l.label()).collect());
+    assert!(
+        notes.iter().any(|label| label.contains("now a shell")),
+        "{notes:?}"
+    );
+    assert!(h.shows("restore-ok", cx));
+    click(&h, "restore-ok".to_owned(), cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+}
+
+#[gpui_kit::test]
+fn the_previous_run_is_not_erased_by_an_empty_window_before_it_was_answered(
+    cx: &mut TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let mut state = one_tab_each(&cwd, "claude", None, &[1]);
+    state.terminals[0].agent = None;
+    let h = restart(cx, None, &state);
+    cx.run_until_parked();
+    // While the question is open the stored Current is still the old one.
+    let kept = h.store.load_workspace(Slot::Current).unwrap().unwrap();
+    assert_eq!(kept.terminals.len(), 1);
+    // And it is also archived.
+    assert_eq!(
+        h.store
+            .load_workspace(Slot::Previous)
+            .unwrap()
+            .unwrap()
+            .terminals
+            .len(),
+        1
+    );
+}
+
+#[gpui_kit::test]
+fn a_paused_session_never_notifies(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let state = one_tab_each(&cwd, "claude", Some("sid-1"), &[1, 2]);
+    let always = settings_with(&dir, r#"{"restore_sessions": "always"}"#);
+    let h = restart(cx, Some(always), &state);
+    wait_until(&h, cx, "both shells", |h, cx| live_count(h, cx) == 2);
+    cx.update(|cx| {
+        h.shell.update(cx, |s, cx| {
+            s.raise_for_test(crate::ui::notify::Event::Waiting, LiveId(2), cx);
+        })
+    });
+    assert!(
+        h.shell(cx, |s| s.banners.is_empty()),
+        "the paused one is silent"
+    );
+    assert!(h.notes.borrow().is_empty());
+}

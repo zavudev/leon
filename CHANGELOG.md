@@ -6,6 +6,22 @@
 
 ### Added
 
+* **Sessions come back.** Leon remembers the open terminals as they change (not
+  only at quit, so a crash or a power cut loses at most half a second): machine,
+  folder, agent and its session id, your renames, the tabs and panes with their
+  ratios, and which tab and pane had the focus. At the next start the setting
+  *Restore the last sessions* decides: **Ask me** (default; a small question
+  listing the sessions, with Restore all, Choose and Not now, and "Leon did not
+  close normally" after a crash), **Always**, or **Never** (the palette's
+  *Restore last sessions* still brings them back). Agents are resumed through
+  their own resume command and stay **paused** (`paused · press Enter to
+  resume`) until their tab is first shown or you press Enter, so ten restored
+  agents spend nothing until you look (*Resume restored agents* = all at once
+  resumes them in the background, three a second). A terminal that cannot be
+  reopened (folder gone, machine unknown, agent missing or launch only, session
+  id unknown, or the same session already running in another terminal) is
+  listed with the reason instead of becoming a broken shell. Scrollback is not
+  restored: the agent redraws its own conversation.
 * **Why is a session missing?** A palette command and `leon --diagnose history
   [--agent <id>]` report where each agent's history is looked for (defaults,
   environment variables, Settings), what format was found (SQLite tables and

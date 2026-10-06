@@ -32,12 +32,14 @@ mod migrations;
 mod projects;
 pub mod search;
 mod usage;
+mod workspace;
 
 pub use history::{
     history_overview_at, import_cursors_at, set_import_cursor_in, upsert_session_in, AgentOverview,
     ImportRun, SessionFilter,
 };
 pub use usage::{UsagePoint, UsageRow};
+pub use workspace::{SavedLayout, SavedState, SavedTab, SavedTerminal, SavedWorkspace, Slot};
 
 /// How long a connection waits for a lock held by another connection before
 /// giving up.

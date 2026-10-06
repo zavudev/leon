@@ -219,6 +219,7 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
             Cmd(C::Refresh),
             Cmd(C::ProbeMachine),
             Cmd(C::WhyMissing),
+            Cmd(C::RestoreSessions),
         ],
     ),
     (

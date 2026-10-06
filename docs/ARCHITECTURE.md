@@ -225,6 +225,38 @@ history`; `HistorySource::stamp` is a metadata-only change marker (it includes
 the `-wal` file) so a poll can skip an import when nothing moved. A source whose
 layout is not known is an error that is reported, never "no sessions".
 
+## Remembering and restoring the open terminals
+
+`leon-core`'s `store/workspace.rs` keeps a `SavedState` (migration 8): one row per
+terminal, tab and workspace, in two slots, `Current` (what the running window
+writes) and `Previous` (the last run's, copied at start so declining or opening
+something new never loses it). It holds machine, folder, agent id, the agent's
+own session id with how sure Leon is (`resumed`, `state-file`,
+`newest-in-folder`), the history row, the user's name, the tab layout tree with
+ratios, focus, zoom, and a clean-shutdown flag; never scrollback.
+
+In the window, `restore_view.rs` compares `snapshot_state` with the last write on
+every render and writes after `Options::save_debounce` (500 ms); programs that
+ended are left out with their pane. `flush` (quit, close, update restart) writes
+once more with `clean_shutdown = true`, before anything is hung up; the start
+clears the flag. `restore.rs` is the pure part (layout conversion, the rows and
+sentence of the question).
+
+Restoring builds every terminal at once as the base shell (`spawn_live`), puts
+them in the saved layout, and decides per terminal with `launch::plan`: a plain
+shell or a launch-only agent becomes a shell (the latter with a note, never a
+fresh agent), a resumable agent with a known session id becomes a **paused**
+session whose resume line is held in `LiveSession::pending`. It is typed when
+its tab is shown (`open_live`), on Enter in it, or in the background three a
+second with `restore_resume = all`. Anything that cannot be reopened (unknown
+machine, missing folder, agent not installed, unknown session id, the session
+already running in another terminal per the elsewhere scan) is listed with its
+reason. A paused session has no agent for the activity dot and sends no
+notification. Known limits: the sidebar selection is restored only as the
+terminal that was on screen; relay terminals are not re-attached yet (the host
+keeps them: `Client::pty_list` / `pty_attach`); scrollback is not stored (the
+seam is `SavedTerminal`, which can carry a screen snapshot later).
+
 ## Notifications
 
 When a session wants the user or ends, Leon says so twice: the **geek banner**

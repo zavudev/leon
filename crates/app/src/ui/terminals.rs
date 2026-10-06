@@ -19,6 +19,7 @@ use super::activity::Activity;
 use super::live::{AgentPhase, LiveId, LiveSession, LiveState};
 use super::notify;
 use super::panes::{Axis, Dir, Layout, MinSize, Path, Rect, RESIZE_STEP};
+use super::restore;
 use super::shell::{ElsewhereNote, Main, Notice, Overlay, Pane, Shell};
 use super::steps::SessionIntent;
 use super::tree::{self, NodeId};
@@ -172,10 +173,49 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let agent = match &launch {
+            Launch::Agent { kind, .. } => Some(*kind),
+            Launch::Shell => None,
+        };
+        let Some(id) = self.spawn_live(launch, machine, cwd, history, false, None, window, cx)
+        else {
+            return;
+        };
+        match place {
+            Place::Split(of, axis) if self.workspaces.locate(of).is_some() => {
+                self.workspaces.split(of, axis, id);
+            }
+            _ => {
+                let root = tree::workspace_root(&self.snapshot, machine, cwd);
+                self.workspaces
+                    .add_tab(&workspace::key_of(machine.as_str(), &root), id);
+            }
+        }
+        self.refresh_live();
+        self.open_live(id, window, cx);
+        self.warn_before_session(agent, machine, cx);
+    }
+
+    /// Starts the terminal of `launch` without placing it in any tab: the
+    /// caller puts it in a layout. With `deferred` the agent's line is held
+    /// back (the session is "paused") until [`Shell::resume_paused`]; `title`
+    /// is what the row says until the program sets its own.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn spawn_live(
+        &mut self,
+        launch: Launch,
+        machine: &MachineId,
+        cwd: &str,
+        history: Option<SessionId>,
+        deferred: bool,
+        title: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<LiveId> {
         let Some(found) = self.snapshot.machine(machine).cloned() else {
             self.engine
                 .report(StatusKind::Error, "That machine is not known.");
-            return;
+            return None;
         };
         let state = self.engine.machine_state(machine);
         let report = match &state {
@@ -202,7 +242,7 @@ impl Shell {
             Err(error) => {
                 self.engine.report(StatusKind::Error, error.to_string());
                 cx.notify();
-                return;
+                return None;
             }
         };
         let colours = theme::palette(cx);
@@ -218,7 +258,7 @@ impl Shell {
             Err(error) => {
                 self.engine.report(StatusKind::Error, error.to_string());
                 cx.notify();
-                return;
+                return None;
             }
         };
         view.update(cx, |view, _| view.set_padding(metrics::TERMINAL_PADDING()));
@@ -243,31 +283,15 @@ impl Shell {
             cx.observe(&view, move |this, _, cx| this.live_changed(id, cx)),
         ];
         // The line is typed by a thread of its own, from the terminal's point
-        // of view and not the window's: it waits for the shell to have printed
-        // its prompt and gone quiet, and holds the terminal only weakly, so
-        // closing the pane is never held up by it.
+        // of view and not the window's (see `type_when_ready`). A paused
+        // session holds it back.
+        let mut pending = None;
         if let Some(line) = plan.send.clone() {
-            let terminal = std::sync::Arc::downgrade(view.read(cx).terminal());
-            let ready = self.options.ready;
-            std::thread::spawn(move || {
-                let begun = Instant::now();
-                loop {
-                    std::thread::sleep(ready.poll);
-                    let Some(terminal) = terminal.upgrade() else {
-                        return;
-                    };
-                    if terminal.exit_info().is_some() {
-                        return;
-                    }
-                    let quiet = terminal
-                        .quiet_for()
-                        .is_some_and(|quiet| quiet >= ready.quiet);
-                    if quiet || begun.elapsed() >= ready.timeout {
-                        terminal.write(line.into_bytes());
-                        return;
-                    }
-                }
-            });
+            if deferred {
+                pending = Some(line);
+            } else {
+                Self::type_when_ready(view.read(cx).terminal(), self.options.ready, line);
+            }
         }
         self.live.push(LiveSession {
             id,
@@ -275,9 +299,9 @@ impl Shell {
             machine_name: found.name.clone(),
             cwd: cwd.to_owned(),
             agent,
-            resumed,
+            resumed: resumed.clone(),
             history,
-            title: None,
+            title,
             name: None,
             phase: if agent.is_some() {
                 AgentPhase::Launched
@@ -290,23 +314,70 @@ impl Shell {
             bell: false,
             failure_seen: false,
             activity: Activity::Off,
+            pending,
+            learned: match (&agent, &resumed) {
+                (Some(_), Some(id)) => Some((id.clone(), "resumed".to_owned())),
+                _ => None,
+            },
+            started_ms: (self.options.now)().timestamp_millis(),
             _subscriptions: subscriptions,
         });
         self.refresh_activity(cx);
         self.keep_watching(cx);
-        match place {
-            Place::Split(of, axis) if self.workspaces.locate(of).is_some() => {
-                self.workspaces.split(of, axis, id);
+        Some(id)
+    }
+
+    /// Types `line` into the shell of `terminal` once it has printed its
+    /// prompt and gone quiet, from a thread of its own: it holds the terminal
+    /// only weakly, so closing the pane is never held up by it.
+    pub(super) fn type_when_ready(
+        terminal: &std::sync::Arc<leon_term::Terminal>,
+        ready: Readiness,
+        line: String,
+    ) {
+        let terminal = std::sync::Arc::downgrade(terminal);
+        std::thread::spawn(move || {
+            let begun = Instant::now();
+            loop {
+                std::thread::sleep(ready.poll);
+                let Some(terminal) = terminal.upgrade() else {
+                    return;
+                };
+                if terminal.exit_info().is_some() {
+                    return;
+                }
+                let quiet = terminal
+                    .quiet_for()
+                    .is_some_and(|quiet| quiet >= ready.quiet);
+                if quiet || begun.elapsed() >= ready.timeout {
+                    terminal.write(line.into_bytes());
+                    return;
+                }
             }
-            _ => {
-                let root = tree::workspace_root(&self.snapshot, machine, cwd);
-                self.workspaces
-                    .add_tab(&workspace::key_of(machine.as_str(), &root), id);
-            }
+        });
+    }
+
+    /// Resumes a paused session: its agent's line is typed into the shell.
+    /// `true` when it was paused.
+    pub(super) fn resume_paused(&mut self, id: LiveId, cx: &mut Context<Self>) -> bool {
+        let ready = self.options.ready;
+        let Some(session) = self.live.get_mut(id) else {
+            return false;
+        };
+        let Some(line) = session.pending.take() else {
+            return false;
+        };
+        // The row says what it was only until the program has its own title.
+        if session
+            .title
+            .as_deref()
+            .is_some_and(|title| title.ends_with(restore::PAUSED_NOTE))
+        {
+            session.title = None;
         }
-        self.refresh_live();
-        self.open_live(id, window, cx);
-        self.warn_before_session(agent, machine, cx);
+        Self::type_when_ready(session.view.read(cx).terminal(), ready, line);
+        cx.notify();
+        true
     }
 
     /// A line in the status bar when the agent that was just started is near
@@ -418,7 +489,7 @@ impl Shell {
     /// Says what a session just did, in the ways the settings ask for: the
     /// geek banner over the window and the desktop notification. The session
     /// the user is looking at says it itself.
-    fn raise(&mut self, event: notify::Event, id: LiveId, cx: &mut Context<Self>) {
+    pub(super) fn raise(&mut self, event: notify::Event, id: LiveId, cx: &mut Context<Self>) {
         let prefs = crate::settings::notifications(cx);
         if !prefs.enabled || !prefs.allows(event) {
             return;
@@ -426,6 +497,10 @@ impl Shell {
         let Some(session) = self.live.get(id) else {
             return;
         };
+        // A restored session that waits to be resumed has nothing to say.
+        if session.is_paused() {
+            return;
+        }
         if self.window_active && matches!(self.main, Main::Live(open) if open == id) {
             return;
         }
@@ -589,6 +664,8 @@ impl Shell {
         let thresholds = self.options.activity;
         self.set_activity(id, &thresholds, cx);
         self.workspaces.focus(id);
+        // The tab is being shown: what was restored paused in it wakes now.
+        self.resume_tab_of(id, cx);
         self.main = Main::Live(id);
         self.pane = Pane::Main;
         // A terminal that resumed a history session is that session's row.
@@ -1194,6 +1271,10 @@ impl Shell {
         let Main::Live(id) = self.main else {
             return false;
         };
+        // Enter in a paused session resumes its agent; it is not typed.
+        if self.paused_enter(stroke, cx) {
+            return true;
+        }
         let Some(view) = self.live.get(id).map(|session| session.view.clone()) else {
             return false;
         };

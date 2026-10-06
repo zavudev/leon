@@ -96,6 +96,28 @@ impl Store {
         })
     }
 
+    /// The history session an agent's own id names on a machine, if it was
+    /// imported.
+    pub fn session_by_external(
+        &self,
+        machine_id: &MachineId,
+        agent: AgentId,
+        external_id: &str,
+    ) -> Result<Option<Session>> {
+        self.read(|connection| {
+            Ok(connection
+                .prepare_cached(&format!(
+                    "SELECT {SESSION_COLUMNS} FROM session s
+                     WHERE s.machine_id = ?1 AND s.agent = ?2 AND s.external_id = ?3"
+                ))?
+                .query_row(
+                    params![machine_id.as_str(), agent.as_str(), external_id],
+                    |row| session_from_row(row, 0),
+                )
+                .optional()?)
+        })
+    }
+
     /// The distinct working directories of a machine's sessions, sorted. With
     /// `unlinked_only`, only those no project or worktree contains yet: the
     /// ones that could still turn out to belong to a project nobody added.

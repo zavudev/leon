@@ -48,7 +48,11 @@ impl Default for UpdateUi {
 }
 
 /// A small button: a mono label in a hairline box.
-fn pill(id: &'static str, label: impl Into<SharedString>, colours: &Palette) -> Stateful<Div> {
+pub(super) fn pill(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    colours: &Palette,
+) -> Stateful<Div> {
     mono(label)
         .id(id)
         .debug_selector(move || id.into())

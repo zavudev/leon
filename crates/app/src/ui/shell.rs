@@ -108,6 +108,8 @@ pub enum Overlay {
     Notes,
     /// "Why is a session missing?": the history report.
     History,
+    /// "Restore N sessions from last time?" and what could not be restored.
+    Restore,
 }
 
 /// What the folder picker answered.
@@ -183,6 +185,8 @@ pub struct Options {
     pub notify: notify::Notify,
     /// How long a banner stays on screen.
     pub banner_duration: Duration,
+    /// How long a change of the open terminals waits before it is written.
+    pub save_debounce: Duration,
     /// How an image file is picked on this computer, for a project's logo.
     pub pick_image: PickFolder,
     /// Where a file is saved: the system's save dialog.
@@ -260,6 +264,7 @@ impl Default for Options {
             error_flash: Duration::from_secs(4),
             notify: Rc::new(notify::system),
             banner_duration: Duration::from_secs(8),
+            save_debounce: Duration::from_millis(500),
             pick_image: super::projects::default_image_picker(),
             save_file: Rc::new(super::terminal_tools::system_save_dialog),
             read_clipboard: Rc::new(|cx| cx.read_from_clipboard()),
@@ -410,6 +415,8 @@ pub struct Shell {
     pub(super) logos: Logos,
     /// The scroll of the history report.
     pub(super) history_scroll: ScrollHandle,
+    /// What is remembered and offered back (see `restore_view.rs`).
+    pub(super) restore: super::restore_view::RestoreUi,
     /// Watches the terminals' activity while any is live.
     pub(super) ticker: Option<Task<()>>,
     /// The notifications shown for what sessions just did, oldest first.
@@ -627,6 +634,7 @@ impl Shell {
             labels,
             logos: Logos::default(),
             history_scroll: ScrollHandle::new(),
+            restore: Default::default(),
             ticker: None,
             banners: Vec::new(),
             banner_ticker: None,
@@ -661,6 +669,7 @@ impl Shell {
         shell.usage_reload();
         shell.watch_usage(window, cx);
         shell.watch_updates(window, cx);
+        shell.begin_session_restore(window, cx);
         // Values of settings.json that could not be used were read as defaults.
         let problems = settings::take_problems(cx);
         shell.report_problems(&problems);
@@ -1558,6 +1567,9 @@ impl Shell {
         if self.overlay == Overlay::Connect && self.connect_key(stroke, window, cx) {
             return true;
         }
+        if self.overlay == Overlay::Restore && self.restore_key(stroke, window, cx) {
+            return true;
+        }
         if self.overlay == Overlay::Usage && self.usage_key(stroke, window, cx) {
             return true;
         }
@@ -1725,6 +1737,7 @@ impl Shell {
             C::ShowUsage => self.toggle_usage(window, cx),
             C::RefreshUsage => self.refresh_usage(cx),
             C::WhyMissing => self.open_history_report(window, cx),
+            C::RestoreSessions => self.restore_last_sessions(window, cx),
             C::Refresh => self.engine.submit(crate::engine::Op::Refresh),
             C::ProbeMachine => {
                 let machine = self.current_machine();
@@ -1806,6 +1819,7 @@ impl Shell {
                 | Overlay::About
                 | Overlay::Notes
                 | Overlay::History
+                | Overlay::Restore
                 | Overlay::Problems
                 | Overlay::Connect
                 | Overlay::Usage
@@ -1845,6 +1859,7 @@ impl Shell {
             Overlay::About
             | Overlay::Notes
             | Overlay::History
+            | Overlay::Restore
             | Overlay::Problems
             | Overlay::Usage => {
                 self.overlay = Overlay::None;
@@ -2251,6 +2266,9 @@ impl Shell {
     /// beside the settings is written. The settings themselves are written at
     /// every change.
     pub(super) fn flush(&mut self, cx: &mut Context<Self>) {
+        // Before anything is hung up: what is open now, marked as ended
+        // normally.
+        self.remember_clean_shutdown(cx);
         for id in self.live.ids() {
             if let Some(session) = self.live.get(id) {
                 let terminal = session.view.read(cx).terminal();
@@ -2474,6 +2492,7 @@ impl Shell {
             Overlay::Share => self.render_share(colours, cx).into_any_element(),
             Overlay::Notes => self.render_notes(colours, cx).into_any_element(),
             Overlay::History => self.render_history_report(colours, cx).into_any_element(),
+            Overlay::Restore => self.render_restore(colours, cx).into_any_element(),
         };
         let top = match self.overlay {
             Overlay::Palette => self.palette_top(),
@@ -2511,6 +2530,8 @@ impl Render for Shell {
             self.menu_state = available;
             crate::menus::refresh(available, cx);
         }
+        // What is open is remembered after every change.
+        self.watch_workspace(cx);
         // Terminals wear the theme and the interface size in use.
         self.sync_settings(cx);
         let (terminal_theme, terminal_font) = (colours.terminal, Self::terminal_font(cx));

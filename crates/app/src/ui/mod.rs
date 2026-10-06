@@ -34,6 +34,8 @@ mod panes;
 mod paste;
 mod prefs;
 mod projects;
+mod restore;
+mod restore_view;
 mod settings_screen;
 mod share;
 mod sheet;

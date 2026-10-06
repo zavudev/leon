@@ -339,6 +339,9 @@ const OPEN_MODES: Choices = Choices::Fixed(&[
     ("resume", "Resume in a terminal"),
     ("transcript", "Open the transcript"),
 ]);
+const RESTORE: Choices =
+    Choices::Fixed(&[("ask", "Ask me"), ("always", "Always"), ("never", "Never")]);
+const RESTORE_RESUME: Choices = Choices::Fixed(&[("shown", "When shown"), ("all", "All at once")]);
 const QUIT: Choices = Choices::Fixed(&[
     ("running", "When programs are running"),
     ("always", "Always"),
@@ -985,6 +988,24 @@ const BASE: &[Def] = &[
         "quit close exit ask",
         K::Choice(QUIT),
         D::Text("running"),
+    ),
+    def(
+        "restore_sessions",
+        S::Sessions,
+        "Restore the last sessions",
+        "At start, offer the terminals that were open last time (ask), reopen them (always) or leave them (never; the palette's \"Restore last sessions\" still brings them back). Agents are resumed where they can be; scrollback is not restored.",
+        "reopen open terminals tabs panes crash power quit start",
+        K::Choice(RESTORE),
+        D::Text("ask"),
+    ),
+    def(
+        "restore_resume",
+        S::Sessions,
+        "Resume restored agents",
+        "When a restored agent session is resumed: when its tab is first shown (nothing is spent until you look) or all at once, a few at a time.",
+        "resume tokens quota agents restore background",
+        K::Choice(RESTORE_RESUME),
+        D::Text("shown"),
     ),
     // ----- advanced
     def(
