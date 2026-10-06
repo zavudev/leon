@@ -15,15 +15,18 @@ opt-in `pre-push` hook.
 
 ```sh
 cargo xtask bump patch        # or minor, major, or an explicit X.Y.Z
-git diff                      # Cargo.toml and Cargo.lock
+git diff                      # Cargo.toml, Cargo.lock and docs/SETTINGS.md
 # update CHANGELOG.md
-git commit -am "chore: release 0.1.1"
-git tag v0.1.1
-git push origin main v0.1.1
+git commit -am "chore: release 0.2.0"
+git tag v0.2.0
+git push origin main v0.2.0
 ```
 
 `bump` edits `Cargo.toml`, refreshes the workspace entries of `Cargo.lock`
-(`cargo update --workspace`) and prints the tag to create. It refuses a
+(`cargo update --workspace`), regenerates the generated docs that embed the version
+(`docs/SETTINGS.md`, through `LEON_BLESS=1 cargo test -p leon the_settings_reference_is_current`,
+so the gate does not fail afterwards on a stale "Version 0.x.y") and prints the tag to
+create. `--no-lock` and `--no-docs` skip the second and third steps. It refuses a
 pre-release version, on either side, and an explicit version that is not above
 the current one. To cut a pre-release (`0.2.0-rc.1`), edit the version by hand;
 the workflow publishes it marked as a pre-release.
@@ -148,7 +151,7 @@ minutes):
 * A failed build before anything was published: fix the cause, then either
   re-run the failed jobs from the Actions page (the tag still points to the same
   commit), or delete the tag and push it again on the fixed commit
-  (`git push --delete origin v0.1.1`, `git tag -f v0.1.1`, `git push origin v0.1.1`).
+  (`git push --delete origin v0.2.0`, `git tag -f v0.2.0`, `git push origin v0.2.0`).
   Keep the version unless a file was already published.
 * A broken release that is already published: do not reuse the number. Fix
   forward with the next patch version, and delete or edit the bad release on
