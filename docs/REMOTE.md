@@ -160,6 +160,11 @@ more fragments and rekeying. Each side rekeys after 2^20 messages, 1 GiB or an
 hour. Any authentication failure poisons the session: it is closed and refuses
 everything after.
 
+The version is 2: an `Exec` request may carry the bytes a command reads on
+standard input (at most 4 MiB), which is how Leon writes a file on the other
+computer; version 1 peers are refused with `VersionMismatch` rather than
+misread.
+
 `postcard` was chosen over JSON (terminal bytes would need base64) and over a
 schema compiler (a build step for a few dozen messages). Frames and messages are
 bounded and decoding never panics (fuzz-style and truncation tests).
