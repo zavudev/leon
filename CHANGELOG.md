@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-05
+
 ### Fixed
 
 * **Windows: a session appears under its worktree again.** Sessions were
