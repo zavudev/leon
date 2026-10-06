@@ -174,6 +174,42 @@ above: the engine writes the store and the UI reads it.
   prints no account, e-mail, token or path; a network source runs only with
   `--network <agent>`.
 
+## Notifications
+
+When a session wants the user or ends, Leon says so twice: the **geek banner**
+over the window (monospace, the agent, the folder, the exit code) and the
+**desktop notification** of the system. Both are the same [`Note`], and which
+events and which of the two ways are said is the `Notifications` section of the
+settings (`notify`, `notify_waiting`, `notify_finished`, `notify_failed`,
+`notify_how`, `notify_only_unfocused`), read by `settings::notifications`.
+
+* **The events are pure** (`ui/notify.rs`): `Event::of_exit(code)` decides
+  between a clean end and a failure, `Event::line` words it, `notify::note`
+  composes the title (`label · folder`) and the body (`what happened · machine`
+  for a remote one), and `notify::system_notification` turns it into the
+  notification GPUI shows, with the session as its stable tag so a newer note
+  replaces the older one in the notification centre.
+* **Where it is raised** (`ui/terminals.rs`): `Shell::set_activity` watches the
+  activity transitions, so the change *to waiting* (quiet, or the bell) is one
+  event; `ViewEvent::Exited` is the other, with the exit code. `Shell::raise`
+  drops the event when the settings do not ask for it or when the session is on
+  screen with the window in front (the dot and the lion are already saying it),
+  then pushes a `Banner` and/or hands the note to `Options::notify`.
+* **The banner** is shell state: at most four, the oldest goes first, each with
+  when it expires. `Shell::keep_banners` runs one timer while any is on screen
+  and ends itself with the last one; the clock is the executor's
+  (`BackgroundExecutor::now`) so tests advance it. Clicking a banner opens the
+  session it came from; the cross dismisses it.
+* **The desktop note** is `cx.show_system_notification` (GPUI: notify-rust on
+  Linux, the Notification Center on macOS, a toast on Windows);
+  `main` sets the application identity first, which is what names Leon in the
+  notification. `Options::notify` is the seam: tests record the notes instead.
+  `notify_only_unfocused` keeps the desktop for when the window is not in
+  front; the banner still appears for a session that is not on screen.
+* **Tests** (`ui/tests_notify.rs`) drive the scripted terminals through
+  waiting, a clean exit and a failure, and hold the settings, the focus rule,
+  the dismissal and the expiry to what they say.
+
 ## Project logos, the filter and the activity dot
 
 **Logos.** `leon_core::icon` says which images are accepted and recognises them

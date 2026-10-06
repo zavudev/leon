@@ -125,6 +125,19 @@ How much of each agent's limits is left, and where the numbers come from.
 | Read the opencode Go limits from opencode | `usage_opencode_network` | on, off | `off` | Only for an opencode Go subscription. When on, Leon reads the API key opencode stored for it (~/.local/share/opencode/auth.json) when it refreshes and sends it over HTTPS to opencode.ai only, asking for the subscription's usage. The key is never stored, logged or shown, and only this computer does it. Off by default. |
 | Forget stored usage history |  | button |  | Delete the percentages and times kept for the trend lines and the burn-rate estimate. The latest readings stay. |
 
+## Notifications
+
+What Leon says when a session wants you or finishes, and how it says it.
+
+| Setting | Key | Values | Default | Description |
+| --- | --- | --- | --- | --- |
+| Notify | `notify` | on, off | `on` | Say when a session wants you or finishes. |
+| When an agent wants you | `notify_waiting` | on, off | `on` | An agent finished its turn, went quiet or rang the bell. |
+| When a session ends | `notify_finished` | on, off | `on` | A program ended with exit code zero. |
+| When a session fails | `notify_failed` | on, off | `on` | A program ended with an error. |
+| How to say it | `notify_how` | `both`, `banner`, `system` | `both` | The geek banner in the window, the desktop notification, or both. |
+| Desktop only without focus | `notify_only_unfocused` | on, off | `on` | Show the desktop notification only while the Leon window does not have the focus. The banner still appears for a session that is not on screen. |
+
 ## Sidebar & window
 
 The sidebar and what quitting asks.

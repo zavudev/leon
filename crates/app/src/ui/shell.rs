@@ -26,6 +26,7 @@ use super::live::{LiveId, Sessions};
 use super::logos::Logos;
 use super::menu::Menu;
 use super::model::Snapshot;
+use super::notify;
 use super::palette::PaletteState;
 use super::panes::{Axis, Dir};
 use super::settings_screen::SettingsUi;
@@ -43,9 +44,9 @@ use chrono::{DateTime, Utc};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, App, Context, Div, Entity, FocusHandle, Keystroke, ListAlignment, ListOffset, ListState,
-    MouseButton, MouseDownEvent, PathPromptOptions, ScrollHandle, ScrollStrategy, Size, Stateful,
-    Subscription, Task, UniformListScrollHandle, Window,
+    div, App, Context, Div, Entity, FocusHandle, FontWeight, Keystroke, ListAlignment, ListOffset,
+    ListState, MouseButton, MouseDownEvent, PathPromptOptions, ScrollHandle, ScrollStrategy, Size,
+    Stateful, Subscription, Task, UniformListScrollHandle, Window,
 };
 use leon_core::{MachineId, Message, ProjectId, Result as StoreResult, Session, WorktreeId};
 use leon_term::{Backend, Pty};
@@ -168,6 +169,11 @@ pub struct Options {
     pub activity: Thresholds,
     /// How long the lion shows an error after a session ends with one.
     pub error_flash: Duration,
+    /// How a note reaches the desktop's notification centre; tests record the
+    /// notes instead.
+    pub notify: notify::Notify,
+    /// How long a banner stays on screen.
+    pub banner_duration: Duration,
     /// How an image file is picked on this computer, for a project's logo.
     pub pick_image: PickFolder,
     /// Where a file is saved: the system's save dialog.
@@ -220,6 +226,9 @@ impl leon_remote::connect::SshDir for NoSshDir {
 /// How many polls of this computer pass between two of the SSH machines.
 pub const REMOTE_EVERY: u32 = 6;
 
+/// How often the banners' expiry is looked at while any is on screen.
+const BANNER_TICK: Duration = Duration::from_millis(250);
+
 impl Default for Options {
     fn default() -> Self {
         Self {
@@ -233,6 +242,8 @@ impl Default for Options {
             ready: Readiness::default(),
             activity: Thresholds::default(),
             error_flash: Duration::from_secs(4),
+            notify: Rc::new(notify::system),
+            banner_duration: Duration::from_secs(8),
             pick_image: super::projects::default_image_picker(),
             save_file: Rc::new(super::terminal_tools::system_save_dialog),
             read_clipboard: Rc::new(|cx| cx.read_from_clipboard()),
@@ -378,6 +389,12 @@ pub struct Shell {
     pub(super) logos: Logos,
     /// Watches the terminals' activity while any is live.
     pub(super) ticker: Option<Task<()>>,
+    /// The notifications shown for what sessions just did, oldest first.
+    pub(super) banners: Vec<notify::Banner>,
+    /// Watches the banners' expiry while any is on screen.
+    pub(super) banner_ticker: Option<Task<()>>,
+    /// The id the next banner gets.
+    pub(super) next_banner: u64,
     pub(super) choosing: Option<Task<()>>,
     /// The context menu, while one is open.
     pub(super) menu: Option<Menu>,
@@ -583,6 +600,9 @@ impl Shell {
             labels,
             logos: Logos::default(),
             ticker: None,
+            banners: Vec::new(),
+            banner_ticker: None,
+            next_banner: 0,
             choosing: None,
             menu: None,
             sheet_scroll: ScrollHandle::new(),
@@ -2201,6 +2221,148 @@ impl Shell {
         }
     }
 
+    /// Watches the banners' expiry while any is on screen. One timer for all
+    /// of them, and it ends itself once the last one is gone.
+    pub(super) fn keep_banners(&mut self, cx: &mut Context<Self>) {
+        if self.banner_ticker.is_some() {
+            return;
+        }
+        self.banner_ticker = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(BANNER_TICK).await;
+            let alive = this.update(cx, |this, cx| {
+                let now = cx.background_executor().now();
+                let before = this.banners.len();
+                this.banners.retain(|banner| banner.until > now);
+                if this.banners.len() != before {
+                    cx.notify();
+                }
+                let alive = !this.banners.is_empty();
+                if !alive {
+                    // Dropping the handle ends the task after this turn.
+                    this.banner_ticker = None;
+                }
+                alive
+            });
+            if !matches!(alive, Ok(true)) {
+                return;
+            }
+        }));
+    }
+
+    /// The geek banners: what the sessions just did, over the main pane. A
+    /// click opens the session the note came from; the cross dismisses it.
+    fn render_notifications(
+        &self,
+        colours: &Colours,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        if self.banners.is_empty() {
+            return None;
+        }
+        let cards = self.banners.iter().rev().map(|banner| {
+            let id = banner.id;
+            let session = banner.note.session;
+            let (marker, label) = match banner.note.kind {
+                notify::Kind::Waiting => (colours.warning, "WAIT"),
+                notify::Kind::Finished => (colours.success, "DONE"),
+                notify::Kind::Failed => (colours.error, "FAIL"),
+            };
+            div()
+                .id(("notify", id as usize))
+                .debug_selector(move || format!("notify-{id}"))
+                .w(px(320.))
+                .flex()
+                .flex_row()
+                .rounded(metrics::RADIUS())
+                .border_1()
+                .border_color(colours.elevated_border)
+                .bg(colours.surface)
+                .overflow_hidden()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.banners.retain(|banner| banner.id != id);
+                    if let Some(session) = session {
+                        this.open_live(session, window, cx);
+                    }
+                    cx.notify();
+                }))
+                .child(div().w(px(3.)).flex_none().bg(marker))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .font_family(theme::fonts::mono())
+                                        .font_features(theme::fonts::mono_features())
+                                        .text_size(metrics::TEXT_LABEL())
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(marker)
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(theme::fonts::mono())
+                                        .text_size(metrics::TEXT_SMALL())
+                                        .text_color(colours.text)
+                                        .child(banner.note.title.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(metrics::TEXT_SMALL())
+                                .text_color(colours.text_muted)
+                                .child(banner.note.body.clone()),
+                        ),
+                )
+                .child(
+                    div()
+                        .id(("notify-dismiss", id as usize))
+                        .debug_selector(move || format!("notify-dismiss-{id}"))
+                        .px_2()
+                        .py_2()
+                        .flex_none()
+                        .cursor_pointer()
+                        .text_size(metrics::TEXT_SMALL())
+                        .text_color(colours.text_faint)
+                        .hover(move |style| style.text_color(colours.text))
+                        .child("✕")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.banners.retain(|banner| banner.id != id);
+                            cx.stop_propagation();
+                            cx.notify();
+                        })),
+                )
+        });
+        Some(
+            div()
+                .id("notifications")
+                .debug_selector(|| "notifications".into())
+                .absolute()
+                .right(px(12.))
+                .bottom(metrics::FOOTER_HEIGHT() + px(12.))
+                .occlude()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .children(cards),
+        )
+    }
+
     fn render_overlay(&self, colours: &Colours, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let content = match self.overlay {
             Overlay::None | Overlay::Menu => return None,
@@ -2314,6 +2476,9 @@ impl Render for Shell {
             .when(settings::get(cx).sidebar_visible, |this| {
                 this.child(self.render_sidebar_handle(&colours, cx))
             })
+            // The notifications of what the sessions just did, over the main
+            // pane and under any overlay.
+            .children(self.render_notifications(&colours, cx))
             // While anything is dragged (the sidebar's edge, a pane divider) a
             // sheet over the window takes the pointer: no terminal beneath
             // selects text or is sent mouse reports, and the cursor stays the

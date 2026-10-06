@@ -797,7 +797,8 @@ it) with the sections on the left, a search field on top and the options on the
 right. Every option shows its name, what it does, its value, a `MODIFIED`
 marker and `RESET TO DEFAULT` once it differs from the default, and applies at
 once; there is no Save button. Sections: Appearance, Terminal, Agents,
-Sessions & history, Projects, Machines, Usage, Sidebar & window, Keyboard (every
+Sessions & history, Projects, Machines, Usage, Notifications, Sidebar & window,
+Keyboard (every
 command and its chords, read-only: shortcuts are not customisable yet) and
 Advanced & About.
 
@@ -887,6 +888,31 @@ times under a local hash; **Forget stored usage history** in Settings deletes it
 per agent, the source, the windows with percentages and reset times, how fresh
 they are or why they are unknown, and nothing that identifies an account. It
 never calls a network source whose setting is off.
+
+## Notifications
+
+When a session wants you or finishes, Leon says so in two ways: a **geek
+banner** over the main pane (monospace, with the agent, the folder and the exit
+code) and a **desktop notification** from the system. Both are on by default,
+and Settings ▸ Notifications decides what is said and how:
+
+| Event | Default | What it is |
+| --- | --- | --- |
+| An agent wants you | on | it finished its turn, went quiet or rang the bell |
+| A session ends | on | the program ended with exit code zero |
+| A session fails | on | it ended with an error |
+
+* **How**: `How to say it` picks the banner, the desktop notification or both.
+  A banner can be clicked to open the session it came from, or dismissed with
+  its cross; it goes away on its own after a few seconds, and a newer note of
+  the same session replaces it instead of stacking (up to four are shown).
+* **When**: the session you are looking at with the window in front says
+  nothing — its dot and the lion already say it. `Desktop only without focus`
+  (on by default) keeps the desktop for when Leon is not in front; the banner
+  still appears for a session that is not on screen.
+* The desktop notification is the system's own (the notification centre on
+  macOS, the desktop's notification daemon on Linux, a toast on Windows) and is
+  posted under Leon's name and icon.
 
 ## The sidebar
 
