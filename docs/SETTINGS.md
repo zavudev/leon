@@ -298,7 +298,7 @@ Folders, logging and starting over.
 | Setting | Key | Values | Default | Description |
 | --- | --- | --- | --- | --- |
 | Log level | `log_level` | `error`, `warn`, `info`, `debug`, `trace` | `info` | How much Leon writes to its log (standard error). The RUST_LOG variable wins when set. |
-| About Leon |  | button |  | Version 0.1.1, by Zavu: the About panel. |
+| About Leon |  | button |  | Version 0.2.0, by Zavu: the About panel. |
 | Data folder |  | button |  | Show the folder that holds the database and these settings. |
 | Themes folder |  | button |  | Show the folder of your theme files. |
 | Reset all settings |  | button |  | Put every setting back to its default. Theme files, projects and history are not touched. |

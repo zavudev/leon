@@ -2,34 +2,7 @@
 
 ## [Unreleased]
 
-## [0.1.1] - 2026-10-05
-
-### Fixed
-
-* **Windows: a session appears under its worktree again.** Sessions were
-  matched to projects and worktrees by comparing paths as raw text, and on
-  Windows the same folder is spelled `C:/Users/me/code/api` by git and
-  `C:\Users\me\code\api` by the agent (also `c:` for `C:`, a `\\?\` prefix, a
-  trailing separator, any case), so no session matched and it fell into the
-  collapsed Unsorted node. Paths are now compared by one identity function
-  (`leon_core::path::key`: the style follows the path, Windows paths are
-  case-insensitive, POSIX paths unchanged) in the store, the tree, discovery,
-  dismissed roots, workspaces and "sessions elsewhere". Store version 6 merges
-  projects and worktrees that differ only by spelling and links the sessions
-  again, so an existing database heals on the next start. History import was
-  checked on Windows: a transcript cut mid-line by a power loss is imported up
-  to its last complete line and again when it grows; the opencode database is
-  also looked for under `%APPDATA%` when it is not under `~/.local/share`.
-
-* **`wss://` relays work.** The first connection to a TLS relay panicked in the
-  TLS library (no process-level crypto provider was installed), leaving the
-  host and the Connect screens at "connecting" for ever; this shipped in 0.1.0,
-  so "With a code" could not reach `wss://relay.getleon.dev`. The crypto
-  provider is now chosen on purpose (`ring`), the client configuration is built
-  with it explicitly, it is also installed once at the start of the app and of
-  `leon host`, and a failure while setting up TLS is reported as "The secure
-  connection could not be set up" and retried instead of hanging. Tests now run
-  the whole path (pairing, a command, a terminal) over TLS.
+## [0.2.0] - 2026-10-05
 
 ### Added
 
@@ -81,19 +54,56 @@
   without gaps or duplicates. See `docs/REMOTE.md`.
 * New crates `leon-wire`, `leon-link`, `leon-pty` and `leon-host`; settings for
   the relay address, the device name, sharing and approval.
+* **The local gate**: `scripts/check.sh` (also `cargo xtask check`) runs what CI
+  runs for this computer's platform, in the same order, with a summary and the
+  time of every step; `scripts/install-hooks.sh` installs it as an opt-in
+  `pre-push` hook. `cargo xtask bump` also regenerates the generated docs that
+  embed the version.
+
+### Changed
+
+* The default relay address is `wss://relay.getleon.dev`.
+* Usage limits are on by default and are read every 60 seconds (at least 30)
+  while the window is focused. `usage_interval` (minutes) is replaced by
+  `usage_refresh_seconds`.
+* Settings ▸ Agents and the new-session list are generated from the agent
+  catalogue; `docs/SETTINGS.md` is generated from the settings schema.
 
 ### Fixed
 
+* **Windows: no console windows.** Every child process Leon starts (git, ssh,
+  agent probes, usage readers, host commands) now goes through a console-less
+  helper, so no black window flashes open and closes.
 * Settings: an option with a long description is as tall as its text; it was
   drawn at a fixed height and overlapped the next one.
 * Usage: switching a network source on reads at once and the view and the
   footer update when it ends, with "Reading…", the specific reason of a failure
   and when the next read is, and a "Try again" for a refused keychain prompt.
 
-### Changed
+* **Windows: a session appears under its worktree again.** Sessions were
+  matched to projects and worktrees by comparing paths as raw text, and on
+  Windows the same folder is spelled `C:/Users/me/code/api` by git and
+  `C:\Users\me\code\api` by the agent (also `c:` for `C:`, a `\\?\` prefix, a
+  trailing separator, any case), so no session matched and it fell into the
+  collapsed Unsorted node. Paths are now compared by one identity function
+  (`leon_core::path::key`: the style follows the path, Windows paths are
+  case-insensitive, POSIX paths unchanged) in the store, the tree, discovery,
+  dismissed roots, workspaces and "sessions elsewhere". Store version 6 merges
+  projects and worktrees that differ only by spelling and links the sessions
+  again, so an existing database heals on the next start. History import was
+  checked on Windows: a transcript cut mid-line by a power loss is imported up
+  to its last complete line and again when it grows; the opencode database is
+  also looked for under `%APPDATA%` when it is not under `~/.local/share`.
 
-* The default relay address is `wss://relay.getleon.dev`.
-* `usage_interval` (minutes) is replaced by `usage_refresh_seconds`.
+* **`wss://` relays work.** The first connection to a TLS relay panicked in the
+  TLS library (no process-level crypto provider was installed), leaving the
+  host and the Connect screens at "connecting" for ever; this shipped in 0.1.0,
+  so "With a code" could not reach `wss://relay.getleon.dev`. The crypto
+  provider is now chosen on purpose (`ring`), the client configuration is built
+  with it explicitly, it is also installed once at the start of the app and of
+  `leon host`, and a failure while setting up TLS is reported as "The secure
+  connection could not be set up" and retried instead of hanging. Tests now run
+  the whole path (pairing, a command, a terminal) over TLS.
 
 ### Not yet
 
