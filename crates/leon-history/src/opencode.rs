@@ -29,7 +29,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use leon_core::{AgentKind, Role};
+use leon_core::{AgentId, Role};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use serde_json::Value;
@@ -149,7 +149,7 @@ pub fn read_session(
         return Ok(None);
     };
 
-    let mut session = SessionBuilder::new(AgentKind::Opencode, session_id);
+    let mut session = SessionBuilder::new(AgentId::OPENCODE, session_id);
     session.see_cwd(directory.as_deref());
     session.see_title(title.as_deref());
 
@@ -463,7 +463,7 @@ mod tests {
     fn a_session_is_read_with_its_metadata_and_transcript() {
         let session = read_session(&database(), "ses_1").unwrap().unwrap();
 
-        assert_eq!(session.agent, AgentKind::Opencode);
+        assert_eq!(session.agent, AgentId::OPENCODE);
         assert_eq!(session.external_id, "ses_1");
         assert_eq!(session.cwd, "/srv/api");
         assert_eq!(session.title, "Tidy the config loader");

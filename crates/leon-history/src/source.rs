@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::UNIX_EPOCH;
 
-use leon_core::AgentKind;
+use leon_core::AgentId;
 use rusqlite::Connection;
 use thiserror::Error;
 
@@ -61,7 +61,7 @@ pub struct SourceItem {
 /// A place sessions of one agent can be imported from.
 pub trait HistorySource: Send + Sync {
     /// The agent whose sessions this source provides.
-    fn agent(&self) -> AgentKind;
+    fn agent(&self) -> AgentId;
 
     /// Enumerates the items currently available. A source whose root does
     /// not exist lists nothing; that is not an error.
@@ -90,8 +90,8 @@ impl ClaudeFiles {
 }
 
 impl HistorySource for ClaudeFiles {
-    fn agent(&self) -> AgentKind {
-        AgentKind::Claude
+    fn agent(&self) -> AgentId {
+        AgentId::CLAUDE
     }
 
     fn list(&self) -> Result<Vec<SourceItem>, HistoryError> {
@@ -100,7 +100,7 @@ impl HistorySource for ClaudeFiles {
             if project.is_dir() {
                 for file in read_dir(&project)? {
                     if has_extension(&file, "jsonl") {
-                        items.extend(file_item(AgentKind::Claude, &file));
+                        items.extend(file_item(AgentId::CLAUDE, &file));
                     }
                 }
             }
@@ -134,8 +134,8 @@ impl CodexFiles {
 }
 
 impl HistorySource for CodexFiles {
-    fn agent(&self) -> AgentKind {
-        AgentKind::Codex
+    fn agent(&self) -> AgentId {
+        AgentId::CODEX
     }
 
     fn list(&self) -> Result<Vec<SourceItem>, HistoryError> {
@@ -150,7 +150,7 @@ impl HistorySource for CodexFiles {
                 } else if has_extension(&entry, "jsonl")
                     && file_stem(&entry).starts_with("rollout-")
                 {
-                    items.extend(file_item(AgentKind::Codex, &entry));
+                    items.extend(file_item(AgentId::CODEX, &entry));
                 }
             }
         }
@@ -209,8 +209,8 @@ impl OpencodeDb {
 }
 
 impl HistorySource for OpencodeDb {
-    fn agent(&self) -> AgentKind {
-        AgentKind::Opencode
+    fn agent(&self) -> AgentId {
+        AgentId::OPENCODE
     }
 
     fn list(&self) -> Result<Vec<SourceItem>, HistoryError> {
@@ -271,7 +271,7 @@ fn file_stem(path: &Path) -> String {
 /// file's size and modification time, which is enough to notice appends and
 /// rewrites without reading the file. A file that cannot be inspected is left
 /// out.
-fn file_item(agent: AgentKind, path: &Path) -> Option<SourceItem> {
+fn file_item(agent: AgentId, path: &Path) -> Option<SourceItem> {
     let metadata = fs::metadata(path).ok()?;
     if !metadata.is_file() {
         return None;

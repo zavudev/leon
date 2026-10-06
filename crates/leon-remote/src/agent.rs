@@ -1,7 +1,9 @@
 //! How each coding agent is started and resumed.
 //!
-//! The command lines here were checked against the `--help` output of the
-//! agents' own CLIs:
+//! The command lines come from the catalogue ([`leon_core::agent`]): the
+//! program, the arguments of a new session and the resume form of each agent.
+//! The three agents whose history Leon imports were checked against the
+//! `--help` output of their own CLIs:
 //!
 //! | Agent    | New session | Resume a session          |
 //! |----------|-------------|---------------------------|
@@ -12,60 +14,53 @@
 //! The id is the agent's own session id, stored by Leon as
 //! `Session::external_id`.
 
-use leon_core::{AgentKind, Machine};
+use leon_core::{AgentSpec, Machine};
 
 use crate::command::{interactive_on, CommandSpec, SshOptions};
 
-/// The program and arguments that start `kind`, resuming the session
-/// `resume` when given.
-pub fn agent_launch(kind: AgentKind, resume: Option<&str>) -> (String, Vec<String>) {
-    let (program, resume_args): (&str, &[&str]) = match kind {
-        AgentKind::Claude => ("claude", &["--resume"]),
-        AgentKind::Codex => ("codex", &["resume"]),
-        AgentKind::Opencode => ("opencode", &["--session"]),
-    };
-    let args = match resume {
-        Some(id) => resume_args
-            .iter()
-            .map(|arg| (*arg).to_owned())
-            .chain([id.to_owned()])
-            .collect(),
-        None => Vec::new(),
-    };
-    (program.to_owned(), args)
+/// The program and arguments that start `spec`, resuming the session
+/// `resume` when given. `None` when a resume was asked of an agent that is
+/// launch only.
+pub fn agent_launch(spec: &AgentSpec, resume: Option<&str>) -> Option<(String, Vec<String>)> {
+    spec.launch(resume)
 }
 
 /// The complete interactive command that hosts an agent session in `cwd` on
 /// `machine`. The result is meant to be spawned inside a pseudo-terminal.
+/// `None` when a resume was asked of an agent that is launch only.
 pub fn session_command(
     machine: &Machine,
     cwd: &str,
-    kind: AgentKind,
+    spec: &AgentSpec,
     resume: Option<&str>,
     ssh: &SshOptions,
-) -> CommandSpec {
-    let (program, args) = agent_launch(kind, resume);
+) -> Option<CommandSpec> {
+    let (program, args) = agent_launch(spec, resume)?;
     let command = CommandSpec::new(program).args(args).cwd(cwd);
-    interactive_on(machine, &command, ssh)
+    Some(interactive_on(machine, &command, ssh))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leon_core::{MachineId, MachineKind};
+    use leon_core::{AgentId, MachineId, MachineKind};
+
+    fn spec(id: AgentId) -> &'static AgentSpec {
+        id.spec().unwrap()
+    }
 
     #[test]
     fn a_new_session_starts_the_bare_program() {
         assert_eq!(
-            agent_launch(AgentKind::Claude, None),
+            agent_launch(spec(AgentId::CLAUDE), None).unwrap(),
             ("claude".to_owned(), vec![])
         );
         assert_eq!(
-            agent_launch(AgentKind::Codex, None),
+            agent_launch(spec(AgentId::CODEX), None).unwrap(),
             ("codex".to_owned(), vec![])
         );
         assert_eq!(
-            agent_launch(AgentKind::Opencode, None),
+            agent_launch(spec(AgentId::OPENCODE), None).unwrap(),
             ("opencode".to_owned(), vec![])
         );
     }
@@ -73,15 +68,17 @@ mod tests {
     #[test]
     fn each_agent_resumes_with_its_own_syntax() {
         assert_eq!(
-            agent_launch(AgentKind::Claude, Some("abc")).1,
+            agent_launch(spec(AgentId::CLAUDE), Some("abc")).unwrap().1,
             ["--resume", "abc"]
         );
         assert_eq!(
-            agent_launch(AgentKind::Codex, Some("abc")).1,
+            agent_launch(spec(AgentId::CODEX), Some("abc")).unwrap().1,
             ["resume", "abc"]
         );
         assert_eq!(
-            agent_launch(AgentKind::Opencode, Some("abc")).1,
+            agent_launch(spec(AgentId::OPENCODE), Some("abc"))
+                .unwrap()
+                .1,
             ["--session", "abc"]
         );
     }
@@ -96,10 +93,11 @@ mod tests {
         let spec = session_command(
             &machine,
             "/srv/api",
-            AgentKind::Codex,
+            spec(AgentId::CODEX),
             Some("abc"),
             &SshOptions::without_multiplexing(),
-        );
+        )
+        .unwrap();
         assert_eq!(spec.program, "codex");
         assert_eq!(spec.args, ["resume", "abc"]);
         assert_eq!(spec.cwd.as_deref(), Some("/srv/api"));
@@ -120,10 +118,11 @@ mod tests {
         let spec = session_command(
             &machine,
             "/srv/my api",
-            AgentKind::Claude,
+            spec(AgentId::CLAUDE),
             Some("abc"),
             &SshOptions::without_multiplexing(),
-        );
+        )
+        .unwrap();
         assert_eq!(spec.program, "ssh");
         assert_eq!(
             spec.args,

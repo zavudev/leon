@@ -23,7 +23,7 @@ use super::{bad_tag, from_millis, to_millis, Store};
 use crate::change::StoreChange;
 use crate::error::{Result, StoreError};
 use crate::ids::{MachineId, ProjectId, SessionId};
-use crate::model::{AgentKind, Message, NewMessage, NewSession, Role, Session};
+use crate::model::{AgentId, Message, NewMessage, NewSession, Role, Session};
 
 /// The session columns, in the order [`session_from_row`] expects them, for a
 /// `session` table aliased as `s`.
@@ -37,7 +37,7 @@ pub(crate) const SESSION_COLUMN_COUNT: usize = 11;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionFilter {
     /// Only sessions of this agent.
-    pub agent: Option<AgentKind>,
+    pub agent: Option<AgentId>,
     /// Only sessions that ran on this machine.
     pub machine_id: Option<MachineId>,
     /// Only sessions linked to this project.
@@ -84,7 +84,7 @@ impl Store {
             let sessions = statement
                 .query_map(
                     params![
-                        filter.agent.map(AgentKind::as_str),
+                        filter.agent.map(AgentId::as_str),
                         filter.machine_id.as_ref().map(MachineId::as_str),
                         filter.project_id.as_ref().map(ProjectId::as_str),
                         sql_limit(limit),
@@ -317,7 +317,7 @@ pub(crate) fn session_from_row(row: &Row<'_>, offset: usize) -> rusqlite::Result
     let agent: String = row.get(offset + 1)?;
     Ok(Session {
         id: SessionId::from_string(row.get::<_, String>(offset)?),
-        agent: AgentKind::parse(&agent).ok_or_else(|| bad_tag(offset + 1, &agent))?,
+        agent: AgentId::parse(&agent).ok_or_else(|| bad_tag(offset + 1, &agent))?,
         external_id: row.get(offset + 2)?,
         machine_id: MachineId::from_string(row.get::<_, String>(offset + 3)?),
         cwd: row.get(offset + 4)?,
@@ -348,7 +348,7 @@ mod tests {
 
     fn session(external_id: &str) -> NewSession {
         NewSession {
-            agent: AgentKind::Claude,
+            agent: AgentId::CLAUDE,
             external_id: external_id.into(),
             machine_id: MachineId::local(),
             cwd: "/srv/api".into(),
@@ -393,7 +393,7 @@ mod tests {
         let id = store.upsert_session(&session("s1"), &transcript()).unwrap();
 
         let stored = store.session(&id).unwrap();
-        assert_eq!(stored.agent, AgentKind::Claude);
+        assert_eq!(stored.agent, AgentId::CLAUDE);
         assert_eq!(stored.external_id, "s1");
         assert_eq!(stored.title, "Fix the login flow");
         assert_eq!(stored.model.as_deref(), Some("model-a"));
@@ -481,7 +481,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let claude = store.upsert_session(&session("shared"), &[]).unwrap();
         let mut other = session("shared");
-        other.agent = AgentKind::Codex;
+        other.agent = AgentId::CODEX;
         let codex = store.upsert_session(&other, &[]).unwrap();
         assert_ne!(claude, codex);
     }
@@ -524,7 +524,7 @@ mod tests {
         store.upsert_session(&session("in-project"), &[]).unwrap();
         let mut elsewhere = session("elsewhere");
         elsewhere.cwd = "/tmp/scratch".into();
-        elsewhere.agent = AgentKind::Opencode;
+        elsewhere.agent = AgentId::OPENCODE;
         store.upsert_session(&elsewhere, &[]).unwrap();
 
         let by = |filter: SessionFilter| -> Vec<String> {
@@ -544,7 +544,7 @@ mod tests {
         );
         assert_eq!(
             by(SessionFilter {
-                agent: Some(AgentKind::Opencode),
+                agent: Some(AgentId::OPENCODE),
                 ..Default::default()
             }),
             ["elsewhere"]

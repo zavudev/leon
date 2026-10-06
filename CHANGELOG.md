@@ -16,6 +16,33 @@
 
 ### Added
 
+* **Agents are a catalogue, not three.** Leon now knows 43 command line agents
+  (everything in Orca's list: Grok, Cursor, GitHub Copilot, Muse, DeepSeek
+  Harness, ZCode, MiMo Code, Amp, OpenClaude, Antigravity, Pi, oh-my-pi, Hermes
+  Agent, Devin, Goose, Auggie, Autohand Code, Charm Crush, Cline, CodeBuddy,
+  Codebuff, Freebuff, Command Code, Continue, Droid, Kilocode, Kimi, Kiro,
+  Mistral Vibe, Qwen Code, Rovo Dev and more) with their launch commands and,
+  where Orca's source gives one, their resume form (the others are launch
+  only, never a guessed flag). **New agent session** lists what the machine has
+  first, then the rest dimmed with "not installed" and a docs link, and filters
+  as you type. Settings ▸ Agents is generated from the catalogue, with the
+  agents that are not installed folded; **Add a custom agent…** takes any
+  command line tool (name, command, arguments, optional resume arguments with
+  `{id}`). A bundled logo is used only where its licence allows (Simple Icons,
+  CC0); every other agent gets a letter-mark tile. History import stays Claude
+  Code, Codex and opencode. Stored data and settings of the three original
+  agents load unchanged.
+* **Usage limits for more agents**, from Orca's reference: Grok, Cursor, Kimi,
+  ZCode and Antigravity, and a fresher Codex source (the backend its own usage
+  screen reads, only when its session log is more than ten minutes old; it
+  starts no session and writes nothing). On by default and switchable per agent
+  in Settings ▸ Usage; an expired sign-in is reported, not refreshed. **These
+  are implemented from Orca's source and have not been verified against the live
+  services** (only Claude Code and the Codex log have). With many agents the bar
+  shows the ones with numbers and folds the rest into a `+N`; the view groups
+  **This machine's agents** and **Not installed / no data**. `leon --diagnose
+  usage` lists every provider with its source and state.
+
 * Usage limits: a footer with each agent's primary window (five-hour, weekly,
   per-model) for the machine in context, a usage view (`Show usage`) with
   Detailed and Compact modes, per-machine readings, a burn-rate estimate, a

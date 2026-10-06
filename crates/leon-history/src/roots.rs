@@ -74,7 +74,7 @@ pub fn default_roots_in(home: &Path, variable: impl Fn(&str) -> Option<String>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leon_core::AgentKind;
+    use leon_core::AgentId;
 
     #[test]
     fn default_locations_hang_off_the_home_directory() {
@@ -97,6 +97,25 @@ mod tests {
                     .join("opencode.db")
             )
         );
+    }
+
+    #[test]
+    fn the_importers_are_exactly_the_agents_the_catalogue_says_have_history() {
+        let home = Path::new("home").join("dev");
+        let roots = default_roots_in(&home, |_| None);
+        let mut imported: Vec<&str> = roots
+            .sources()
+            .iter()
+            .map(|source| source.agent().as_str())
+            .collect();
+        imported.sort_unstable();
+        let mut catalogued: Vec<&str> = leon_core::agent::builtin()
+            .iter()
+            .filter(|spec| spec.history.is_some())
+            .map(|spec| spec.id.as_str())
+            .collect();
+        catalogued.sort_unstable();
+        assert_eq!(imported, catalogued);
     }
 
     #[test]
@@ -146,6 +165,6 @@ mod tests {
             .iter()
             .map(|source| source.agent())
             .collect();
-        assert_eq!(agents, [AgentKind::Codex, AgentKind::Opencode]);
+        assert_eq!(agents, [AgentId::CODEX, AgentId::OPENCODE]);
     }
 }

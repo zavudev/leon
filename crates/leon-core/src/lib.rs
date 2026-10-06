@@ -12,6 +12,7 @@
 
 #![warn(missing_docs)]
 
+pub mod agent;
 mod change;
 mod error;
 pub mod icon;
@@ -19,12 +20,13 @@ mod ids;
 mod model;
 pub mod store;
 
+pub use agent::{AgentSpec, CustomAgent};
 pub use change::{ChangeListener, StoreChange};
 pub use error::{Result, StoreError};
 pub use icon::{IconFormat, IconImage, IconKind, NewIcon, ProjectIcon};
 pub use ids::{MachineId, ProjectId, SessionId, WorktreeId};
 pub use model::{
-    AgentKind, Machine, MachineKind, Message, NewMessage, NewSession, NewWorktree, Project, Role,
+    AgentId, Machine, MachineKind, Message, NewMessage, NewSession, NewWorktree, Project, Role,
     Session, Worktree,
 };
 pub use store::search::{

@@ -9,7 +9,7 @@
 //! apart.
 
 use chrono::{DateTime, Utc};
-use leon_core::{AgentKind, MachineId, NewMessage, NewSession, Role};
+use leon_core::{AgentId, MachineId, NewMessage, NewSession, Role};
 
 use crate::normalize::{clip, title_from};
 
@@ -25,7 +25,7 @@ pub(crate) const UNTITLED: &str = "Untitled session";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedSession {
     /// The agent that ran the session.
-    pub agent: AgentKind,
+    pub agent: AgentId,
     /// The agent's own identifier, the value its resume option accepts.
     pub external_id: String,
     /// Working directory of the session; empty when the transcript does not
@@ -64,7 +64,7 @@ impl ParsedSession {
 /// Accumulates what a parser finds and turns it into a [`ParsedSession`].
 #[derive(Debug)]
 pub(crate) struct SessionBuilder {
-    agent: AgentKind,
+    agent: AgentId,
     external_id: String,
     cwd: Option<String>,
     model: Option<String>,
@@ -77,7 +77,7 @@ pub(crate) struct SessionBuilder {
 }
 
 impl SessionBuilder {
-    pub(crate) fn new(agent: AgentKind, external_id: &str) -> Self {
+    pub(crate) fn new(agent: AgentId, external_id: &str) -> Self {
         Self {
             agent,
             external_id: external_id.to_owned(),
@@ -188,7 +188,7 @@ mod tests {
     }
 
     fn builder() -> SessionBuilder {
-        SessionBuilder::new(AgentKind::Claude, "s1")
+        SessionBuilder::new(AgentId::CLAUDE, "s1")
     }
 
     #[test]
@@ -280,6 +280,6 @@ mod tests {
         let new = parsed.new_session(&MachineId::local());
         assert_eq!(new.machine_id, MachineId::local());
         assert_eq!(new.external_id, "s1");
-        assert_eq!(new.agent, AgentKind::Claude);
+        assert_eq!(new.agent, AgentId::CLAUDE);
     }
 }

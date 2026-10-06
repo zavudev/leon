@@ -139,10 +139,19 @@ above: the engine writes the store and the UI reads it.
   take the same path through `ssh`. A machine that cannot be reached keeps its
   earlier reading (`agent_usage::merge`), whose age is shown and judged.
 * **Sources, least intrusive first.** Local files the agent already writes
-  (Codex); the agent's own command line (none gives limits without launching a
-  session, so none is used); the vendor's usage endpoint with the agent's own
-  credential (Claude Code, the opencode Go subscription), **on by default, off
-  per agent in Settings**. Those run on this computer only and through the `Http` trait
+  (Codex's session log); the agent's own command line (Antigravity's
+  `agy -p /usage`, only after `agy --version` says it is a metadata read, run
+  through the runner on any machine); the vendor's usage endpoint with the
+  agent's own credential (Claude Code, the opencode Go subscription, Codex's
+  backend when its log is more than ten minutes old, Grok, Cursor, Kimi, ZCode),
+  **on by default, off per agent in Settings** (the switches are generated from
+  the catalogue: `usage_<id>_network`). Only Claude Code and the Codex log have
+  been verified against a live service; the rest are implemented from Orca's
+  source (`src/main/rate-limits/`) and say so. Each provider is a module of
+  pure parsers (`grok`, `cursor`, `kimi`, `zcode`, `antigravity`, `codex`,
+  `claude`, `opencode`) plus one function in `network.rs`; every vendor host is
+  in `ALLOWED_HOSTS` and a test pins that an unlisted host is refused. An
+  expired stored sign-in is `Reason::SessionExpired` and is never refreshed. Those run on this computer only and through the `Http` trait
   (`CurlHttp`: the system `curl`, the header on standard input so the token is
   never in a process list, HTTPS to one allowed host, no redirects, a time limit);
   a disabled source reads no credential and makes no call (tested with a

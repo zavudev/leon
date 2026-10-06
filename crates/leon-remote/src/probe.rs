@@ -22,17 +22,49 @@ use thiserror::Error;
 use crate::command::{run_on, CommandSpec, SshOptions};
 use crate::runner::{RunError, Runner};
 
-/// The script run on the machine. Each line of output is `key=value`; a tool
-/// line is `tool=<name>=<absolute path>` and is printed only for tools that
-/// exist.
-const PROBE_SCRIPT: &str = r#"PATH="$PATH:$HOME/.local/bin:$HOME/.opencode/bin:$HOME/.bun/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin"
+/// The most tools one probe looks for: the catalogue is bounded, and so is
+/// the script that goes over the wire.
+pub const MAX_TOOLS: usize = 128;
+
+/// The part of the script before the names of the tools. Each line of output
+/// is `key=value`; a tool line is `tool=<name>=<absolute path>` and is printed
+/// only for tools that exist.
+const PROBE_HEAD: &str = r#"PATH="$PATH:$HOME/.local/bin:$HOME/.opencode/bin:$HOME/.bun/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin"
 printf 'os=%s\n' "$(uname -s)"
 printf 'arch=%s\n' "$(uname -m)"
 printf 'home=%s\n' "$HOME"
-for tool in git claude codex opencode; do
+for tool in "#;
+
+const PROBE_TAIL: &str = r#"; do
   found=$(command -v "$tool" 2>/dev/null) && printf 'tool=%s=%s\n' "$tool" "$found"
 done
 exit 0"#;
+
+/// Whether `name` is safe to put in the script as a bare word: a program
+/// name, never a path or anything a shell would interpret.
+fn is_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c))
+}
+
+/// The names of every tool a probe looks for: `git`, then the binaries that
+/// tell each agent of the catalogue (built-in and custom) is installed,
+/// without repeats, bounded by [`MAX_TOOLS`].
+pub fn catalogue_tools() -> Vec<String> {
+    let mut tools = vec!["git".to_owned()];
+    for spec in leon_core::agent::all() {
+        for name in &spec.detect {
+            if !tools.contains(name) {
+                tools.push(name.clone());
+            }
+        }
+    }
+    tools
+}
 
 /// The operating system of a probed machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,12 +89,21 @@ pub struct ProbeReport {
     pub home: Option<String>,
     /// Absolute path of `git`, when installed.
     pub git: Option<String>,
-    /// Absolute path of `claude`, when installed.
-    pub claude: Option<String>,
-    /// Absolute path of `codex`, when installed.
-    pub codex: Option<String>,
-    /// Absolute path of `opencode`, when installed.
-    pub opencode: Option<String>,
+    /// The absolute path of every other tool that was looked for and found,
+    /// by name: the binaries of the agents.
+    pub tools: std::collections::BTreeMap<String, String>,
+}
+
+impl ProbeReport {
+    /// The path of the tool `name`, when it was found.
+    pub fn tool(&self, name: &str) -> Option<&str> {
+        self.tools.get(name).map(String::as_str)
+    }
+
+    /// Whether any of `names` was found.
+    pub fn has_any(&self, names: &[String]) -> bool {
+        names.iter().any(|name| self.tools.contains_key(name))
+    }
 }
 
 /// Why a machine could not be probed.
@@ -85,9 +126,26 @@ pub enum ProbeError {
     Unrecognised,
 }
 
-/// The probe as a command for the target machine.
+/// The probe script for these tool names. Names that are not plain program
+/// names are left out, and no more than [`MAX_TOOLS`] are looked for.
+pub fn probe_script(tools: &[String]) -> String {
+    let names: Vec<&str> = tools
+        .iter()
+        .map(String::as_str)
+        .filter(|name| is_tool_name(name))
+        .take(MAX_TOOLS)
+        .collect();
+    format!("{PROBE_HEAD}{}{PROBE_TAIL}", names.join(" "))
+}
+
+/// The probe of the catalogue's tools as a command for the target machine.
 pub fn probe_command() -> CommandSpec {
-    CommandSpec::new("sh").args(["-c", PROBE_SCRIPT])
+    probe_command_for(&catalogue_tools())
+}
+
+/// The probe of these tools as a command for the target machine.
+pub fn probe_command_for(tools: &[String]) -> CommandSpec {
+    CommandSpec::new("sh").args(["-c", &probe_script(tools)])
 }
 
 /// Parses the output of the probe script. Returns `None` when the output
@@ -102,9 +160,7 @@ pub fn parse_probe(output: &str) -> Option<ProbeReport> {
         arch: None,
         home: None,
         git: None,
-        claude: None,
-        codex: None,
-        opencode: None,
+        tools: std::collections::BTreeMap::new(),
     };
     for line in output.lines() {
         let Some((key, value)) = line.trim_end_matches('\r').split_once('=') else {
@@ -123,15 +179,13 @@ pub fn parse_probe(output: &str) -> Option<ProbeReport> {
             "home" if !value.is_empty() => report.home = Some(value.to_owned()),
             "tool" => {
                 if let Some((name, path)) = value.split_once('=') {
-                    let slot = match name {
-                        "git" => &mut report.git,
-                        "claude" => &mut report.claude,
-                        "codex" => &mut report.codex,
-                        "opencode" => &mut report.opencode,
-                        _ => continue,
-                    };
-                    if !path.is_empty() {
-                        *slot = Some(path.to_owned());
+                    if !is_tool_name(name) || path.is_empty() {
+                        continue;
+                    }
+                    if name == "git" {
+                        report.git = Some(path.to_owned());
+                    } else if report.tools.len() < MAX_TOOLS {
+                        report.tools.insert(name.to_owned(), path.to_owned());
                     }
                 }
             }
@@ -192,12 +246,9 @@ tool=claude=/home/dev/.local/bin/claude
         assert_eq!(report.arch.as_deref(), Some("x86_64"));
         assert_eq!(report.home.as_deref(), Some("/home/dev"));
         assert_eq!(report.git.as_deref(), Some("/usr/bin/git"));
-        assert_eq!(
-            report.claude.as_deref(),
-            Some("/home/dev/.local/bin/claude")
-        );
-        assert_eq!(report.codex, None);
-        assert_eq!(report.opencode, None);
+        assert_eq!(report.tool("claude"), Some("/home/dev/.local/bin/claude"));
+        assert_eq!(report.tool("codex"), None);
+        assert_eq!(report.tool("opencode"), None);
     }
 
     #[test]
@@ -211,11 +262,11 @@ tool=claude=/home/dev/.local/bin/claude
 
     #[test]
     fn noise_around_the_output_is_ignored() {
-        let noisy = "Welcome to the build box!\r\nLast login: yesterday\r\n\r\nos=Linux\r\nhome=/home/dev\r\nmotd=ignored\r\ntool=unknown=/bin/x\r\ntool=codex=/usr/local/bin/codex\r\ntool=broken\r\n";
+        let noisy = "Welcome to the build box!\r\nLast login: yesterday\r\n\r\nos=Linux\r\nhome=/home/dev\r\nmotd=ignored\r\ntool=codex=/usr/local/bin/codex\r\ntool=broken\r\n";
         let report = parse_probe(noisy).unwrap();
         assert_eq!(report.os, RemoteOs::Linux);
         assert_eq!(report.home.as_deref(), Some("/home/dev"));
-        assert_eq!(report.codex.as_deref(), Some("/usr/local/bin/codex"));
+        assert_eq!(report.tool("codex"), Some("/usr/local/bin/codex"));
         assert_eq!(report.git, None);
     }
 
@@ -223,6 +274,80 @@ tool=claude=/home/dev/.local/bin/claude
     fn a_tool_path_containing_an_equals_sign_is_kept_whole() {
         let report = parse_probe("os=Linux\ntool=git=/opt/a=b/git\n").unwrap();
         assert_eq!(report.git.as_deref(), Some("/opt/a=b/git"));
+    }
+
+    #[test]
+    fn many_agents_are_found_in_the_same_report() {
+        let output = "os=Linux\ntool=git=/usr/bin/git\ntool=grok=/h/.local/bin/grok\ntool=cursor-agent=/h/.local/bin/cursor-agent\ntool=qwen=/usr/bin/qwen\ntool=a b=/x\ntool=;rm=/x\ntool=--x=/x\ntool=empty=\n";
+        let report = parse_probe(output).unwrap();
+        assert_eq!(
+            report.tools.len(),
+            3,
+            "only plain program names with a path"
+        );
+        assert_eq!(report.tool("grok"), Some("/h/.local/bin/grok"));
+        assert!(report.has_any(&["nope".into(), "qwen".into()]));
+        assert!(!report.has_any(&["nope".into()]));
+    }
+
+    #[test]
+    fn the_script_looks_for_every_agent_of_the_catalogue_in_one_command() {
+        let script = probe_script(&catalogue_tools());
+        assert_eq!(
+            script.matches("command -v").count(),
+            1,
+            "one loop, one round trip"
+        );
+        for name in [
+            "git",
+            "claude",
+            "codex",
+            "opencode",
+            "grok",
+            "cursor-agent",
+            "agy",
+            "kiro-cli",
+            "cn",
+            "vibe",
+        ] {
+            assert!(
+                script.contains(&format!(" {name} ")) || script.contains(&format!(" {name};")),
+                "{name} is not probed"
+            );
+        }
+        assert!(
+            script.len() < 4000,
+            "the script stays small: {}",
+            script.len()
+        );
+    }
+
+    #[test]
+    fn the_names_in_the_script_are_plain_and_bounded() {
+        let mut names: Vec<String> = vec![
+            "ok".into(),
+            "a b".into(),
+            "$(x)".into(),
+            "-n".into(),
+            "/bin/x".into(),
+            "".into(),
+        ];
+        names.extend((0..300).map(|n| format!("t{n}")));
+        let script = probe_script(&names);
+        for bad in ["a b", "$(x)", "-n", "/bin/x"] {
+            assert!(!script.contains(&format!(" {bad} ")), "{bad}");
+        }
+        let looked: Vec<&str> = script
+            .split("for tool in ")
+            .nth(1)
+            .unwrap()
+            .split("; do")
+            .next()
+            .unwrap()
+            .split(' ')
+            .collect();
+        assert_eq!(looked.len(), MAX_TOOLS);
+        assert_eq!(looked[0], "ok");
     }
 
     #[test]

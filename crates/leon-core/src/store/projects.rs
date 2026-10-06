@@ -353,7 +353,7 @@ fn trim_trailing_separators(path: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{AgentKind, NewSession};
+    use crate::model::{AgentId, NewSession};
     use chrono::DateTime;
 
     fn local() -> MachineId {
@@ -371,7 +371,7 @@ mod tests {
 
     fn session_in(cwd: &str, external_id: &str) -> NewSession {
         NewSession {
-            agent: AgentKind::Claude,
+            agent: AgentId::CLAUDE,
             external_id: external_id.into(),
             machine_id: local(),
             cwd: cwd.into(),

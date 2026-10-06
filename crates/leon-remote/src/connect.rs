@@ -742,15 +742,22 @@ fn conclude(list: &mut Checklist, report: ProbeReport) {
              `sudo apt install git`) to use projects and worktrees there.",
         ),
     }
-    let agents = [
-        ("claude", &report.claude),
-        ("codex", &report.codex),
-        ("opencode", &report.opencode),
-    ];
-    let found: Vec<String> = agents
+    let agents = ["claude", "codex", "opencode"].map(|name| (name, report.tool(name)));
+    let mut found: Vec<String> = agents
         .iter()
-        .filter_map(|(name, path)| path.as_ref().map(|path| format!("{name} {path}")))
+        .filter_map(|(name, path)| path.map(|path| format!("{name} {path}")))
         .collect();
+    // The other agents of the catalogue that the machine has: named by their
+    // commands, without paths, so the line stays short.
+    let others: Vec<&str> = report
+        .tools
+        .keys()
+        .map(String::as_str)
+        .filter(|name| !["claude", "codex", "opencode"].contains(name))
+        .collect();
+    if !others.is_empty() {
+        found.push(format!("also {}", others.join(", ")));
+    }
     let missing: Vec<&str> = agents
         .iter()
         .filter(|(_, path)| path.is_none())

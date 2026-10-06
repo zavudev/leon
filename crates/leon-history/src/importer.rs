@@ -200,7 +200,7 @@ mod tests {
     use crate::opencode;
     use crate::session::ParsedSession;
     use crate::source::HistoryError;
-    use leon_core::{AgentKind, Role, SearchQuery, SessionFilter};
+    use leon_core::{AgentId, Role, SearchQuery, SessionFilter};
     use std::fs;
     use std::path::Path;
 
@@ -270,10 +270,7 @@ mod tests {
             .unwrap();
         let mut agents: Vec<_> = sessions.iter().map(|session| session.agent).collect();
         agents.sort_by_key(|agent| agent.as_str());
-        assert_eq!(
-            agents,
-            [AgentKind::Claude, AgentKind::Codex, AgentKind::Opencode]
-        );
+        assert_eq!(agents, [AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE]);
 
         let hits = store.search(&SearchQuery::new("exponentially")).unwrap();
         assert_eq!(hits.len(), 1);
@@ -336,7 +333,7 @@ mod tests {
         assert_eq!(report.imported, 1);
         assert_eq!(report.skipped_unchanged, 2);
         let filter = SessionFilter {
-            agent: Some(AgentKind::Claude),
+            agent: Some(AgentId::CLAUDE),
             ..Default::default()
         };
         let sessions = store.recent_sessions(&filter, 10).unwrap();
@@ -436,8 +433,8 @@ mod tests {
     struct InMemory;
 
     impl HistorySource for InMemory {
-        fn agent(&self) -> AgentKind {
-            AgentKind::Claude
+        fn agent(&self) -> AgentId {
+            AgentId::CLAUDE
         }
 
         fn list(&self) -> Result<Vec<SourceItem>, HistoryError> {
