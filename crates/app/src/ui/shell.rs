@@ -2190,6 +2190,7 @@ impl Shell {
     /// The window is being closed: it may be, unless a program is running.
     fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !self.quit_asks(cx) {
+            self.install_on_quit(cx);
             self.flush(cx);
             return true;
         }

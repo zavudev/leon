@@ -159,6 +159,10 @@ fn try_apply(
             .and_then(|output| match version_of_probe(&output) {
                 Some(printed) if printed == staged.offer.version => Ok(()),
                 Some(printed) => Err(format!("it says it is {printed}")),
+                // A Windows release is a program with no console: when
+                // nothing is there to read its output it may print none, and
+                // having run and ended well is then all there is to see.
+                None if platform.os == Os::Windows => Ok(()),
                 None => Err("it printed nothing".to_owned()),
             });
     if let Err(why) = ran {
@@ -639,6 +643,25 @@ mod tests {
         assert!(matches!(
             apply(&w, &FakeTools::new("0.2.1"), "0.2.0"),
             Err(ApplyError::Untrusted(_))
+        ));
+    }
+
+    #[test]
+    fn a_windows_build_that_prints_nothing_but_ends_well_is_accepted_and_elsewhere_it_is_not() {
+        let mut w = world("old", "0.2.1");
+        std::fs::rename(
+            w.layout.payload_dir("0.2.1").join("leon"),
+            w.layout.payload_dir("0.2.1").join("leon.exe"),
+        )
+        .unwrap();
+        w.platform = Platform::parse("windows-x86_64").unwrap();
+        let silent = FakeTools::new("0.2.1");
+        *silent.probe_answer.lock().unwrap() = Ok(String::new());
+        assert!(apply(&w, &silent, "0.2.0").is_ok());
+        let w = world("old", "0.2.1");
+        assert!(matches!(
+            apply(&w, &silent, "0.2.0"),
+            Err(ApplyError::DidNotRun(_))
         ));
     }
 

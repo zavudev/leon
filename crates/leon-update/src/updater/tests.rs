@@ -466,6 +466,23 @@ async fn being_offline_is_a_failed_check_with_a_time_to_try_again() {
 }
 
 #[tokio::test]
+async fn a_failed_check_is_not_repeated_by_itself_before_its_time() {
+    let rig = Rig::linux("0.2.0");
+    rig.http.set(
+        LATEST_URL,
+        Reply::Fail(HttpError::Unreachable("offline".into())),
+    );
+    let updater = rig.updater();
+    updater.check(false).await;
+    assert_eq!(rig.calls("GET"), 1);
+    updater.check(false).await;
+    assert_eq!(rig.calls("GET"), 1, "not before retry_at");
+    rig.now.store(NOW + 3 * 3600, Ordering::SeqCst);
+    updater.check(false).await;
+    assert_eq!(rig.calls("GET"), 2, "after it");
+}
+
+#[tokio::test]
 async fn an_answer_that_is_not_a_release_is_a_failed_check() {
     let rig = Rig::linux("0.2.0");
     rig.http

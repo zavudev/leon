@@ -118,6 +118,7 @@ pub fn parse_authenticode(output: &str) -> Signature {
 /// How long a build may take to print its version.
 const PROBE_TIME: Duration = Duration::from_secs(15);
 
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 fn run(mut command: std::process::Command) -> std::io::Result<std::process::Output> {
     command.stdin(std::process::Stdio::null());
     command.output()

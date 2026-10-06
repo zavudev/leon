@@ -412,7 +412,9 @@ impl Updater {
         }
         let before = self.snapshot().state;
         if !manual {
-            let until = self.lock().saved.retry_after;
+            // Told to come back later (a rate limit), or a failure whose retry
+            // time has not come: nothing is asked.
+            let until = self.not_before();
             if until.is_some_and(|until| until > self.now()) {
                 self.end();
                 return self.snapshot();
