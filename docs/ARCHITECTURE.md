@@ -797,9 +797,10 @@ be told, always).
 While a terminal has the keyboard (`Pane::Main` with a live session open and
 no overlay) the shell's key interceptor first asks the registry
 (`keys::resolve` with `Context { terminal: true }`) and only chords that
-`keys::kept_in_terminal` allows can match: on macOS every `Cmd` chord, on
-Linux and Windows only chords that also hold `Shift`, plus the scrollback
-keys. Chords are per platform (`mac(..)` and `other(..)` in the registry,
+`keys::kept_in_terminal` allows can match: on macOS every `Cmd` chord; on
+Linux and Windows the native `Ctrl+C` / `Ctrl+V` editing chords and chords
+that also hold `Shift`, plus the scrollback keys. Chords are per platform
+(`mac(..)` and `other(..)` in the registry,
 and `alt` / `control` modifiers), which is how the iTerm2 chords coexist with
 `Ctrl+Shift` equivalents. Every other key goes to `TerminalView`, which turns
 named keys, Ctrl and Alt into escape sequences; plain text is left to the

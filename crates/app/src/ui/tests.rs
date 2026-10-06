@@ -3658,7 +3658,9 @@ mod live {
     }
 
     #[gpui_kit::test]
-    fn ctrl_c_ctrl_d_escape_tab_and_the_arrows_reach_the_program(cx: &mut TestAppContext) {
+    fn non_editing_ctrl_chords_escape_tab_and_the_arrows_reach_the_program(
+        cx: &mut TestAppContext,
+    ) {
         let h = open_live(cx);
         let (_dir, _) = real_worktree(&h, cx);
         h.press("ctrl-n", cx);
@@ -3668,17 +3670,22 @@ mod live {
         });
         let script = script_of(&h, 1);
         let before = script.written().len();
-        for key in ["ctrl-c", "ctrl-d", "escape", "tab", "up", "left", "enter"] {
+        let mut keys = vec!["ctrl-d", "escape", "tab", "up", "left", "enter"];
+        if crate::platform::is_mac() {
+            keys.insert(0, "ctrl-c");
+        }
+        for key in keys {
             // These are the program's: the secondary chords here are not
             // Leon's while a terminal has the keyboard, on every platform.
             cx.update_window(h.window.into(), |_, window, cx| window.press(key, cx))
                 .unwrap();
         }
-        assert_eq!(
-            script.written()[before..],
-            *b"\x03\x04\x1b\t\x1b[A\x1b[D\r",
-            "the keys, as a terminal sends them"
-        );
+        let expected = if crate::platform::is_mac() {
+            &b"\x03\x04\x1b\t\x1b[A\x1b[D\r"[..]
+        } else {
+            &b"\x04\x1b\t\x1b[A\x1b[D\r"[..]
+        };
+        assert_eq!(script.written()[before..], *expected, "the terminal bytes");
         // Leon did not move: still on the terminal, still the main pane.
         assert_eq!(h.main_kind(cx), "live:1");
         assert_eq!(
@@ -5802,12 +5809,21 @@ mod live {
             wait_until(&h, cx, "the agent", |h, cx| {
                 screen(h, cx, 1).contains("FAKE-CLAUDE")
             });
-            for key in ["ctrl-c", "ctrl-d", "escape", "tab", "up", "left", "enter"] {
+            let mut keys = vec!["ctrl-d", "escape", "tab", "up", "left", "enter"];
+            if crate::platform::is_mac() {
+                keys.insert(0, "ctrl-c");
+            }
+            for key in keys {
                 cx.update_window(h.window.into(), |_, window, cx| window.press(key, cx))
                     .unwrap();
             }
+            let echoed = if crate::platform::is_mac() {
+                "^C^D^[^I^[[A^[[D^M"
+            } else {
+                "^D^[^I^[[A^[[D^M"
+            };
             wait_until(&h, cx, "the keys to be echoed", |h, cx| {
-                screen(h, cx, 1).contains("^C^D^[^I^[[A^[[D^M")
+                screen(h, cx, 1).contains(echoed)
             });
             h.type_text("héllo", cx);
             // The fake agent shows its input with `cat -vt`, and the two `cat`

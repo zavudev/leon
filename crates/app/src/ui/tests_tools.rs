@@ -122,6 +122,9 @@ fn select_all_selects_the_whole_buffer_so_the_ordinary_copy_takes_it(cx: &mut Te
     }
     let selected = terminal_of(&h, cx, 1).unwrap().selection_text().unwrap();
     assert!(selected.contains("line 1 of the output") && selected.contains("line 60"));
+    h.press_chord("cmd-c", "ctrl-c", cx);
+    let copied = clipboard(cx).expect("the native copy chord copied the selection");
+    assert!(copied.contains("line 1 of the output") && copied.contains("line 60"));
 }
 
 fn save_to(
@@ -885,7 +888,7 @@ mod pasting {
         let (h, _dir, _) = terminal_with(cx, 1);
         clipboard_holds(cx, &h, vec![png()]);
         let sent = script_of(&h, 1).written();
-        h.press_chord("cmd-v", "ctrl-shift-v", cx);
+        h.press_chord("cmd-v", "ctrl-v", cx);
         let now = script_of(&h, 1).written();
         assert_eq!(&now[sent.len()..], [0x16], "only Ctrl+V, no image bytes");
         assert!(h.status().contains("Ctrl+V"), "{}", h.status());
@@ -896,7 +899,7 @@ mod pasting {
         let (h, _dir, _) = terminal_with(cx, 1);
         clipboard_holds(cx, &h, vec![words("hello there")]);
         let sent = script_of(&h, 1).written_text();
-        h.press_chord("cmd-v", "ctrl-shift-v", cx);
+        h.press_chord("cmd-v", "ctrl-v", cx);
         assert_eq!(
             &script_of(&h, 1).written_text()[sent.len()..],
             "hello there"
@@ -905,7 +908,7 @@ mod pasting {
         script_of(&h, 1).print("\x1b[?2004h");
         cx.run_until_parked();
         let sent = script_of(&h, 1).written_text();
-        h.press_chord("cmd-v", "ctrl-shift-v", cx);
+        h.press_chord("cmd-v", "ctrl-v", cx);
         assert_eq!(
             &script_of(&h, 1).written_text()[sent.len()..],
             "\x1b[200~hello there\x1b[201~"
@@ -925,7 +928,7 @@ mod pasting {
         );
         clipboard_holds(cx, &h, vec![ClipboardEntry::ExternalPaths(files)]);
         let sent = script_of(&h, 1).written_text();
-        h.press_chord("cmd-v", "ctrl-shift-v", cx);
+        h.press_chord("cmd-v", "ctrl-v", cx);
         assert_eq!(
             &script_of(&h, 1).written_text()[sent.len()..],
             "/tmp/a.png '/tmp/two words.png'"
@@ -936,7 +939,7 @@ mod pasting {
     fn an_empty_clipboard_sends_nothing_and_says_so(cx: &mut TestAppContext) {
         let (h, _dir, _) = terminal_with(cx, 1);
         let sent = script_of(&h, 1).written();
-        h.press_chord("cmd-v", "ctrl-shift-v", cx);
+        h.press_chord("cmd-v", "ctrl-v", cx);
         assert_eq!(script_of(&h, 1).written(), sent);
         assert!(h.status().contains("nothing to paste"), "{}", h.status());
     }
@@ -953,7 +956,7 @@ mod pasting {
         });
         clipboard_holds(cx, &h, vec![png()]);
         let sent = script_of(&h, 1).written();
-        h.press_chord("cmd-v", "ctrl-shift-v", cx);
+        h.press_chord("cmd-v", "ctrl-v", cx);
         assert_eq!(script_of(&h, 1).written(), sent, "nothing is sent");
         assert!(
             h.status()
@@ -964,15 +967,21 @@ mod pasting {
     }
 
     #[gpui_kit::test]
-    fn plain_ctrl_v_reaches_the_program_as_0x16(cx: &mut TestAppContext) {
+    fn ctrl_v_is_native_paste_off_macos_and_terminal_input_on_macos(cx: &mut TestAppContext) {
         let (h, _dir, _) = terminal_with(cx, 1);
-        clipboard_holds(cx, &h, vec![words("must not be pasted")]);
+        clipboard_holds(cx, &h, vec![words("native paste")]);
         let sent = script_of(&h, 1).written();
-        // The physical Ctrl+V, on every platform (on macOS Cmd is another key).
+        // On macOS Cmd is the system modifier, so physical Ctrl+V remains the
+        // terminal's quoted-insert byte. Elsewhere Ctrl+V is the native paste.
         cx.update_window(h.window.into(), |_, window, cx| window.press("ctrl-v", cx))
             .unwrap();
         h.settle(cx);
-        assert_eq!(&script_of(&h, 1).written()[sent.len()..], [0x16]);
+        let written = &script_of(&h, 1).written()[sent.len()..];
+        if crate::platform::is_mac() {
+            assert_eq!(written, [0x16]);
+        } else {
+            assert_eq!(written, b"native paste");
+        }
     }
 
     #[gpui_kit::test]
@@ -983,7 +992,7 @@ mod pasting {
         clipboard_holds(cx, &h, vec![png(), words("photo.png")]);
         // A plain shell: the text.
         let sent = script_of(&h, 1).written_text();
-        h.press_chord("cmd-v", "ctrl-shift-v", cx);
+        h.press_chord("cmd-v", "ctrl-v", cx);
         assert_eq!(&script_of(&h, 1).written_text()[sent.len()..], "photo.png");
         // The explicit commands, from the palette.
         let sent = script_of(&h, 1).written();
@@ -1006,7 +1015,7 @@ mod pasting {
             })
         });
         let sent = script_of(&h, 1).written();
-        h.press_chord("cmd-v", "ctrl-shift-v", cx);
+        h.press_chord("cmd-v", "ctrl-v", cx);
         assert_eq!(&script_of(&h, 1).written()[sent.len()..], [0x16]);
     }
 
