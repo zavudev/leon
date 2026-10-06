@@ -475,6 +475,8 @@ macOS:
 * Share this machine… palette only
 * Open project… `⌘O`
 * Open the transcript `⇧⌘L`
+* Open a file… `⇧⌘O`
+* Show or hide the files `⇧⌘E`
 * Focus the terminal `⌘E`
 * Split the pane to the right `⌘D`
 * Split the pane downwards `⇧⌘D`
@@ -532,6 +534,8 @@ Linux and Windows:
 * Connect a machine… `Ctrl+Shift+M`
 * Share this machine… palette only
 * Open the transcript `Ctrl+Shift+L`
+* Open a file… `Ctrl+Shift+Alt+O`
+* Show or hide the files `Ctrl+Shift+Alt+E`
 * Split the pane to the right `Ctrl+Shift+D`
 * Split the pane downwards `Ctrl+Shift+O`
 * Focus the pane on the left `Ctrl+Shift+←`
