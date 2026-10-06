@@ -79,7 +79,7 @@ fn rig(
     let h = open_live(cx);
     let processes = Processes::new();
     h.engine.set_process_scanner(processes.clone(), Some(LEON));
-    let (dir, path, id) = local_session(&h, cx, AgentKind::Claude, "alpha");
+    let (dir, path, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
     put_cursor_on(&h, cx, NodeId::Session(id.clone()));
     h.settle(cx);
     (h, processes, dir, path, id)
@@ -450,4 +450,58 @@ fn turning_detection_off_stops_every_scan_and_the_tree_forgets_nothing_it_never_
     cx.update(|cx| h.shell.update(cx, |s, cx| s.scan_elsewhere_now(false, cx)));
     h.settle(cx);
     assert_eq!(calls(), 2, "and it resumes when it is on again");
+}
+
+#[gpui_kit::test]
+fn a_session_running_in_another_terminal_is_not_resumed_a_second_time_by_a_restore(
+    cx: &mut TestAppContext,
+) {
+    use leon_core::{SavedLayout, SavedState, SavedTab, SavedTerminal, SavedWorkspace, Slot};
+    let (h, processes, _dir, path, _id) = rig(cx);
+    show(&processes, &strange_claude("alpha-3"));
+    scan(&h, cx);
+    let state = SavedState {
+        saved_at: 1,
+        clean_shutdown: true,
+        selection: None,
+        main: Some(1),
+        workspaces: vec![SavedWorkspace {
+            key: crate::ui::workspace::key_of(MachineId::local().as_str(), &path),
+            active: 0,
+            tabs: vec![SavedTab {
+                layout: SavedLayout::Leaf(1),
+                focus: 1,
+                zoomed: false,
+            }],
+        }],
+        terminals: vec![SavedTerminal {
+            id: 1,
+            machine: MachineId::local().as_str().to_owned(),
+            cwd: path,
+            agent: Some("claude".into()),
+            session: Some("alpha-3".into()),
+            confidence: Some("resumed".into()),
+            history: None,
+            name: None,
+            title: None,
+            started_at: 0,
+        }],
+    };
+    h.store.save_workspace(Slot::Previous, &state).unwrap();
+    h.press("ctrl-shift-p", cx);
+    h.set_palette_text(">restore last", cx);
+    h.press("enter", cx);
+    h.mouse_on("restore-all".to_owned(), gpui_kit::MouseButton::Left, cx);
+    wait_until(&h, cx, "the report", |h, cx| {
+        h.shell(cx, |s| s.restore.report_open)
+    });
+    let failures = h.shell(cx, |s| s.restore.failures.clone());
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        failures[0]
+            .1
+            .contains("already running in another terminal"),
+        "{failures:?}"
+    );
+    assert_eq!(live_count(&h, cx), 0, "no second agent was started");
 }

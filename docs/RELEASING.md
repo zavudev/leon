@@ -15,15 +15,18 @@ opt-in `pre-push` hook.
 
 ```sh
 cargo xtask bump patch        # or minor, major, or an explicit X.Y.Z
-git diff                      # Cargo.toml and Cargo.lock
+git diff                      # Cargo.toml, Cargo.lock and docs/SETTINGS.md
 # update CHANGELOG.md
-git commit -am "chore: release 0.1.1"
-git tag v0.1.1
-git push origin main v0.1.1
+git commit -am "chore: release 0.2.0"
+git tag v0.2.0
+git push origin main v0.2.0
 ```
 
 `bump` edits `Cargo.toml`, refreshes the workspace entries of `Cargo.lock`
-(`cargo update --workspace`) and prints the tag to create. It refuses a
+(`cargo update --workspace`), regenerates the generated docs that embed the version
+(`docs/SETTINGS.md`, through `LEON_BLESS=1 cargo test -p leon the_settings_reference_is_current`,
+so the gate does not fail afterwards on a stale "Version 0.x.y") and prints the tag to
+create. `--no-lock` and `--no-docs` skip the second and third steps. It refuses a
 pre-release version, on either side, and an explicit version that is not above
 the current one. To cut a pre-release (`0.2.0-rc.1`), edit the version by hand;
 the workflow publishes it marked as a pre-release.
@@ -44,7 +47,45 @@ Other commands: `cargo xtask version`, `cargo xtask check-tag <TAG>`,
 
 The release is created with generated notes, and marked pre-release when the
 version has a `-suffix`. Nothing is published unless all four platforms built.
-There is no auto-updater, so there is no update manifest or update key.
+
+## What the updater needs from a release
+
+Leon updates itself from these releases and nothing else (`docs/UPDATES.md`): there
+is no update manifest to publish, no update key and no secret. It reads the release
+as GitHub shows it, so **keep these stable**:
+
+* The tag is `v<semver>`, equal to the version in `Cargo.toml`; a pre-release has a
+  `-suffix` and is marked as a pre-release (the workflow does both).
+* The file names are `leon-<version>-<platform>.<ext>` exactly as in the table above,
+  and `SHA256SUMS` lists **exactly those files, one line each** (`cargo xtask
+  checksums` writes it, the workflow checks it against the files). Leon does not
+  read any other name; 0.1.0's scheme is the same one.
+* The layout inside each archive: the macOS `.dmg` holds `Leon.app` at the top of the
+  volume (the updater mounts it read-only with `hdiutil` and copies the bundle with
+  `ditto`; a `.dmg` is used rather than an extra `.app.tar.gz` asset because it is
+  already published, is the same bytes a person downloads, and needs no second file
+  to keep in step); the Windows `.zip` and the Linux `.tar.gz` have one top folder,
+  `leon-<version>-<platform>/`, with `leon.exe` or `leon` inside it. Anything else
+  inside is ignored; a second top folder, a path that climbs out or a link refuses
+  the archive.
+* The bundle's `Info.plist` has `dev.zavu.leon` as its identifier and the release's
+  version as `CFBundleShortVersionString` (`packaging/macos/bundle.sh` writes both).
+
+**Every archive the workflow builds is checked with the updater's own extraction
+code before anything is published** (the step "Check that the updater can use the
+archive" of each build job): `cargo run -p leon-update --example check_archive --
+dist/<file>`, which is also `leon --diagnose update --check-archive <file>`. A release
+whose archive the updater could not unpack does not get published. The `publish`
+job also checks `SHA256SUMS` against the files (`sha256sum --check`, and that the
+names are exactly the assets).
+
+Signing matters to updates too: with a Developer ID (macOS) or a certificate
+(Windows) configured, an installed signed Leon accepts only builds signed by the
+same Team ID or subject, so **do not change the signing identity of a release line
+without telling users to reinstall by hand**. Until the secrets are set, builds are
+unsigned and the updater says so (`docs/UPDATES.md` has what that means for trust).
+Whoever can publish a release here can publish an update: protect the repository's
+write access and the secrets above.
 
 ## Secrets
 
@@ -112,11 +153,17 @@ that old or newer); a custom `RUNNER_LINUX` decides the baseline instead.
 
 What the workflows already do for speed: `fmt` is its own job and fails in
 seconds; clippy runs beside the tests, not before them; `--locked`;
-`Swatinem/rust-cache` with `cache-on-failure`, written from `main` only (pull
-requests and tags read it); line-tables-only debug information in CI. `sccache`
+`Swatinem/rust-cache` with `cache-on-failure`, saved by `main` and by pull
+requests (a pull request's second push is warm; its first falls back to
+`main`'s cache; a cache is only visible to its own branch and its base);
+line-tables-only debug information in CI. `sccache`
 is deliberately not used: `rust-cache` already restores the whole `target` of the
 dependencies, and a second compiler cache would add network round trips for the
-same objects and compete for the 10 GB cache quota. `mold` is not needed either:
+same objects and compete for the 10 GB cache quota. That quota is per
+repository: GitHub evicts the least recently used caches when it is full, so
+many open pull requests can push `main`'s caches out; if that happens, close
+stale pull requests or go back to saving from `main` only (`save-if:
+${{ github.ref == 'refs/heads/main' }}` on each `rust-cache` step). `mold` is not needed either:
 current stable Rust links with `lld` by default on x86_64 Linux.
 
 Ways to go faster, with rough expectations (a cold build of this workspace is
@@ -142,7 +189,7 @@ minutes):
 * A failed build before anything was published: fix the cause, then either
   re-run the failed jobs from the Actions page (the tag still points to the same
   commit), or delete the tag and push it again on the fixed commit
-  (`git push --delete origin v0.1.1`, `git tag -f v0.1.1`, `git push origin v0.1.1`).
+  (`git push --delete origin v0.2.0`, `git tag -f v0.2.0`, `git push origin v0.2.0`).
   Keep the version unless a file was already published.
 * A broken release that is already published: do not reuse the number. Fix
   forward with the next patch version, and delete or edit the bad release on

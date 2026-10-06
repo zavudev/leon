@@ -11,7 +11,7 @@
 //! never as the old percentage, and a reading older than anything useful
 //! becomes unknown.
 
-use leon_core::AgentKind;
+use leon_core::AgentId;
 use serde::{Deserialize, Serialize};
 
 /// Seconds in a minute, an hour and a day.
@@ -99,14 +99,15 @@ pub enum Source {
 
 impl Source {
     /// A plain description, as shown in the usage view.
-    pub fn describe(self, agent: AgentKind) -> String {
+    pub fn describe(self, agent: AgentId) -> String {
         match (self, agent) {
-            (Source::Local, AgentKind::Codex) => "Codex's own session log".into(),
+            (Source::Local, AgentId::CODEX) => "Codex's own session log".into(),
             (Source::Local, _) => "the agent's own files".into(),
             (Source::Cli, _) => "the agent's command line".into(),
-            (Source::VendorApi, AgentKind::Claude) => "Anthropic's usage endpoint".into(),
-            (Source::VendorApi, AgentKind::Opencode) => "opencode's usage endpoint".into(),
-            (Source::VendorApi, AgentKind::Codex) => "OpenAI's usage endpoint".into(),
+            (Source::VendorApi, AgentId::CLAUDE) => "Anthropic's usage endpoint".into(),
+            (Source::VendorApi, AgentId::OPENCODE) => "opencode's usage endpoint".into(),
+            (Source::VendorApi, AgentId::CODEX) => "OpenAI's usage endpoint".into(),
+            (Source::VendorApi, other) => format!("{}'s usage endpoint", other.name()),
         }
     }
 }
@@ -131,6 +132,37 @@ pub enum Reason {
     Unreachable,
     /// The agent has not written any limit yet.
     NoData,
+    /// A read is under way. Never stored: the window shows it while a
+    /// collection runs, instead of what the last one said.
+    Reading,
+    /// The computer is offline, or the vendor did not answer in time.
+    Offline,
+    /// The vendor answered with an error; this is its HTTP status.
+    VendorError(u16),
+    /// The vendor asked for fewer calls (HTTP 429); this is the wait it named
+    /// in seconds, 0 when it named none.
+    RateLimited(u32),
+    /// The system refused to hand over the agent's sign-in (a keychain prompt
+    /// that was denied or dismissed).
+    KeychainDenied,
+    /// The agent's stored sign-in has expired. Leon never refreshes it: the
+    /// agent does that the next time it runs.
+    SessionExpired,
+    /// The plan has no limit to measure.
+    Unlimited,
+    /// The sign-in is valid but lacks the permission to read usage (a 403 that
+    /// names a missing scope).
+    MissingScope,
+    /// The agent is used with an API key: usage limits belong to
+    /// subscriptions and do not apply to API-key billing.
+    ApiKeyBilling,
+    /// The key has no subscription behind it (opencode Go: no entitlement).
+    NoSubscription,
+    /// The service rejected the stored key.
+    KeyRejected,
+    /// This version of the agent answers its usage command with a model turn,
+    /// which would spend quota at every read: Leon stopped asking.
+    SpendsATurn,
 }
 
 impl Reason {
@@ -145,7 +177,74 @@ impl Reason {
             Reason::ParseError => "The answer was not understood.",
             Reason::Unreachable => "The source could not be reached.",
             Reason::NoData => "No limit has been recorded yet.",
+            Reason::Reading => "Reading the limits now.",
+            Reason::Offline => "Offline: the service did not answer.",
+            Reason::VendorError(_) => "The service answered with an error.",
+            Reason::RateLimited(_) => "Rate limited: the service asked for fewer calls.",
+            Reason::KeychainDenied => "The sign-in could not be read: access was denied.",
+            Reason::SessionExpired => {
+                "The sign-in has expired. Run the agent once so it refreshes its own sign-in; Leon never does."
+            }
+            Reason::Unlimited => "The plan has no limit to measure.",
+            Reason::MissingScope => {
+                "The sign-in lacks permission to read usage. Sign in again with the agent."
+            }
+            Reason::ApiKeyBilling => "Usage limits do not apply to API-key billing.",
+            Reason::NoSubscription => "No subscription for this key: there is no limit to read.",
+            Reason::KeyRejected => "The service rejected the stored key.",
+            Reason::SpendsATurn => {
+                "This version of Antigravity cannot report usage without spending a turn."
+            }
         }
+    }
+
+    /// The sentence with what it knows, for a line of its own: the vendor's
+    /// status is part of it.
+    pub fn text(self) -> String {
+        match self {
+            Reason::VendorError(status) => {
+                format!("The service answered with an error (HTTP {status}).")
+            }
+            Reason::RateLimited(0) => "Rate limited: the service asked for fewer calls.".to_owned(),
+            Reason::RateLimited(seconds) => format!(
+                "Rate limited: the service asked to wait {}.",
+                crate::present::compact_duration(i64::from(seconds))
+            ),
+            other => other.sentence().to_owned(),
+        }
+    }
+
+    /// Whether this is a source that failed (as opposed to one that is off,
+    /// absent or not applicable): what backs a source off and what a later
+    /// reading may retry.
+    pub fn is_failure(self) -> bool {
+        matches!(
+            self,
+            Reason::Unreachable
+                | Reason::ParseError
+                | Reason::Offline
+                | Reason::VendorError(_)
+                | Reason::RateLimited(_)
+                | Reason::KeychainDenied
+                | Reason::SessionExpired
+        )
+    }
+
+    /// Whether the numbers of an earlier reading stay on show, marked with
+    /// their age, when a read ends in this reason: a failure that says nothing
+    /// about the limits themselves. A sign-out, a switch, or a key the service
+    /// refused replaces them.
+    pub fn keeps_numbers(self) -> bool {
+        matches!(
+            self,
+            Reason::Unreachable
+                | Reason::NoData
+                | Reason::Offline
+                | Reason::VendorError(_)
+                | Reason::RateLimited(_)
+                | Reason::KeychainDenied
+                | Reason::SessionExpired
+        )
     }
 
     /// Two or three words for the bar.
@@ -159,7 +258,32 @@ impl Reason {
             Reason::ParseError => "unreadable",
             Reason::Unreachable => "unreachable",
             Reason::NoData => "no data yet",
+            Reason::Reading => "reading…",
+            Reason::Offline => "offline",
+            Reason::VendorError(_) => "error",
+            Reason::RateLimited(_) => "rate limited",
+            Reason::KeychainDenied => "access denied",
+            Reason::SessionExpired => "sign-in expired",
+            Reason::Unlimited => "no limit",
+            Reason::MissingScope => "no permission",
+            Reason::ApiKeyBilling => "API key",
+            Reason::NoSubscription => "no subscription",
+            Reason::KeyRejected => "key rejected",
+            Reason::SpendsATurn => "unsupported",
         }
+    }
+}
+
+/// Who runs the service an agent's usage is read from, for a sentence such as
+/// "rate limited by Anthropic".
+pub fn vendor(agent: AgentId) -> &'static str {
+    match agent {
+        AgentId::CLAUDE => "Anthropic",
+        AgentId::CODEX => "OpenAI",
+        AgentId::GROK => "xAI",
+        AgentId::ZCODE => "Z.ai",
+        AgentId::KIMI => "Moonshot",
+        other => other.name(),
     }
 }
 
@@ -183,7 +307,7 @@ pub enum State {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentUsage {
     /// Which agent.
-    pub agent: AgentKind,
+    pub agent: AgentId,
     /// The machine's id.
     pub machine: String,
     /// A label for the account that never identifies it: the plan or nothing.
@@ -240,7 +364,7 @@ pub const MAX_AGE: i64 = 8 * DAY;
 
 impl AgentUsage {
     /// A reading with nothing known.
-    pub fn unknown(agent: AgentKind, machine: &str, reason: Reason) -> Self {
+    pub fn unknown(agent: AgentId, machine: &str, reason: Reason) -> Self {
         Self {
             agent,
             machine: machine.to_owned(),
@@ -329,7 +453,7 @@ mod tests {
 
     fn reading(observed_at: i64, windows: Vec<UsageWindow>) -> AgentUsage {
         AgentUsage {
-            agent: AgentKind::Codex,
+            agent: AgentId::CODEX,
             machine: "local".into(),
             account_label: None,
             plan: Some("plus".into()),
@@ -397,7 +521,7 @@ mod tests {
 
     #[test]
     fn an_unknown_reading_keeps_its_reason() {
-        let usage = AgentUsage::unknown(AgentKind::Claude, "local", Reason::SourceDisabled);
+        let usage = AgentUsage::unknown(AgentId::CLAUDE, "local", Reason::SourceDisabled);
         assert_eq!(
             usage.effective(NOW),
             Effective::Unknown(Reason::SourceDisabled)

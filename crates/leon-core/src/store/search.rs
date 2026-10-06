@@ -23,7 +23,7 @@ use super::history::{session_from_row, sql_limit, SESSION_COLUMNS, SESSION_COLUM
 use super::{bad_tag, Store};
 use crate::error::Result;
 use crate::ids::{MachineId, ProjectId};
-use crate::model::{AgentKind, Role, Session};
+use crate::model::{AgentId, Role, Session};
 
 /// Placed immediately before each matched word in a snippet (U+0002).
 pub const SNIPPET_START: char = '\u{2}';
@@ -48,7 +48,7 @@ pub struct SearchQuery {
     /// Free text typed by the user.
     pub text: String,
     /// Only sessions of this agent.
-    pub agent: Option<AgentKind>,
+    pub agent: Option<AgentId>,
     /// Only sessions that ran on this machine.
     pub machine_id: Option<MachineId>,
     /// Only sessions linked to this project.
@@ -101,7 +101,7 @@ impl Store {
         if query.limit == 0 {
             return Ok(Vec::new());
         }
-        let agent = query.agent.map(AgentKind::as_str);
+        let agent = query.agent.map(AgentId::as_str);
         let machine_id = query.machine_id.as_ref().map(MachineId::as_str);
         let project_id = query.project_id.as_ref().map(ProjectId::as_str);
         let (start, end) = (SNIPPET_START.to_string(), SNIPPET_END.to_string());
@@ -271,7 +271,7 @@ mod tests {
 
     fn session(external_id: &str, title: &str) -> NewSession {
         NewSession {
-            agent: AgentKind::Claude,
+            agent: AgentId::CLAUDE,
             external_id: external_id.into(),
             machine_id: MachineId::local(),
             cwd: "/srv/api".into(),
@@ -495,7 +495,7 @@ mod tests {
             .upsert_session(&session("local-claude", "a"), &text)
             .unwrap();
         let mut codex = session("local-codex", "b");
-        codex.agent = AgentKind::Codex;
+        codex.agent = AgentId::CODEX;
         codex.cwd = "/tmp/elsewhere".into();
         store.upsert_session(&codex, &text).unwrap();
         let mut far = session("remote-claude", "c");
@@ -516,7 +516,7 @@ mod tests {
         assert_eq!(found(base.clone()).len(), 3);
         assert_eq!(
             found(SearchQuery {
-                agent: Some(AgentKind::Codex),
+                agent: Some(AgentId::CODEX),
                 ..base.clone()
             }),
             ["local-codex"]

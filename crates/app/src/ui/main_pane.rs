@@ -19,7 +19,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::{
     div, list, AnyElement, App, Context, Div, FontWeight, SharedString, Stateful, Window,
 };
-use leon_core::{AgentKind, MachineId, Message, ProjectId, Role, WorktreeId};
+use leon_core::{AgentId, MachineId, Message, ProjectId, Role, WorktreeId};
 
 /// The most characters of one message drawn: a transcript can hold a whole
 /// file pasted by a tool, and laying that out every frame would cost more
@@ -146,7 +146,7 @@ impl Shell {
 
     /// The header's metadata as one line, for tests.
     #[cfg(test)]
-    #[cfg_attr(not(unix), allow(dead_code))] // used by the Unix-only tests
+    #[cfg_attr(not(leon_posix_tests), allow(dead_code))] // used by the Unix-only tests
     pub(super) fn main_heading_for_test(&self, cx: &App) -> String {
         self.main_heading(cx).2
     }
@@ -197,7 +197,7 @@ impl Shell {
     }
 
     /// The agent of what is open, for the icon in the header.
-    fn main_agent(&self) -> Option<AgentKind> {
+    fn main_agent(&self) -> Option<AgentId> {
         match &self.main {
             Main::Session(transcript) => Some(transcript.session.agent),
             Main::Live(id) => self.live.get(*id).and_then(|session| session.shown_agent()),
@@ -555,12 +555,10 @@ impl Shell {
                     this.run_command(Command::NewSession, window, cx);
                 },
             ));
-        for agent in AgentKind::ALL {
-            let id = match agent {
-                AgentKind::Claude => "worktree-new-claude",
-                AgentKind::Codex => "worktree-new-codex",
-                AgentKind::Opencode => "worktree-new-opencode",
-            };
+        // The agents this machine has (the catalogue's, not a fixed three);
+        // a machine nobody probed yet shows the built-in ones.
+        for agent in self.agents_for_buttons(&entry.project.machine_id) {
+            let id = format!("worktree-new-{}", agent.as_str());
             let tip = format!("New {} session here", format::agent_name(agent));
             actions = actions.child(worktree_button(
                 id,
@@ -782,6 +780,16 @@ impl Shell {
             .into_any_element()
     }
 
+    /// The agents offered as buttons on the worktree screen: those installed on
+    /// the machine, else (nothing is known of it) the built-in three.
+    fn agents_for_buttons(&self, machine: &MachineId) -> Vec<AgentId> {
+        self.installed_agents()
+            .into_iter()
+            .find(|(id, _)| id == machine)
+            .map(|(_, agents)| agents)
+            .unwrap_or_else(|| vec![AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE])
+    }
+
     /// Whether a terminal of Leon runs this history session in its own
     /// folder: what the sidebar marks with a green light.
     fn running_here(&self, id: &leon_core::SessionId) -> bool {
@@ -799,6 +807,13 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let running = self.running_here(&session.id);
+        // Held by a terminal outside Leon: the row says so rather than offer
+        // it as free; a session restored but not resumed yet says it waits.
+        let elsewhere = !running && self.elsewhere_of(session).is_some();
+        let paused = self
+            .live
+            .of_history(&session.id)
+            .is_some_and(|live| live.is_paused());
         let hover = colours.surface_2;
         let session = session.clone();
         let opened = session.clone();
@@ -842,7 +857,17 @@ impl Shell {
             .child(
                 mono(format!("{} MESSAGES", session.message_count)).text_color(colours.text_faint),
             )
-            .when(running, |this| this.child(led(colours.success)))
+            .when(paused, |this| {
+                this.child(mono("PAUSED").text_color(colours.warning))
+            })
+            .when(elsewhere, |this| {
+                this.child(
+                    mono("ELSEWHERE")
+                        .debug_selector(move || format!("worktree-session-elsewhere-{index}"))
+                        .text_color(colours.elsewhere),
+                )
+            })
+            .when(running && !paused, |this| this.child(led(colours.success)))
             .child(mono(format::age(now, session.updated_at)).text_color(colours.text_faint))
     }
 
@@ -1107,7 +1132,7 @@ struct OpenWorktree {
 /// agent's mark, and its shortcut in the tooltip. `primary` fills it with the
 /// accent, for the one call to action of the screen.
 fn worktree_button(
-    id: &'static str,
+    id: impl Into<SharedString>,
     tip: String,
     colours: &Palette,
     cx: &mut Context<Shell>,
@@ -1117,9 +1142,11 @@ fn worktree_button(
 ) -> Stateful<Div> {
     let hover = colours.surface_2;
     let tip: SharedString = tip.into();
+    let id: SharedString = id.into();
+    let selector = id.to_string();
     let button = div()
         .id(id)
-        .debug_selector(move || id.into())
+        .debug_selector(move || selector.clone())
         .flex_none()
         .h(metrics::CONTROL())
         .px(px(10.))

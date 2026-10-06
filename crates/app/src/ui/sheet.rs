@@ -275,6 +275,11 @@ impl Shell {
                 super::widgets::mono(format!("LICENCE {}", env!("CARGO_PKG_LICENSE")))
                     .text_color(colours.text_faint),
             )
+            .children(self.about_update_line(cx).map(|line| {
+                super::widgets::mono(line)
+                    .debug_selector(|| "about-update".into())
+                    .text_color(colours.text_muted)
+            }))
     }
 }
 

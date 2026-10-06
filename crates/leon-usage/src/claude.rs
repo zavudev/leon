@@ -8,7 +8,7 @@
 //! pure parts (reading the credential file, parsing the answer); the call
 //! lives in [`crate::network`].
 
-use leon_core::AgentKind;
+use leon_core::AgentId;
 use serde_json::Value;
 
 use crate::model::{AgentUsage, Reason, Source, State, UsageWindow, WindowKind, DAY, HOUR};
@@ -19,6 +19,20 @@ pub const HOST: &str = "api.anthropic.com";
 /// The usage endpoint.
 pub const URL: &str = "https://api.anthropic.com/api/oauth/usage";
 
+/// The keychain service the CLI keeps its credential under.
+pub const SERVICE: &str = "Claude Code-credentials";
+
+/// The keychain service when `CLAUDE_CONFIG_DIR` is set: the CLI scopes its
+/// item by the first eight hex digits of the SHA-256 of that folder. (Orca
+/// normalises the text to NFC first; Leon takes the folder as the environment
+/// gives it.)
+pub fn scoped_service(config_dir: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(config_dir.as_bytes());
+    let suffix: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
+    format!("{SERVICE}-{suffix}")
+}
+
 /// What the credential store held: the token and the plan, nothing else.
 #[derive(Debug)]
 pub struct Credential {
@@ -26,6 +40,30 @@ pub struct Credential {
     pub token: Secret,
     /// The plan the account is on, when the store says.
     pub plan: Option<String>,
+}
+
+/// Whether the store holds a refresh token but no access token: the sign-in
+/// exists and only the CLI can renew it.
+pub fn refresh_only(json: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(json) else {
+        return false;
+    };
+    let Some(oauth) = value.get("claudeAiOauth") else {
+        return false;
+    };
+    let has = |key: &str| {
+        oauth
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty())
+    };
+    has("refreshToken") && !has("accessToken")
+}
+
+/// Whether a 403 answer says the sign-in lacks the scope usage needs
+/// (`user:profile`), as opposed to a token that is stale.
+pub fn lacks_scope(body: &str) -> bool {
+    body.contains("user:profile")
 }
 
 /// Reads the JSON the CLI keeps (`{"claudeAiOauth":{"accessToken":..,
@@ -47,22 +85,40 @@ pub fn parse_credential(json: &str) -> Option<Credential> {
     })
 }
 
-/// A reset time given as seconds, milliseconds or an ISO 8601 text, in Unix
-/// seconds.
+/// Unix seconds from a count that is seconds or, past ten digits,
+/// milliseconds.
+fn epoch(n: f64) -> Option<i64> {
+    (n.is_finite() && n > 0.0).then(|| {
+        if n > 1e10 {
+            (n / 1000.0) as i64
+        } else {
+            n as i64
+        }
+    })
+}
+
+/// A reset time as the services send it, in Unix seconds: a number of seconds
+/// or milliseconds (as a number or as text), RFC 3339 with or without fractional
+/// seconds and with any offset, or a date and time with no offset, which is
+/// read as UTC. These are the forms JavaScript's `new Date()` takes that the
+/// services use; anything else is `None`, which is a window with no reset time
+/// and never a failed read.
 pub fn parse_reset(value: &Value) -> Option<i64> {
     match value {
-        Value::Number(n) => {
-            let n = n.as_f64()?;
-            Some(if n > 1e10 {
-                (n / 1000.0) as i64
-            } else {
-                n as i64
-            })
+        Value::Number(n) => epoch(n.as_f64()?),
+        Value::String(text) => {
+            let text = text.trim();
+            if let Ok(at) = chrono::DateTime::parse_from_rfc3339(text) {
+                return Some(at.timestamp());
+            }
+            if let Ok(n) = text.parse::<f64>() {
+                return epoch(n);
+            }
+            ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"]
+                .iter()
+                .find_map(|format| chrono::NaiveDateTime::parse_from_str(text, format).ok())
+                .map(|at| at.and_utc().timestamp())
         }
-        Value::String(text) => chrono::DateTime::parse_from_rfc3339(text.trim())
-            .ok()
-            .map(|d| d.timestamp())
-            .or_else(|| text.trim().parse::<i64>().ok().filter(|n| *n > 0)),
         _ => None,
     }
 }
@@ -87,20 +143,23 @@ fn window(kind: WindowKind, raw: &Value, length: i64) -> Option<UsageWindow> {
     })
 }
 
-fn title(model: &str) -> String {
-    let mut chars = model.chars();
-    chars
-        .next()
-        .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
-        .unwrap_or_default()
-}
+/// The top-level keys that carry a per-model weekly window, with the model's
+/// name: a short explicit list, so that an unrelated `seven_day_*` key is never
+/// shown as a model.
+const KNOWN_MODEL_KEYS: &[(&str, &str)] = &[
+    ("seven_day_opus", "Opus"),
+    ("seven_day_sonnet", "Sonnet"),
+    ("fable_weekly", "Fable"),
+    ("fable_seven_day", "Fable"),
+    ("seven_day_fable", "Fable"),
+];
 
 /// Parses the endpoint's answer: `five_hour`, `seven_day`, per-model weekly
-/// buckets (`seven_day_<model>` keys and `limits` entries of kind
-/// `weekly_scoped`). An answer with no five-hour and no weekly window is a
+/// buckets (`limits` entries of kind `weekly_scoped` with their
+/// display name, and the known top-level model keys). An answer with no five-hour and no weekly window is a
 /// [`Reason::ParseError`].
 pub fn parse_usage(body: &str, machine: &str, plan: Option<String>, now: i64) -> AgentUsage {
-    let fail = || AgentUsage::unknown(AgentKind::Claude, machine, Reason::ParseError);
+    let fail = || AgentUsage::unknown(AgentId::CLAUDE, machine, Reason::ParseError);
     let Ok(value) = serde_json::from_str::<Value>(body) else {
         return fail();
     };
@@ -123,21 +182,10 @@ pub fn parse_usage(body: &str, machine: &str, plan: Option<String>, now: i64) ->
     if windows.is_empty() {
         return fail();
     }
-    let mut keys: Vec<&String> = object.keys().collect();
-    keys.sort();
-    for key in keys {
-        let model = key
-            .strip_prefix("seven_day_")
-            .or_else(|| key.strip_suffix("_seven_day"))
-            .or_else(|| key.strip_suffix("_weekly"))
-            .or_else(|| key.strip_prefix("weekly_"));
-        if let Some(model) = model {
-            let name = title(model);
-            if let Some(w) = window(WindowKind::ModelWeekly(name), &object[key], 7 * DAY) {
-                push_model(&mut windows, w);
-            }
-        }
-    }
+    // Per-model windows: the `limits` entries first (they carry the display
+    // name), then the few top-level keys the service is known to use. Any
+    // other `seven_day_*` key is an unrelated limit, never a model.
+    let mut model_windows = Vec::new();
     if let Some(limits) = object.get("limits").and_then(Value::as_array) {
         for limit in limits {
             if limit.get("kind").and_then(Value::as_str) != Some("weekly_scoped") {
@@ -152,12 +200,21 @@ pub fn parse_usage(body: &str, machine: &str, plan: Option<String>, now: i64) ->
                 continue;
             };
             if let Some(w) = window(WindowKind::ModelWeekly(name.to_owned()), limit, 7 * DAY) {
-                push_model(&mut windows, w);
+                push_model(&mut model_windows, w);
             }
         }
     }
+    for (key, name) in KNOWN_MODEL_KEYS {
+        if let Some(w) = object
+            .get(*key)
+            .and_then(|raw| window(WindowKind::ModelWeekly((*name).to_owned()), raw, 7 * DAY))
+        {
+            push_model(&mut model_windows, w);
+        }
+    }
+    windows.extend(model_windows);
     AgentUsage {
-        agent: AgentKind::Claude,
+        agent: AgentId::CLAUDE,
         machine: machine.to_owned(),
         account_label: plan.clone(),
         plan,
@@ -283,6 +340,83 @@ mod tests {
             Some(1_791_201_600)
         );
         assert_eq!(parse_reset(&serde_json::json!("soon")), None);
+        // The other forms `new Date()` takes: fractions, offsets, no offset
+        // (read as UTC), epoch text.
+        for (text, at) in [
+            ("2026-10-05T12:00:00.250Z", 1_791_201_600),
+            ("2026-10-05T14:00:00+02:00", 1_791_201_600),
+            ("2026-10-05T12:00:00", 1_791_201_600),
+            ("2026-10-05 12:00:00", 1_791_201_600),
+            ("1791201600", 1_791_201_600),
+            ("1791201600000", 1_791_201_600),
+            ("1791201600.5", 1_791_201_600),
+        ] {
+            assert_eq!(parse_reset(&serde_json::json!(text)), Some(at), "{text}");
+        }
+        assert_eq!(parse_reset(&serde_json::json!("0")), None);
+        assert_eq!(parse_reset(&serde_json::json!(-5)), None);
         assert_eq!(parse_reset(&serde_json::json!(null)), None);
+    }
+
+    #[test]
+    fn an_unrelated_weekly_key_is_never_shown_as_a_model() {
+        let body = r#"{"five_hour":{"utilization":1},"seven_day":{"utilization":2},
+            "seven_day_oauth_apps":{"utilization":77},"seven_day_cowork":{"utilization":88},
+            "extra_weekly":{"utilization":66},"weekly_credits":{"utilization":55}}"#;
+        let State::Known { windows } = parse_usage(body, "m", None, NOW).state else {
+            panic!()
+        };
+        assert_eq!(windows.len(), 2, "{windows:?}");
+    }
+
+    #[test]
+    fn the_known_model_keys_and_the_scoped_limits_give_models() {
+        let body = r#"{"five_hour":{"utilization":1},"seven_day":{"utilization":2},
+            "seven_day_opus":{"utilization":10},"seven_day_sonnet":{"utilization":20},
+            "fable_weekly":{"utilization":30},"seven_day_fable":{"utilization":31},
+            "limits":[{"kind":"weekly_scoped","percent":5,"scope":{"model":{"display_name":"Haiku"}}},
+                      {"kind":"daily_scoped","percent":9,"scope":{"model":{"display_name":"Nope"}}}]}"#;
+        let State::Known { windows } = parse_usage(body, "m", None, NOW).state else {
+            panic!()
+        };
+        let models: Vec<(String, f64)> = windows[2..]
+            .iter()
+            .map(|w| (w.kind.short(), w.used_percent))
+            .collect();
+        assert_eq!(
+            models,
+            [
+                ("Haiku".to_owned(), 5.0),
+                ("Opus".to_owned(), 10.0),
+                ("Sonnet".to_owned(), 20.0),
+                ("Fable".to_owned(), 30.0),
+            ],
+            "the Fable aliases are one window"
+        );
+    }
+
+    #[test]
+    fn a_refresh_token_without_an_access_token_is_a_sign_in_only_the_cli_can_renew() {
+        assert!(refresh_only(r#"{"claudeAiOauth":{"refreshToken":"r"}}"#));
+        assert!(!refresh_only(
+            r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r"}}"#
+        ));
+        assert!(!refresh_only(r#"{"claudeAiOauth":{}}"#));
+        assert!(!refresh_only("nope"));
+    }
+
+    #[test]
+    fn a_403_names_the_missing_scope() {
+        assert!(lacks_scope(
+            r#"{"error":{"message":"needs scope user:profile"}}"#
+        ));
+        assert!(!lacks_scope("{}"));
+    }
+
+    #[test]
+    fn the_keychain_item_is_scoped_by_the_config_folder() {
+        // sha256("abc") starts ba7816bf.
+        assert_eq!(scoped_service("abc"), "Claude Code-credentials-ba7816bf");
+        assert_eq!(SERVICE, "Claude Code-credentials");
     }
 }

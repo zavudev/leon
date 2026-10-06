@@ -383,7 +383,11 @@ impl TerminalView {
     ) {
         window.focus(&self.focus, cx);
         cx.emit(ViewEvent::Clicked);
-        if event.button == MouseButton::Left {
+        // A program that captures the mouse owns plain clicks, links or not;
+        // the secondary key (Cmd or Ctrl) is what opens a link then. Shift is
+        // the usual way past the program, as for selecting.
+        let captured = keys::mouse_reporting(self.terminal.mode()) && !event.modifiers.shift;
+        if event.button == MouseButton::Left && (!captured || event.modifiers.secondary()) {
             let (col, row, _) = self.cell_at(event.position);
             if let Some(link) = self.terminal.link_at(col, row) {
                 if event.modifiers.secondary() {
@@ -864,7 +868,7 @@ fn paint_grid(
             if link.is_some() {
                 flags.insert(Flags::UNDERLINE);
             }
-            if link == hovered_link {
+            if link_is_hovered(link, hovered_link) {
                 fg = theme.cursor;
             }
             let mut paint_bg = cell.flags.contains(Flags::INVERSE) || bg != theme.background;
@@ -1009,6 +1013,33 @@ fn paint_grid(
     window.handle_input(focus, ElementInputHandler::new(bounds, view.clone()), cx);
 }
 
+/// Whether the cell's link is the one under the pointer. Cells that are no
+/// link at all are never hovered, whatever the pointer is over: two absent
+/// links are not the same link.
+fn link_is_hovered(link: Option<&str>, hovered: Option<&str>) -> bool {
+    link.is_some() && link == hovered
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::link_is_hovered;
+
+    #[test]
+    fn only_a_cell_of_the_hovered_link_is_hovered() {
+        assert!(!link_is_hovered(None, None), "plain text is not a link");
+        assert!(!link_is_hovered(None, Some("https://a.example")));
+        assert!(!link_is_hovered(Some("https://a.example"), None));
+        assert!(!link_is_hovered(
+            Some("https://a.example"),
+            Some("https://b.example")
+        ));
+        assert!(link_is_hovered(
+            Some("https://a.example"),
+            Some("https://a.example")
+        ));
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -1094,7 +1125,12 @@ mod tests {
 
     #[gpui_kit::test]
     fn a_keystroke_that_is_a_terminal_key_is_sent_and_plain_text_is_not(cx: &mut TestAppContext) {
-        let (view, terminal) = show(cx, "stty -echo -icanon -isig; exec cat -vt");
+        let (view, terminal) = show(cx, "stty -echo -icanon -isig; printf SET; exec cat -vt");
+        // Input sent before `stty` has run would be echoed and line-buffered
+        // by the terminal driver, not seen raw by `cat`.
+        wait_until(cx, "the raw mode", || {
+            terminal.screen_text().contains("SET")
+        });
         let sent = cx.update(|cx| {
             view.update(cx, |view, cx| {
                 let up = view.handle_keystroke(&Keystroke::parse("up").unwrap(), cx);
@@ -1114,7 +1150,10 @@ mod tests {
 
     #[gpui_kit::test]
     fn text_from_the_input_method_reaches_the_program(cx: &mut TestAppContext) {
-        let (view, terminal) = show(cx, "stty -echo -icanon -isig; exec cat");
+        let (view, terminal) = show(cx, "stty -echo -icanon -isig; printf SET; exec cat");
+        wait_until(cx, "the raw mode", || {
+            terminal.screen_text().contains("SET")
+        });
         let window = cx.windows()[0];
         cx.update_window(window, |_, window, cx| {
             view.update(cx, |view, cx| {
@@ -1123,6 +1162,36 @@ mod tests {
         })
         .unwrap();
         wait_until(cx, "the text", || terminal.screen_text().contains("ñandú"));
+    }
+
+    #[gpui_kit::test]
+    fn a_program_that_captures_the_mouse_keeps_plain_clicks_and_ctrl_click_opens_the_link(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, terminal) = show(
+            cx,
+            "printf '\\033[?1000h\\033[?1006hSee https://one.example '; read hold",
+        );
+        wait_until(cx, "the link", || {
+            terminal.screen_text().contains("https://one.example")
+        });
+        let metrics = cx.update(|cx| view.read(cx).metrics.get());
+        let at = Point {
+            x: metrics.origin.x + metrics.cell.width * 10.5,
+            y: metrics.origin.y + metrics.cell.height * 0.5,
+        };
+        let window = cx.windows()[0];
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        visual.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        drop(visual);
+        assert_eq!(cx.opened_url(), None, "the click belongs to the program");
+        assert_eq!(cx.update(|cx| view.read(cx).link_prompt.clone()), None);
+
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.simulate_mouse_down(at, MouseButton::Left, Modifiers::secondary_key());
+        visual.simulate_mouse_up(at, MouseButton::Left, Modifiers::secondary_key());
+        assert_eq!(cx.opened_url().as_deref(), Some("https://one.example"));
     }
 
     #[gpui_kit::test]

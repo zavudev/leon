@@ -672,7 +672,7 @@ impl Shell {
 
     /// The activity a row's dot shows, for the rows that have one.
     #[cfg(test)]
-    #[cfg_attr(not(unix), allow(dead_code))] // used by the Unix-only tests
+    #[cfg_attr(not(leon_posix_tests), allow(dead_code))] // used by the Unix-only tests
     pub(super) fn row_activity(&self, row: &Row) -> Option<Activity> {
         match &row.kind {
             Kind::Worktree { worktree, .. } => Some(self.worktree_activity(&worktree.id)),

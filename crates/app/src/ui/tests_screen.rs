@@ -440,7 +440,16 @@ fn the_screen_is_the_same_set_of_options_as_the_schema(cx: &mut TestAppContext) 
     let dir = tempfile::tempdir().unwrap();
     let h = window(cx, &dir);
     open_screen(&h, cx);
-    for def in schema::SETTINGS.iter().filter(|d| d.platform.here()) {
+    // The agents that are not installed here are folded into one line until it
+    // is chosen; the user's own list is drawn by its own rows.
+    cx.update(|cx| {
+        h.shell
+            .update(cx, |shell, _| shell.settings_ui.agents_expanded = true)
+    });
+    for def in schema::settings()
+        .iter()
+        .filter(|d| d.platform.here() && d.key != "custom_agents")
+    {
         section(&h, def.section, cx);
         assert!(
             h.shows_dynamic(format!("settings-row-{}", def.key), cx),
@@ -580,4 +589,44 @@ fn the_about_button_shows_the_about_panel_and_the_folder_buttons_reveal(cx: &mut
     go_to(&h, "about", cx);
     h.press("enter", cx);
     assert_eq!(h.shell(cx, |s| s.overlay), Overlay::About);
+}
+
+#[gpui_kit::test]
+fn the_agents_section_folds_what_is_not_installed_and_adds_your_own(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let h = window(cx, &dir);
+    open_screen(&h, cx);
+    section(&h, Section::Agents, cx);
+    let (folded, setting_rows, has_add) = h.shell(cx, |s| {
+        let list = s.settings_entries();
+        let more = list.iter().find_map(|e| match e {
+            Entry::MoreAgents { count, expanded } => Some((*count, *expanded)),
+            _ => None,
+        });
+        (
+            more,
+            list.iter()
+                .filter(|e| matches!(e, Entry::Setting(_)))
+                .count(),
+            list.contains(&Entry::AddAgent),
+        )
+    });
+    let (count, expanded) = folded.expect("the agents that are not installed are folded");
+    assert!(count > 20 && !expanded, "{count}");
+    assert!(has_add, "the button that adds an agent is there");
+    assert!(
+        setting_rows < 40,
+        "the screen is not 35 agents tall: {setting_rows} settings"
+    );
+    cx.update(|cx| {
+        h.shell
+            .update(cx, |shell, _| shell.settings_ui.agents_expanded = true)
+    });
+    let unfolded = h.shell(cx, |s| {
+        s.settings_entries()
+            .iter()
+            .filter(|e| matches!(e, Entry::Setting(_)))
+            .count()
+    });
+    assert!(unfolded > setting_rows + 60, "{unfolded} vs {setting_rows}");
 }

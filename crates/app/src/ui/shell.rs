@@ -48,7 +48,9 @@ use gpui_kit::{
     ListState, MouseButton, MouseDownEvent, PathPromptOptions, ScrollHandle, ScrollStrategy, Size,
     Stateful, Subscription, Task, UniformListScrollHandle, Window,
 };
-use leon_core::{MachineId, Message, ProjectId, Result as StoreResult, Session, WorktreeId};
+use leon_core::{
+    AgentId, MachineId, MachineKind, Message, ProjectId, Result as StoreResult, Session, WorktreeId,
+};
 use leon_term::{Backend, Pty};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -102,6 +104,12 @@ pub enum Overlay {
     Pair,
     /// "Share this machine".
     Share,
+    /// The release notes of the version on offer.
+    Notes,
+    /// "Why is a session missing?": the history report.
+    History,
+    /// "Restore N sessions from last time?" and what could not be restored.
+    Restore,
 }
 
 /// What the folder picker answered.
@@ -120,6 +128,9 @@ pub type Reveal = Rc<dyn Fn(&mut App, &std::path::Path)>;
 
 /// Brings an application forward, given the path of its bundle.
 pub type RevealApp = Rc<dyn Fn(&mut App, &str)>;
+
+/// Opens an address in the browser.
+pub type OpenUrl = Rc<dyn Fn(&mut App, &str)>;
 
 /// Shows the folder picker and says what was chosen.
 pub type PickFolder = Rc<dyn Fn(&mut App) -> Task<Picked>>;
@@ -174,6 +185,18 @@ pub struct Options {
     pub notify: notify::Notify,
     /// How long a banner stays on screen.
     pub banner_duration: Duration,
+    /// How long a change of the open terminals waits before it is written.
+    pub save_debounce: Duration,
+    /// How long a request for an incremental history import waits, so a
+    /// burst of them is one import.
+    pub import_debounce: Duration,
+    /// How often history is imported on a timer; zero is never.
+    pub import_interval: Duration,
+    /// How long a quit waits after typing an agent's exit line before it sends
+    /// SIGTERM to what still runs.
+    pub quit_gesture_wait: Duration,
+    /// The longest a quit waits for agents to end by themselves.
+    pub quit_grace: Duration,
     /// How an image file is picked on this computer, for a project's logo.
     pub pick_image: PickFolder,
     /// Where a file is saved: the system's save dialog.
@@ -203,6 +226,13 @@ pub struct Options {
     /// Connections to other computers and sharing this one; absent in tests
     /// that do not need them.
     pub remote: Option<Arc<crate::remote::Remote>>,
+    /// The updater of this install; absent in tests that do not need it.
+    pub updates: Option<Arc<crate::updates::Service>>,
+    /// Whether the first check and the later ones run on a timer. Tests turn
+    /// it off.
+    pub update_timer: bool,
+    /// Opens an address in the browser.
+    pub open_url: OpenUrl,
 }
 
 /// A `~/.ssh` that is not there: the home folder is unknown.
@@ -244,6 +274,11 @@ impl Default for Options {
             error_flash: Duration::from_secs(4),
             notify: Rc::new(notify::system),
             banner_duration: Duration::from_secs(8),
+            save_debounce: Duration::from_millis(500),
+            import_debounce: Duration::from_secs(2),
+            import_interval: Duration::from_secs(60),
+            quit_gesture_wait: Duration::from_millis(1_200),
+            quit_grace: Duration::from_millis(2_500),
             pick_image: super::projects::default_image_picker(),
             save_file: Rc::new(super::terminal_tools::system_save_dialog),
             read_clipboard: Rc::new(|cx| cx.read_from_clipboard()),
@@ -258,10 +293,13 @@ impl Default for Options {
                 None => Arc::new(NoSshDir),
             },
             remote: None,
+            updates: None,
+            update_timer: true,
+            open_url: Rc::new(|cx, url| cx.open_url(url)),
             reveal_app: Rc::new(|_, bundle| {
                 // `open` on a running application brings it forward.
                 #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("open").arg(bundle).spawn();
+                let _ = leon_remote::spawn::std_child("open").arg(bundle).spawn();
                 #[cfg(not(target_os = "macos"))]
                 let _ = bundle;
             }),
@@ -378,6 +416,8 @@ pub struct Shell {
     pub(super) pair_ui: super::pair::PairUi,
     /// "Share this machine".
     pub(super) share_ui: super::share::ShareUi,
+    /// Updates: what the window knows of them.
+    pub(super) updates: super::updates_view::UpdateUi,
     /// The sidebar's filter field, the text it holds, and what that leaves of
     /// the tree (`None` while it is empty).
     pub(super) filter_input: Entity<InputState>,
@@ -387,6 +427,14 @@ pub struct Shell {
     pub(super) labels: std::collections::HashMap<ProjectId, String>,
     /// The project logos read from the store.
     pub(super) logos: Logos,
+    /// The scroll of the history report.
+    pub(super) history_scroll: ScrollHandle,
+    /// What is remembered and offered back (see `restore_view.rs`).
+    pub(super) restore: super::restore_view::RestoreUi,
+    /// Prompt history imports (see `history_sync.rs`).
+    pub(super) sync: super::history_sync::SyncUi,
+    /// Closing sessions gently on the way out (see `quit_gently.rs`).
+    pub(super) closing: super::quit_gently::Closing,
     /// Watches the terminals' activity while any is live.
     pub(super) ticker: Option<Task<()>>,
     /// The notifications shown for what sessions just did, oldest first.
@@ -514,7 +562,11 @@ impl Shell {
             cx.observe_window_activation(window, |this, window, cx| {
                 this.window_active = window.is_window_active();
                 if window.is_window_active() {
+                    this.request_import(cx);
                     this.scan_elsewhere_now(true, cx);
+                    // Back in front: a reading older than the interval is
+                    // made once.
+                    this.usage_tick(cx);
                 }
                 cx.notify();
             }),
@@ -555,7 +607,13 @@ impl Shell {
         let engine_watcher = cx.spawn(async move |this, cx| {
             use tokio::sync::broadcast::error::RecvError;
             while !matches!(events.recv().await, Err(RecvError::Closed)) {
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                if this
+                    .update(cx, |this, cx| {
+                        this.learn_session_ids(cx);
+                        cx.notify()
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -594,11 +652,16 @@ impl Shell {
             usage: super::usage_view::UsageUi::default(),
             pair_ui,
             share_ui: super::share::ShareUi::default(),
+            updates: super::updates_view::UpdateUi::default(),
             filter_input,
             filter_query: String::new(),
             filter: None,
             labels,
             logos: Logos::default(),
+            history_scroll: ScrollHandle::new(),
+            restore: Default::default(),
+            sync: Default::default(),
+            closing: Default::default(),
             ticker: None,
             banners: Vec::new(),
             banner_ticker: None,
@@ -632,6 +695,9 @@ impl Shell {
         shell.watch_elsewhere(window, cx);
         shell.usage_reload();
         shell.watch_usage(window, cx);
+        shell.watch_updates(window, cx);
+        shell.begin_session_restore(window, cx);
+        shell.watch_history(window, cx);
         // Values of settings.json that could not be used were read as defaults.
         let problems = settings::take_problems(cx);
         shell.report_problems(&problems);
@@ -775,6 +841,8 @@ impl Shell {
                 self.fill_palette(cx);
             }
         }
+        // A session that was just imported may be the id a terminal waits for.
+        self.learn_session_ids(cx);
         cx.notify();
     }
 
@@ -814,6 +882,48 @@ impl Shell {
         self.cursor = tree::follow(&self.rows, key.as_deref(), self.cursor.unwrap_or(0));
     }
 
+    /// The agents each machine has: this computer's by looking for their
+    /// programs, an SSH or relay machine's by its last probe. A machine that
+    /// has not been probed is absent (nothing is known of it).
+    pub(super) fn installed_agents(&self) -> Vec<(MachineId, Vec<AgentId>)> {
+        let mut out = Vec::new();
+        for machine in &self.snapshot.machines {
+            let found: Option<Vec<AgentId>> = if machine.kind == MachineKind::Local {
+                Some(
+                    leon_core::agent::all()
+                        .into_iter()
+                        .filter(|spec| {
+                            let names: Vec<&str> = if spec.detect.is_empty() {
+                                vec![spec.command.as_str()]
+                            } else {
+                                spec.detect.iter().map(String::as_str).collect()
+                            };
+                            names
+                                .iter()
+                                .any(|name| self.options.system.find_program(name).is_some())
+                        })
+                        .map(|spec| spec.id)
+                        .collect(),
+                )
+            } else {
+                match self.engine.machine_state(&machine.id) {
+                    crate::engine::MachineState::Online(Some(report)) => Some(
+                        leon_core::agent::all()
+                            .into_iter()
+                            .filter(|spec| crate::launch::probed(&report, spec).is_some())
+                            .map(|spec| spec.id)
+                            .collect(),
+                    ),
+                    _ => None,
+                }
+            };
+            if let Some(found) = found {
+                out.push((machine.id.clone(), found));
+            }
+        }
+        out
+    }
+
     /// The machines, projects and folders, and where the keyboard is, for the
     /// palette's questions.
     pub(super) fn world(&self, cx: &Context<Self>) -> World {
@@ -828,6 +938,8 @@ impl Shell {
             chosen.interface_scale,
         )
         .with_prefs(Self::step_prefs(cx))
+        .with_update_ready(self.ready_update_version())
+        .with_installed(self.installed_agents())
         .with_repositories(
             self.connect_ui
                 .repos
@@ -1485,6 +1597,9 @@ impl Shell {
         if self.overlay == Overlay::Connect && self.connect_key(stroke, window, cx) {
             return true;
         }
+        if self.overlay == Overlay::Restore && self.restore_key(stroke, window, cx) {
+            return true;
+        }
         if self.overlay == Overlay::Usage && self.usage_key(stroke, window, cx) {
             return true;
         }
@@ -1622,6 +1737,8 @@ impl Shell {
             C::PasteImage => self.paste_terminal(super::paste::How::Image, cx),
             C::Copy | C::ScrollPageUp | C::ScrollPageDown => self.terminal_action(command, cx),
             C::NewSession
+            | C::AddAgent
+            | C::RemoveAgent
             | C::CloseSession
             | C::NewWorktree
             | C::AddProject
@@ -1649,6 +1766,8 @@ impl Shell {
             C::Settings => self.open_settings(window, cx),
             C::ShowUsage => self.toggle_usage(window, cx),
             C::RefreshUsage => self.refresh_usage(cx),
+            C::WhyMissing => self.open_history_report(window, cx),
+            C::RestoreSessions => self.restore_last_sessions(window, cx),
             C::Refresh => self.engine.submit(crate::engine::Op::Refresh),
             C::ProbeMachine => {
                 let machine = self.current_machine();
@@ -1686,6 +1805,11 @@ impl Shell {
                 self.overlay = Overlay::About;
                 self.focus.focus(window, cx);
             }
+            C::CheckForUpdates => self.check_for_updates(cx),
+            C::RestartToUpdate => self.restart_to_update(window, cx),
+            C::ShowReleaseNotes => self.show_release_notes(window, cx),
+            C::SkipVersion => self.skip_version(cx),
+            C::OpenDownloadPage => self.open_download_page(cx),
             C::NewThemeFromCurrent => self.begin_flow(command, window, cx),
             C::ExportTheme => self.export_theme(cx),
             C::OpenThemesFolder => self.open_themes_folder(cx),
@@ -1723,6 +1847,9 @@ impl Shell {
                 Overlay::Shortcuts
                 | Overlay::Menu
                 | Overlay::About
+                | Overlay::Notes
+                | Overlay::History
+                | Overlay::Restore
                 | Overlay::Problems
                 | Overlay::Connect
                 | Overlay::Usage
@@ -1759,7 +1886,12 @@ impl Shell {
             Overlay::Connect => self.close_connect(window, cx),
             Overlay::Pair => self.close_pair(window, cx),
             Overlay::Share => self.close_share(window, cx),
-            Overlay::About | Overlay::Problems | Overlay::Usage => {
+            Overlay::About
+            | Overlay::Notes
+            | Overlay::History
+            | Overlay::Restore
+            | Overlay::Problems
+            | Overlay::Usage => {
                 self.overlay = Overlay::None;
                 self.focus.focus(window, cx);
             }
@@ -2134,8 +2266,10 @@ impl Shell {
     /// The window is being closed: it may be, unless a program is running.
     fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !self.quit_asks(cx) {
-            self.flush(cx);
-            return true;
+            self.install_on_quit(cx);
+            // Agents are given their chance to save; the window closes by
+            // itself when they are done, within the grace.
+            return self.begin_quit(cx);
         }
         self.begin_flow(Command::Quit, window, cx);
         false
@@ -2145,8 +2279,18 @@ impl Shell {
     /// programs keep running there), saves what is kept, and ends the
     /// application.
     pub(super) fn quit_now(&mut self, cx: &mut Context<Self>) {
-        self.flush(cx);
-        (self.options.quit)(cx);
+        // A ready update is put in place on the way out when the settings
+        // say so and nothing is running: the next start is the new version.
+        self.install_on_quit(cx);
+        self.quit_now_without_update(cx);
+    }
+
+    /// [`Shell::quit_now`] without looking at updates: the restart that has
+    /// just installed one ends here.
+    pub(super) fn quit_now_without_update(&mut self, cx: &mut Context<Self>) {
+        if self.begin_quit(cx) {
+            (self.options.quit)(cx);
+        }
     }
 
     /// What must not be lost when the application ends: the terminals are hung
@@ -2154,6 +2298,12 @@ impl Shell {
     /// beside the settings is written. The settings themselves are written at
     /// every change.
     pub(super) fn flush(&mut self, cx: &mut Context<Self>) {
+        // Before anything is hung up: what is open now, marked as ended
+        // normally (a gentle quit has written it already, before the agents
+        // ended).
+        if !self.closing.quitting {
+            self.remember_clean_shutdown(cx);
+        }
         for id in self.live.ids() {
             if let Some(session) = self.live.get(id) {
                 let terminal = session.view.read(cx).terminal();
@@ -2375,6 +2525,9 @@ impl Shell {
             Overlay::Usage => self.render_usage(colours, cx).into_any_element(),
             Overlay::Pair => self.render_pair(colours, cx).into_any_element(),
             Overlay::Share => self.render_share(colours, cx).into_any_element(),
+            Overlay::Notes => self.render_notes(colours, cx).into_any_element(),
+            Overlay::History => self.render_history_report(colours, cx).into_any_element(),
+            Overlay::Restore => self.render_restore(colours, cx).into_any_element(),
         };
         let top = match self.overlay {
             Overlay::Palette => self.palette_top(),
@@ -2412,6 +2565,8 @@ impl Render for Shell {
             self.menu_state = available;
             crate::menus::refresh(available, cx);
         }
+        // What is open is remembered after every change.
+        self.watch_workspace(cx);
         // Terminals wear the theme and the interface size in use.
         self.sync_settings(cx);
         let (terminal_theme, terminal_font) = (colours.terminal, Self::terminal_font(cx));

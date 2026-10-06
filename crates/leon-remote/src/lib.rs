@@ -45,8 +45,11 @@ pub use agent::{agent_launch, session_command};
 pub use command::{interactive_on, remote_shell_command, run_on, CommandSpec, SshOptions};
 pub use diagnosis::{classify, Diagnosis, DiagnosisKind, Stage};
 pub use git::{parse_worktree_list, Git, GitError, GitWorktree};
-pub use probe::{parse_probe, probe, probe_command, ProbeError, ProbeReport, RemoteOs};
+pub use probe::{
+    catalogue_tools, parse_probe, probe, probe_command, probe_command_for, probe_script,
+    ProbeError, ProbeReport, RemoteOs, MAX_TOOLS,
+};
 pub use quote::{sh_join, sh_quote};
 pub use relay::{RelayHub, RoutingRunner};
 pub use runner::{Output, ProcessRunner, RunError, Runner, ScriptedRunner};
-pub use spawn::child;
+pub use spawn::{child, std_child};

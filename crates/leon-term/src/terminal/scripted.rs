@@ -28,6 +28,8 @@ struct Inner {
     handler: Mutex<Option<Handler>>,
     foreground: AtomicBool,
     hung_up: AtomicBool,
+    /// Whether the program in front of the shell was sent SIGTERM.
+    terminated: AtomicBool,
     /// Where a remote terminal's input, resizes and hang-up go.
     link: Mutex<Option<Arc<dyn RemoteLink>>>,
 }
@@ -166,6 +168,20 @@ impl Script {
         });
     }
 
+    /// Whether the program in front of the shell was asked to end with a
+    /// termination signal ([`Terminal::terminate_foreground`]).
+    pub fn was_terminated(&self) -> bool {
+        self.0.terminated.load(Ordering::Acquire)
+    }
+
+    pub(super) fn terminate(&self) -> bool {
+        if self.is_remote() || self.0.foreground.load(Ordering::Acquire) {
+            return false;
+        }
+        self.0.terminated.store(true, Ordering::Release);
+        true
+    }
+
     pub(super) fn shell_is_foreground(&self) -> bool {
         self.0.foreground.load(Ordering::Acquire)
     }
@@ -219,6 +235,7 @@ impl Terminal {
             handler: Mutex::new(None),
             foreground: AtomicBool::new(true),
             hung_up: AtomicBool::new(false),
+            terminated: AtomicBool::new(false),
             link: Mutex::new(None),
         }));
         let terminal = Self {

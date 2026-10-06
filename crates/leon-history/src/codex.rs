@@ -28,7 +28,7 @@
 //! * Unparseable lines, including a final line cut short, are counted and
 //!   skipped.
 
-use leon_core::{AgentKind, Role};
+use leon_core::{AgentId, Role};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use serde_json::Value;
@@ -71,7 +71,7 @@ struct Record {
 /// callers pass the id embedded in the file name. The id is the value
 /// `codex resume` accepts. Returns `None` when the file holds no messages.
 pub fn parse_session(fallback_id: &str, bytes: &[u8]) -> Option<ParsedSession> {
-    let mut session = SessionBuilder::new(AgentKind::Codex, fallback_id);
+    let mut session = SessionBuilder::new(AgentId::CODEX, fallback_id);
     let mut named = false;
 
     for raw in bytes.split(|byte| *byte == b'\n') {
@@ -244,7 +244,7 @@ mod tests {
         ]);
         let session = parse_session("from-file-name", &bytes).unwrap();
 
-        assert_eq!(session.agent, AgentKind::Codex);
+        assert_eq!(session.agent, AgentId::CODEX);
         assert_eq!(session.external_id, "codex-session-1");
         assert_eq!(session.cwd, "/srv/api");
         assert_eq!(session.model.as_deref(), Some("model-c"));

@@ -8,57 +8,141 @@
 //! * the credential is read at the moment of the call, kept in a
 //!   [`Secret`](crate::secret::Secret), and dropped with the request; it is
 //!   never stored, logged, shown or part of an error;
-//! * it is sent only to the vendor's own host, over HTTPS, by [`Http`]; a
-//!   request to any other host is refused before anything starts;
+//! * it is sent only to the vendor's own host, over HTTPS, by [`Http`]; every
+//!   host is named in [`ALLOWED_HOSTS`] and a request to any other is refused
+//!   before anything starts;
 //! * every call has a time limit, redirects are not followed, and a failure
 //!   backs off ([`Throttle`]);
+//! * a stored sign-in that has expired is reported, never refreshed: the
+//!   agent refreshes its own;
 //! * any failure is an explicit unknown ([`Reason`]), never a made-up number.
 //!
-//! [`CurlHttp`] sends the request with the system's `curl`, the header on
+//! [`CurlHttp`] sends the request with the system's `curl`, the headers on
 //! standard input so that the token never shows in a process list. Tests use
 //! [`ScriptedHttp`], and nothing in the test suite can reach a network.
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use leon_core::AgentKind;
+use leon_core::AgentId;
 
 use crate::model::{AgentUsage, Reason};
 use crate::secret::Secret;
-use crate::{claude, opencode};
+use crate::{claude, codex, cursor, grok, kimi, opencode, zcode};
 
 /// A boxed, sendable future.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// The hosts a credential may be sent to.
-pub const ALLOWED_HOSTS: [&str; 2] = [claude::HOST, opencode::HOST];
+/// The hosts a credential may be sent to: one or three per provider.
+pub const ALLOWED_HOSTS: [&str; 9] = [
+    claude::HOST,
+    opencode::HOST,
+    codex::BACKEND_HOST,
+    grok::HOST,
+    cursor::HOST,
+    kimi::HOST,
+    zcode::HOSTS[0],
+    zcode::HOSTS[1],
+    zcode::HOSTS[2],
+];
 
 /// How long one call may take.
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// What Leon calls itself to every vendor. It never imitates another client:
+/// the protocol headers a service needs (`anthropic-beta`, `OpenAI-Beta`, the
+/// account id) are sent, the identity is Leon's own.
+pub const USER_AGENT: &str = concat!("Leon/", env!("CARGO_PKG_VERSION"));
+
+/// The least time, in seconds, between two calls to the same vendor by the
+/// schedule, whatever the refresh setting says.
+pub const MIN_GAP: i64 = 60;
+
 /// The largest answer read.
 const MAX_BYTES: u64 = 1_000_000;
 
-/// Which network sources are switched on.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct NetworkPolicy {
-    /// Claude's usage endpoint.
-    pub claude: bool,
-    /// The opencode Go usage endpoint.
-    pub opencode: bool,
+/// The agents that have a usage source with a switch of its own in the
+/// settings: every built-in agent with a usage provider.
+pub fn switchable_agents() -> Vec<AgentId> {
+    leon_core::agent::builtin()
+        .iter()
+        .filter(|spec| spec.usage.is_some())
+        .map(|spec| spec.id)
+        .collect()
 }
 
-/// A request with a bearer credential.
+/// Which usage sources are switched on, by agent: the network sources, and
+/// the command-line one of Antigravity.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NetworkPolicy {
+    on: BTreeSet<AgentId>,
+}
+
+impl NetworkPolicy {
+    /// Everything off.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Everything on.
+    pub fn all() -> Self {
+        Self {
+            on: switchable_agents().into_iter().collect(),
+        }
+    }
+
+    /// Whether the source of `agent` is on.
+    pub fn allows(&self, agent: AgentId) -> bool {
+        self.on.contains(&agent)
+    }
+
+    /// Switches the source of `agent`.
+    pub fn set(&mut self, agent: AgentId, on: bool) {
+        if on {
+            self.on.insert(agent);
+        } else {
+            self.on.remove(&agent);
+        }
+    }
+
+    /// The same policy with the source of `agent` on.
+    pub fn with(mut self, agent: AgentId) -> Self {
+        self.on.insert(agent);
+        self
+    }
+
+    /// The agents whose source is on.
+    pub fn agents(&self) -> impl Iterator<Item = AgentId> + '_ {
+        self.on.iter().copied()
+    }
+}
+
+/// How a request proves who is asking.
+pub enum Auth<'a> {
+    /// `Authorization: Bearer <secret>`.
+    Bearer(&'a Secret),
+    /// A header whose whole value is the secret (a cookie, or the bare key
+    /// some services take as `Authorization`).
+    Header {
+        /// The header's name.
+        name: &'static str,
+        /// Its value.
+        value: &'a Secret,
+    },
+}
+
+/// A request with a credential.
 pub struct Request<'a> {
     /// The URL; its host must be in [`ALLOWED_HOSTS`].
     pub url: &'a str,
-    /// The credential, sent as `Authorization: Bearer`.
-    pub bearer: &'a Secret,
+    /// The credential.
+    pub auth: Auth<'a>,
     /// Other headers, which hold nothing secret.
-    pub headers: Vec<(&'static str, &'static str)>,
+    pub headers: Vec<(&'static str, String)>,
 }
 
 impl std::fmt::Debug for Request<'_> {
@@ -76,6 +160,9 @@ pub struct Response {
     pub status: u16,
     /// The body, as text.
     pub body: String,
+    /// The wait the vendor asked for with `Retry-After`, in seconds, when it
+    /// gave one as a number.
+    pub retry_after: Option<u32>,
 }
 
 /// Why nothing came back. It carries no text, so it cannot quote a request.
@@ -120,12 +207,13 @@ fn config_quote(value: &str) -> String {
 /// The `curl` configuration of a request, which goes to standard input.
 pub fn curl_config(request: &Request<'_>) -> String {
     let mut config = format!("url = {}\n", config_quote(request.url));
+    let (name, value) = match &request.auth {
+        Auth::Bearer(secret) => ("Authorization", format!("Bearer {}", secret.expose())),
+        Auth::Header { name, value } => (*name, value.expose().to_owned()),
+    };
     config.push_str(&format!(
         "header = {}\n",
-        config_quote(&format!(
-            "Authorization: Bearer {}",
-            request.bearer.expose()
-        ))
+        config_quote(&format!("{name}: {value}"))
     ));
     for (name, value) in &request.headers {
         config.push_str(&format!(
@@ -134,6 +222,35 @@ pub fn curl_config(request: &Request<'_>) -> String {
         ));
     }
     config
+}
+
+/// Reads what `curl --include --write-out '\n%{http_code}'` printed: the
+/// header block(s), the body and the status. `None` when there is no status.
+pub fn parse_curl_output(text: &str) -> Option<Response> {
+    let (rest, status) = text.rsplit_once('\n')?;
+    let status: u16 = status.trim().parse().ok().filter(|status| *status != 0)?;
+    let mut remaining = rest;
+    let mut retry_after = None;
+    // An interim `100 Continue` has a block of its own before the answer's.
+    while remaining.starts_with("HTTP/") {
+        let (head, body) = remaining
+            .split_once("\r\n\r\n")
+            .or_else(|| remaining.split_once("\n\n"))
+            .unwrap_or((remaining, ""));
+        for line in head.lines() {
+            if let Some((name, value)) = line.split_once(':') {
+                if name.trim().eq_ignore_ascii_case("retry-after") {
+                    retry_after = value.trim().parse().ok();
+                }
+            }
+        }
+        remaining = body;
+    }
+    Some(Response {
+        status,
+        body: remaining.to_owned(),
+        retry_after,
+    })
 }
 
 /// Calls with the system's `curl`.
@@ -149,10 +266,17 @@ impl Http for CurlHttp {
             }
             let mut command = leon_remote::spawn::child("curl");
             command
-                .args(["--silent", "--proto", "=https", "--max-redirs", "0"])
+                .args([
+                    "--silent",
+                    "--include",
+                    "--proto",
+                    "=https",
+                    "--max-redirs",
+                    "0",
+                ])
                 .args(["--max-time", &TIMEOUT.as_secs().to_string()])
                 .args(["--max-filesize", &MAX_BYTES.to_string()])
-                .args(["--user-agent", "Leon"])
+                .args(["--user-agent", USER_AGENT])
                 .args(["--write-out", "\n%{http_code}"])
                 .args(["--config", "-"])
                 .stdin(std::process::Stdio::piped())
@@ -172,15 +296,7 @@ impl Http for CurlHttp {
                     .map_err(|_| HttpError::Unreachable)?
                     .map_err(|_| HttpError::Unreachable)?;
             let text = String::from_utf8_lossy(&output.stdout).into_owned();
-            let (body, status) = text.rsplit_once('\n').ok_or(HttpError::Unreachable)?;
-            let status: u16 = status.trim().parse().map_err(|_| HttpError::Unreachable)?;
-            if status == 0 {
-                return Err(HttpError::Unreachable);
-            }
-            Ok(Response {
-                status,
-                body: body.to_owned(),
-            })
+            parse_curl_output(&text).ok_or(HttpError::Unreachable)
         })
     }
 }
@@ -190,6 +306,7 @@ impl Http for CurlHttp {
 pub struct ScriptedHttp {
     replies: Mutex<Vec<Result<Response, HttpError>>>,
     calls: Mutex<Vec<String>>,
+    headers: Mutex<Vec<Vec<(&'static str, String)>>>,
 }
 
 impl ScriptedHttp {
@@ -200,9 +317,15 @@ impl ScriptedHttp {
 
     /// Queues an answer.
     pub fn reply(self, status: u16, body: &str) -> Self {
+        self.reply_after(status, body, None)
+    }
+
+    /// Queues an answer that carries a `Retry-After`.
+    pub fn reply_after(self, status: u16, body: &str, retry_after: Option<u32>) -> Self {
         self.replies.lock().unwrap().push(Ok(Response {
             status,
             body: body.to_owned(),
+            retry_after,
         }));
         self
     }
@@ -217,12 +340,18 @@ impl ScriptedHttp {
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
+
+    /// The headers (never the credential) of each call so far.
+    pub fn headers(&self) -> Vec<Vec<(&'static str, String)>> {
+        self.headers.lock().unwrap().clone()
+    }
 }
 
 impl Http for ScriptedHttp {
     fn get<'a>(&'a self, request: &'a Request<'a>) -> BoxFuture<'a, Result<Response, HttpError>> {
         Box::pin(async move {
             self.calls.lock().unwrap().push(request.url.to_owned());
+            self.headers.lock().unwrap().push(request.headers.clone());
             let mut replies = self.replies.lock().unwrap();
             if replies.is_empty() {
                 Err(HttpError::Unreachable)
@@ -242,14 +371,76 @@ pub enum Read<T> {
     Missing,
     /// The store could not be read.
     Unavailable,
+    /// The system refused to hand it over (a keychain prompt that was denied
+    /// or dismissed).
+    Denied,
+    /// There is no usable credential, for a reason that is not "signed out":
+    /// the sign-in only the agent can renew, or an API-key login.
+    Not(Reason),
+}
+
+/// What `security find-generic-password` came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeychainOutcome {
+    /// It printed the item.
+    Found,
+    /// There is no such item.
+    NotFound,
+    /// Access was denied, or the permission prompt was dismissed.
+    Denied,
+    /// Anything else.
+    Other,
+}
+
+/// Classifies the end of `security find-generic-password`. The text it printed
+/// is looked at only to tell a refusal from another failure; nothing of it is
+/// kept.
+pub fn classify_security(code: Option<i32>, stderr: &str) -> KeychainOutcome {
+    match code {
+        Some(0) => return KeychainOutcome::Found,
+        Some(44) => return KeychainOutcome::NotFound,
+        Some(128 | 36 | 51) => return KeychainOutcome::Denied,
+        _ => {}
+    }
+    let text = stderr.to_ascii_lowercase();
+    if ["denied", "cancel", "not allowed", "interaction"]
+        .iter()
+        .any(|word| text.contains(word))
+    {
+        KeychainOutcome::Denied
+    } else {
+        KeychainOutcome::Other
+    }
 }
 
 /// Where the agents keep their credentials, read only at the moment of a call.
+/// The methods of the newer providers answer "not signed in" unless
+/// implemented, so a stand-in for tests names only what it needs.
 pub trait Credentials: Send + Sync {
     /// Claude Code's OAuth credential.
     fn claude(&self) -> Read<claude::Credential>;
     /// The opencode Go API key.
     fn opencode_go(&self) -> Read<Secret>;
+    /// Codex's ChatGPT sign-in.
+    fn codex(&self) -> Read<codex::Credential> {
+        Read::Missing
+    }
+    /// Grok's session, at the time `now` (Unix seconds).
+    fn grok(&self, _now: i64) -> Read<grok::Credential> {
+        Read::Missing
+    }
+    /// Cursor's session, at the time `now`.
+    fn cursor(&self, _now: i64) -> Read<cursor::Session> {
+        Read::Missing
+    }
+    /// Kimi Code's sign-in, at the time `now`.
+    fn kimi(&self, _now: i64) -> Read<kimi::Credential> {
+        Read::Missing
+    }
+    /// The ZCode plan's key and host.
+    fn zcode(&self) -> Read<zcode::Credential> {
+        Read::Missing
+    }
 }
 
 /// The credentials of this computer's user.
@@ -259,56 +450,274 @@ pub struct SystemCredentials {
     pub home: PathBuf,
 }
 
-impl Credentials for SystemCredentials {
-    fn claude(&self) -> Read<claude::Credential> {
-        #[cfg(target_os = "macos")]
-        {
-            // The keychain item the CLI itself writes. Standard error is
-            // dropped so that nothing the tool says is kept.
-            let output = std::process::Command::new("security")
-                .args([
-                    "find-generic-password",
-                    "-s",
-                    "Claude Code-credentials",
-                    "-w",
-                ])
-                .stdin(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .output();
-            if let Ok(output) = output {
-                if output.status.success() {
-                    if let Some(found) =
-                        claude::parse_credential(&String::from_utf8_lossy(&output.stdout))
-                    {
-                        return Read::Found(found);
-                    }
+/// The text of a file: `Missing` when there is none.
+fn read_file(path: &std::path::Path) -> Read<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Read::Found(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Read::Missing,
+        Err(_) => Read::Unavailable,
+    }
+}
+
+/// A directory named by an environment variable when it is set and not empty.
+fn env_dir(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Reads a file under a directory and parses it: signed out when the file is
+/// there but is not what the agent writes.
+fn parse_file<T>(path: PathBuf, parse: impl FnOnce(&str) -> Option<T>) -> Read<T> {
+    match read_file(&path) {
+        Read::Found(text) => parse(&text).map_or(Read::Missing, Read::Found),
+        Read::Missing => Read::Missing,
+        Read::Unavailable | Read::Denied => Read::Unavailable,
+        Read::Not(reason) => Read::Not(reason),
+    }
+}
+
+impl SystemCredentials {
+    /// The token `cursor-agent` keeps in the macOS keychain.
+    #[cfg(target_os = "macos")]
+    fn cursor_keychain(&self) -> Read<String> {
+        let output = leon_remote::spawn::std_child("security")
+            .args([
+                "find-generic-password",
+                "-s",
+                "cursor-access-token",
+                "-a",
+                "cursor-user",
+                "-w",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output();
+        match output {
+            Ok(output) => match classify_security(
+                output.status.code(),
+                &String::from_utf8_lossy(&output.stderr),
+            ) {
+                KeychainOutcome::Found => {
+                    Read::Found(String::from_utf8_lossy(&output.stdout).trim().to_owned())
                 }
-            }
-        }
-        let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.home.join(".claude"));
-        match std::fs::read_to_string(dir.join(".credentials.json")) {
-            Ok(text) => claude::parse_credential(&text).map_or(Read::Missing, Read::Found),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Read::Missing,
-            Err(_) => Read::Unavailable,
+                KeychainOutcome::Denied => Read::Denied,
+                KeychainOutcome::NotFound | KeychainOutcome::Other => Read::Missing,
+            },
+            Err(_) => Read::Missing,
         }
     }
 
-    fn opencode_go(&self) -> Read<Secret> {
-        let data = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.home.join(".local").join("share"));
-        match std::fs::read_to_string(data.join("opencode").join("auth.json")) {
-            Ok(text) => opencode::parse_key(&text).map_or(Read::Missing, Read::Found),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Read::Missing,
-            Err(_) => Read::Unavailable,
+    #[cfg(not(target_os = "macos"))]
+    fn cursor_keychain(&self) -> Read<String> {
+        Read::Missing
+    }
+
+    /// The Cursor IDE's global state database.
+    fn cursor_desktop_db(&self) -> PathBuf {
+        let root = if cfg!(target_os = "macos") {
+            self.home
+                .join("Library")
+                .join("Application Support")
+                .join("Cursor")
+        } else if cfg!(windows) {
+            env_dir("APPDATA")
+                .unwrap_or_else(|| self.home.join("AppData").join("Roaming"))
+                .join("Cursor")
+        } else {
+            env_dir("XDG_CONFIG_HOME")
+                .unwrap_or_else(|| self.home.join(".config"))
+                .join("Cursor")
+        };
+        root.join("User").join("globalStorage").join("state.vscdb")
+    }
+
+    /// The folder of `cursor-agent`'s own files.
+    fn cursor_cli_dir(&self) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            self.home.join(".cursor")
+        } else if cfg!(windows) {
+            env_dir("APPDATA")
+                .unwrap_or_else(|| self.home.join("AppData").join("Roaming"))
+                .join("Cursor")
+        } else {
+            env_dir("XDG_CONFIG_HOME")
+                .unwrap_or_else(|| self.home.join(".config"))
+                .join("cursor")
         }
     }
 }
 
+impl Credentials for SystemCredentials {
+    fn claude(&self) -> Read<claude::Credential> {
+        let config_dir = env_dir("CLAUDE_CONFIG_DIR");
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut denied = false;
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut refresh_only = false;
+        #[cfg(target_os = "macos")]
+        {
+            // The keychain item the CLI itself writes: scoped by the config
+            // folder when `CLAUDE_CONFIG_DIR` is set, then the shared one.
+            // The first read may make macOS ask the user for permission.
+            let mut services = Vec::new();
+            if let Some(dir) = &config_dir {
+                services.push(claude::scoped_service(&dir.to_string_lossy()));
+            }
+            services.push(claude::SERVICE.to_owned());
+            for service in services {
+                let output = leon_remote::spawn::std_child("security")
+                    .args(["find-generic-password", "-s", &service, "-w"])
+                    .stdin(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::piped())
+                    .output();
+                let Ok(output) = output else { continue };
+                match classify_security(
+                    output.status.code(),
+                    &String::from_utf8_lossy(&output.stderr),
+                ) {
+                    KeychainOutcome::Found => {
+                        let text = String::from_utf8_lossy(&output.stdout);
+                        if let Some(found) = claude::parse_credential(&text) {
+                            return Read::Found(found);
+                        }
+                        refresh_only |= claude::refresh_only(&text);
+                    }
+                    KeychainOutcome::Denied => denied = true,
+                    KeychainOutcome::NotFound | KeychainOutcome::Other => {}
+                }
+            }
+        }
+        let dir = config_dir.unwrap_or_else(|| self.home.join(".claude"));
+        let file = read_file(&dir.join(".credentials.json"));
+        if let Read::Found(text) = &file {
+            if let Some(found) = claude::parse_credential(text) {
+                return Read::Found(found);
+            }
+            refresh_only |= claude::refresh_only(text);
+        }
+        if matches!(file, Read::Unavailable | Read::Denied) {
+            return Read::Unavailable;
+        }
+        if denied {
+            Read::Denied
+        } else if refresh_only {
+            Read::Not(Reason::SessionExpired)
+        } else if env_dir("ANTHROPIC_API_KEY").is_some() {
+            // No subscription sign-in and an API key in the environment: the
+            // account is billed by use and has no usage limits to read.
+            Read::Not(Reason::ApiKeyBilling)
+        } else {
+            Read::Missing
+        }
+    }
+
+    fn opencode_go(&self) -> Read<Secret> {
+        let data =
+            env_dir("XDG_DATA_HOME").unwrap_or_else(|| self.home.join(".local").join("share"));
+        let dir = data.join("opencode");
+        // Orca's order: the inline content, `auth.json`, the OpenCode 2
+        // credential database, then the shared `OPENCODE_API_KEY`.
+        if let Some(key) = std::env::var("OPENCODE_AUTH_CONTENT")
+            .ok()
+            .and_then(|text| opencode::parse_key(&text))
+        {
+            return Read::Found(key);
+        }
+        let file = parse_file(dir.join("auth.json"), opencode::parse_key);
+        if matches!(file, Read::Found(_)) {
+            return file;
+        }
+        if let Some(key) =
+            opencode::database_key(&dir, std::env::var("OPENCODE_DB").ok().as_deref())
+        {
+            return Read::Found(key);
+        }
+        match std::env::var("OPENCODE_API_KEY")
+            .ok()
+            .map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty())
+        {
+            Some(key) => Read::Found(Secret::new(&key)),
+            None => file,
+        }
+    }
+
+    fn codex(&self) -> Read<codex::Credential> {
+        let dir = env_dir("CODEX_HOME").unwrap_or_else(|| self.home.join(".codex"));
+        let path = dir.join("auth.json");
+        match read_file(&path) {
+            Read::Found(text) => match codex::parse_credential(&text) {
+                Some(found) => Read::Found(found),
+                None if codex::is_api_key_login(&text) => Read::Not(Reason::ApiKeyBilling),
+                None => Read::Missing,
+            },
+            Read::Missing => Read::Missing,
+            Read::Unavailable | Read::Denied => Read::Unavailable,
+            Read::Not(reason) => Read::Not(reason),
+        }
+    }
+
+    fn grok(&self, now: i64) -> Read<grok::Credential> {
+        let dir = env_dir("GROK_HOME").unwrap_or_else(|| self.home.join(".grok"));
+        parse_file(dir.join("auth.json"), |text| {
+            grok::parse_credential(text, now)
+        })
+    }
+
+    fn cursor(&self, now: i64) -> Read<cursor::Session> {
+        // The keychain first, then the older file; a live session wins over
+        // an expired one, wherever it is.
+        let mut expired = None;
+        let mut denied = false;
+        let tokens = [
+            self.cursor_keychain(),
+            parse_file(
+                self.cursor_cli_dir().join("auth.json"),
+                cursor::parse_auth_file,
+            ),
+            // The Cursor IDE's own session, read only, when the CLI has none
+            // that is live.
+            cursor::desktop_token(&self.cursor_desktop_db()).map_or(Read::Missing, Read::Found),
+        ];
+        for token in tokens {
+            match token {
+                Read::Found(token) => {
+                    if let Some(session) = cursor::parse_session(&token, now) {
+                        if !session.expired {
+                            return Read::Found(session);
+                        }
+                        expired.get_or_insert(session);
+                    }
+                }
+                Read::Denied => denied = true,
+                Read::Missing | Read::Unavailable | Read::Not(_) => {}
+            }
+        }
+        match expired {
+            Some(session) => Read::Found(session),
+            None if denied => Read::Denied,
+            None => Read::Missing,
+        }
+    }
+
+    fn kimi(&self, now: i64) -> Read<kimi::Credential> {
+        let dir = env_dir("KIMI_CODE_HOME").unwrap_or_else(|| self.home.join(".kimi-code"));
+        parse_file(dir.join("credentials").join("kimi-code.json"), |text| {
+            kimi::parse_credential(text, now)
+        })
+    }
+
+    fn zcode(&self) -> Read<zcode::Credential> {
+        parse_file(
+            self.home.join(".zcode").join("cli").join("config.json"),
+            zcode::parse_credential,
+        )
+    }
+}
+
 /// Slows a source that keeps failing: after each failure the wait doubles, up
-/// to a limit; a success clears it.
+/// to a limit; a success clears it. A vendor's `Retry-After` is honoured.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Throttle {
     failures: u32,
@@ -318,99 +727,462 @@ pub struct Throttle {
 impl Throttle {
     /// The first wait after a failure, in seconds.
     pub const FIRST: i64 = 60;
-    /// The longest wait, in seconds.
+    /// The longest wait, in seconds, when the vendor named none.
     pub const LONGEST: i64 = 30 * 60;
+    /// The longest `Retry-After` honoured, in seconds.
+    pub const LONGEST_RETRY_AFTER: i64 = 60 * 60;
+    /// The least a source rests after the vendor said 429, in seconds,
+    /// whatever `Retry-After` says (or does not).
+    pub const RATE_LIMIT_MIN: i64 = 5 * 60;
 
     /// Whether a call may be made at `now`.
     pub fn allows(&self, now: i64) -> bool {
         now >= self.not_before
     }
 
+    /// When the next call may be made, after a failure.
+    pub fn retry_at(&self) -> Option<i64> {
+        (self.failures > 0).then_some(self.not_before)
+    }
+
     /// Notes a call's outcome.
     pub fn record(&mut self, ok: bool, now: i64) {
+        self.record_with(ok, now, None, 0);
+    }
+
+    /// Notes a call's outcome with the wait the vendor asked for and a jitter
+    /// of `jitter_percent` (0 to 10) of the wait, so that many installs do not
+    /// call at the same moment.
+    pub fn record_with(
+        &mut self,
+        ok: bool,
+        now: i64,
+        retry_after: Option<i64>,
+        jitter_percent: i64,
+    ) {
         if ok {
             *self = Self::default();
-        } else {
-            self.failures = self.failures.saturating_add(1);
-            let wait = (Self::FIRST << (self.failures - 1).min(10)).min(Self::LONGEST);
-            self.not_before = now + wait;
+            return;
         }
+        self.failures = self.failures.saturating_add(1);
+        let backoff = (Self::FIRST << (self.failures - 1).min(10)).min(Self::LONGEST);
+        let asked = retry_after.unwrap_or(0).clamp(0, Self::LONGEST_RETRY_AFTER);
+        let wait = backoff.max(asked);
+        self.not_before = now + wait + wait * jitter_percent.clamp(0, 10) / 100;
+    }
+
+    /// Forgets a back-off: the user asked again, or the source was switched.
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// What a 401 or a 403 means for `agent`: the stored sign-in is stale (the
+/// agent renews its own), lacks a permission, or, for a key, was rejected or
+/// has no subscription behind it.
+fn auth_reason(agent: AgentId, status: u16, body: &str) -> Reason {
+    match agent {
+        AgentId::CLAUDE if status == 403 && claude::lacks_scope(body) => Reason::MissingScope,
+        AgentId::OPENCODE => opencode::auth_reason(status, body),
+        AgentId::ZCODE => Reason::KeyRejected,
+        _ => Reason::SessionExpired,
+    }
+}
+
+/// What a source answered that is not a success.
+fn failure(agent: AgentId, machine: &str, answer: Result<Response, HttpError>) -> AgentUsage {
+    let reason = match answer {
+        Ok(response) if matches!(response.status, 401 | 403) => {
+            auth_reason(agent, response.status, &response.body)
+        }
+        Ok(response) if response.status == 429 => {
+            Reason::RateLimited(response.retry_after.unwrap_or(0))
+        }
+        // The opencode console answers an entitlement refusal with 402 too.
+        Ok(response) if agent == AgentId::OPENCODE && response.status == 402 => {
+            opencode::auth_reason(403, &response.body)
+        }
+        Ok(response) => Reason::VendorError(response.status),
+        Err(HttpError::Unreachable) => Reason::Offline,
+        Err(HttpError::Refused) => Reason::Unreachable,
+    };
+    AgentUsage::unknown(agent, machine, reason)
+}
+
+/// The credential, or the reading that says why there is none.
+#[allow(clippy::result_large_err)] // the reading is what the caller returns as it is
+fn credential<T>(
+    read: Read<T>,
+    missing: Reason,
+    agent: AgentId,
+    machine: &str,
+) -> Result<T, AgentUsage> {
+    let reason = match read {
+        Read::Found(found) => return Ok(found),
+        Read::Missing => missing,
+        Read::Unavailable => Reason::Unreachable,
+        Read::Denied => Reason::KeychainDenied,
+        Read::Not(reason) => reason,
+    };
+    Err(AgentUsage::unknown(agent, machine, reason))
+}
+
+/// The answer of a call when it is a success (HTTP 200), else the reading that
+/// says what went wrong.
+#[allow(clippy::result_large_err)] // the reading is what the caller returns as it is
+async fn call(
+    http: &dyn Http,
+    request: &Request<'_>,
+    agent: AgentId,
+    machine: &str,
+) -> Result<String, AgentUsage> {
+    match http.get(request).await {
+        Ok(response) if response.status == 200 => Ok(response.body),
+        other => Err(failure(agent, machine, other)),
     }
 }
 
 /// Claude's usage, if its source is on.
 pub async fn claude_usage(
-    policy: NetworkPolicy,
+    policy: &NetworkPolicy,
     credentials: &dyn Credentials,
     http: &dyn Http,
     machine: &str,
     now: i64,
 ) -> AgentUsage {
-    if !policy.claude {
-        return AgentUsage::unknown(AgentKind::Claude, machine, Reason::SourceDisabled);
+    let agent = AgentId::CLAUDE;
+    if !policy.allows(agent) {
+        return AgentUsage::unknown(agent, machine, Reason::SourceDisabled);
     }
-    let credential = match credentials.claude() {
-        Read::Found(credential) => credential,
-        Read::Missing => {
-            return AgentUsage::unknown(AgentKind::Claude, machine, Reason::NotSignedIn)
-        }
-        Read::Unavailable => {
-            return AgentUsage::unknown(AgentKind::Claude, machine, Reason::Unreachable)
-        }
+    let credential = match credential(credentials.claude(), Reason::NotSignedIn, agent, machine) {
+        Ok(credential) => credential,
+        Err(usage) => return usage,
     };
     let request = Request {
         url: claude::URL,
-        bearer: &credential.token,
+        auth: Auth::Bearer(&credential.token),
         headers: vec![
-            ("anthropic-beta", "oauth-2025-04-20"),
-            ("Accept", "application/json"),
+            ("anthropic-beta", "oauth-2025-04-20".to_owned()),
+            ("Accept", "application/json".to_owned()),
         ],
     };
-    match http.get(&request).await {
-        Ok(response) if response.status == 200 => {
-            claude::parse_usage(&response.body, machine, credential.plan, now)
-        }
-        Ok(response) if matches!(response.status, 401 | 403) => {
-            AgentUsage::unknown(AgentKind::Claude, machine, Reason::NotSignedIn)
-        }
-        _ => AgentUsage::unknown(AgentKind::Claude, machine, Reason::Unreachable),
+    match call(http, &request, agent, machine).await {
+        Ok(body) => claude::parse_usage(&body, machine, credential.plan, now),
+        Err(usage) => usage,
     }
 }
 
 /// The opencode Go subscription's usage, if its source is on.
 pub async fn opencode_usage(
-    policy: NetworkPolicy,
+    policy: &NetworkPolicy,
     credentials: &dyn Credentials,
     http: &dyn Http,
     machine: &str,
     now: i64,
 ) -> AgentUsage {
-    if !policy.opencode {
-        return AgentUsage::unknown(AgentKind::Opencode, machine, Reason::SourceDisabled);
+    let agent = AgentId::OPENCODE;
+    if !policy.allows(agent) {
+        return AgentUsage::unknown(agent, machine, Reason::SourceDisabled);
     }
-    let key = match credentials.opencode_go() {
-        Read::Found(key) => key,
-        Read::Missing => {
-            return AgentUsage::unknown(AgentKind::Opencode, machine, Reason::NotSupported)
-        }
-        Read::Unavailable => {
-            return AgentUsage::unknown(AgentKind::Opencode, machine, Reason::Unreachable)
-        }
+    let key = match credential(
+        credentials.opencode_go(),
+        Reason::NotSupported,
+        agent,
+        machine,
+    ) {
+        Ok(key) => key,
+        Err(usage) => return usage,
     };
     let request = Request {
         url: opencode::URL,
-        bearer: &key,
-        headers: vec![("Accept", "application/json")],
+        auth: Auth::Bearer(&key),
+        headers: vec![("Accept", "application/json".to_owned())],
     };
-    match http.get(&request).await {
-        Ok(response) if response.status == 200 => {
-            opencode::parse_usage(&response.body, machine, now)
+    match call(http, &request, agent, machine).await {
+        // A key bounced to the console's sign-in page arrives as a 200 page.
+        Ok(body) if body.trim_start().starts_with('<') => {
+            AgentUsage::unknown(agent, machine, Reason::KeyRejected)
         }
-        Ok(response) if matches!(response.status, 401 | 403) => {
-            AgentUsage::unknown(AgentKind::Opencode, machine, Reason::NotSignedIn)
-        }
-        _ => AgentUsage::unknown(AgentKind::Opencode, machine, Reason::Unreachable),
+        Ok(body) => opencode::parse_usage(&body, machine, now),
+        Err(usage) => usage,
     }
+}
+
+/// Codex's limits from the backend its own usage screen reads: fresher than
+/// the session log when Codex has not run lately. It reads `auth.json` and
+/// makes one GET; it starts no session and writes nothing.
+pub async fn codex_usage(
+    policy: &NetworkPolicy,
+    credentials: &dyn Credentials,
+    http: &dyn Http,
+    machine: &str,
+    now: i64,
+) -> AgentUsage {
+    let agent = AgentId::CODEX;
+    if !policy.allows(agent) {
+        return AgentUsage::unknown(agent, machine, Reason::SourceDisabled);
+    }
+    let credential = match credential(credentials.codex(), Reason::NotSignedIn, agent, machine) {
+        Ok(credential) => credential,
+        Err(usage) => return usage,
+    };
+    let mut headers = vec![
+        ("Accept", "application/json".to_owned()),
+        ("OpenAI-Beta", "codex-1".to_owned()),
+    ];
+    if let Some(id) = &credential.account_id {
+        headers.push(("ChatGPT-Account-Id", id.clone()));
+    }
+    let request = Request {
+        url: codex::BACKEND_URL,
+        auth: Auth::Bearer(&credential.token),
+        headers,
+    };
+    match call(http, &request, agent, machine).await {
+        Ok(body) => codex::parse_backend(&body, machine, now),
+        Err(usage) => usage,
+    }
+}
+
+/// Grok's limits, if its source is on: the credits view of the billing
+/// endpoint, and the default view when only that one carries the budget.
+pub async fn grok_usage(
+    policy: &NetworkPolicy,
+    credentials: &dyn Credentials,
+    http: &dyn Http,
+    machine: &str,
+    now: i64,
+) -> AgentUsage {
+    let agent = AgentId::GROK;
+    if !policy.allows(agent) {
+        return AgentUsage::unknown(agent, machine, Reason::SourceDisabled);
+    }
+    let credential = match credential(credentials.grok(now), Reason::NotSignedIn, agent, machine) {
+        Ok(credential) => credential,
+        Err(usage) => return usage,
+    };
+    if credential.expired {
+        return AgentUsage::unknown(agent, machine, Reason::SessionExpired);
+    }
+    let get = |url: &'static str| {
+        let mut headers = vec![
+            (grok::AUTH_HEADER.0, grok::AUTH_HEADER.1.to_owned()),
+            ("Accept", "application/json".to_owned()),
+        ];
+        if let Some(id) = &credential.user_id {
+            headers.push(("x-userid", id.clone()));
+        }
+        (url, headers)
+    };
+    let (url, headers) = get(grok::CREDITS_URL);
+    let request = Request {
+        url,
+        auth: Auth::Bearer(&credential.token),
+        headers,
+    };
+    let body = match call(http, &request, agent, machine).await {
+        Ok(body) => body,
+        Err(usage) => return usage,
+    };
+    let Some(mut billing) = grok::parse_billing(&body) else {
+        return AgentUsage::unknown(agent, machine, Reason::NoData);
+    };
+    if billing.weekly.is_none() && billing.monthly.is_none() {
+        // Some unified-billing accounts carry the budget only in the default
+        // view.
+        let (url, headers) = get(grok::DEFAULT_URL);
+        let request = Request {
+            url,
+            auth: Auth::Bearer(&credential.token),
+            headers,
+        };
+        match call(http, &request, agent, machine).await {
+            Ok(body) => {
+                if let Some(second) = grok::parse_billing(&body) {
+                    billing.monthly = second.monthly;
+                    billing.tier = billing.tier.or(second.tier);
+                    billing.reports_amounts |= second.reports_amounts;
+                }
+            }
+            Err(usage) => return usage,
+        }
+    }
+    grok::reading(&billing, machine, now)
+}
+
+/// Cursor's limits, if its source is on: the usage summary and, for a plan
+/// that reports nothing there, the older request-quota endpoint.
+pub async fn cursor_usage(
+    policy: &NetworkPolicy,
+    credentials: &dyn Credentials,
+    http: &dyn Http,
+    machine: &str,
+    now: i64,
+) -> AgentUsage {
+    let agent = AgentId::CURSOR;
+    if !policy.allows(agent) {
+        return AgentUsage::unknown(agent, machine, Reason::SourceDisabled);
+    }
+    let session = match credential(credentials.cursor(now), Reason::NotSignedIn, agent, machine) {
+        Ok(session) => session,
+        Err(usage) => return usage,
+    };
+    if session.expired {
+        return AgentUsage::unknown(agent, machine, Reason::SessionExpired);
+    }
+    let headers = || {
+        vec![
+            ("Accept", "application/json".to_owned()),
+            ("Origin", "https://cursor.com".to_owned()),
+            ("Referer", "https://cursor.com/dashboard".to_owned()),
+        ]
+    };
+    let summary_request = Request {
+        url: cursor::SUMMARY_URL,
+        auth: Auth::Header {
+            name: "Cookie",
+            value: &session.cookie,
+        },
+        headers: headers(),
+    };
+    let answer = http.get(&summary_request).await;
+    // The dashboard answers 401 to a session it no longer knows.
+    if matches!(&answer, Ok(response) if response.status == 401) {
+        return AgentUsage::unknown(agent, machine, Reason::SessionExpired);
+    }
+    let body = match answer {
+        Ok(response) if response.status == 200 => response.body,
+        other => return failure(agent, machine, other),
+    };
+    let Some(summary) = cursor::parse_summary(&body) else {
+        return AgentUsage::unknown(agent, machine, Reason::ParseError);
+    };
+    if summary.unlimited || !summary.windows.is_empty() {
+        return cursor::reading(&summary, None, machine, now);
+    }
+    let url = format!(
+        "{}?user={}",
+        cursor::LEGACY_URL,
+        cursor::escape(&session.subject)
+    );
+    let legacy_request = Request {
+        url: &url,
+        auth: Auth::Header {
+            name: "Cookie",
+            value: &session.cookie,
+        },
+        headers: headers(),
+    };
+    match call(http, &legacy_request, agent, machine).await {
+        Ok(body) => cursor::reading(&summary, cursor::parse_legacy(&body), machine, now),
+        Err(usage) => usage,
+    }
+}
+
+/// Kimi Code's limits, if its source is on.
+pub async fn kimi_usage(
+    policy: &NetworkPolicy,
+    credentials: &dyn Credentials,
+    http: &dyn Http,
+    machine: &str,
+    now: i64,
+) -> AgentUsage {
+    let agent = AgentId::KIMI;
+    if !policy.allows(agent) {
+        return AgentUsage::unknown(agent, machine, Reason::SourceDisabled);
+    }
+    let credential = match credential(credentials.kimi(now), Reason::NotSignedIn, agent, machine) {
+        Ok(credential) => credential,
+        Err(usage) => return usage,
+    };
+    if credential.expired {
+        return AgentUsage::unknown(agent, machine, Reason::SessionExpired);
+    }
+    let request = Request {
+        url: kimi::URL,
+        auth: Auth::Bearer(&credential.token),
+        headers: vec![("Accept", "application/json".to_owned())],
+    };
+    match call(http, &request, agent, machine).await {
+        Ok(body) => kimi::parse_usage(&body, machine, now),
+        Err(usage) => usage,
+    }
+}
+
+/// The ZCode plan's quota, if its source is on.
+pub async fn zcode_usage(
+    policy: &NetworkPolicy,
+    credentials: &dyn Credentials,
+    http: &dyn Http,
+    machine: &str,
+    now: i64,
+) -> AgentUsage {
+    let agent = AgentId::ZCODE;
+    if !policy.allows(agent) {
+        return AgentUsage::unknown(agent, machine, Reason::SourceDisabled);
+    }
+    let credential = match credential(credentials.zcode(), Reason::NotSignedIn, agent, machine) {
+        Ok(credential) => credential,
+        Err(usage) => return usage,
+    };
+    let request = Request {
+        url: &credential.url,
+        auth: Auth::Header {
+            name: "Authorization",
+            value: &credential.key,
+        },
+        headers: vec![
+            ("Accept-Language", "en-US,en".to_owned()),
+            ("Content-Type", "application/json".to_owned()),
+        ],
+    };
+    match call(http, &request, agent, machine).await {
+        Ok(body) => zcode::parse_usage(&body, machine, now),
+        Err(usage) => usage,
+    }
+}
+
+/// The reading of agent `agent` from its network source: the switch, the
+/// credential, the call. Codex and Antigravity are not read here (see
+/// [`codex_usage`] and the collection's command for `agy`).
+pub async fn network_usage(
+    agent: AgentId,
+    policy: &NetworkPolicy,
+    credentials: &dyn Credentials,
+    http: &dyn Http,
+    machine: &str,
+    now: i64,
+) -> AgentUsage {
+    match agent {
+        AgentId::CLAUDE => claude_usage(policy, credentials, http, machine, now).await,
+        AgentId::OPENCODE => opencode_usage(policy, credentials, http, machine, now).await,
+        AgentId::CODEX => codex_usage(policy, credentials, http, machine, now).await,
+        AgentId::GROK => grok_usage(policy, credentials, http, machine, now).await,
+        AgentId::CURSOR => cursor_usage(policy, credentials, http, machine, now).await,
+        AgentId::KIMI => kimi_usage(policy, credentials, http, machine, now).await,
+        AgentId::ZCODE => zcode_usage(policy, credentials, http, machine, now).await,
+        other => AgentUsage::unknown(other, machine, Reason::NotSupported),
+    }
+}
+
+/// Whether `agent` has a source that is called over the network from this
+/// computer (and so reads a credential and needs the switch).
+pub fn has_network_source(agent: AgentId) -> bool {
+    matches!(
+        agent,
+        AgentId::CLAUDE
+            | AgentId::OPENCODE
+            | AgentId::CODEX
+            | AgentId::GROK
+            | AgentId::CURSOR
+            | AgentId::KIMI
+            | AgentId::ZCODE
+    )
+}
+
+/// Whether `agent` has a source that asks the agent's own command (`agy`).
+pub fn has_command_source(agent: AgentId) -> bool {
+    agent == AgentId::ANTIGRAVITY
 }
 
 #[cfg(test)]
@@ -423,12 +1195,16 @@ mod tests {
     struct FakeCredentials {
         claude_json: Option<&'static str>,
         key: Option<&'static str>,
+        claude_reason: Option<Reason>,
         reads: AtomicUsize,
     }
 
     impl Credentials for FakeCredentials {
         fn claude(&self) -> Read<claude::Credential> {
             self.reads.fetch_add(1, Ordering::SeqCst);
+            if let Some(reason) = self.claude_reason {
+                return Read::Not(reason);
+            }
             self.claude_json
                 .and_then(claude::parse_credential)
                 .map_or(Read::Missing, Read::Found)
@@ -451,7 +1227,7 @@ mod tests {
             ..Default::default()
         };
         let http = ScriptedHttp::new().reply(200, ANSWER);
-        let usage = claude_usage(NetworkPolicy::default(), &credentials, &http, "local", 1).await;
+        let usage = claude_usage(&NetworkPolicy::default(), &credentials, &http, "local", 1).await;
         assert_eq!(
             usage.state,
             State::Unknown {
@@ -469,7 +1245,8 @@ mod tests {
             ..Default::default()
         };
         let http = ScriptedHttp::new();
-        let usage = opencode_usage(NetworkPolicy::default(), &credentials, &http, "local", 1).await;
+        let usage =
+            opencode_usage(&NetworkPolicy::default(), &credentials, &http, "local", 1).await;
         assert_eq!(
             usage.state,
             State::Unknown {
@@ -487,11 +1264,8 @@ mod tests {
             ..Default::default()
         };
         let http = ScriptedHttp::new().reply(200, ANSWER);
-        let policy = NetworkPolicy {
-            claude: true,
-            opencode: false,
-        };
-        let usage = claude_usage(policy, &credentials, &http, "local", 1_790_000_000).await;
+        let policy = NetworkPolicy::none().with(AgentId::CLAUDE);
+        let usage = claude_usage(&policy, &credentials, &http, "local", 1_790_000_000).await;
         assert_eq!(http.calls(), [claude::URL]);
         assert_eq!(usage.source, Some(Source::VendorApi));
         assert_eq!(usage.plan.as_deref(), Some("max"));
@@ -502,11 +1276,10 @@ mod tests {
     async fn a_missing_credential_is_signed_out_and_makes_no_call() {
         let credentials = FakeCredentials::default();
         let http = ScriptedHttp::new();
-        let policy = NetworkPolicy {
-            claude: true,
-            opencode: true,
-        };
-        let usage = claude_usage(policy, &credentials, &http, "local", 1).await;
+        let policy = NetworkPolicy::none()
+            .with(AgentId::CLAUDE)
+            .with(AgentId::OPENCODE);
+        let usage = claude_usage(&policy, &credentials, &http, "local", 1).await;
         assert_eq!(
             usage.state,
             State::Unknown {
@@ -522,21 +1295,25 @@ mod tests {
             claude_json: Some(CLAUDE_OK),
             ..Default::default()
         };
-        let policy = NetworkPolicy {
-            claude: true,
-            opencode: false,
-        };
+        let policy = NetworkPolicy::none().with(AgentId::CLAUDE);
         for (http, reason) in [
-            (ScriptedHttp::new().reply(401, "{}"), Reason::NotSignedIn),
-            (ScriptedHttp::new().reply(429, "{}"), Reason::Unreachable),
-            (ScriptedHttp::new().reply(500, "oops"), Reason::Unreachable),
+            (ScriptedHttp::new().reply(401, "{}"), Reason::SessionExpired),
+            (ScriptedHttp::new().reply(429, "{}"), Reason::RateLimited(0)),
+            (
+                ScriptedHttp::new().reply_after(429, "{}", Some(120)),
+                Reason::RateLimited(120),
+            ),
+            (
+                ScriptedHttp::new().reply(500, "oops"),
+                Reason::VendorError(500),
+            ),
             (
                 ScriptedHttp::new().fail(HttpError::Unreachable),
-                Reason::Unreachable,
+                Reason::Offline,
             ),
             (ScriptedHttp::new().reply(200, "<html>"), Reason::ParseError),
         ] {
-            let usage = claude_usage(policy, &credentials, &http, "local", 1).await;
+            let usage = claude_usage(&policy, &credentials, &http, "local", 1).await;
             assert_eq!(usage.state, State::Unknown { reason }, "{reason:?}");
         }
     }
@@ -548,11 +1325,8 @@ mod tests {
             ..Default::default()
         };
         let http = ScriptedHttp::new().reply(500, "tok-secret echoed");
-        let policy = NetworkPolicy {
-            claude: true,
-            opencode: false,
-        };
-        let usage = claude_usage(policy, &credentials, &http, "local", 1).await;
+        let policy = NetworkPolicy::none().with(AgentId::CLAUDE);
+        let usage = claude_usage(&policy, &credentials, &http, "local", 1).await;
         assert!(!format!("{usage:?}").contains("tok-secret"));
     }
 
@@ -566,11 +1340,8 @@ mod tests {
             200,
             r#"{"usage":{"rolling":{"percent":5,"resetsAt":"2026-10-05T12:00:00Z"},"weekly":{"percent":6,"resetsAt":"2026-10-09T00:00:00Z"}}}"#,
         );
-        let policy = NetworkPolicy {
-            claude: false,
-            opencode: true,
-        };
-        let usage = opencode_usage(policy, &credentials, &http, "local", 1_790_000_000).await;
+        let policy = NetworkPolicy::none().with(AgentId::OPENCODE);
+        let usage = opencode_usage(&policy, &credentials, &http, "local", 1_790_000_000).await;
         assert_eq!(http.calls(), [opencode::URL]);
         assert!(matches!(usage.state, State::Known { .. }));
     }
@@ -596,7 +1367,7 @@ mod tests {
         let secret = Secret::new("tok");
         let request = Request {
             url: "https://evil.example/",
-            bearer: &secret,
+            auth: Auth::Bearer(&secret),
             headers: vec![],
         };
         assert_eq!(CurlHttp.get(&request).await, Err(HttpError::Refused));
@@ -607,8 +1378,8 @@ mod tests {
         let secret = Secret::new("a\"b\\c");
         let request = Request {
             url: claude::URL,
-            bearer: &secret,
-            headers: vec![("Accept", "application/json")],
+            auth: Auth::Bearer(&secret),
+            headers: vec![("Accept", "application/json".to_owned())],
         };
         let config = curl_config(&request);
         assert!(config.contains(r#"url = "https://api.anthropic.com/api/oauth/usage""#));
@@ -621,10 +1392,88 @@ mod tests {
         let secret = Secret::new("tok-very-secret");
         let request = Request {
             url: claude::URL,
-            bearer: &secret,
+            auth: Auth::Bearer(&secret),
             headers: vec![],
         };
         assert!(!format!("{request:?}").contains("tok-very-secret"));
+    }
+
+    #[test]
+    fn a_retry_after_longer_than_the_backoff_is_honoured_and_capped() {
+        let mut throttle = Throttle::default();
+        throttle.record_with(false, 1000, Some(300), 0);
+        assert_eq!(throttle.retry_at(), Some(1300));
+        assert!(!throttle.allows(1299));
+        throttle.record_with(false, 2000, Some(1_000_000), 0);
+        assert_eq!(
+            throttle.retry_at(),
+            Some(2000 + Throttle::LONGEST_RETRY_AFTER)
+        );
+        throttle.clear();
+        assert_eq!(throttle.retry_at(), None);
+        assert!(throttle.allows(0));
+    }
+
+    #[test]
+    fn the_jitter_only_ever_lengthens_the_wait_by_a_tenth_at_most() {
+        let mut throttle = Throttle::default();
+        throttle.record_with(false, 0, None, 10);
+        assert_eq!(throttle.retry_at(), Some(66));
+        throttle.clear();
+        throttle.record_with(false, 0, None, 99);
+        assert_eq!(throttle.retry_at(), Some(66), "capped at ten percent");
+    }
+
+    #[test]
+    fn curl_output_gives_the_status_the_body_and_the_retry_after() {
+        let out = "HTTP/2 429\r\nretry-after: 90\r\ncontent-type: x\r\n\r\n{\"e\":1}\n429";
+        let r = parse_curl_output(out).unwrap();
+        assert_eq!((r.status, r.retry_after), (429, Some(90)));
+        assert_eq!(r.body, "{\"e\":1}");
+        let interim = "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n\r\nbody\n200";
+        let r = parse_curl_output(interim).unwrap();
+        assert_eq!(
+            (r.status, r.body.as_str(), r.retry_after),
+            (200, "body", None)
+        );
+        assert!(parse_curl_output("\n000").is_none());
+        let date = "HTTP/2 503\r\nRetry-After: Wed, 21 Oct 2026 07:28:00 GMT\r\n\r\n\n503";
+        assert_eq!(parse_curl_output(date).unwrap().retry_after, None);
+    }
+
+    #[test]
+    fn a_refused_keychain_is_told_from_a_missing_item() {
+        assert_eq!(classify_security(Some(0), ""), KeychainOutcome::Found);
+        assert_eq!(classify_security(Some(44), ""), KeychainOutcome::NotFound);
+        assert_eq!(classify_security(Some(128), ""), KeychainOutcome::Denied);
+        assert_eq!(
+            classify_security(Some(1), "User interaction is not allowed."),
+            KeychainOutcome::Denied
+        );
+        assert_eq!(classify_security(Some(1), "boom"), KeychainOutcome::Other);
+    }
+
+    #[tokio::test]
+    async fn a_denied_keychain_is_its_own_reason_and_makes_no_call() {
+        struct Denied;
+        impl Credentials for Denied {
+            fn claude(&self) -> Read<claude::Credential> {
+                Read::Denied
+            }
+            fn opencode_go(&self) -> Read<Secret> {
+                Read::Missing
+            }
+        }
+        let http = ScriptedHttp::new();
+        let policy = NetworkPolicy::none().with(AgentId::CLAUDE);
+        let usage = claude_usage(&policy, &Denied, &http, "local", 1).await;
+        assert_eq!(
+            usage.state,
+            State::Unknown {
+                reason: Reason::KeychainDenied
+            }
+        );
+        assert_eq!(http.calls().len(), 0);
     }
 
     #[test]
@@ -644,5 +1493,126 @@ mod tests {
         assert!(throttle.allows(1000 + Throttle::LONGEST));
         throttle.record(true, 5000);
         assert!(throttle.allows(5000));
+    }
+
+    async fn claude_answer(status: u16, body: &str) -> Reason {
+        let credentials = FakeCredentials {
+            claude_json: Some(CLAUDE_OK),
+            ..Default::default()
+        };
+        let http = ScriptedHttp::new().reply(status, body);
+        let policy = NetworkPolicy::none().with(AgentId::CLAUDE);
+        match claude_usage(&policy, &credentials, &http, "local", 1)
+            .await
+            .state
+        {
+            State::Unknown { reason } => reason,
+            State::Known { .. } => panic!("expected a reason"),
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_401_and_403_are_a_stale_sign_in_not_a_signed_out_one() {
+        // As Orca classifies it: 401 is a recoverable stale token; 403 is too
+        // unless it names the missing `user:profile` scope.
+        for (status, body, reason) in [
+            (401, "{}", Reason::SessionExpired),
+            (
+                401,
+                r#"{"error":{"message":"invalid x-api-key"}}"#,
+                Reason::SessionExpired,
+            ),
+            (403, "{}", Reason::SessionExpired),
+            (
+                403,
+                r#"{"error":{"message":"OAuth token does not meet scope requirement user:profile"}}"#,
+                Reason::MissingScope,
+            ),
+        ] {
+            assert_eq!(claude_answer(status, body).await, reason, "{status} {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_signed_in_account_without_a_token_or_on_an_api_key_says_why() {
+        for reason in [Reason::SessionExpired, Reason::ApiKeyBilling] {
+            let credentials = FakeCredentials {
+                claude_reason: Some(reason),
+                ..Default::default()
+            };
+            let http = ScriptedHttp::new();
+            let policy = NetworkPolicy::none().with(AgentId::CLAUDE);
+            let usage = claude_usage(&policy, &credentials, &http, "local", 1).await;
+            assert_eq!(usage.state, State::Unknown { reason });
+            assert_eq!(http.calls().len(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn opencode_refusals_name_the_key_or_the_missing_subscription() {
+        for (status, body, reason) in [
+            (401, "{}", Reason::KeyRejected),
+            (403, "{}", Reason::NoSubscription),
+            (
+                402,
+                r#"{"error":{"type":"EntitlementError"}}"#,
+                Reason::NoSubscription,
+            ),
+            (
+                401,
+                r#"{"error":{"type":"AuthError"}}"#,
+                Reason::KeyRejected,
+            ),
+            (200, "<html>sign in</html>", Reason::KeyRejected),
+        ] {
+            let credentials = FakeCredentials {
+                key: Some("k"),
+                ..Default::default()
+            };
+            let http = ScriptedHttp::new().reply(status, body);
+            let policy = NetworkPolicy::none().with(AgentId::OPENCODE);
+            let usage = opencode_usage(&policy, &credentials, &http, "local", 1).await;
+            assert_eq!(usage.state, State::Unknown { reason }, "{status} {body}");
+        }
+    }
+
+    #[test]
+    fn leon_names_itself_and_never_another_client() {
+        assert!(USER_AGENT.starts_with("Leon/"), "{USER_AGENT}");
+        assert!(!USER_AGENT.to_ascii_lowercase().contains("claude-code"));
+        assert!(!USER_AGENT.to_ascii_lowercase().contains("codex"));
+    }
+
+    #[tokio::test]
+    async fn protocol_headers_are_sent_and_no_client_is_imitated() {
+        let credentials = FakeCredentials {
+            claude_json: Some(CLAUDE_OK),
+            ..Default::default()
+        };
+        let http = ScriptedHttp::new().reply(200, ANSWER);
+        let policy = NetworkPolicy::none().with(AgentId::CLAUDE);
+        claude_usage(&policy, &credentials, &http, "local", 1).await;
+        let sent = &http.headers()[0];
+        assert!(sent
+            .iter()
+            .any(|(name, value)| *name == "anthropic-beta" && value == "oauth-2025-04-20"));
+        assert!(sent
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("user-agent")));
+        assert!(sent
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("originator")));
+    }
+
+    #[test]
+    fn the_rate_limit_rest_is_at_least_five_minutes() {
+        let mut throttle = Throttle::default();
+        throttle.record_with(false, 1000, Some(Throttle::RATE_LIMIT_MIN), 0);
+        assert!(!throttle.allows(1000 + 299));
+        assert!(throttle.allows(1000 + 300));
+        let mut longer = Throttle::default();
+        longer.record_with(false, 1000, Some(900), 0);
+        assert!(!longer.allows(1000 + 899));
+        assert!(longer.allows(1000 + 900));
     }
 }

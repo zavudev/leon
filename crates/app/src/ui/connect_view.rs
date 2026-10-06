@@ -230,7 +230,11 @@ impl Shell {
                     div()
                         .id(("connect-how", at))
                         .debug_selector(move || selector.clone())
-                        .h(px(30.))
+                        // Its question may wrap in a narrow card: as tall as
+                        // its text, never less than a row.
+                        .flex_none()
+                        .min_h(px(30.))
+                        .py(px(4.))
                         .flex()
                         .items_center()
                         .justify_between()
@@ -256,6 +260,7 @@ impl Shell {
                         )
                         .child(
                             div()
+                                .min_w_0()
                                 .text_size(metrics::TEXT_SMALL())
                                 .text_color(muted)
                                 .child(howto.question),

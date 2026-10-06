@@ -485,6 +485,7 @@ fn classify(error: &LinkError) -> (Failure, String) {
 fn classify_dial(error: &DialError) -> (Failure, String) {
     match error {
         DialError::Unreachable(detail) => (Failure::RelayUnreachable, detail.clone()),
+        DialError::Secure(_) => (Failure::Other, error.to_string()),
         DialError::Refused(e) if e.code == RelayErrorCode::HostNotFound => (
             Failure::HostOffline,
             "the other computer is not connected to the relay (it is off, asleep, or not sharing)"

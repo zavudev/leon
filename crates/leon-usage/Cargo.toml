@@ -16,3 +16,4 @@ chrono.workspace = true
 sha2 = "0.10"
 tokio.workspace = true
 tracing.workspace = true
+rusqlite.workspace = true

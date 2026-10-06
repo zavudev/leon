@@ -24,7 +24,7 @@ use crate::keys::{self, Command};
 use crate::theme::{metrics, px, Palette};
 use gpui_kit::prelude::*;
 use gpui_kit::{div, point, Context, Div, MouseButton, Pixels, Point, Window};
-use leon_core::AgentKind;
+use leon_core::AgentId;
 use std::time::{Duration, Instant};
 
 /// How long a pause ends what was typed to select an item.
@@ -43,7 +43,7 @@ pub struct Item {
     /// The command it runs; its chord is the one shown.
     pub command: Command,
     /// For "new agent session": the agent to start.
-    pub agent: Option<AgentKind>,
+    pub agent: Option<AgentId>,
     /// A submenu, when it has one.
     pub children: Vec<Item>,
 }
@@ -64,12 +64,16 @@ impl Item {
             label: "New agent session".to_owned(),
             command: Command::NewSession,
             agent: None,
-            children: AgentKind::ALL
+            // The agents whose history Leon reads, and the user's own; the
+            // whole catalogue (with what is installed first) is the item
+            // itself, which asks in the palette.
+            children: leon_core::agent::all()
                 .iter()
-                .map(|agent| Self {
-                    label: format::agent_name(*agent).to_owned(),
+                .filter(|spec| spec.history.is_some() || spec.custom)
+                .map(|spec| Self {
+                    label: format::agent_name(spec.id).to_owned(),
                     command: Command::NewSession,
-                    agent: Some(*agent),
+                    agent: Some(spec.id),
                     children: Vec::new(),
                 })
                 .collect(),
@@ -532,7 +536,7 @@ impl Shell {
     /// Starts a session of `agent` where the cursor is, without asking which.
     pub(super) fn new_session_with(
         &mut self,
-        agent: AgentKind,
+        agent: AgentId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -855,9 +859,9 @@ mod tests {
         assert_eq!(
             agents,
             [
-                Some(AgentKind::Claude),
-                Some(AgentKind::Codex),
-                Some(AgentKind::Opencode)
+                Some(AgentId::CLAUDE),
+                Some(AgentId::CODEX),
+                Some(AgentId::OPENCODE)
             ]
         );
         assert!(sub.iter().all(|item| item.command == Command::NewSession));
@@ -885,7 +889,7 @@ mod tests {
     fn a_history_session_offers_open_transcript_id_and_removal() {
         let session = Kind::Session(Session {
             id: leon_core::SessionId::from_string("s"),
-            agent: AgentKind::Claude,
+            agent: AgentId::CLAUDE,
             external_id: "x".into(),
             machine_id: MachineId::local(),
             project_id: None,
@@ -979,7 +983,7 @@ mod tests {
         let Chosen::Run(item) = menu.choose() else {
             panic!("expected an entry")
         };
-        assert_eq!(item.agent, Some(AgentKind::Codex));
+        assert_eq!(item.agent, Some(AgentId::CODEX));
         assert!(menu.close_sub());
         assert!(!menu.close_sub());
         assert_eq!(menu.cursor, 1, "the parent item is still selected");

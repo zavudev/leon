@@ -41,6 +41,18 @@ pub fn is_windows() -> bool {
     cfg!(windows)
 }
 
+/// The computer as a bug report names it: system and architecture.
+pub fn describe() -> String {
+    let system = if is_mac() {
+        "macOS"
+    } else if is_windows() {
+        "Windows"
+    } else {
+        "Linux"
+    };
+    format!("{system} {}", std::env::consts::ARCH)
+}
+
 /// Whether this computer has a POSIX shell of its own, which the usage
 /// collection needs for its local machine. Remote machines are POSIX
 /// wherever Leon runs, and do not ask.

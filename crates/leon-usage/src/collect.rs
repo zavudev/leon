@@ -8,33 +8,54 @@
 //! this computer, only when its switch is on, and never copies a credential
 //! anywhere (see [`crate::network`]). On a remote machine such a source is
 //! reported as not supported; it is never run by sending a credential across.
+//!
+//! One source is the agent's own command: Antigravity's `agy -p /usage`. It
+//! runs through the runner on whichever machine the agent is, after the
+//! collection saw a version of `agy` that answers it without a model turn.
 
-use leon_core::{AgentKind, Machine, MachineKind};
+use std::time::Duration;
+
+use leon_core::{AgentId, Machine, MachineKind};
 use leon_remote::{run_on, CommandSpec, Runner, SshOptions};
 use sha2::{Digest, Sha256};
 
-use crate::codex;
 use crate::forecast::Sample;
-use crate::model::{AgentUsage, Collected, Reason, WindowKind};
-use crate::network::{self, Credentials, Http, NetworkPolicy};
+use crate::model::{AgentUsage, Collected, Reason, State, WindowKind};
+use crate::network::{self, switchable_agents, Credentials, Http, NetworkPolicy};
+use crate::{antigravity, codex};
 
 /// How many of the newest session logs are read, and how many token-count
 /// lines of each.
 const FILES: usize = 4;
 const LINES: usize = 40;
 
-/// What is printed for the agents' own files: which agents are there and the
-/// newest limit observations of Codex. Everything it prints is a marker or a
-/// line the parsers pick apart; it prints no credential, no path and no
-/// conversation text beyond the token-count lines themselves.
+/// How long `agy` may take to answer `/usage` (its own limit is shorter).
+const AGY_LIMIT: Duration = Duration::from_secs(30);
+
+const PATH: &str = r#"PATH="$PATH:$HOME/.local/bin:$HOME/.opencode/bin:$HOME/.bun/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin""#;
+
+/// What is printed for the agents' own files: which agents are there, the
+/// version of `agy`, and the newest limit observations of Codex. Everything it
+/// prints is a marker or a line the parsers pick apart; it prints no
+/// credential, no path and no conversation text beyond the token-count lines
+/// themselves.
 fn script() -> String {
-    format!(
-        r#"PATH="$PATH:$HOME/.local/bin:$HOME/.opencode/bin:$HOME/.bun/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin"
-for tool in claude codex opencode; do
-  if command -v "$tool" >/dev/null 2>&1; then printf 'has=%s\n' "$tool"; fi
-done
-auth="${{XDG_DATA_HOME:-$HOME/.local/share}}/opencode/auth.json"
-if [ -f "$auth" ] && grep -q '"opencode-go"' "$auth" 2>/dev/null; then printf 'go=opencode\n'; fi
+    let mut text = format!("{PATH}\n");
+    for agent in switchable_agents() {
+        let Some(spec) = agent.spec() else { continue };
+        let names: Vec<String> = spec
+            .detect
+            .iter()
+            .map(|name| format!("command -v {name} >/dev/null 2>&1"))
+            .collect();
+        text.push_str(&format!(
+            "if {}; then printf 'has=%s\\n' {}; fi\n",
+            names.join(" || "),
+            agent.as_str()
+        ));
+    }
+    text.push_str(&format!(
+        r#"if command -v agy >/dev/null 2>&1; then printf 'agy=%s\n' "$(agy --version 2>/dev/null | head -n 1)"; fi
 sessions="${{CODEX_HOME:-$HOME/.codex}}/sessions"
 if [ -d "$sessions" ]; then
   printf '@codex\n'
@@ -43,7 +64,8 @@ if [ -d "$sessions" ]; then
   done
 fi
 exit 0"#
-    )
+    ));
+    text
 }
 
 /// The collection as a command for the machine.
@@ -51,13 +73,20 @@ pub fn collect_command() -> CommandSpec {
     CommandSpec::new("sh").args(["-c", &script()])
 }
 
+/// The command that asks `agy` for its limits. It never carries
+/// `--disable-slash-commands`, which would turn `/usage` into a model turn.
+pub fn antigravity_command() -> CommandSpec {
+    let args = antigravity::USAGE_ARGS.join(" ");
+    CommandSpec::new("sh").args(["-c", &format!("{PATH}\nexec agy {args} 20s 2>&1")])
+}
+
 /// What the command printed, understood.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Found {
     /// Agents installed.
-    pub has: Vec<AgentKind>,
-    /// Whether opencode has a Go subscription key.
-    pub go: bool,
+    pub has: Vec<AgentId>,
+    /// The version of `agy`, when it printed one.
+    pub agy: Option<(u32, u32, u32)>,
     /// The lines after the `@codex` marker.
     pub codex_lines: String,
 }
@@ -76,11 +105,13 @@ pub fn parse_found(output: &str) -> Found {
             found.codex_lines.push_str(line);
             found.codex_lines.push('\n');
         } else if let Some(tool) = line.strip_prefix("has=") {
-            if let Some(agent) = AgentKind::parse(tool) {
+            // Only the agents that have a usage source are looked for; any
+            // other line is noise.
+            if let Some(agent) = AgentId::parse(tool).filter(|a| switchable_agents().contains(a)) {
                 found.has.push(agent);
             }
-        } else if line == "go=opencode" {
-            found.go = true;
+        } else if let Some(version) = line.strip_prefix("agy=") {
+            found.agy = antigravity::parse_version(version);
         }
     }
     found
@@ -93,19 +124,27 @@ pub fn can_collect(local: bool, windows: bool) -> bool {
     !(local && windows)
 }
 
+/// What one network source that was really called came to: the reason when it
+/// failed or answered nothing, `None` when it gave a reading. The engine backs
+/// the source off on a failure.
+pub type Called = (AgentId, Option<Reason>);
+
 /// One machine's readings and the observations that came with them.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct MachineUsage {
-    /// One reading per agent, in display order.
+    /// One reading per agent that has a usage provider, in catalogue order.
     pub readings: Vec<AgentUsage>,
     /// Observations per agent and window, for the stored history.
-    pub samples: Vec<(AgentKind, WindowKind, Sample)>,
+    pub samples: Vec<(AgentId, WindowKind, Sample)>,
+    /// The network sources that were called on this computer, and what they
+    /// came to.
+    pub called: Vec<Called>,
 }
 
 /// A local hash standing in for the account in the stored history: the same
 /// agent, machine and plan always give the same key, and nothing identifies
 /// the account.
-pub fn series_key(machine: &str, agent: AgentKind, plan: Option<&str>) -> String {
+pub fn series_key(machine: &str, agent: AgentId, plan: Option<&str>) -> String {
     let mut hasher = Sha256::new();
     hasher.update(machine.as_bytes());
     hasher.update([0]);
@@ -120,6 +159,16 @@ pub fn series_key(machine: &str, agent: AgentKind, plan: Option<&str>) -> String
         .collect()
 }
 
+fn all_unknown(id: &str, reason: Reason) -> MachineUsage {
+    MachineUsage {
+        readings: switchable_agents()
+            .into_iter()
+            .map(|agent| AgentUsage::unknown(agent, id, reason))
+            .collect(),
+        ..Default::default()
+    }
+}
+
 /// Collects the readings of `machine`.
 ///
 /// The one command is run through `runner`; when it cannot be run every agent
@@ -129,7 +178,7 @@ pub async fn collect_machine<R: Runner>(
     runner: &R,
     machine: &Machine,
     ssh: &SshOptions,
-    policy: NetworkPolicy,
+    policy: &NetworkPolicy,
     credentials: &dyn Credentials,
     http: &dyn Http,
     now: i64,
@@ -157,46 +206,33 @@ pub async fn collect_machine_on<R: Runner>(
     machine: &Machine,
     local_posix: bool,
     ssh: &SshOptions,
-    policy: NetworkPolicy,
+    policy: &NetworkPolicy,
     credentials: &dyn Credentials,
     http: &dyn Http,
     now: i64,
 ) -> MachineUsage {
     let id = machine.id.as_str();
     if !can_collect(machine.kind == MachineKind::Local, !local_posix) {
-        return MachineUsage {
-            readings: AgentKind::ALL
-                .iter()
-                .map(|agent| AgentUsage::unknown(*agent, id, Reason::NotSupported))
-                .collect(),
-            samples: Vec::new(),
-        };
+        return all_unknown(id, Reason::NotSupported);
     }
     let spec = run_on(machine, &collect_command(), ssh);
     let found = match runner.run(&spec).await {
         Ok(output) if output.success() => parse_found(&output.stdout),
-        _ => {
-            return MachineUsage {
-                readings: AgentKind::ALL
-                    .iter()
-                    .map(|agent| AgentUsage::unknown(*agent, id, Reason::Unreachable))
-                    .collect(),
-                samples: Vec::new(),
-            }
-        }
+        _ => return all_unknown(id, Reason::Unreachable),
     };
     let local = machine.kind == MachineKind::Local;
     let mut out = MachineUsage::default();
-    for agent in AgentKind::ALL {
-        if !found.has.contains(&agent)
-            && !(agent == AgentKind::Codex && !found.codex_lines.is_empty())
-        {
+    for agent in switchable_agents() {
+        let installed = found.has.contains(&agent)
+            || (agent == AgentId::CODEX && !found.codex_lines.is_empty());
+        if !installed {
             out.readings
                 .push(AgentUsage::unknown(agent, id, Reason::NotInstalled));
             continue;
         }
+        let off = |reason| AgentUsage::unknown(agent, id, reason);
         let reading = match agent {
-            AgentKind::Codex => {
+            AgentId::CODEX => {
                 let Collected { usage, samples } =
                     codex::parse_rollout_lines(&found.codex_lines, id);
                 out.samples.extend(
@@ -204,23 +240,76 @@ pub async fn collect_machine_on<R: Runner>(
                         .into_iter()
                         .map(|(kind, sample)| (agent, kind, sample)),
                 );
+                // The log is as fresh as the backend while Codex is in use;
+                // when it is not, the backend may know more. A backend that
+                // fails leaves the log's reading in place.
+                let fresh = usage
+                    .observed_at
+                    .is_some_and(|at| now - at <= codex::LOG_FRESH);
+                if policy.allows(agent) && local && !fresh {
+                    let backend = network::codex_usage(policy, credentials, http, id, now).await;
+                    let reason = match &backend.state {
+                        State::Unknown { reason } => Some(*reason),
+                        State::Known { windows } => {
+                            out.samples.extend(windows.iter().map(|w| {
+                                (
+                                    agent,
+                                    w.kind.clone(),
+                                    Sample {
+                                        at: now,
+                                        used_percent: w.used_percent,
+                                    },
+                                )
+                            }));
+                            None
+                        }
+                    };
+                    out.called.push((agent, reason));
+                    if reason.is_none() {
+                        out.readings.push(backend);
+                        continue;
+                    }
+                }
                 usage
             }
-            AgentKind::Claude if !policy.claude => {
-                AgentUsage::unknown(agent, id, Reason::SourceDisabled)
+            AgentId::ANTIGRAVITY => {
+                if !policy.allows(agent) {
+                    off(Reason::SourceDisabled)
+                } else if antigravity::latched(id) {
+                    off(Reason::SpendsATurn)
+                } else if !found.agy.is_some_and(antigravity::supports_usage) {
+                    off(Reason::NotSupported)
+                } else {
+                    let spec = run_on(machine, &antigravity_command(), ssh);
+                    match tokio::time::timeout(AGY_LIMIT, runner.run(&spec)).await {
+                        Ok(Ok(output)) => {
+                            let usage = antigravity::parse_output(&output.stdout, id, now);
+                            if usage.state
+                                == (State::Unknown {
+                                    reason: Reason::SpendsATurn,
+                                })
+                            {
+                                antigravity::latch(id);
+                            }
+                            usage
+                        }
+                        Ok(Err(_)) => off(Reason::Unreachable),
+                        Err(_) => off(Reason::Offline),
+                    }
+                }
             }
-            AgentKind::Claude if !local => AgentUsage::unknown(agent, id, Reason::NotSupported),
-            AgentKind::Claude => network::claude_usage(policy, credentials, http, id, now).await,
-            AgentKind::Opencode if !found.go => {
-                AgentUsage::unknown(agent, id, Reason::NotSupported)
+            _ if !policy.allows(agent) => off(Reason::SourceDisabled),
+            _ if !local => off(Reason::NotSupported),
+            _ if network::has_network_source(agent) => {
+                let usage = network::network_usage(agent, policy, credentials, http, id, now).await;
+                let reason = match &usage.state {
+                    State::Unknown { reason } => Some(*reason),
+                    State::Known { .. } => None,
+                };
+                out.called.push((agent, reason));
+                usage
             }
-            AgentKind::Opencode if !policy.opencode => {
-                AgentUsage::unknown(agent, id, Reason::SourceDisabled)
-            }
-            AgentKind::Opencode if !local => AgentUsage::unknown(agent, id, Reason::NotSupported),
-            AgentKind::Opencode => {
-                network::opencode_usage(policy, credentials, http, id, now).await
-            }
+            _ => off(Reason::NotSupported),
         };
         out.readings.push(reading);
     }
@@ -282,13 +371,10 @@ mod tests {
 
     const CODEX_LINE: &str = r#"{"timestamp":"2026-10-04T18:59:06.753Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":97.0,"window_minutes":300,"resets_at":1791154068},"secondary":{"used_percent":15.0,"window_minutes":10080,"resets_at":1791678919},"plan_type":"plus"}}}"#;
 
-    fn output(has: &[&str], go: bool, codex: Option<&str>) -> Output {
+    fn output(has: &[&str], codex: Option<&str>) -> Output {
         let mut text = String::from("Welcome banner\n");
         for tool in has {
             text.push_str(&format!("has={tool}\n"));
-        }
-        if go {
-            text.push_str("go=opencode\n");
         }
         if let Some(lines) = codex {
             text.push_str("@codex\n");
@@ -303,7 +389,7 @@ mod tests {
     async fn run(
         machine: &Machine,
         out: Output,
-        policy: NetworkPolicy,
+        policy: &NetworkPolicy,
         http: &ScriptedHttp,
     ) -> (MachineUsage, ScriptedRunner) {
         run_on_computer(machine, true, out, policy, http).await
@@ -313,7 +399,7 @@ mod tests {
         machine: &Machine,
         local_posix: bool,
         out: Output,
-        policy: NetworkPolicy,
+        policy: &NetworkPolicy,
         http: &ScriptedHttp,
     ) -> (MachineUsage, ScriptedRunner) {
         let runner = ScriptedRunner::new().reply(out);
@@ -336,24 +422,24 @@ mod tests {
         let http = ScriptedHttp::new();
         let (got, runner) = run(
             &local(),
-            output(&["claude", "codex"], false, Some(CODEX_LINE)),
-            NetworkPolicy::default(),
+            output(&["claude", "codex"], Some(CODEX_LINE)),
+            &NetworkPolicy::default(),
             &http,
         )
         .await;
         assert_eq!(runner.calls().len(), 1);
-        assert_eq!(got.readings.len(), 3);
+        assert_eq!(got.readings.len(), switchable_agents().len());
         let by = |a| got.readings.iter().find(|r| r.agent == a).unwrap();
-        assert!(matches!(by(AgentKind::Codex).state, State::Known { .. }));
-        assert_eq!(by(AgentKind::Codex).source, Some(Source::Local));
+        assert!(matches!(by(AgentId::CODEX).state, State::Known { .. }));
+        assert_eq!(by(AgentId::CODEX).source, Some(Source::Local));
         assert_eq!(
-            by(AgentKind::Claude).state,
+            by(AgentId::CLAUDE).state,
             State::Unknown {
                 reason: Reason::SourceDisabled
             }
         );
         assert_eq!(
-            by(AgentKind::Opencode).state,
+            by(AgentId::OPENCODE).state,
             State::Unknown {
                 reason: Reason::NotInstalled
             }
@@ -365,32 +451,31 @@ mod tests {
     #[tokio::test]
     async fn a_remote_machine_runs_the_command_over_ssh_and_never_calls_a_vendor() {
         let http = ScriptedHttp::new();
-        let policy = NetworkPolicy {
-            claude: true,
-            opencode: true,
-        };
+        let policy = NetworkPolicy::none()
+            .with(AgentId::CLAUDE)
+            .with(AgentId::OPENCODE);
         let (got, runner) = run(
             &remote(),
-            output(&["claude", "codex", "opencode"], true, Some(CODEX_LINE)),
-            policy,
+            output(&["claude", "codex", "opencode"], Some(CODEX_LINE)),
+            &policy,
             &http,
         )
         .await;
         assert_eq!(runner.calls()[0].program, "ssh");
         let by = |a| got.readings.iter().find(|r| r.agent == a).unwrap();
         assert_eq!(
-            by(AgentKind::Claude).state,
+            by(AgentId::CLAUDE).state,
             State::Unknown {
                 reason: Reason::NotSupported
             }
         );
         assert_eq!(
-            by(AgentKind::Opencode).state,
+            by(AgentId::OPENCODE).state,
             State::Unknown {
                 reason: Reason::NotSupported
             }
         );
-        assert!(matches!(by(AgentKind::Codex).state, State::Known { .. }));
+        assert!(matches!(by(AgentId::CODEX).state, State::Known { .. }));
         assert_eq!(got.readings[1].machine, "box");
         assert_eq!(http.calls().len(), 0);
     }
@@ -398,14 +483,13 @@ mod tests {
     #[tokio::test]
     async fn a_relay_machine_is_read_through_its_route_and_never_calls_a_vendor() {
         let http = ScriptedHttp::new();
-        let policy = NetworkPolicy {
-            claude: true,
-            opencode: true,
-        };
+        let policy = NetworkPolicy::none()
+            .with(AgentId::CLAUDE)
+            .with(AgentId::OPENCODE);
         let (got, runner) = run(
             &relayed(),
-            output(&["claude", "codex"], false, Some(CODEX_LINE)),
-            policy,
+            output(&["claude", "codex"], Some(CODEX_LINE)),
+            &policy,
             &http,
         )
         .await;
@@ -415,9 +499,9 @@ mod tests {
             "the command must go through the relay"
         );
         let by = |a| got.readings.iter().find(|r| r.agent == a).unwrap();
-        assert!(matches!(by(AgentKind::Codex).state, State::Known { .. }));
+        assert!(matches!(by(AgentId::CODEX).state, State::Known { .. }));
         assert_eq!(
-            by(AgentKind::Claude).state,
+            by(AgentId::CLAUDE).state,
             State::Unknown {
                 reason: Reason::NotSupported
             }
@@ -426,17 +510,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opencode_without_a_go_key_has_nothing_to_read() {
+    async fn opencode_without_any_key_has_nothing_to_read() {
         let http = ScriptedHttp::new();
-        let policy = NetworkPolicy {
-            claude: false,
-            opencode: true,
-        };
-        let (got, _) = run(&local(), output(&["opencode"], false, None), policy, &http).await;
+        let policy = NetworkPolicy::none().with(AgentId::OPENCODE);
+        let (got, _) = run(&local(), output(&["opencode"], None), &policy, &http).await;
         let reading = got
             .readings
             .iter()
-            .find(|r| r.agent == AgentKind::Opencode)
+            .find(|r| r.agent == AgentId::OPENCODE)
             .unwrap();
         assert_eq!(
             reading.state,
@@ -448,19 +529,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opencode_with_a_go_key_waits_for_its_switch() {
+    async fn opencode_waits_for_its_switch() {
         let http = ScriptedHttp::new();
         let (got, _) = run(
             &local(),
-            output(&["opencode"], true, None),
-            NetworkPolicy::default(),
+            output(&["opencode"], None),
+            &NetworkPolicy::default(),
             &http,
         )
         .await;
         let reading = got
             .readings
             .iter()
-            .find(|r| r.agent == AgentKind::Opencode)
+            .find(|r| r.agent == AgentId::OPENCODE)
             .unwrap();
         assert_eq!(
             reading.state,
@@ -475,15 +556,15 @@ mod tests {
         let http = ScriptedHttp::new();
         let (got, _) = run(
             &local(),
-            output(&["codex"], false, None),
-            NetworkPolicy::default(),
+            output(&["codex"], None),
+            &NetworkPolicy::default(),
             &http,
         )
         .await;
         let reading = got
             .readings
             .iter()
-            .find(|r| r.agent == AgentKind::Codex)
+            .find(|r| r.agent == AgentId::CODEX)
             .unwrap();
         assert_eq!(
             reading.state,
@@ -500,13 +581,13 @@ mod tests {
             &runner,
             &remote(),
             &SshOptions::without_multiplexing(),
-            NetworkPolicy::default(),
+            &NetworkPolicy::default(),
             &NoCredentials,
             &ScriptedHttp::new(),
             1,
         )
         .await;
-        assert_eq!(got.readings.len(), 3);
+        assert_eq!(got.readings.len(), switchable_agents().len());
         assert!(got.readings.iter().all(|r| r.state
             == State::Unknown {
                 reason: Reason::Unreachable
@@ -519,13 +600,13 @@ mod tests {
         let (got, runner) = run_on_computer(
             &local(),
             false,
-            output(&["claude", "codex"], false, Some(CODEX_LINE)),
-            NetworkPolicy::default(),
+            output(&["claude", "codex"], Some(CODEX_LINE)),
+            &NetworkPolicy::default(),
             &http,
         )
         .await;
         assert!(runner.calls().is_empty(), "no shell, so no command");
-        assert_eq!(got.readings.len(), 3);
+        assert_eq!(got.readings.len(), switchable_agents().len());
         assert!(got.readings.iter().all(|r| r.state
             == State::Unknown {
                 reason: Reason::NotSupported
@@ -539,8 +620,8 @@ mod tests {
         let (got, runner) = run_on_computer(
             &remote(),
             false,
-            output(&["codex"], false, Some(CODEX_LINE)),
-            NetworkPolicy::default(),
+            output(&["codex"], Some(CODEX_LINE)),
+            &NetworkPolicy::default(),
             &http,
         )
         .await;
@@ -548,7 +629,7 @@ mod tests {
         let codex = got
             .readings
             .iter()
-            .find(|r| r.agent == AgentKind::Codex)
+            .find(|r| r.agent == AgentId::CODEX)
             .unwrap();
         assert!(matches!(codex.state, State::Known { .. }));
     }
@@ -567,29 +648,291 @@ mod tests {
     #[test]
     fn the_command_prints_markers_and_no_credential() {
         let script = script();
-        assert!(script.contains("grep -q '\"opencode-go\"'"));
-        // `grep -q` is the only thing done with the auth file: nothing of it is printed.
+        // The script never touches a credential file: opencode's key is read
+        // by Leon itself, on this computer only.
+        assert!(!script.contains("auth.json"));
         assert!(!script.contains("cat "));
         assert!(!script.contains("accessToken"));
     }
 
     #[test]
     fn found_lines_are_read_around_banners() {
-        let found = parse_found(
-            "Last login: x\nhas=codex\nhas=nope\ngo=opencode\n@codex\nline one\nline two\n",
-        );
-        assert_eq!(found.has, [AgentKind::Codex]);
-        assert!(found.go);
+        let found = parse_found("Last login: x\nhas=codex\nhas=nope\n@codex\nline one\nline two\n");
+        assert_eq!(found.has, [AgentId::CODEX]);
         assert_eq!(found.codex_lines, "line one\nline two\n");
     }
 
     #[test]
     fn a_series_key_is_stable_short_and_names_nothing() {
-        let a = series_key("local", AgentKind::Codex, Some("plus"));
-        assert_eq!(a, series_key("local", AgentKind::Codex, Some("plus")));
-        assert_ne!(a, series_key("local", AgentKind::Codex, Some("pro")));
-        assert_ne!(a, series_key("box", AgentKind::Codex, Some("plus")));
+        let a = series_key("local", AgentId::CODEX, Some("plus"));
+        assert_eq!(a, series_key("local", AgentId::CODEX, Some("plus")));
+        assert_ne!(a, series_key("local", AgentId::CODEX, Some("pro")));
+        assert_ne!(a, series_key("box", AgentId::CODEX, Some("plus")));
         assert_eq!(a.len(), 12);
         assert!(!a.contains("local"));
+    }
+
+    struct CodexCreds;
+    impl Credentials for CodexCreds {
+        fn claude(&self) -> Read<crate::claude::Credential> {
+            Read::Missing
+        }
+        fn opencode_go(&self) -> Read<Secret> {
+            Read::Missing
+        }
+        fn codex(&self) -> Read<crate::codex::Credential> {
+            crate::codex::parse_credential(r#"{"tokens":{"access_token":"t"}}"#)
+                .map_or(Read::Missing, Read::Found)
+        }
+    }
+
+    const BACKEND: &str = r#"{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":7,"limit_window_seconds":18000,"reset_at":1791300000}}}"#;
+
+    async fn with_codex_backend(now: i64, http: &ScriptedHttp) -> (MachineUsage, ScriptedRunner) {
+        let runner = ScriptedRunner::new().reply(output(&["codex"], Some(CODEX_LINE)));
+        let got = collect_machine_on(
+            &runner,
+            &local(),
+            true,
+            &SshOptions::without_multiplexing(),
+            &NetworkPolicy::none().with(AgentId::CODEX),
+            &CodexCreds,
+            http,
+            now,
+        )
+        .await;
+        (got, runner)
+    }
+
+    #[tokio::test]
+    async fn a_stale_codex_log_is_refreshed_from_the_backend_when_that_source_is_on() {
+        // The log line is from 2026-10-04T18:59Z; this is days later.
+        let http = ScriptedHttp::new().reply(200, BACKEND);
+        let (got, _) = with_codex_backend(1_791_500_000, &http).await;
+        let codex = got
+            .readings
+            .iter()
+            .find(|r| r.agent == AgentId::CODEX)
+            .unwrap();
+        assert_eq!(codex.source, Some(Source::VendorApi));
+        assert_eq!(codex.plan.as_deref(), Some("pro"));
+        assert_eq!(http.calls(), [crate::codex::BACKEND_URL]);
+        assert_eq!(got.called, [(AgentId::CODEX, None)]);
+        assert!(got.samples.iter().any(|(_, _, s)| s.at == 1_791_500_000));
+    }
+
+    #[tokio::test]
+    async fn a_fresh_codex_log_is_enough_and_the_backend_is_not_called() {
+        let http = ScriptedHttp::new().reply(200, BACKEND);
+        // Two minutes after the log line (1791140346).
+        let (got, _) = with_codex_backend(1_791_140_466, &http).await;
+        let codex = got
+            .readings
+            .iter()
+            .find(|r| r.agent == AgentId::CODEX)
+            .unwrap();
+        assert_eq!(codex.source, Some(Source::Local));
+        assert!(http.calls().is_empty());
+        assert!(got.called.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failing_backend_leaves_the_log_in_place_and_says_it_failed() {
+        let http = ScriptedHttp::new().reply(500, "oops");
+        let (got, _) = with_codex_backend(1_791_500_000, &http).await;
+        let codex = got
+            .readings
+            .iter()
+            .find(|r| r.agent == AgentId::CODEX)
+            .unwrap();
+        assert_eq!(codex.source, Some(Source::Local), "the log's reading stays");
+        assert_eq!(
+            got.called,
+            [(AgentId::CODEX, Some(Reason::VendorError(500)))]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_backend_is_never_asked_for_a_remote_machine() {
+        let runner = ScriptedRunner::new().reply(output(&["codex"], Some(CODEX_LINE)));
+        let http = ScriptedHttp::new().reply(200, BACKEND);
+        let got = collect_machine_on(
+            &runner,
+            &remote(),
+            true,
+            &SshOptions::without_multiplexing(),
+            &NetworkPolicy::all(),
+            &CodexCreds,
+            &http,
+            1_791_500_000,
+        )
+        .await;
+        assert!(http.calls().is_empty());
+        assert!(got.called.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_network_provider_runs_only_here_and_only_when_installed() {
+        let http = ScriptedHttp::new();
+        let (got, _) = run(
+            &remote(),
+            output(&["grok"], None),
+            &NetworkPolicy::all(),
+            &http,
+        )
+        .await;
+        let by = |a| got.readings.iter().find(|r| r.agent == a).unwrap();
+        assert_eq!(
+            by(AgentId::GROK).state,
+            State::Unknown {
+                reason: Reason::NotSupported
+            }
+        );
+        assert_eq!(
+            by(AgentId::CURSOR).state,
+            State::Unknown {
+                reason: Reason::NotInstalled
+            }
+        );
+        assert!(http.calls().is_empty());
+        let (got, _) = run(
+            &local(),
+            output(&["grok"], None),
+            &NetworkPolicy::all(),
+            &http,
+        )
+        .await;
+        let grok = got
+            .readings
+            .iter()
+            .find(|r| r.agent == AgentId::GROK)
+            .unwrap();
+        assert_eq!(
+            grok.state,
+            State::Unknown {
+                reason: Reason::NotSignedIn
+            }
+        );
+        assert_eq!(got.called, [(AgentId::GROK, Some(Reason::NotSignedIn))]);
+    }
+
+    const AGY: &str = r#"{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"w","name":"Weekly","window":"weekly","remaining_fraction":0.5}]}]}}}"#;
+
+    fn agy_output(version: &str) -> Output {
+        Output::ok(format!("has=antigravity\nagy={version}\n"))
+    }
+
+    #[tokio::test]
+    async fn antigravity_is_asked_through_the_runner_on_any_machine_when_new_enough() {
+        for machine in [local(), remote(), relayed()] {
+            let runner = ScriptedRunner::new()
+                .reply(agy_output("agy 1.2.11"))
+                .reply(Output::ok(AGY));
+            let got = collect_machine_on(
+                &runner,
+                &machine,
+                true,
+                &SshOptions::without_multiplexing(),
+                &NetworkPolicy::none().with(AgentId::ANTIGRAVITY),
+                &NoCredentials,
+                &ScriptedHttp::new(),
+                1_791_000_000,
+            )
+            .await;
+            let agy = got
+                .readings
+                .iter()
+                .find(|r| r.agent == AgentId::ANTIGRAVITY)
+                .unwrap();
+            assert_eq!(agy.source, Some(Source::Cli), "{:?}", machine.id);
+            assert_eq!(runner.calls().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn antigravity_is_not_asked_when_off_or_too_old_or_unreadable() {
+        for (policy, version, reason) in [
+            (NetworkPolicy::none(), "agy 1.2.11", Reason::SourceDisabled),
+            (NetworkPolicy::all(), "agy 1.1.10", Reason::NotSupported),
+            (NetworkPolicy::all(), "", Reason::NotSupported),
+        ] {
+            let runner = ScriptedRunner::new().reply(agy_output(version));
+            let got = collect_machine_on(
+                &runner,
+                &local(),
+                true,
+                &SshOptions::without_multiplexing(),
+                &policy,
+                &NoCredentials,
+                &ScriptedHttp::new(),
+                1,
+            )
+            .await;
+            let agy = got
+                .readings
+                .iter()
+                .find(|r| r.agent == AgentId::ANTIGRAVITY)
+                .unwrap();
+            assert_eq!(agy.state, State::Unknown { reason }, "{version:?}");
+            assert_eq!(runner.calls().len(), 1, "the command was not run");
+        }
+    }
+
+    #[test]
+    fn the_script_looks_for_every_agent_with_a_usage_provider_and_the_command_is_safe() {
+        let script = script();
+        for agent in switchable_agents() {
+            assert!(
+                script.contains(&format!("printf 'has=%s\\n' {}", agent.as_str())),
+                "{agent}"
+            );
+        }
+        assert!(script.contains("kimi-code"), "aliases are detected too");
+        let call = antigravity_command().args.join(" ");
+        assert!(call.contains("-p /usage --output-format json"));
+        assert!(!call.contains("disable-slash-commands"));
+    }
+
+    #[tokio::test]
+    async fn an_agy_that_answers_with_a_model_turn_is_never_asked_again() {
+        let mut machine = remote();
+        machine.id = MachineId::from_string("latch-box");
+        antigravity::unlatch("latch-box");
+        let prompt =
+            r#"{"status":"SUCCESS","response":"Hello","num_turns":1,"conversation_id":"abc"}"#;
+        let policy = NetworkPolicy::none().with(AgentId::ANTIGRAVITY);
+        let runner = ScriptedRunner::new()
+            .reply(agy_output("agy 1.2.11"))
+            .reply(Output::ok(prompt))
+            .reply(agy_output("agy 1.2.11"));
+        for round in 0..2 {
+            let got = collect_machine_on(
+                &runner,
+                &machine,
+                true,
+                &SshOptions::without_multiplexing(),
+                &policy,
+                &NoCredentials,
+                &ScriptedHttp::new(),
+                1_791_000_000,
+            )
+            .await;
+            let agy = got
+                .readings
+                .iter()
+                .find(|r| r.agent == AgentId::ANTIGRAVITY)
+                .unwrap();
+            assert_eq!(
+                agy.state,
+                State::Unknown {
+                    reason: Reason::SpendsATurn
+                },
+                "round {round}"
+            );
+        }
+        // The first round ran the collection and the command; the second only
+        // the collection: the command that spends a turn was not run again.
+        assert_eq!(runner.calls().len(), 3);
+        antigravity::unlatch("latch-box");
     }
 }

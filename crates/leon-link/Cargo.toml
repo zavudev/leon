@@ -11,7 +11,7 @@ publish.workspace = true
 # An in-process relay for tests of the crates that use this one. A test
 # double: it has no limits and no accounts, and is never part of a shipped
 # binary.
-test-support = []
+test-support = ["dep:rcgen", "dep:tokio-rustls"]
 
 [dependencies]
 leon-wire.workspace = true
@@ -29,9 +29,16 @@ subtle.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+# Only for the test relay (feature test-support): a TLS relay with a throwaway certificate.
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
 tracing.workspace = true
 x25519-dalek.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

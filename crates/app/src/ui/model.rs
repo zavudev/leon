@@ -85,14 +85,14 @@ impl Snapshot {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-    use leon_core::{AgentKind, MachineKind, NewMessage, NewSession, NewWorktree, Role};
+    use leon_core::{AgentId, MachineKind, NewMessage, NewSession, NewWorktree, Role};
 
     fn session(store: &Store, machine: &MachineId, cwd: &str, title: &str, minute: u32) {
         let at = Utc.with_ymd_and_hms(2026, 10, 4, 10, minute, 0).unwrap();
         store
             .upsert_session(
                 &NewSession {
-                    agent: AgentKind::Claude,
+                    agent: AgentId::CLAUDE,
                     external_id: format!("{title}-{minute}"),
                     machine_id: machine.clone(),
                     cwd: cwd.to_owned(),

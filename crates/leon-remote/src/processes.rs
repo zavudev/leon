@@ -29,7 +29,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use leon_core::AgentKind;
+use leon_core::AgentId;
 
 use crate::command::CommandSpec;
 
@@ -94,7 +94,7 @@ pub struct AgentProcess {
     /// Its parent's pid.
     pub ppid: u32,
     /// Which agent it is.
-    pub agent: AgentKind,
+    pub agent: AgentId,
     /// The terminal device it runs on, when it has one.
     pub tty: Option<String>,
     /// When it started, in unix seconds, when the scan knew the time.
@@ -129,6 +129,23 @@ pub struct Scan {
 const MAX_DEPTH: usize = 64;
 
 impl Scan {
+    /// The processes above `pid`, nearest first (its parent, the parent's
+    /// parent, ...), as far as the scan knows them.
+    pub fn ancestors(&self, pid: u32) -> Vec<u32> {
+        let mut chain = Vec::new();
+        let mut at = pid;
+        for _ in 0..MAX_DEPTH {
+            match self.parents.get(&at) {
+                Some((parent, _)) if *parent != at && *parent != 0 => {
+                    chain.push(*parent);
+                    at = *parent;
+                }
+                _ => break,
+            }
+        }
+        chain
+    }
+
     /// Whether `pid` is `root` or runs below it.
     pub fn descends_from(&self, pid: u32, root: u32) -> bool {
         let mut at = pid;
@@ -244,11 +261,11 @@ fn base_name(path: &str) -> &str {
     name.strip_suffix(".exe").unwrap_or(name)
 }
 
-fn agent_named(name: &str) -> Option<AgentKind> {
+fn agent_named(name: &str) -> Option<AgentId> {
     match name {
-        "claude" => Some(AgentKind::Claude),
-        "codex" => Some(AgentKind::Codex),
-        "opencode" => Some(AgentKind::Opencode),
+        "claude" => Some(AgentId::CLAUDE),
+        "codex" => Some(AgentId::CODEX),
+        "opencode" => Some(AgentId::OPENCODE),
         _ => None,
     }
 }
@@ -361,7 +378,7 @@ const OPENCODE_OTHER: &[&str] = &[
 /// What the arguments of an `agent` process say about its session; `None`
 /// when it is not an interactive or one-shot session at all (a subcommand
 /// such as `mcp`, `--version`).
-pub fn session_use(agent: AgentKind, tokens: &[String]) -> Option<Resumes> {
+pub fn session_use(agent: AgentId, tokens: &[String]) -> Option<Resumes> {
     if tokens
         .iter()
         .any(|t| matches!(t.as_str(), "--version" | "-v" | "-V" | "--help" | "-h"))
@@ -369,7 +386,7 @@ pub fn session_use(agent: AgentKind, tokens: &[String]) -> Option<Resumes> {
         return None;
     }
     match agent {
-        AgentKind::Claude => {
+        AgentId::CLAUDE => {
             if tokens
                 .first()
                 .is_some_and(|first| CLAUDE_OTHER.contains(&first.as_str()))
@@ -399,7 +416,7 @@ pub fn session_use(agent: AgentKind, tokens: &[String]) -> Option<Resumes> {
                 _ => Resumes::Unnamed,
             })
         }
-        AgentKind::Codex => {
+        AgentId::CODEX => {
             let Some(at) = tokens
                 .iter()
                 .position(|t| CODEX_SUBCOMMANDS.contains(&t.as_str()))
@@ -419,7 +436,7 @@ pub fn session_use(agent: AgentKind, tokens: &[String]) -> Option<Resumes> {
                 None => Resumes::Unnamed,
             })
         }
-        AgentKind::Opencode => {
+        AgentId::OPENCODE => {
             if tokens
                 .first()
                 .is_some_and(|first| OPENCODE_OTHER.contains(&first.as_str()))
@@ -446,12 +463,15 @@ pub fn session_use(agent: AgentKind, tokens: &[String]) -> Option<Resumes> {
                 _ => Resumes::Unnamed,
             })
         }
+        // The other agents hold no history Leon reads, so no session is
+        // known of their processes.
+        _ => None,
     }
 }
 
 /// The agent process a command line is, if it is one: the program itself, or
 /// an interpreter running a script of that name.
-fn agent_of(command: &str) -> Option<(AgentKind, Vec<String>)> {
+fn agent_of(command: &str) -> Option<(AgentId, Vec<String>)> {
     let tokens = words(command);
     let first = tokens.first()?;
     if let Some(agent) = agent_named(base_name(first)) {
@@ -562,13 +582,13 @@ pub fn parse_scan(output: &str) -> Scan {
                 (Some(a), Some(b)) => (a - b).abs() <= STATE_START_TOLERANCE,
                 _ => true,
             };
-            if same && process.agent == AgentKind::Claude {
+            if same && process.agent == AgentId::CLAUDE {
                 process.state_session = Some(session.clone());
             }
         }
     }
     // A wrapper and the program it starts are one session: keep the outer.
-    let ids: HashSet<(u32, AgentKind)> = found.iter().map(|p| (p.pid, p.agent)).collect();
+    let ids: HashSet<(u32, AgentId)> = found.iter().map(|p| (p.pid, p.agent)).collect();
     let nested: Vec<u32> = found
         .iter()
         .filter(|p| {
@@ -606,77 +626,77 @@ mod tests {
 
     #[test]
     fn the_arguments_of_each_agent_say_which_session_it_holds() {
-        use AgentKind::{Claude, Codex, Opencode};
+        let (claude, codex, opencode) = (AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE);
         let id = || Resumes::Id(UUID.to_owned());
-        let table: Vec<(AgentKind, String, Option<Resumes>)> = vec![
-            (Claude, "".into(), Some(Resumes::Unnamed)),
-            (Claude, format!("--resume {UUID}"), Some(id())),
-            (Claude, format!("-r {UUID}"), Some(id())),
-            (Claude, format!("--resume={UUID}"), Some(id())),
-            (Claude, format!("--session-id {UUID}"), Some(id())),
-            (Claude, format!("--model opus --resume {UUID}"), Some(id())),
-            (Claude, "--continue".into(), Some(Resumes::Latest)),
-            (Claude, "-c".into(), Some(Resumes::Latest)),
-            (Claude, "--resume".into(), Some(Resumes::Unnamed)),
+        let table: Vec<(AgentId, String, Option<Resumes>)> = vec![
+            (claude, "".into(), Some(Resumes::Unnamed)),
+            (claude, format!("--resume {UUID}"), Some(id())),
+            (claude, format!("-r {UUID}"), Some(id())),
+            (claude, format!("--resume={UUID}"), Some(id())),
+            (claude, format!("--session-id {UUID}"), Some(id())),
+            (claude, format!("--model opus --resume {UUID}"), Some(id())),
+            (claude, "--continue".into(), Some(Resumes::Latest)),
+            (claude, "-c".into(), Some(Resumes::Latest)),
+            (claude, "--resume".into(), Some(Resumes::Unnamed)),
             (
-                Claude,
+                claude,
                 "--resume my-named-session".into(),
                 Some(Resumes::Unnamed),
             ),
             // A fork writes a new session: the id is not the one held.
             (
-                Claude,
+                claude,
                 format!("--resume {UUID} --fork-session"),
                 Some(Resumes::Unnamed),
             ),
             (
-                Claude,
+                claude,
                 "--continue --fork-session".into(),
                 Some(Resumes::Unnamed),
             ),
-            (Claude, "mcp serve".into(), None),
-            (Claude, "--version".into(), None),
-            (Claude, "update".into(), None),
-            (Codex, "".into(), Some(Resumes::Unnamed)),
-            (Codex, format!("resume {UUID}"), Some(id())),
-            (Codex, format!("-c model=o3 resume {UUID}"), Some(id())),
-            (Codex, format!("exec resume {UUID}"), Some(id())),
-            (Codex, "resume --last".into(), Some(Resumes::Latest)),
-            (Codex, "resume".into(), Some(Resumes::Unnamed)),
-            (Codex, format!("fork {UUID}"), Some(Resumes::Unnamed)),
-            (Codex, "exec fix the bug".into(), Some(Resumes::Unnamed)),
-            (Codex, "app-server --listen unix://".into(), None),
-            (Codex, "login".into(), None),
-            (Opencode, "".into(), Some(Resumes::Unnamed)),
+            (claude, "mcp serve".into(), None),
+            (claude, "--version".into(), None),
+            (claude, "update".into(), None),
+            (codex, "".into(), Some(Resumes::Unnamed)),
+            (codex, format!("resume {UUID}"), Some(id())),
+            (codex, format!("-c model=o3 resume {UUID}"), Some(id())),
+            (codex, format!("exec resume {UUID}"), Some(id())),
+            (codex, "resume --last".into(), Some(Resumes::Latest)),
+            (codex, "resume".into(), Some(Resumes::Unnamed)),
+            (codex, format!("fork {UUID}"), Some(Resumes::Unnamed)),
+            (codex, "exec fix the bug".into(), Some(Resumes::Unnamed)),
+            (codex, "app-server --listen unix://".into(), None),
+            (codex, "login".into(), None),
+            (opencode, "".into(), Some(Resumes::Unnamed)),
             (
-                Opencode,
+                opencode,
                 "--session ses_1a2b".into(),
                 Some(Resumes::Id("ses_1a2b".into())),
             ),
             (
-                Opencode,
+                opencode,
                 "-s ses_1a2b".into(),
                 Some(Resumes::Id("ses_1a2b".into())),
             ),
             (
-                Opencode,
+                opencode,
                 "--session=ses_1a2b".into(),
                 Some(Resumes::Id("ses_1a2b".into())),
             ),
             (
-                Opencode,
+                opencode,
                 "run -s ses_1a2b hello".into(),
                 Some(Resumes::Id("ses_1a2b".into())),
             ),
-            (Opencode, "--continue".into(), Some(Resumes::Latest)),
+            (opencode, "--continue".into(), Some(Resumes::Latest)),
             (
-                Opencode,
+                opencode,
                 "--session ses_1a2b --fork".into(),
                 Some(Resumes::Unnamed),
             ),
-            (Opencode, "/work/project".into(), Some(Resumes::Unnamed)),
-            (Opencode, "serve".into(), None),
-            (Opencode, "models".into(), None),
+            (opencode, "/work/project".into(), Some(Resumes::Unnamed)),
+            (opencode, "serve".into(), None),
+            (opencode, "models".into(), None),
         ];
         for (agent, line, expected) in &table {
             assert_eq!(
@@ -706,11 +726,11 @@ mod tests {
     #[test]
     fn a_program_or_an_interpreter_running_its_script_is_an_agent() {
         let (agent, args) = agent_of("/Users/me/.local/bin/claude --resume x").unwrap();
-        assert_eq!((agent, args), (AgentKind::Claude, tokens("--resume x")));
+        assert_eq!((agent, args), (AgentId::CLAUDE, tokens("--resume x")));
         let (agent, args) = agent_of("node /usr/local/bin/codex resume y").unwrap();
-        assert_eq!((agent, args), (AgentKind::Codex, tokens("resume y")));
+        assert_eq!((agent, args), (AgentId::CODEX, tokens("resume y")));
         let (agent, _) = agent_of("\"C:\\Program Files\\x\\opencode.exe\" -c").unwrap();
-        assert_eq!(agent, AgentKind::Opencode);
+        assert_eq!(agent, AgentId::OPENCODE);
         for not in [
             "/bin/zsh -c source /Users/me/.claude/shell-snapshots/x.sh",
             "rg claude",

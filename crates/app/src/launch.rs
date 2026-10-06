@@ -23,7 +23,7 @@
 //! terminal that says `command not found`. A machine that was not probed yet
 //! is tried anyway.
 
-use leon_core::{AgentKind, Machine, MachineKind};
+use leon_core::{AgentId, AgentSpec, Machine, MachineKind};
 use leon_remote::{agent_launch, interactive_on, sh_quote, CommandSpec, ProbeReport, SshOptions};
 use leon_term::SpawnSpec;
 use std::path::{Path, PathBuf};
@@ -34,7 +34,7 @@ pub enum Launch {
     /// An agent, resuming the session with this id of its own when given.
     Agent {
         /// Which agent.
-        kind: AgentKind,
+        kind: AgentId,
         /// The agent's own id of the session to resume.
         resume: Option<String>,
     },
@@ -48,12 +48,20 @@ pub enum LaunchError {
     /// The agent is not installed on the machine.
     NotInstalled {
         /// The agent.
-        agent: AgentKind,
+        agent: AgentId,
         /// The machine's name.
         machine: String,
     },
     /// The folder does not exist on this computer.
     NoSuchFolder(String),
+    /// The agent is not in the catalogue (it was a custom agent that has been
+    /// removed).
+    UnknownAgent(AgentId),
+    /// A session was to be resumed but the agent is launch only.
+    CannotResume {
+        /// The agent.
+        agent: AgentId,
+    },
 }
 
 impl std::fmt::Display for LaunchError {
@@ -65,6 +73,12 @@ impl std::fmt::Display for LaunchError {
                 crate::format::agent_name(*agent)
             ),
             Self::NoSuchFolder(path) => write!(f, "The folder {path} does not exist."),
+            Self::UnknownAgent(agent) => write!(f, "{agent} is not an agent Leon knows."),
+            Self::CannotResume { agent } => write!(
+                f,
+                "{} cannot be resumed from Leon: it starts new sessions only.",
+                crate::format::agent_name(*agent)
+            ),
         }
     }
 }
@@ -175,14 +189,10 @@ fn unix_login_shell(shell: Option<String>) -> (String, Vec<String>) {
     (shell, vec!["-l".to_owned(), "-i".to_owned()])
 }
 
-/// The agent's path in a probe report: `Some(None)` when the machine was
-/// probed and does not have it.
-pub fn probed(report: &ProbeReport, kind: AgentKind) -> Option<&str> {
-    match kind {
-        AgentKind::Claude => report.claude.as_deref(),
-        AgentKind::Codex => report.codex.as_deref(),
-        AgentKind::Opencode => report.opencode.as_deref(),
-    }
+/// The path of the agent in a probe report: the first of its binaries the
+/// machine has. `None` when the machine was probed and has none of them.
+pub fn probed<'a>(report: &'a ProbeReport, spec: &AgentSpec) -> Option<&'a str> {
+    spec.detect.iter().find_map(|name| report.tool(name))
 }
 
 /// The terminal's spec for a command of this crate's command type.
@@ -275,88 +285,67 @@ pub struct LaunchPrefs {
     pub shell: Option<(String, Vec<String>)>,
     /// Variables added to the environment of terminals on this computer.
     pub env: Vec<(String, String)>,
-    /// How each agent starts, in the order of [`AgentKind::ALL`].
-    pub agents: [AgentPrefs; 3],
+    /// How each agent starts, by agent; an agent without an entry starts as
+    /// the catalogue says.
+    pub agents: std::collections::HashMap<AgentId, AgentPrefs>,
 }
+
+static NO_PREFS: AgentPrefs = AgentPrefs {
+    executable: None,
+    args: Vec::new(),
+    resume_args: Vec::new(),
+};
 
 impl LaunchPrefs {
     /// How `kind` is started.
-    pub fn agent(&self, kind: AgentKind) -> &AgentPrefs {
-        let place = AgentKind::ALL
-            .iter()
-            .position(|candidate| *candidate == kind)
-            .unwrap_or(0);
-        &self.agents[place]
+    pub fn agent(&self, kind: AgentId) -> &AgentPrefs {
+        self.agents.get(&kind).unwrap_or(&NO_PREFS)
     }
 }
 
-/// Splits what a person typed into arguments the way a shell would: spaces
-/// separate, single and double quotes keep words together and a backslash
-/// escapes the next character outside single quotes.
-pub fn split_words(text: &str) -> Vec<String> {
-    let (mut words, mut word, mut any) = (Vec::new(), String::new(), false);
-    let mut quote: Option<char> = None;
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        match (quote, c) {
-            (Some(q), c) if c == q => quote = None,
-            (Some('\''), c) => word.push(c),
-            (_, '\\') => {
-                if let Some(next) = chars.next() {
-                    word.push(next);
-                    any = true;
-                }
-            }
-            (Some(_), c) => word.push(c),
-            (None, '\'' | '"') => {
-                quote = Some(c);
-                any = true;
-            }
-            (None, c) if c.is_whitespace() => {
-                if any {
-                    words.push(std::mem::take(&mut word));
-                    any = false;
-                }
-            }
-            (None, c) => {
-                word.push(c);
-                any = true;
-            }
-        }
-    }
-    if any {
-        words.push(word);
-    }
-    words
-}
+pub use leon_core::agent::split_words;
 
 /// The command line that starts an agent in a shell, without the Enter.
 #[cfg(test)]
-pub fn command_line(kind: AgentKind, resume: Option<&str>, flavor: Flavor) -> String {
-    command_line_with(kind, resume, flavor, &AgentPrefs::default())
+pub fn command_line(kind: AgentId, resume: Option<&str>, flavor: Flavor) -> String {
+    command_line_with(kind, resume, flavor, &AgentPrefs::default()).unwrap()
 }
 
 /// [`command_line`] with the executable and the extra arguments the settings
 /// give: the arguments follow the command (`claude --resume <id> <extra>`).
+/// `None` when the agent is not in the catalogue, or a resume was asked of one
+/// that is launch only.
 pub fn command_line_with(
-    kind: AgentKind,
+    kind: AgentId,
     resume: Option<&str>,
     flavor: Flavor,
     prefs: &AgentPrefs,
-) -> String {
-    let (program, args) = agent_launch(kind, resume);
+) -> Option<String> {
+    command_line_for(kind.spec()?, resume, flavor, prefs)
+}
+
+/// [`command_line_with`] for a spec at hand.
+pub fn command_line_for(
+    spec: &AgentSpec,
+    resume: Option<&str>,
+    flavor: Flavor,
+    prefs: &AgentPrefs,
+) -> Option<String> {
+    let (program, args) = agent_launch(spec, resume)?;
     let program = prefs.executable.clone().unwrap_or(program);
     let extra = if resume.is_some() {
         &prefs.resume_args
     } else {
         &prefs.args
     };
-    std::iter::once(program)
-        .chain(args)
-        .chain(extra.iter().cloned())
-        .map(|word| quote(&word, flavor))
-        .collect::<Vec<_>>()
-        .join(" ")
+    Some(
+        std::iter::once(program)
+            .chain(args)
+            .chain(extra.iter().cloned())
+            .map(|word| quote(&word, flavor))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 /// What a terminal starts and what is typed into it.
@@ -409,20 +398,32 @@ pub fn plan_with(
 ) -> Result<Plan, LaunchError> {
     let local = matches!(machine.kind, MachineKind::Local);
     // The agent must exist on the machine; its path is the shell's to find.
-    if let Launch::Agent { kind, .. } = launch {
-        let (name, _) = agent_launch(*kind, None);
+    if let Launch::Agent { kind, resume } = launch {
+        let spec = kind.spec().ok_or(LaunchError::UnknownAgent(*kind))?;
+        if resume.is_some() && !spec.can_resume() {
+            return Err(LaunchError::CannotResume { agent: *kind });
+        }
         let own = prefs.agent(*kind).executable.as_deref();
+        let present = |program: &str| {
+            // A chosen program is a file, or a name the shell finds.
+            if Path::new(program).components().count() > 1 {
+                is_runnable(Path::new(program))
+            } else {
+                system.find_program(program).is_some()
+            }
+        };
         let installed = if local {
             match own {
-                // A chosen program is a file, or a name the shell finds.
-                Some(program) if Path::new(program).components().count() > 1 => {
-                    is_runnable(Path::new(program))
-                }
-                Some(program) => system.find_program(program).is_some(),
-                None => system.find_program(&name).is_some(),
+                Some(program) => present(program),
+                None if spec.detect.is_empty() => present(&spec.command),
+                None => spec.detect.iter().any(|name| present(name)),
             }
         } else {
-            report.is_none_or(|report| probed(report, *kind).is_some())
+            // A command that is a path is not looked for by name: the machine
+            // is not asked, and the shell reports it if it is not there.
+            report.is_none_or(|report| {
+                spec.detect.is_empty() || own.is_some() || probed(report, spec).is_some()
+            })
         };
         if !installed {
             return Err(LaunchError::NotInstalled {
@@ -451,6 +452,7 @@ pub fn plan_with(
         Launch::Agent { kind, resume } => Some(format!(
             "{}\r",
             command_line_with(*kind, resume.as_deref(), flavor, prefs.agent(*kind))
+                .ok_or(LaunchError::UnknownAgent(*kind))?
         )),
         Launch::Shell => None,
     };
@@ -524,13 +526,14 @@ mod tests {
             arch: None,
             home: None,
             git: None,
-            claude: claude.map(str::to_owned),
-            codex: None,
-            opencode: None,
+            tools: claude
+                .map(|path| ("claude".to_owned(), path.to_owned()))
+                .into_iter()
+                .collect(),
         }
     }
 
-    fn agent(kind: AgentKind, resume: Option<&str>) -> Launch {
+    fn agent(kind: AgentId, resume: Option<&str>) -> Launch {
         Launch::Agent {
             kind,
             resume: resume.map(str::to_owned),
@@ -557,7 +560,7 @@ mod tests {
             &local(),
             None,
             "/srv/api",
-            &agent(AgentKind::Claude, None),
+            &agent(AgentId::CLAUDE, None),
             &ssh(),
             &fake(),
         )
@@ -590,23 +593,23 @@ mod tests {
             .unwrap()
         };
         assert_eq!(
-            sent(AgentKind::Claude, "abc-123"),
+            sent(AgentId::CLAUDE, "abc-123"),
             "claude --resume abc-123\r"
         );
-        assert_eq!(sent(AgentKind::Codex, "abc-123"), "codex resume abc-123\r");
+        assert_eq!(sent(AgentId::CODEX, "abc-123"), "codex resume abc-123\r");
         assert_eq!(
-            sent(AgentKind::Opencode, "abc-123"),
+            sent(AgentId::OPENCODE, "abc-123"),
             "opencode --session abc-123\r"
         );
     }
 
     #[test]
     fn an_id_with_odd_characters_is_quoted_for_the_shell() {
-        let line = command_line(AgentKind::Claude, Some("it's; rm -rf ~"), Flavor::Posix);
+        let line = command_line(AgentId::CLAUDE, Some("it's; rm -rf ~"), Flavor::Posix);
         assert_eq!(line, r"claude --resume 'it'\''s; rm -rf ~'");
-        let line = command_line(AgentKind::Claude, Some("it's x"), Flavor::PowerShell);
+        let line = command_line(AgentId::CLAUDE, Some("it's x"), Flavor::PowerShell);
         assert_eq!(line, "claude --resume 'it''s x'");
-        let line = command_line(AgentKind::Codex, Some("a b"), Flavor::Cmd);
+        let line = command_line(AgentId::CODEX, Some("a b"), Flavor::Cmd);
         assert_eq!(line, "codex resume \"a b\"");
     }
 
@@ -628,7 +631,7 @@ mod tests {
             &local(),
             None,
             "/srv/api",
-            &agent(AgentKind::Codex, None),
+            &agent(AgentId::CODEX, None),
             &ssh(),
             &fake(),
         )
@@ -636,7 +639,7 @@ mod tests {
         assert_eq!(
             error,
             LaunchError::NotInstalled {
-                agent: AgentKind::Codex,
+                agent: AgentId::CODEX,
                 machine: "This machine".into()
             }
         );
@@ -688,7 +691,7 @@ mod tests {
             &remote(),
             Some(&found),
             "/srv/api",
-            &agent(AgentKind::Claude, Some("abc")),
+            &agent(AgentId::CLAUDE, Some("abc")),
             &ssh(),
             &fake(),
         )
@@ -707,7 +710,7 @@ mod tests {
             &remote(),
             Some(report),
             "/srv/api",
-            &agent(AgentKind::Claude, None),
+            &agent(AgentId::CLAUDE, None),
             &ssh(),
             &fake(),
         )
@@ -720,7 +723,7 @@ mod tests {
             &remote(),
             None,
             "/srv/api",
-            &agent(AgentKind::Claude, None),
+            &agent(AgentId::CLAUDE, None),
             &ssh(),
             &fake(),
         )
@@ -804,12 +807,12 @@ mod tests {
             resume_args: vec!["--verbose".into()],
         };
         assert_eq!(
-            command_line_with(AgentKind::Claude, None, Flavor::Posix, &prefs),
-            "/opt/bin/claude --model opus"
+            command_line_with(AgentId::CLAUDE, None, Flavor::Posix, &prefs),
+            Some("/opt/bin/claude --model opus".to_owned())
         );
         assert_eq!(
-            command_line_with(AgentKind::Claude, Some("abc"), Flavor::Posix, &prefs),
-            "/opt/bin/claude --resume abc --verbose"
+            command_line_with(AgentId::CLAUDE, Some("abc"), Flavor::Posix, &prefs),
+            Some("/opt/bin/claude --resume abc --verbose".to_owned())
         );
     }
 
@@ -836,5 +839,123 @@ mod tests {
             planned.spawn.env,
             [("EDITOR".to_owned(), "nvim".to_owned())]
         );
+    }
+
+    fn custom(name: &str, command: &str, args: &str, resume: &str) -> AgentSpec {
+        leon_core::CustomAgent::new(name, command, args, resume, &[])
+            .unwrap()
+            .to_spec(&[])
+            .unwrap()
+    }
+
+    #[test]
+    fn a_custom_agent_is_quoted_for_every_shell_flavour() {
+        let spec = custom(
+            "My Tool",
+            "my-tool",
+            "--name 'Ana Smith' --fast",
+            "--resume {id}",
+        );
+        let none = AgentPrefs::default();
+        let line = |resume, flavor| command_line_for(&spec, resume, flavor, &none).unwrap();
+        assert_eq!(
+            line(None, Flavor::Posix),
+            r"my-tool --name 'Ana Smith' --fast"
+        );
+        assert_eq!(
+            line(Some("it's; rm -rf ~"), Flavor::Posix),
+            r"my-tool --resume 'it'\''s; rm -rf ~'"
+        );
+        assert_eq!(
+            line(Some("it's x"), Flavor::PowerShell),
+            "my-tool --resume 'it''s x'"
+        );
+        assert_eq!(line(Some("a b"), Flavor::Cmd), "my-tool --resume \"a b\"");
+        assert_eq!(
+            line(None, Flavor::PowerShell),
+            "my-tool --name 'Ana Smith' --fast"
+        );
+    }
+
+    #[test]
+    fn a_custom_agent_that_continues_the_latest_session_resumes_without_an_id() {
+        let spec = custom("Latest Tool", "lt", "", "--continue");
+        let none = AgentPrefs::default();
+        assert_eq!(
+            command_line_for(&spec, Some("ignored"), Flavor::Posix, &none).as_deref(),
+            Some("lt --continue")
+        );
+        let launch_only = custom("Only Tool", "ot", "", "");
+        assert_eq!(
+            command_line_for(&launch_only, Some("x"), Flavor::Posix, &none),
+            None
+        );
+        assert_eq!(
+            command_line_for(&launch_only, None, Flavor::Posix, &none).as_deref(),
+            Some("ot")
+        );
+    }
+
+    #[test]
+    fn a_catalogue_agent_starts_with_its_own_command_and_a_launch_only_one_is_never_resumed() {
+        let grok = AgentId::GROK;
+        assert_eq!(
+            command_line_with(grok, None, Flavor::Posix, &AgentPrefs::default()).as_deref(),
+            Some("grok")
+        );
+        let kiro = AgentId::parse("kiro").unwrap();
+        assert_eq!(
+            command_line_with(kiro, None, Flavor::Posix, &AgentPrefs::default()).as_deref(),
+            Some("kiro-cli chat --tui")
+        );
+        let amp = AgentId::parse("amp").unwrap();
+        assert_eq!(
+            command_line_with(amp, Some("x"), Flavor::Posix, &AgentPrefs::default()),
+            None
+        );
+        let copilot = AgentId::parse("copilot").unwrap();
+        assert_eq!(
+            command_line_with(copilot, Some("s1"), Flavor::Posix, &AgentPrefs::default())
+                .as_deref(),
+            Some("copilot '--resume=s1'")
+        );
+        // An id that is not in the catalogue has no command at all.
+        let gone = AgentId::parse("never-in-the-catalogue").unwrap();
+        assert_eq!(
+            command_line_with(gone, None, Flavor::Posix, &AgentPrefs::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn resuming_a_launch_only_agent_or_an_unknown_one_is_refused_before_anything_starts() {
+        let machine = Machine {
+            id: leon_core::MachineId::local(),
+            name: "This machine".into(),
+            kind: MachineKind::Local,
+        };
+        let planned = |kind, resume: Option<&str>| {
+            plan(
+                &machine,
+                None,
+                "/srv/api",
+                &Launch::Agent {
+                    kind,
+                    resume: resume.map(str::to_owned),
+                },
+                &SshOptions::without_multiplexing(),
+                &fake(),
+            )
+        };
+        let amp = AgentId::parse("amp").unwrap();
+        assert_eq!(
+            planned(amp, Some("x")),
+            Err(LaunchError::CannotResume { agent: amp })
+        );
+        let gone = AgentId::parse("never-in-the-catalogue").unwrap();
+        assert_eq!(planned(gone, None), Err(LaunchError::UnknownAgent(gone)));
+        assert!(LaunchError::CannotResume { agent: amp }
+            .to_string()
+            .contains("new sessions only"));
     }
 }

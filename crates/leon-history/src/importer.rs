@@ -15,10 +15,15 @@
 use std::ops::AddAssign;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use leon_core::{set_import_cursor_in, upsert_session_in, MachineId, Store, StoreChange};
+use std::time::Instant;
+
+use chrono::{DateTime, Utc};
+use leon_core::{
+    set_import_cursor_in, upsert_session_in, ImportRun, MachineId, Store, StoreChange,
+};
 
 use crate::roots::HistoryRoots;
-use crate::source::{HistorySource, SourceItem};
+use crate::source::{HistoryError, HistorySource, SourceItem};
 
 /// Upper bound on the number of threads used by one import run.
 const MAX_WORKERS: usize = 8;
@@ -40,6 +45,9 @@ pub struct ImportReport {
     pub failed: usize,
     /// Lines or rows inside imported items that were skipped as unreadable.
     pub malformed: usize,
+    /// Sources whose layout Leon does not know (a database without the
+    /// tables or columns it reads). They are also counted in `failed`.
+    pub unsupported: usize,
 }
 
 impl AddAssign for ImportReport {
@@ -50,6 +58,7 @@ impl AddAssign for ImportReport {
         self.empty += other.empty;
         self.failed += other.failed;
         self.malformed += other.malformed;
+        self.unsupported += other.unsupported;
     }
 }
 
@@ -60,10 +69,83 @@ pub struct Importer;
 impl Importer {
     /// Imports everything found under `roots` on this machine's file system
     /// and attributes it to `machine_id`. Safe to call repeatedly.
+    ///
+    /// Each source is imported on its own and what it did is recorded in the
+    /// store (when, how long, how it ended) for the history diagnosis.
     pub fn run(store: &Store, machine_id: &MachineId, roots: &HistoryRoots) -> ImportReport {
-        let sources = roots.sources();
-        let sources: Vec<&dyn HistorySource> = sources.iter().map(Box::as_ref).collect();
-        Self::run_sources(store, machine_id, &sources)
+        Self::run_with_clock(store, machine_id, roots, Utc::now)
+    }
+
+    /// [`Importer::run`] with the clock that stamps the recorded runs, for
+    /// tests.
+    pub fn run_with_clock(
+        store: &Store,
+        machine_id: &MachineId,
+        roots: &HistoryRoots,
+        now: impl Fn() -> DateTime<Utc>,
+    ) -> ImportReport {
+        Self::run_each(store, machine_id, roots, now, None)
+    }
+
+    /// An incremental run for a poll: a source whose
+    /// [`stamp`](HistorySource::stamp) is the one remembered in `stamps` from
+    /// the previous call (nothing in it moved, its database's `-wal` file
+    /// included) is not even listed. A source that cannot give a stamp is
+    /// always imported. The stamp is taken before the run, so a change made
+    /// while it runs is seen by the next call.
+    pub fn run_changed(
+        store: &Store,
+        machine_id: &MachineId,
+        roots: &HistoryRoots,
+        stamps: &mut std::collections::HashMap<String, String>,
+    ) -> ImportReport {
+        Self::run_each(store, machine_id, roots, Utc::now, Some(stamps))
+    }
+
+    fn run_each(
+        store: &Store,
+        machine_id: &MachineId,
+        roots: &HistoryRoots,
+        now: impl Fn() -> DateTime<Utc>,
+        mut stamps: Option<&mut std::collections::HashMap<String, String>>,
+    ) -> ImportReport {
+        let mut total = ImportReport::default();
+        for source in roots.sources() {
+            let tag = source.agent().as_str().to_owned();
+            let stamp = stamps.as_ref().and(source.stamp());
+            if let (Some(known), Some(stamp)) = (stamps.as_ref(), &stamp) {
+                if known.get(&tag) == Some(stamp) {
+                    continue;
+                }
+            }
+            let started = Instant::now();
+            let report = Self::run_sources(store, machine_id, &[source.as_ref()]);
+            let run = ImportRun {
+                agent: source.agent().as_str().to_owned(),
+                at: now(),
+                duration_ms: started.elapsed().as_millis() as u64,
+                scanned: report.scanned as u64,
+                imported: report.imported as u64,
+                unchanged: report.skipped_unchanged as u64,
+                empty: report.empty as u64,
+                failed: report.failed as u64,
+                malformed: report.malformed as u64,
+                unsupported: report.unsupported as u64,
+            };
+            if let Err(error) = store.record_import_run(machine_id, &run) {
+                tracing::debug!(%error, "cannot record an import run");
+            }
+            if let (Some(stamps), Some(stamp)) = (stamps.as_deref_mut(), stamp) {
+                // A source that failed is looked at again next time.
+                if report.failed == 0 {
+                    stamps.insert(tag, stamp);
+                } else {
+                    stamps.remove(&tag);
+                }
+            }
+            total += report;
+        }
+        total
     }
 
     /// Imports everything the given sources provide and attributes it to
@@ -88,6 +170,13 @@ impl Importer {
         for source in sources {
             match source.list() {
                 Ok(items) => {
+                    // A part of the source that could not be read is still a
+                    // problem to report, though the rest was listed.
+                    let problems = source.problems();
+                    if !problems.is_empty() {
+                        report.failed += 1;
+                        report.unsupported += 1;
+                    }
                     for item in items {
                         report.scanned += 1;
                         if cursors.get(&item.key) == Some(&item.fingerprint) {
@@ -100,6 +189,9 @@ impl Importer {
                 Err(error) => {
                     tracing::warn!(agent = source.agent().as_str(), %error, "cannot list history source");
                     report.failed += 1;
+                    if matches!(error, HistoryError::Unsupported { .. }) {
+                        report.unsupported += 1;
+                    }
                 }
             }
         }
@@ -200,7 +292,7 @@ mod tests {
     use crate::opencode;
     use crate::session::ParsedSession;
     use crate::source::HistoryError;
-    use leon_core::{AgentKind, Role, SearchQuery, SessionFilter};
+    use leon_core::{AgentId, Role, SearchQuery, SessionFilter};
     use std::fs;
     use std::path::Path;
 
@@ -270,10 +362,7 @@ mod tests {
             .unwrap();
         let mut agents: Vec<_> = sessions.iter().map(|session| session.agent).collect();
         agents.sort_by_key(|agent| agent.as_str());
-        assert_eq!(
-            agents,
-            [AgentKind::Claude, AgentKind::Codex, AgentKind::Opencode]
-        );
+        assert_eq!(agents, [AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE]);
 
         let hits = store.search(&SearchQuery::new("exponentially")).unwrap();
         assert_eq!(hits.len(), 1);
@@ -336,7 +425,7 @@ mod tests {
         assert_eq!(report.imported, 1);
         assert_eq!(report.skipped_unchanged, 2);
         let filter = SessionFilter {
-            agent: Some(AgentKind::Claude),
+            agent: Some(AgentId::CLAUDE),
             ..Default::default()
         };
         let sessions = store.recent_sessions(&filter, 10).unwrap();
@@ -436,8 +525,8 @@ mod tests {
     struct InMemory;
 
     impl HistorySource for InMemory {
-        fn agent(&self) -> AgentKind {
-            AgentKind::Claude
+        fn agent(&self) -> AgentId {
+            AgentId::CLAUDE
         }
 
         fn list(&self) -> Result<Vec<SourceItem>, HistoryError> {
@@ -499,5 +588,141 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         Importer::run(&store, &MachineId::local(), &roots);
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    fn one_claude_file(dir: &Path) -> (HistoryRoots, std::path::PathBuf) {
+        let roots = HistoryRoots {
+            claude_projects: Some(dir.join("claude")),
+            codex_sessions: None,
+            opencode_db: None,
+        };
+        (roots, dir.join("claude/project/cut-session.jsonl"))
+    }
+
+    fn count_messages(store: &Store) -> usize {
+        let sessions = store
+            .recent_sessions(&SessionFilter::default(), 10)
+            .unwrap();
+        sessions.first().map_or(0, |s| s.message_count as usize)
+    }
+
+    #[test]
+    fn a_file_cut_mid_line_by_a_power_loss_is_imported_up_to_its_last_complete_line_and_again_when_it_grows(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (roots, file) = one_claude_file(dir.path());
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let first = claude_line("user", "first question", 0);
+        let second = claude_line("assistant", "first answer", 1);
+        let third = claude_line("user", "second question", 2);
+        // The third line is cut in the middle of its JSON, and the cut may
+        // even end in zero bytes, as a file system leaves after a power cut.
+        let cut = &third[..third.len() / 2];
+        fs::write(&file, format!("{first}\n{second}\n{cut}\0\0\0")).unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let report = Importer::run(&store, &MachineId::local(), &roots);
+        assert_eq!(report.imported, 1, "{report:?}");
+        assert_eq!(count_messages(&store), 2);
+        // Nothing changed: not read again.
+        let again = Importer::run(&store, &MachineId::local(), &roots);
+        assert_eq!(again.skipped_unchanged, 1);
+        // The file later grows (the agent resumed and wrote on): re-imported.
+        fs::write(&file, format!("{first}\n{second}\n{third}\n")).unwrap();
+        let grown = Importer::run(&store, &MachineId::local(), &roots);
+        assert_eq!(grown.imported, 1, "{grown:?}");
+        assert_eq!(count_messages(&store), 3);
+    }
+
+    #[test]
+    fn a_zero_length_file_is_empty_not_a_failure_and_is_imported_when_it_gets_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let (roots, file) = one_claude_file(dir.path());
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, b"").unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let report = Importer::run(&store, &MachineId::local(), &roots);
+        assert_eq!(
+            (report.empty, report.failed, report.imported),
+            (1, 0, 0),
+            "{report:?}"
+        );
+        fs::write(&file, claude_line("user", "hello", 0) + "\n").unwrap();
+        let later = Importer::run(&store, &MachineId::local(), &roots);
+        assert_eq!(later.imported, 1, "{later:?}");
+    }
+
+    #[test]
+    fn each_run_is_recorded_per_agent_and_an_unknown_layout_is_counted() {
+        let home = tempfile::tempdir().unwrap();
+        let mut roots = fixture(home.path());
+        let store = Store::open_in_memory().unwrap();
+        let stamp = DateTime::from_timestamp_millis(7_000).unwrap();
+        Importer::run_with_clock(&store, &MachineId::local(), &roots, || stamp);
+        let overview = store.history_overview(&MachineId::local()).unwrap();
+        assert_eq!(overview.len(), 3);
+        let claude = overview.iter().find(|row| row.agent == "claude").unwrap();
+        assert_eq!(claude.sessions, 1);
+        assert_eq!(claude.last_run.as_ref().unwrap().at, stamp);
+        assert_eq!(claude.last_run.as_ref().unwrap().imported, 1);
+
+        // A database with another layout is reported, not silently empty.
+        let odd = home.path().join("odd.db");
+        rusqlite::Connection::open(&odd)
+            .unwrap()
+            .execute_batch("CREATE TABLE other (id TEXT);")
+            .unwrap();
+        roots.opencode_db = Some(odd);
+        let report = Importer::run(&store, &MachineId::local(), &roots);
+        assert_eq!(report.unsupported, 1);
+        assert!(report.failed >= 1);
+    }
+
+    #[test]
+    fn a_poll_skips_a_source_that_did_not_move_and_sees_a_change_that_only_reached_the_wal() {
+        let home = tempfile::tempdir().unwrap();
+        let roots = fixture(home.path());
+        // Put the opencode database in WAL mode and keep the log from being
+        // folded back into the main file.
+        let writer = rusqlite::Connection::open(home.path().join("opencode.db")).unwrap();
+        writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+        writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let mut stamps = std::collections::HashMap::new();
+
+        let first = Importer::run_changed(&store, &MachineId::local(), &roots, &mut stamps);
+        assert_eq!(first.imported, 3);
+        let quiet = Importer::run_changed(&store, &MachineId::local(), &roots, &mut stamps);
+        assert_eq!(
+            quiet,
+            ImportReport::default(),
+            "nothing moved: nothing listed"
+        );
+
+        let main_size = fs::metadata(home.path().join("opencode.db")).unwrap().len();
+        opencode::fixture::message(&writer, "m9", "ses_1", 9_500, r#"{"role":"user"}"#);
+        opencode::fixture::part(
+            &writer,
+            "p9",
+            "m9",
+            "ses_1",
+            9_500,
+            serde_json::json!({"type": "text", "text": "a late question"}),
+        );
+        assert_eq!(
+            fs::metadata(home.path().join("opencode.db")).unwrap().len(),
+            main_size
+        );
+        let after = Importer::run_changed(&store, &MachineId::local(), &roots, &mut stamps);
+        assert_eq!(
+            after.imported, 1,
+            "only opencode changed, and only in the log"
+        );
+        assert_eq!(
+            store
+                .search(&SearchQuery::new("late question"))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

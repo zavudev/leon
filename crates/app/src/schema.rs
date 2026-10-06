@@ -6,7 +6,7 @@
 //! platforms it exists on. Everything else is derived from this table: the
 //! file's reading and writing ([`Store`]), the Settings screen, the palette's
 //! entries, the generated `docs/SETTINGS.md` ([`render_docs`]) and the
-//! tests. Adding a setting to [`SETTINGS`] makes it appear everywhere; its
+//! tests. Adding a setting to [`settings`] makes it appear everywhere; its
 //! effect is wired where the application reads it (`settings::get_*`).
 //!
 //! The file is forward and backward compatible. Keys this build does not know
@@ -15,6 +15,8 @@
 //! that key only, with a [`Problem`] to report. A number outside its range is
 //! clamped, not refused.
 
+use leon_core::agent::UsageProvider;
+use leon_core::{AgentId, AgentSpec};
 use serde_json::{Map, Number, Value as Json};
 
 /// The sections of the Settings screen, in its order.
@@ -281,6 +283,8 @@ pub struct Def {
     pub default: Initial,
     /// Where it exists.
     pub platform: Platform,
+    /// The agent it belongs to, for the settings generated from the catalogue.
+    pub agent: Option<AgentId>,
 }
 
 const fn def(
@@ -301,6 +305,7 @@ const fn def(
         kind,
         default,
         platform: Platform::All,
+        agent: None,
     }
 }
 
@@ -318,6 +323,8 @@ const APPEARANCES: Choices =
 const LINES: Choices = Choices::Fixed(&[("theme", "Theme default"), ("on", "On"), ("off", "Off")]);
 const MOTION: Choices =
     Choices::Fixed(&[("system", "Follow system"), ("on", "On"), ("off", "Off")]);
+const BAR_MODES: Choices = Choices::Fixed(&[("detailed", "Detailed"), ("compact", "Compact")]);
+const PERCENT_DISPLAYS: Choices = Choices::Fixed(&[("used", "Used"), ("remaining", "Left")]);
 const CURSORS: Choices = Choices::Fixed(&[
     ("block", "Block"),
     ("beam", "Beam"),
@@ -328,20 +335,22 @@ const PASTES: Choices = Choices::Fixed(&[
     ("text", "Always text"),
     ("image", "Image when there is one"),
 ]);
-const DEFAULT_AGENTS: Choices = Choices::Fixed(&[
-    ("ask", "Ask each time"),
-    ("claude", "Claude Code"),
-    ("codex", "Codex"),
-    ("opencode", "opencode"),
-]);
 const OPEN_MODES: Choices = Choices::Fixed(&[
     ("resume", "Resume in a terminal"),
     ("transcript", "Open the transcript"),
 ]);
+const RESTORE: Choices =
+    Choices::Fixed(&[("ask", "Ask me"), ("always", "Always"), ("never", "Never")]);
+const RESTORE_RESUME: Choices = Choices::Fixed(&[("shown", "When shown"), ("all", "All at once")]);
 const QUIT: Choices = Choices::Fixed(&[
     ("running", "When programs are running"),
     ("always", "Always"),
     ("never", "Never"),
+]);
+const UPDATE_MODES: Choices = Choices::Fixed(&[
+    ("automatic", "Automatic"),
+    ("notify", "Tell me"),
+    ("off", "Off"),
 ]);
 const NOTIFY_HOW: Choices = Choices::Fixed(&[
     ("both", "Banner and desktop"),
@@ -367,7 +376,7 @@ const PROGRAM: Kind = K::Path {
 };
 
 /// The registry of settings.
-pub const SETTINGS: &[Def] = &[
+const BASE: &[Def] = &[
     // ----- appearance
     def(
         "theme_id",
@@ -574,15 +583,6 @@ pub const SETTINGS: &[Def] = &[
     ),
     // ----- agents
     def(
-        "default_agent",
-        S::Agents,
-        "Agent for a new session",
-        "The agent New agent session starts without asking, or ask each time.",
-        "default claude codex opencode new",
-        K::Choice(DEFAULT_AGENTS),
-        D::Text("ask"),
-    ),
-    def(
         "history_open",
         S::Agents,
         "Opening a history session",
@@ -590,114 +590,6 @@ pub const SETTINGS: &[Def] = &[
         "resume transcript enter click",
         K::Choice(OPEN_MODES),
         D::Text("resume"),
-    ),
-    def(
-        "agent_claude_enabled",
-        S::Agents,
-        "Claude Code",
-        "Offer Claude Code for new sessions.",
-        "claude anthropic enabled",
-        K::Toggle,
-        D::Bool(true),
-    ),
-    def(
-        "agent_claude_executable",
-        S::Agents,
-        "Claude Code executable",
-        "The program that starts Claude Code. Empty lets the login shell find `claude`.",
-        "claude path binary",
-        PROGRAM,
-        D::Text(""),
-    ),
-    def(
-        "agent_claude_args",
-        S::Agents,
-        "Claude Code arguments, new session",
-        "Extra arguments typed after the command of a new Claude Code session.",
-        "claude flags options",
-        NO_ARGS,
-        D::Text(""),
-    ),
-    def(
-        "agent_claude_resume_args",
-        S::Agents,
-        "Claude Code arguments, resume",
-        "Extra arguments typed after the command that resumes a Claude Code session.",
-        "claude flags options resume",
-        NO_ARGS,
-        D::Text(""),
-    ),
-    def(
-        "agent_codex_enabled",
-        S::Agents,
-        "Codex",
-        "Offer Codex for new sessions.",
-        "codex openai enabled",
-        K::Toggle,
-        D::Bool(true),
-    ),
-    def(
-        "agent_codex_executable",
-        S::Agents,
-        "Codex executable",
-        "The program that starts Codex. Empty lets the login shell find `codex`.",
-        "codex path binary",
-        PROGRAM,
-        D::Text(""),
-    ),
-    def(
-        "agent_codex_args",
-        S::Agents,
-        "Codex arguments, new session",
-        "Extra arguments typed after the command of a new Codex session.",
-        "codex flags options",
-        NO_ARGS,
-        D::Text(""),
-    ),
-    def(
-        "agent_codex_resume_args",
-        S::Agents,
-        "Codex arguments, resume",
-        "Extra arguments typed after the command that resumes a Codex session.",
-        "codex flags options resume",
-        NO_ARGS,
-        D::Text(""),
-    ),
-    def(
-        "agent_opencode_enabled",
-        S::Agents,
-        "opencode",
-        "Offer opencode for new sessions.",
-        "opencode enabled",
-        K::Toggle,
-        D::Bool(true),
-    ),
-    def(
-        "agent_opencode_executable",
-        S::Agents,
-        "opencode executable",
-        "The program that starts opencode. Empty lets the login shell find `opencode`.",
-        "opencode path binary",
-        PROGRAM,
-        D::Text(""),
-    ),
-    def(
-        "agent_opencode_args",
-        S::Agents,
-        "opencode arguments, new session",
-        "Extra arguments typed after the command of a new opencode session.",
-        "opencode flags options",
-        NO_ARGS,
-        D::Text(""),
-    ),
-    def(
-        "agent_opencode_resume_args",
-        S::Agents,
-        "opencode arguments, resume",
-        "Extra arguments typed after the command that resumes an opencode session.",
-        "opencode flags options resume",
-        NO_ARGS,
-        D::Text(""),
     ),
     // ----- sessions and history
     def(
@@ -861,9 +753,9 @@ pub const SETTINGS: &[Def] = &[
         "The relay that connects two computers that reach it from behind their routers. The default service is operated by Zavu and is not live yet.",
         "relay server url websocket wss connect code share network",
         K::Text {
-            placeholder: "wss://relay.zavu.dev",
+            placeholder: "wss://relay.getleon.dev",
         },
-        D::Text("wss://relay.zavu.dev"),
+        D::Text("wss://relay.getleon.dev"),
     ),
     def(
         "remote_device_name",
@@ -932,51 +824,42 @@ pub const SETTINGS: &[Def] = &[
         D::Bool(true),
     ),
     def(
-        "usage_claude",
-        S::Usage,
-        "Show Claude Code",
-        "Show Claude Code's limits in the bar and the usage view.",
-        "limits anthropic quota",
-        K::Toggle,
-        D::Bool(true),
-    ),
-    def(
-        "usage_codex",
-        S::Usage,
-        "Show Codex",
-        "Show Codex's limits in the bar and the usage view.",
-        "limits openai quota",
-        K::Toggle,
-        D::Bool(true),
-    ),
-    def(
-        "usage_opencode",
-        S::Usage,
-        "Show opencode",
-        "Show opencode's limits in the bar and the usage view.",
-        "limits go quota",
-        K::Toggle,
-        D::Bool(true),
-    ),
-    def(
-        "usage_interval",
+        "usage_refresh_seconds",
         S::Usage,
         "Refresh interval",
-        "How often, in minutes, the limits are read again while the window is focused.",
-        "poll minutes limits refresh",
+        "How often, in seconds, the limits are read again while the window is focused; it pauses in the background and reads once when you return or open the usage view with an older reading. A source that calls a vendor is never called more often than every 60 seconds, and after a 429 it rests at least 5 minutes (or what the service asks for) and keeps the last numbers on show. Codex's own session log may follow a shorter interval.",
+        "poll seconds minutes limits refresh",
         K::Number {
-            min: 1,
-            max: 120,
-            step: 1,
-            unit: "min",
+            min: 30,
+            max: 3600,
+            step: 30,
+            unit: "s",
         },
-        D::Int(5),
+        D::Int(600),
+    ),
+    def(
+        "usage_bar_mode",
+        S::Usage,
+        "Usage bar",
+        "Detailed shows every window of each agent (`10% used 2h 29m · 91% used 1d 11h`, the countdown to the reset, a model's name for its own window) and gives way to Compact, one window per agent, as the window narrows. Compact shows only the window closest to its limit.",
+        "footer detailed compact verbose windows chips limits",
+        K::Choice(BAR_MODES),
+        D::Text("detailed"),
+    ),
+    def(
+        "usage_percentage_display",
+        S::Usage,
+        "Show limits as",
+        "Used (`38% used`) or what is left (`62% left`). Warnings always follow what is used.",
+        "percent remaining left used consumed limits",
+        K::Choice(PERCENT_DISPLAYS),
+        D::Text("used"),
     ),
     def(
         "usage_warn",
         S::Usage,
         "Warn from",
-        "From this percentage a limit is shown as high, with a marker as well as a colour.",
+        "From this percentage of what is used a limit is shown as high, with a marker as well as a colour.",
         "threshold warning percent limits",
         K::Number {
             min: 10,
@@ -984,13 +867,13 @@ pub const SETTINGS: &[Def] = &[
             step: 5,
             unit: "%",
         },
-        D::Int(75),
+        D::Int(60),
     ),
     def(
         "usage_critical",
         S::Usage,
         "Critical from",
-        "From this percentage a limit is shown as near its end, and starting a session says so first.",
+        "From this percentage of what is used a limit is shown as near its end, and starting a session says so first.",
         "threshold error percent limits",
         K::Number {
             min: 11,
@@ -998,7 +881,7 @@ pub const SETTINGS: &[Def] = &[
             step: 5,
             unit: "%",
         },
-        D::Int(90),
+        D::Int(80),
     ),
     def(
         "usage_warn_before_session",
@@ -1008,24 +891,6 @@ pub const SETTINGS: &[Def] = &[
         "notice warning start resume limits",
         K::Toggle,
         D::Bool(true),
-    ),
-    def(
-        "usage_claude_network",
-        S::Usage,
-        "Read Claude Code's limits from Anthropic",
-        "Claude Code keeps its limits nowhere on disk. When on, Leon reads the sign-in token Claude Code already holds (the macOS keychain or ~/.claude/.credentials.json) when it refreshes and sends it over HTTPS to api.anthropic.com only, asking for the account's usage. The token is never stored, logged or shown, and only this computer does it. Off by default.",
-        "network anthropic credential token oauth privacy limits",
-        K::Toggle,
-        D::Bool(false),
-    ),
-    def(
-        "usage_opencode_network",
-        S::Usage,
-        "Read the opencode Go limits from opencode",
-        "Only for an opencode Go subscription. When on, Leon reads the API key opencode stored for it (~/.local/share/opencode/auth.json) when it refreshes and sends it over HTTPS to opencode.ai only, asking for the subscription's usage. The key is never stored, logged or shown, and only this computer does it. Off by default.",
-        "network go credential key privacy limits",
-        K::Toggle,
-        D::Bool(false),
     ),
     def(
         "usage_forget_history",
@@ -1124,6 +989,24 @@ pub const SETTINGS: &[Def] = &[
         K::Choice(QUIT),
         D::Text("running"),
     ),
+    def(
+        "restore_sessions",
+        S::Sessions,
+        "Restore the last sessions",
+        "At start, offer the terminals that were open last time (ask), reopen them (always) or leave them (never; the palette's \"Restore last sessions\" still brings them back). Agents are resumed where they can be; scrollback is not restored.",
+        "reopen open terminals tabs panes crash power quit start",
+        K::Choice(RESTORE),
+        D::Text("ask"),
+    ),
+    def(
+        "restore_resume",
+        S::Sessions,
+        "Resume restored agents",
+        "When a restored agent session is resumed: when its tab is first shown (nothing is spent until you look) or all at once, a few at a time.",
+        "resume tokens quota agents restore background",
+        K::Choice(RESTORE_RESUME),
+        D::Text("shown"),
+    ),
     // ----- advanced
     def(
         "log_level",
@@ -1133,6 +1016,33 @@ pub const SETTINGS: &[Def] = &[
         "debug trace logging verbose",
         K::Choice(LEVELS),
         D::Text("info"),
+    ),
+    def(
+        "updates_mode",
+        S::Advanced,
+        "Updates",
+        "How Leon follows its releases on GitHub: download them and install at the next restart, only tell you and let you decide, or never ask.",
+        "update upgrade version release download install automatic notify github",
+        K::Choice(UPDATE_MODES),
+        D::Text("automatic"),
+    ),
+    def(
+        "updates_prereleases",
+        S::Advanced,
+        "Pre-release versions",
+        "Also offer pre-releases (release candidates and betas). Off follows the stable releases only.",
+        "beta rc candidate channel preview unstable update",
+        K::Toggle,
+        D::Bool(false),
+    ),
+    def(
+        "check_for_updates",
+        S::Advanced,
+        "Check for updates",
+        "Ask GitHub now whether a newer version of Leon is out.",
+        "update upgrade version latest release new",
+        K::Action,
+        D::None,
     ),
     def(
         "about",
@@ -1172,14 +1082,271 @@ pub const SETTINGS: &[Def] = &[
     ),
 ];
 
+// ----- the settings generated from the agent catalogue ----------------------
+
+fn leak(text: String) -> &'static str {
+    Box::leak(text.into_boxed_str())
+}
+
+/// The part of a setting's key that names an agent: its id with `_` for `-`.
+pub fn agent_key(agent: AgentId) -> String {
+    agent.as_str().replace('-', "_")
+}
+
+/// The key of a per-agent setting: `agent_<id>_<what>`.
+pub fn agent_setting(agent: AgentId, what: &str) -> String {
+    format!("agent_{}_{what}", agent_key(agent))
+}
+
+/// The key of a per-agent usage setting: `usage_<id>` and
+/// `usage_<id>_network`.
+pub fn usage_setting(agent: AgentId, network: bool) -> String {
+    let base = format!("usage_{}", agent_key(agent));
+    if network {
+        format!("{base}_network")
+    } else {
+        base
+    }
+}
+
+fn for_agent(mut d: Def, agent: AgentId) -> Def {
+    d.agent = Some(agent);
+    d
+}
+
+/// The settings of one agent: whether it is offered, the program, the
+/// arguments of a new session and (for an agent that can be resumed) of a
+/// resumed one.
+fn agent_defs(spec: &AgentSpec) -> Vec<Def> {
+    let (id, name) = (spec.id, spec.name.as_str());
+    let words = format!("{} {} agent", id.as_str(), name.to_lowercase());
+    let mut defs = vec![
+        for_agent(
+            def(
+                leak(agent_setting(id, "enabled")),
+                S::Agents,
+                leak(name.to_owned()),
+                leak(format!("Offer {name} for new sessions.")),
+                leak(format!("{words} enabled")),
+                K::Toggle,
+                D::Bool(true),
+            ),
+            id,
+        ),
+        for_agent(
+            def(
+                leak(agent_setting(id, "executable")),
+                S::Agents,
+                leak(format!("{name} executable")),
+                leak(format!(
+                    "The program that starts {name}. Empty lets the login shell find `{}`.",
+                    spec.command
+                )),
+                leak(format!("{words} path binary")),
+                PROGRAM,
+                D::Text(""),
+            ),
+            id,
+        ),
+        for_agent(
+            def(
+                leak(agent_setting(id, "args")),
+                S::Agents,
+                leak(format!("{name} arguments, new session")),
+                leak(format!(
+                    "Extra arguments typed after the command of a new {name} session."
+                )),
+                leak(format!("{words} flags options")),
+                NO_ARGS,
+                D::Text(""),
+            ),
+            id,
+        ),
+    ];
+    if spec.can_resume() {
+        defs.push(for_agent(
+            def(
+                leak(agent_setting(id, "resume_args")),
+                S::Agents,
+                leak(format!("{name} arguments, resume")),
+                leak(format!(
+                    "Extra arguments typed after the command that resumes a {name} session."
+                )),
+                leak(format!("{words} flags options resume")),
+                NO_ARGS,
+                D::Text(""),
+            ),
+            id,
+        ));
+    }
+    defs
+}
+
+/// The label, description and search words of the switch of a usage source.
+fn network_texts(provider: UsageProvider) -> (String, String, &'static str) {
+    let unverified = " Implemented from Orca's reference; not verified against the live service.";
+    match provider {
+        UsageProvider::Claude => (
+            "Read Claude Code's limits from Anthropic".into(),
+            "Leon reads the sign-in token Claude Code already holds (the macOS keychain, or ~/.claude/.credentials.json) and sends it over HTTPS to api.anthropic.com only to ask for your usage; it is never stored, logged or shown. On by default; macOS may ask once for keychain access.".into(),
+            "network anthropic credential token oauth privacy limits",
+        ),
+        UsageProvider::OpencodeGo => (
+            "Read the opencode Go limits from opencode".into(),
+            "For an opencode Go subscription, Leon reads the API key opencode stored (its auth.json, its credential database, or OPENCODE_API_KEY, read only) and sends it over HTTPS to opencode.ai only to ask for the usage; it is never stored, logged or shown. On by default.".into(),
+            "network go credential key privacy limits",
+        ),
+        UsageProvider::Codex => (
+            "Ask OpenAI for Codex's fresher limits".into(),
+            format!("Codex's own session log is read first. When it is more than ten minutes old, Leon reads the ChatGPT sign-in Codex holds (~/.codex/auth.json, read only) and sends it over HTTPS to chatgpt.com only to ask for your usage; it starts no session, writes nothing, and the token is never stored, logged or shown. On by default.{unverified}"),
+            "network openai chatgpt credential token privacy limits fresher",
+        ),
+        UsageProvider::Grok => (
+            "Read Grok's limits from xAI".into(),
+            format!("Leon reads the sign-in Grok already holds (~/.grok/auth.json, read only) and sends it over HTTPS to cli-chat-proxy.grok.com only to ask for your usage; it is never stored, logged or shown, and an expired sign-in is reported, not refreshed. On by default.{unverified}"),
+            "network xai grok credential token privacy limits",
+        ),
+        UsageProvider::Cursor => (
+            "Read Cursor's limits from Cursor".into(),
+            format!("Leon reads the session cursor-agent holds (the macOS keychain, its auth.json, or the Cursor IDE's own session, read only) and sends it over HTTPS to cursor.com only to ask for your usage; it is never stored, logged or shown, and an expired session is reported, not refreshed. On by default; macOS may ask once for keychain access.{unverified}"),
+            "network cursor credential token session privacy limits",
+        ),
+        UsageProvider::Kimi => (
+            "Read Kimi's limits from Moonshot".into(),
+            format!("Leon reads the sign-in Kimi Code holds (~/.kimi-code/credentials/kimi-code.json, read only) and sends it over HTTPS to api.kimi.com only to ask for your usage; it is never stored, logged or shown, and an expired sign-in is reported, not refreshed. On by default.{unverified}"),
+            "network kimi moonshot credential token privacy limits",
+        ),
+        UsageProvider::Zcode => (
+            "Read ZCode's limits from its plan".into(),
+            format!("Leon reads the plan key ZCode holds (~/.zcode/cli/config.json, read only) and sends it over HTTPS to the plan's own host (api.z.ai or open.bigmodel.cn) only to ask for the quota; it is never stored, logged or shown. On by default.{unverified}"),
+            "network zcode glm z.ai bigmodel credential key privacy limits",
+        ),
+        UsageProvider::Antigravity => (
+            "Ask agy for Antigravity's limits".into(),
+            format!("Leon runs `agy -p /usage` on the machine where Antigravity is installed, only when `agy --version` says it is 1.1.11 or newer (older versions spend a model turn on it). Leon reads no credential. On by default.{unverified}"),
+            "command agy antigravity limits",
+        ),
+    }
+}
+
+/// The two usage settings of an agent that has a usage provider: whether its
+/// limits are shown, and whether its source is on.
+fn usage_defs(spec: &AgentSpec, provider: UsageProvider) -> (Def, Def) {
+    let id = spec.id;
+    let name = spec.name.as_str();
+    let (label, description, words) = network_texts(provider);
+    (
+        for_agent(
+            def(
+                leak(usage_setting(id, false)),
+                S::Usage,
+                leak(format!("Show {name}")),
+                leak(format!(
+                    "Show {name}'s limits in the bar and the usage view."
+                )),
+                leak(format!("limits quota {}", name.to_lowercase())),
+                K::Toggle,
+                D::Bool(true),
+            ),
+            id,
+        ),
+        for_agent(
+            def(
+                leak(usage_setting(id, true)),
+                S::Usage,
+                leak(label),
+                leak(description),
+                words,
+                K::Toggle,
+                D::Bool(true),
+            ),
+            id,
+        ),
+    )
+}
+
+/// The agents offered as the default of a new session.
+fn default_agent_def() -> Def {
+    let mut choices: Vec<(&'static str, &'static str)> = vec![("ask", "Ask each time")];
+    choices.extend(
+        leon_core::agent::builtin()
+            .iter()
+            .map(|spec| (spec.id.as_str(), leak(spec.name.clone()))),
+    );
+    def(
+        "default_agent",
+        S::Agents,
+        "Agent for a new session",
+        "The agent New agent session starts without asking, or ask each time.",
+        "default new agent claude codex opencode grok cursor",
+        K::Choice(Choices::Fixed(Box::leak(choices.into_boxed_slice()))),
+        D::Text("ask"),
+    )
+}
+
+/// The user's own agents: one JSON object per entry, edited by the flow of
+/// Settings, Agents (never typed by hand).
+const CUSTOM_AGENTS: Def = def(
+    "custom_agents",
+    S::Agents,
+    "Your own agents",
+    "Any command line tool, added with Add a custom agent: a name, the command, its arguments and how to resume a session.",
+    "custom agent command cli add",
+    K::List {
+        placeholder: "none",
+    },
+    D::List,
+);
+
+fn build() -> Vec<Def> {
+    let mut all = Vec::new();
+    for def in BASE {
+        match def.key {
+            "history_open" => {
+                all.push(default_agent_def());
+                all.push(*def);
+                all.push(CUSTOM_AGENTS);
+                for spec in leon_core::agent::builtin() {
+                    all.extend(agent_defs(spec));
+                }
+            }
+            "usage_bar" => {
+                all.push(*def);
+                for spec in leon_core::agent::builtin() {
+                    if let Some(provider) = spec.usage {
+                        all.push(usage_defs(spec, provider).0);
+                    }
+                }
+            }
+            "usage_warn_before_session" => {
+                all.push(*def);
+                for spec in leon_core::agent::builtin() {
+                    if let Some(provider) = spec.usage {
+                        all.push(usage_defs(spec, provider).1);
+                    }
+                }
+            }
+            _ => all.push(*def),
+        }
+    }
+    all
+}
+
+/// Every setting, in the order of the Settings screen: the fixed ones and the
+/// per-agent ones generated from the catalogue.
+pub fn settings() -> &'static [Def] {
+    static ALL: std::sync::LazyLock<Vec<Def>> = std::sync::LazyLock::new(build);
+    &ALL
+}
+
 /// The setting with this key.
 pub fn find(key: &str) -> Option<&'static Def> {
-    SETTINGS.iter().find(|def| def.key == key)
+    settings().iter().find(|def| def.key == key)
 }
 
 /// The settings of a section that exist on this platform.
 pub fn of_section(section: Section) -> impl Iterator<Item = &'static Def> {
-    SETTINGS
+    settings()
         .iter()
         .filter(move |def| def.section == section && def.platform.here())
 }
@@ -1470,7 +1637,7 @@ impl Store {
 
     /// The values that could not be used, each read as its default.
     pub fn problems(&self) -> Vec<Problem> {
-        SETTINGS
+        settings()
             .iter()
             .filter(|def| !def.is_action())
             .filter_map(|def| {
@@ -1515,7 +1682,7 @@ pub fn render_docs() -> String {
             section.title(),
             section.blurb()
         ));
-        let defs: Vec<&Def> = SETTINGS.iter().filter(|d| d.section == section).collect();
+        let defs: Vec<&Def> = settings().iter().filter(|d| d.section == section).collect();
         if defs.is_empty() {
             out.push_str(
                 "Read-only: every command with its chords, generated from the shortcut registry.\n\
@@ -1567,12 +1734,37 @@ pub fn render_docs() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_usage_network_sources_are_on_by_default_and_the_refresh_is_ten_minutes() {
+        let store = Store::new();
+        assert_eq!(store.value("usage_claude_network"), Value::Bool(true));
+        assert_eq!(store.value("usage_opencode_network"), Value::Bool(true));
+        assert_eq!(store.value("usage_refresh_seconds"), Value::Int(600));
+        let def = find("usage_refresh_seconds").unwrap();
+        assert!(def.parse_input("30").is_ok(), "30 s is the least");
+        assert!(def.parse_input("29").is_err());
+        let both = ["usage_claude_network", "usage_opencode_network"];
+        for key in both {
+            let text = find(key).unwrap().description;
+            assert!(text.contains("On by default"), "{key}");
+            assert!(text.contains("never stored"), "{key}");
+            assert!(
+                text.matches(". ").count() <= 1,
+                "two sentences at most: {text}"
+            );
+        }
+        assert!(find("usage_claude_network")
+            .unwrap()
+            .description
+            .contains("macOS may ask once"));
+    }
+
     use super::*;
 
     #[test]
     fn every_setting_has_a_label_a_description_and_a_section_and_a_unique_key() {
         let mut keys = std::collections::HashSet::new();
-        for def in SETTINGS {
+        for def in settings() {
             assert!(!def.label.trim().is_empty(), "{} has no label", def.key);
             assert!(
                 def.description.trim().ends_with('.'),
@@ -1599,7 +1791,7 @@ mod tests {
 
     #[test]
     fn every_default_is_valid_for_its_own_kind() {
-        for def in SETTINGS.iter().filter(|d| !d.is_action()) {
+        for def in settings().iter().filter(|d| !d.is_action()) {
             let value = def.default_value().expect("a default");
             assert_eq!(
                 def.read_json(&value.to_json()).as_ref(),
@@ -1608,7 +1800,7 @@ mod tests {
                 def.key
             );
         }
-        for def in SETTINGS.iter().filter(|d| d.is_action()) {
+        for def in settings().iter().filter(|d| d.is_action()) {
             assert!(def.default_value().is_none(), "{}", def.key);
         }
     }

@@ -500,6 +500,38 @@ impl Terminal {
         }
     }
 
+    /// Asks the program running in front of the shell to end: SIGTERM to the
+    /// terminal's foreground process group. `false` when nothing was sent:
+    /// the shell itself is in front, the terminal is on another computer, the
+    /// foreground cannot be told (Windows) or the signal failed.
+    pub fn terminate_foreground(&self) -> bool {
+        if let Some(script) = &self.script {
+            return script.terminate();
+        }
+        #[cfg(unix)]
+        {
+            let Some(pid) = self.pid else { return false };
+            let Some(leader) = self
+                .master
+                .lock()
+                .as_ref()
+                .and_then(|master| master.process_group_leader())
+            else {
+                return false;
+            };
+            if leader as u32 == pid || leader <= 1 {
+                return false;
+            }
+            // SAFETY: plain signal delivery to the terminal's foreground
+            // process group, which the pseudo-terminal itself reported.
+            unsafe { libc::kill(-leader, libc::SIGTERM) == 0 }
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
     /// The events since the last call.
     pub fn drain_events(&self) -> Vec<TerminalEvent> {
         self.shared.events_pending.store(false, Ordering::Release);
@@ -793,11 +825,21 @@ fn viewport_point(term: &Term<EventProxy>, col: usize, row: usize) -> Point {
     Point::new(Line(row as i32 - grid.display_offset() as i32), Column(col))
 }
 
+/// Whether an address that a program wrote (an OSC 8 hyperlink) may be handed
+/// to the system to open: only the web's own schemes. Anything else
+/// (`file:`, an application's scheme, `javascript:`...) would let output that
+/// is merely printed start something, so it is not a link at all.
+pub(crate) fn openable(uri: &str) -> bool {
+    let lower = uri.trim().to_ascii_lowercase();
+    (lower.starts_with("https://") || lower.starts_with("http://"))
+        && !uri.chars().any(char::is_control)
+}
+
 fn link_at(term: &Term<EventProxy>, col: usize, row: usize) -> Option<String> {
     let point = viewport_point(term, col, row);
     let grid = term.grid();
     if let Some(link) = grid[point].hyperlink() {
-        return (!link.uri().is_empty()).then(|| link.uri().to_owned());
+        return openable(link.uri()).then(|| link.uri().to_owned());
     }
 
     let (columns, first, final_line) = logical_line_bounds(term, point);
@@ -909,7 +951,7 @@ pub(crate) fn visible_links(term: &Term<EventProxy>) -> Vec<Option<String>> {
         for column in 0..columns {
             let point = Point::new(Line(row as i32 - offset), Column(column));
             if let Some(link) = grid[point].hyperlink() {
-                if !link.uri().is_empty() {
+                if openable(link.uri()) {
                     links[row * columns + column] = Some(link.uri().to_owned());
                 }
             }
@@ -1217,6 +1259,29 @@ mod tests {
 /// reported, a stubborn child is killed. Each runs `/bin/sh` with no startup
 /// file and a fixed `PATH` (see [`crate::testing::sh`]), with the waits
 /// shortened by [`FAST`]; conditions are polled, never slept for.
+#[cfg(test)]
+mod link_scheme_tests {
+    use super::openable;
+
+    #[test]
+    fn only_web_addresses_are_ever_handed_to_the_system() {
+        assert!(openable("https://example.com/a?b=c"));
+        assert!(openable("HTTP://example.com"));
+        for refused in [
+            "file:///Applications/Calculator.app",
+            "javascript:alert(1)",
+            "ssh://host",
+            "x-apple.systempreferences:",
+            "mailto:a@b",
+            "",
+            "https://exa\nmple.com",
+            "  file:///etc/passwd",
+        ] {
+            assert!(!openable(refused), "{refused:?}");
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 mod pty_tests {
     use super::*;
@@ -1479,6 +1544,23 @@ mod foreground_tests {
             Box::new(|| {}),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_program_in_front_is_asked_to_end_and_the_shell_is_left_alone() {
+        let terminal = shell();
+        wait_for("the prompt", || terminal.screen_text().contains("READY>"));
+        // Nothing runs in front of the shell: there is nobody to ask.
+        assert!(!terminal.terminate_foreground());
+        terminal.write(&b"cat\n"[..]);
+        wait_for("cat to take the terminal", || {
+            terminal.shell_is_foreground() == Some(false)
+        });
+        assert!(terminal.terminate_foreground(), "SIGTERM reached cat");
+        wait_for("the shell to get the terminal back", || {
+            terminal.shell_is_foreground() == Some(true)
+        });
+        assert!(terminal.exit_info().is_none(), "the shell was not touched");
     }
 
     #[test]

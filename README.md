@@ -35,8 +35,18 @@ switching to one never restarts it.
   project or worktree.
 * **Local and remote alike**: a remote session is `ssh -t` into the folder, so
   the agent runs on the server and only the terminal travels.
+* **Sessions come back**: Leon remembers which terminals were open (tabs, panes,
+  focus, the agent's session) as they change, and at the next start offers to
+  reopen them (setting *Restore the last sessions*: ask, always, never).
+  Agents resume paused until you open their tab or press Enter. Scrollback is
+  not restored.
 * **History**: Claude Code, Codex and opencode sessions are imported from
   their own files into a local SQLite database and searched from the palette.
+  A session missing from the tree? The palette's **Why is a session missing?**
+  (or `leon --diagnose history [--agent <id>]`) lists every place Leon looked,
+  the format it found, how many sessions the source holds against how many
+  were imported, and why the rest were skipped. It prints counts, paths and
+  times only: no titles, no messages, no account data.
 
 ## Screenshots
 
@@ -68,12 +78,13 @@ signed:
   `xattr -dr com.apple.quarantine /Applications/Leon.app`.
 * Windows: SmartScreen warns about an unknown publisher: `More info`, `Run anyway`.
 
-Leon does not update itself: download the next release to upgrade. The Linux and
-Windows builds have not been tried by a human yet (see the
-[changelog](CHANGELOG.md)); please report what you find.
+Leon updates itself from these same releases and from nowhere else: see
+[Updates](#updates). The Linux and Windows builds have not been tried by a human
+yet (see the [changelog](CHANGELOG.md)); please report what you find.
 
 The agents themselves are not part of Leon: install the ones you use (`claude`,
-`codex`, `opencode`) on every machine you want to run them on.
+`codex`, `opencode`, or any of the [agents Leon knows](#agents)) on every machine
+you want to run them on.
 
 ## Build
 
@@ -326,6 +337,8 @@ platform (see below).
 | Open the row; a history session resumes in a terminal | `↩` | `Enter` |
 | **Create** | | |
 | New agent session | `⌘N` `⇧⌘A` | `Ctrl+N` `Ctrl+Shift+A` |
+| Add a custom agent… | palette only | palette only |
+| Remove a custom agent… | palette only | palette only |
 | Resume the session in another worktree… | palette only | palette only |
 | Resume here anyway… (a session running in another terminal) | palette only | palette only |
 | Reveal the terminal it runs in | palette only | palette only |
@@ -397,6 +410,8 @@ platform (see below).
 | **Data** | | |
 | Import history and sync worktrees | `⌘R` | `Ctrl+R` |
 | Probe the machine on screen | `⇧⌘R` | `Ctrl+Shift+R` |
+| Why is a session missing? | palette only | palette only |
+| Restore last sessions | palette only | palette only |
 | **View** | | |
 | Toggle light and dark | `⇧⌘Y` | `Ctrl+Shift+Y` |
 | Choose appearance… | palette only | palette only |
@@ -422,6 +437,11 @@ platform (see below).
 | Quit Leon | `⌘Q` | `Ctrl+Shift+Q` |
 | Close the window | `⇧⌘W` | palette only |
 | About Leon | palette only | palette only |
+| Check for updates… | palette only | palette only |
+| Restart to update | palette only | palette only |
+| Show release notes | palette only | palette only |
+| Skip this version | palette only | palette only |
+| Open the download page | palette only | palette only |
 | Close, or go back | `Esc` | `Esc` |
 
 ### While a terminal has the keyboard
@@ -604,7 +624,7 @@ typing selects an item. Every item shows the shortcut it has.
 | Row | Items |
 | --- | --- |
 | Machine | Open project…, New shell, Probe, Why is it offline? and Edit machine… (SSH machines), Rename, Connect a machine…, Remove machine (not for this computer) |
-| Project | New worktree…, New agent session ▸ (Claude Code, Codex, opencode), Open shell here, Copy path, Reveal in file manager (this computer), Refresh icon, Choose icon…, Reset icon, Remove project |
+| Project | New worktree…, New agent session ▸ (Claude Code, Codex, opencode and your own agents; the palette lists the whole catalogue), Open shell here, Copy path, Reveal in file manager (this computer), Refresh icon, Choose icon…, Reset icon, Remove project |
 | Worktree | New agent session ▸, Open shell here, Copy path, Copy branch name, Reveal in file manager (this computer), Remove worktree (not the main one) |
 | History session | Open (resumes it in a terminal), Open transcript, Copy session id, Remove from history |
 | Live terminal | Focus, Split right, Split down, Rename, Close |
@@ -788,6 +808,37 @@ The choice is saved in `settings.json` as `theme_id` (the appearance is
 `theme`). A file without `theme_id`, or with an id this version does not know,
 wears the default theme.
 
+## Updates
+
+Leon follows its own [GitHub releases](https://github.com/zavudev/leon/releases)
+and nothing else: there is no update server, manifest or key of ours. A few
+seconds after the window opens, and every six hours after that (spread a little
+so that computers do not all ask at once), it asks GitHub for the latest
+release. A newer version is downloaded in the background, checked against the
+`SHA256SUMS` of the same release, and installed when you **restart to update**
+or, with nothing running, when you quit. Leon never restarts by itself: a restart
+ends every terminal, so it is always your choice, and the question says how many
+sessions it would close.
+
+* **Settings, Advanced & About, `Updates`**: `Automatic` (the default: download,
+  install at the next restart), `Tell me` (look and say, you decide) or `Off`
+  (never ask GitHub). `Pre-release versions` also follows release candidates.
+* **Commands** (palette, and the macOS menu): `Check for updates…`, `Restart to
+  update`, `Show release notes`, `Skip this version` and `Open the download
+  page`. The footer shows `Update available`, `Downloading 0.2.1 · 42%` and
+  `Restart to update · 0.2.1`; About shows the state.
+* **Checked**: the file is the one the release lists in `SHA256SUMS` (and of the
+  size GitHub states), and a signed install is only replaced by a build signed by
+  the same Team ID (macOS) or certificate (Windows). An unsigned install takes an
+  unsigned update and says so. The old version is kept until the new one has
+  started, and put back if it does not.
+* **Not done**: a development build, an application run from a disk image, a
+  read-only folder, or one a package manager owns is not touched; Leon points to
+  the download page. `LEON_NO_UPDATE=1` switches it all off.
+
+What this protects against, what it does not, where the files go and how to roll
+back by hand: [docs/UPDATES.md](docs/UPDATES.md).
+
 ## Settings
 
 `Cmd+,` (`Ctrl+,` on Linux and Windows), the gear in the sidebar's footer,
@@ -825,25 +876,135 @@ Advanced & About.
   probe, edit (the Connect screen, filled in) and remove, and `Connect a machine…`; the Projects
   section lists the project roots you removed, which discovery does not bring
   back by itself, with a button to let it.
-* **The only network call** Leon makes is the project avatar from the Git host
-  (GitHub); `Fetch owner avatars from the Git host` turns it off.
+* **The network calls** Leon makes by itself are the project avatar from the Git
+  host (`Fetch owner avatars from the Git host` turns it off), the usage limits'
+  network sources (Settings, Usage), and the look at its own GitHub releases
+  for an update (Settings, `Updates`: `off` stops it).
+
+## Agents
+
+Leon starts any command line agent in a real terminal. Agents are data, not
+code: a catalogue of built-in specs (the agents of [Orca](https://github.com/stablyai/orca)'s
+list, with the commands its source uses) and the agents you add yourself. The
+table is generated from the catalogue (`leon_core::agent::render_markdown`) and
+a test fails when it is stale.
+
+<!-- agents:begin (generated by `render_markdown` in leon-core) -->
+
+| Agent | Command | Resume | History | Usage limits |
+| --- | --- | --- | --- | --- |
+| [Claude Code](https://code.claude.com/docs) | `claude` | `claude --resume {id}` | imported | yes |
+| [Codex](https://github.com/openai/codex) | `codex` | `codex resume {id}` | imported | yes |
+| [opencode](https://opencode.ai/docs/cli/) | `opencode` | `opencode --session {id}` | imported | yes, unverified |
+| [Grok](https://x.ai/cli) | `grok` | `grok --resume {id}` | not yet | yes, unverified |
+| [Cursor](https://cursor.com/cli) | `cursor-agent` | `cursor-agent --resume {id}` | not yet | yes, unverified |
+| [GitHub Copilot](https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli) | `copilot` | `copilot --resume={id}` | not yet | no |
+| [Muse](https://dev.meta.ai/docs/muse-code) | `muse` | `muse resume {id}` | not yet | no |
+| [DeepSeek Harness](https://deepseek-harness.github.io/deepseek-harness/) | `dsh-tui .` | `dsh-tui --resume {id}` | not yet | no |
+| [ZCode](https://zcode.z.ai/en/docs) | `zcode` | `zcode --resume {id}` | not yet | yes, unverified |
+| [MiMo Code](https://mimo.xiaomi.com/coder) | `mimo` | `mimo --session {id}` | not yet | no |
+| [Amp](https://ampcode.com/manual#install) | `amp` | launch only | not yet | no |
+| [OpenClaude](https://openclaude.gitlawb.com/) | `openclaude` | launch only | not yet | no |
+| [Antigravity](https://antigravity.google/docs/cli-overview) | `agy` | `agy --conversation {id}` | not yet | yes, unverified |
+| [Pi](https://pi.dev) | `pi` | launch only | not yet | no |
+| [oh-my-pi](https://omp.sh) | `omp` | launch only | not yet | no |
+| [Hermes Agent](https://hermes-agent.nousresearch.com/docs/) | `hermes --tui` | launch only | not yet | no |
+| [Devin](https://devin.ai/cli) | `devin` | `devin --resume {id}` | not yet | no |
+| [Goose](https://block.github.io/goose/docs/quickstart/) | `goose` | launch only | not yet | no |
+| [Auggie](https://docs.augmentcode.com/cli/overview) | `auggie` | launch only | not yet | no |
+| [Autohand Code](https://github.com/autohandai/code-cli) | `autohand` | launch only | not yet | no |
+| [Charm Crush](https://github.com/charmbracelet/crush) | `crush` | launch only | not yet | no |
+| [Cline](https://docs.cline.bot/cline-cli/overview) | `cline` | launch only | not yet | no |
+| [CodeBuddy](https://www.codebuddy.ai/cli) | `codebuddy` | `codebuddy --resume {id}` | not yet | no |
+| [Codebuff](https://www.codebuff.com/docs/help/quick-start) | `codebuff` | launch only | not yet | no |
+| [Freebuff](https://freebuff.com/cli) | `freebuff` | launch only | not yet | no |
+| [Command Code](https://commandcode.ai/docs/quickstart) | `command-code` | launch only | not yet | no |
+| [Continue](https://docs.continue.dev/guides/cli) | `cn` | launch only | not yet | no |
+| [Droid](https://docs.factory.ai/cli/getting-started/quickstart) | `droid` | `droid --resume {id}` | not yet | no |
+| [Kilocode](https://kilo.ai/docs/cli) | `kilo` | launch only | not yet | no |
+| [Kimi](https://www.kimi.com/code/docs/en/kimi-code-cli/getting-started.html) | `kimi` | `kimi --session {id}` | not yet | yes, unverified |
+| [Kiro](https://kiro.dev/docs/cli/) | `kiro-cli chat --tui` | launch only | not yet | no |
+| [Mistral Vibe](https://github.com/mistralai/mistral-vibe) | `vibe` | launch only | not yet | no |
+| [Qwen Code](https://github.com/QwenLM/qwen-code) | `qwen` | `qwen --resume {id}` | not yet | no |
+| [Rovo Dev](https://support.atlassian.com/rovo/docs/install-and-run-rovo-dev-cli-on-your-device/) | `rovo` | launch only | not yet | no |
+| [Gemini](https://github.com/google-gemini/gemini-cli) | `gemini` | `gemini --resume {id}` | not yet | no |
+| [Aider](https://aider.chat/docs/) | `aider` | launch only | not yet | no |
+| [Ante](https://github.com/AntigmaLabs/ante-preview) | `ante` | launch only | not yet | no |
+| [Trae](https://docs.trae.cn/cli_get-started-with-trae-cli) | `traecli` | launch only | not yet | no |
+| [Qoder CLI](https://docs.qoder.com/cli/overview) | `qodercli` | `qodercli --resume {id}` | not yet | no |
+| [Qoder CLI China](https://docs.qoder.cn/cli/overview) | `qoderclicn` | `qoderclicn --resume {id}` | not yet | no |
+| [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) | `prime-agent` | launch only | not yet | no |
+| [OpenClaw](https://github.com/openclaw/openclaw) | `openclaw` | launch only | not yet | no |
+| [Jcode](https://github.com/1jehuang/jcode) | `jcode` | `jcode --resume {id}` | not yet | no |
+
+<!-- agents:end -->
+
+* **Launch only** means Leon knows no resume form that it could check (in
+  Orca's source or the CLI's own `--help`), so it starts new sessions of the
+  agent and never guesses a flag.
+* **History**: only Claude Code, Codex and opencode have importers. A session
+  of any other agent that you start in Leon is a live terminal like any other;
+  Leon says "no history import for this agent yet" where a history list would
+  be, and does not fake one. Agents that store sessions in the format of one of
+  those three (a Claude Code fork such as OpenClaude, an opencode fork) are not
+  wired: their on-disk formats could not be verified, so they are listed as
+  "not yet".
+* **Usage limits**: see [Usage](#usage). "yes, unverified" means the provider
+  is implemented from Orca's reference and has not been checked against the
+  live service.
+* **New agent session** shows what the machine has first (this computer is
+  searched; an SSH or relay machine's probe says, in the same single round trip
+  that finds `git`) and then the rest, dimmed, with "not installed" and the
+  agent's docs link. Type to filter: the list is long.
+* Settings ▸ Agents has, per agent, whether it is offered, the program and the
+  extra arguments (the three headline agents keep their old setting keys).
+* **Your own agents.** The palette's **Add a custom agent…** asks for a name, the
+  command, the arguments of a new session and, optionally, the arguments that
+  resume one: with `{id}` they resume that session (`--resume {id}`), without
+  they continue the latest one (`--continue`), empty means launch only. The
+  agent is kept in `settings.json` (`custom_agents`), checked (name, command,
+  braces) and offered everywhere the built-in ones are. **Remove a custom
+  agent…** takes it away.
+* **Logos.** A bundled mark is used only where its licence allows it (Simple
+  Icons, CC0); every other agent gets a letter-mark tile drawn from the theme.
+  Leon never fetches an icon from the network. `crates/app/assets/ASSETS.md`
+  records every mark with its source and licence.
 
 ## Usage
 
 How much of each agent's limits is left, per machine. The footer under the main
 pane (level with the sidebar's tools, the whole width when the sidebar is
 hidden) shows, for every agent that is installed on the machine in context, its
-logo, a small meter and **one primary number**: the window closest to its limit,
-with the time to reset (`wk  91% !!  1d 11h`). The other windows (the five-hour
-one, the weekly one, a per-model bucket) are in the tooltip. A level is a colour
-**and** a marker, never a colour alone: `!` from the warning threshold (75% by
-default), `!!` from the critical one (90%). A window that has already reset
-since the numbers were read shows 0% and says so; one with no usable reading says
-why (`signed out`, `source off`, `too old`, `no data yet`) instead of a number.
-On a narrow window the bar gives up detail in steps: logo, meter, figure and
-time; then logo and figure; then a single indicator for the agent closest to
+logo, a small meter and, by default (**Usage bar: Detailed**), **every window**
+in Orca's wording, `N% used <label>` joined by `·`: the label of the five-hour
+and the weekly window is the live countdown to their reset (`2h 29m`, `1d 11h`,
+floored: `47m`, `6d 7h`, `now`), the label of a per-model window is the model's
+name: `10% used 2h 29m · 91% used 1d 11h !! · 0% used Fable`. **Compact** shows
+the one window closest to its limit (`wk  91% !!  1d 11h`). A level is a colour
+**and** a marker, never a colour alone: `!` from the warning threshold (60% used
+by default), `!!` from the critical one (80%), as Orca's. **Show limits as**
+(`usage_percentage_display`) shows what is left instead (`9% left`); the
+levels, the warnings and the notice always judge what is **used**. Every figure
+is rounded the same way everywhere (half away from zero: 12.5 reads 13, never
+12), between 0 and 100. A window that has already reset since the numbers were
+read shows 0% and says so; one with no usable reading says why (`signed out`,
+`source off`, `too old`, `no data yet`) instead of a number. On a narrow window
+the bar gives up detail in steps: every window of every agent; then the one
+closest to its limit (logo, meter, label, figure, time); then logo, meter and
+figure; then logo and figure; then a single indicator for the agent closest to
 its limit. The refresh button reads the limits again and says when they were
 last read.
+
+**When a read fails the numbers stay.** An expired or rejected sign-in (a 401,
+or a 403 that is not a missing scope), a rate limit, being offline and a vendor
+error keep the last good numbers on show, marked with their age (`(12 min ago)`
+in the bar, and the reason and when the next read is in the tooltip and the
+view), instead of an empty "not signed in". `Not signed in` is only said when
+there is no credential at all; an expired sign-in says what to do (run the
+agent once so it refreshes its own sign-in: Leon never does); a 403 that names a
+missing scope says the sign-in lacks permission to read usage; an account on an
+API key says that usage limits do not apply to API-key billing; an opencode key
+with no Go subscription says so, and a rejected key says that.
 
 `⇧⌘U` (`Ctrl+Shift+Alt+U`), a click on the bar and the palette's **Show usage**
 open the usage view: one row per agent and machine with `Resets in …`, a labelled
@@ -852,7 +1013,8 @@ fresh they are** ("from Codex's own session log, 3 min ago"), a small history
 line per window and, when at least two observations of the current window exist,
 a **burn-rate estimate** ("At this pace: limit in ~1h 10m (estimate)", or "you
 will not hit the limit before the reset"). `M` switches Detailed and Compact,
-`←`/`→` choose this machine, another machine or all of them, `R` reads again,
+`←`/`→` choose this machine, another machine or all of them, `R` reads again
+(the agent nearest a limit is listed first),
 `S` opens Settings ▸ Usage, `Esc` closes. The header of a live agent session
 shows that agent's primary window, and starting a session of an agent that is
 at or above the critical threshold says so in the status line, with the reset
@@ -866,15 +1028,37 @@ SSH machine's limits are the ones of that machine's account).
 | Agent | Source | What is read | Network |
 | --- | --- | --- | --- |
 | Codex | its own session log | the `rate_limits` of the `token_count` events in `~/.codex/sessions` (five-hour and weekly windows, plan) | none |
-| Claude Code | Anthropic's usage endpoint, **opt-in** | the sign-in token Claude Code already holds, sent to `api.anthropic.com` over HTTPS | on this computer only, off by default |
-| opencode | the Go usage endpoint, **opt-in** | the Go API key opencode stored, sent to `opencode.ai` over HTTPS | on this computer only, off by default |
+| Claude Code | Anthropic's usage endpoint | the sign-in token Claude Code already holds, sent to `api.anthropic.com` over HTTPS | on this computer only, **on by default**; turn it off in Settings ▸ Usage |
+| opencode | the Go usage endpoint | the Go API key opencode stored (the inline `OPENCODE_AUTH_CONTENT`, `auth.json`, OpenCode 2's credential database opened read only, or `OPENCODE_API_KEY`, in Orca's order), sent to `opencode.ai` over HTTPS | on this computer only, **on by default**; turn it off in Settings ▸ Usage |
+| Codex, fresher | OpenAI's backend usage endpoint | used only when the session log is more than ten minutes old: the ChatGPT sign-in Codex holds (`~/.codex/auth.json`, read only), sent to `chatgpt.com` over HTTPS; it starts no session and writes nothing | on this computer only, **on by default**; **implemented from Orca's reference, unverified against the live service** |
+| Grok | the billing endpoint of its CLI | the sign-in in `~/.grok/auth.json`, sent to `cli-chat-proxy.grok.com`; weekly credits, or the monthly budget | on this computer only, **on by default**; **unverified against the live service** |
+| Cursor | the dashboard's usage summary | the session `cursor-agent` holds (macOS keychain, or its `auth.json`) or, failing a live one, the Cursor IDE's own session (`state.vscdb`, opened read only), sent to `cursor.com` as the dashboard's session cookie; monthly plan, two model pools, on-demand | on this computer only, **on by default**; **unverified against the live service** |
+| Kimi | the managed `usages` endpoint | the sign-in in `~/.kimi-code/credentials/kimi-code.json`, sent to `api.kimi.com`; five-hour and weekly | on this computer only, **on by default**; **unverified against the live service** |
+| ZCode | the GLM Coding Plan quota | the plan key in `~/.zcode/cli/config.json`, sent to the plan's own host (`api.z.ai`, `open.bigmodel.cn`, `dev.bigmodel.cn`); the five-hour and weekly plan windows and the `MCP` allowance, as Orca keeps them | on this computer only, **on by default**; **unverified against the live service** |
+| Antigravity | its own `agy -p /usage` | the command's JSON (no credential read by Leon), only when `agy --version` is 1.1.11 or newer; if a build answers with a model turn, Leon stops asking for the session on that machine (it would spend quota at every read) | on any machine through the runner, **on by default**; **unverified against the live service** |
+
+Of these, only Claude Code and the Codex session log have been checked against a
+live service; the opencode Go endpoint (from an earlier release) and the others
+are reference implementations from Orca's source (no Grok, Cursor, Kimi, ZCode
+or Antigravity account was available), written so that a first real run says what went wrong:
+every failure is a typed reason (`signed out`, `sign-in expired`, `unreadable`,
+`rate limited`, an HTTP status…), and `leon --diagnose usage` lists every
+provider with its source and its state. An expired sign-in is reported, never
+refreshed: the agent refreshes its own. Orca also reads Gemini (it refreshes
+and rewrites Gemini's OAuth credentials), and MiniMax (not an agent of the
+catalogue); neither is implemented. No provider of Orca reports money instead of
+a percentage, so no balance kind exists. With many agents installed the bar
+shows the ones with numbers and folds the rest into a `+N` count; the view
+groups **This machine's agents** and **Not installed / no data**.
 
 Claude Code writes its limits nowhere on disk and has no command that prints
 them, so its real numbers need its account's usage endpoint, the one the CLI
-itself calls; that reads a credential and is therefore off until you switch on
-**Read Claude Code's limits from Anthropic** in Settings ▸ Usage. The same holds
-for the opencode Go subscription (opencode's other providers have no limits to
-read). When such a source is on: the credential is read at the moment of the call
+itself calls. That reads a credential, so it is stated here plainly: **it is on
+by default and can be turned off in Settings ▸ Usage** (**Read Claude Code's
+limits from Anthropic**; the same holds for the opencode Go subscription, whose
+other providers have no limits to read). On macOS the first read may ask once for
+access to the keychain; if you deny or dismiss that prompt, Leon does not ask
+again in that session until you choose **Try again**. When such a source is on: the credential is read at the moment of the call
 (the macOS keychain item or `~/.claude/.credentials.json`; opencode's
 `auth.json`), held in memory for the request only, and never stored, logged,
 shown or sent to any host but the vendor's own; the request has a time limit,
@@ -887,7 +1071,48 @@ times under a local hash; **Forget stored usage history** in Settings deletes it
 `leon --diagnose usage` runs the real collection for this computer and prints,
 per agent, the source, the windows with percentages and reset times, how fresh
 they are or why they are unknown, and nothing that identifies an account. It
-never calls a network source whose setting is off.
+follows the same settings (on unless turned off); `--network <agent>` and
+`--no-network <agent|all>` override them for one run.
+
+**How often.** Every 10 minutes by default (Settings ▸ Usage, from 30 seconds;
+a value you set yourself is kept), only while the window is focused: it pauses
+in the background and reads once on return, or when you open the usage view,
+when the last reading is older than the interval. **Refresh now** reads at
+once. Whatever the setting, a source that calls a vendor is not called more
+often than every 60 seconds by the schedule (Codex's own session log may follow
+a shorter interval, it costs nothing). A network source has at most one request
+in flight, adds a little jitter, honours `Retry-After`, backs off exponentially
+after a 5xx or a failure, and after an HTTP 429 rests at least 5 minutes (or
+what the service asked, if longer), says "Rate limited by Anthropic: … Next
+read in 5m" and keeps the last numbers. A source is skipped when the agent is
+not installed or not signed in. The first read happens after the window is up.
+
+**Where Leon deliberately differs from Orca.** The counters follow Orca's rules
+(its windows, thresholds, rounding, rate-limit handling and wording; Orca's
+code is MIT-licensed and was read, not copied), with these differences, all on
+purpose:
+
+* No hidden agent sessions, no PTY scraping and no `codex app-server` launch to
+  read usage: only the files the agent already writes, the agent's own command
+  line where it has a metadata command, and the vendor's usage endpoint.
+* Leon never refreshes, rotates or rewrites any CLI's credentials (Orca's
+  recovery paths do): an expired sign-in is reported and the agent renews its
+  own.
+* No pasted cookies or keys, and no multi-account switching: Leon reads the one
+  account each agent is signed in to.
+* Leon says who it is. Orca sends `User-Agent: claude-code/2.1.0` to
+  Anthropic and `codex-cli` with `originator: Codex Desktop` to OpenAI; Leon
+  sends `User-Agent: Leon/<version>` and only the headers that are part of each
+  API's contract (`anthropic-beta`, `OpenAI-Beta`, `ChatGPT-Account-Id`).
+  Imitating another client is misrepresentation to the vendor.
+* The refresh default is 10 minutes (Orca polls every 15 minutes with a 5
+  minute gap), settable down to 30 seconds with a 60 second floor per vendor.
+* Where Orca's `expiresAt` is not authoritative (the server decides), neither
+  is it Leon's: a 401 is a stale sign-in whatever the stored time says.
+* Leon takes the `CLAUDE_CONFIG_DIR` folder as the environment spells it when it
+  scopes the keychain item (Orca normalises it to NFC first).
+* The footer also shows a marker (`!`, `!!`) after a window at a warning or
+  critical level, so that colour is never the only signal.
 
 ## Notifications
 

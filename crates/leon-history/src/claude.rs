@@ -23,7 +23,7 @@
 //! * A line that is not valid JSON, including a final line cut short while
 //!   the agent was still writing, is counted and skipped.
 
-use leon_core::{AgentKind, Role};
+use leon_core::{AgentId, Role};
 use serde::Deserialize;
 
 use crate::normalize::{parse_timestamp, tool_line, Block, Content};
@@ -63,7 +63,7 @@ struct LineMessage {
 /// extension; it is the value `claude --resume` accepts. Returns `None` when
 /// the file holds no messages.
 pub fn parse_session(external_id: &str, bytes: &[u8]) -> Option<ParsedSession> {
-    let mut session = SessionBuilder::new(AgentKind::Claude, external_id);
+    let mut session = SessionBuilder::new(AgentId::CLAUDE, external_id);
     let mut summary: Option<String> = None;
     let mut ai_title: Option<String> = None;
 
@@ -194,7 +194,7 @@ mod tests {
         ]);
         let session = parse_session("s1", &bytes).unwrap();
 
-        assert_eq!(session.agent, AgentKind::Claude);
+        assert_eq!(session.agent, AgentId::CLAUDE);
         assert_eq!(session.external_id, "s1");
         assert_eq!(session.cwd, "/srv/api");
         assert_eq!(session.model.as_deref(), Some("model-a"));

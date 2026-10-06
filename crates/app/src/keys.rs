@@ -115,6 +115,10 @@ pub enum Command {
     // ----- create
     /// Starts an agent session where the keyboard is.
     NewSession,
+    /// Adds any command line tool as an agent of your own.
+    AddAgent,
+    /// Removes an agent of your own.
+    RemoveAgent,
     /// Resumes the history session the keyboard is on in another worktree of
     /// its project, when its own folder is gone.
     ResumeIn,
@@ -249,6 +253,11 @@ pub enum Command {
     ShowUsage,
     /// Reads the agents' usage limits again now.
     RefreshUsage,
+    /// Explains why a session may be missing: where each agent's history is
+    /// looked for and what was found.
+    WhyMissing,
+    /// Offers the terminals that were open last time again.
+    RestoreSessions,
     /// Opens `settings.json` in the system's editor.
     OpenSettingsFile,
     /// Shows the folder that holds `settings.json` in the file manager.
@@ -271,6 +280,18 @@ pub enum Command {
     CloseWindow,
     /// The About panel.
     About,
+    // ----- updates
+    /// Asks GitHub whether a newer version is out.
+    CheckForUpdates,
+    /// Restarts into the update that is ready (downloads it first when it is
+    /// only on offer).
+    RestartToUpdate,
+    /// The release notes of the version on offer.
+    ShowReleaseNotes,
+    /// Stops offering the version that is on offer.
+    SkipVersion,
+    /// Opens the release's page in the browser, to download it by hand.
+    OpenDownloadPage,
     // ----- terminal: find, clear, copy, save
     /// Opens the find bar of the terminal that has the keyboard.
     Find,
@@ -1012,6 +1033,22 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::AddAgent,
+        "Add a custom agent\u{2026}",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::RemoveAgent,
+        "Remove a custom agent\u{2026}",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::ResumeIn,
         "Resume the session in another worktree…",
         S::Create,
@@ -1482,6 +1519,22 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::WhyMissing,
+        "Why is a session missing?",
+        S::Data,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::RestoreSessions,
+        "Restore last sessions",
+        S::Data,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::ProbeMachine,
         "Probe the machine on screen",
         S::Data,
@@ -1681,6 +1734,46 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::CheckForUpdates,
+        "Check for updates…",
+        S::Application,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::RestartToUpdate,
+        "Restart to update",
+        S::Application,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::ShowReleaseNotes,
+        "Show release notes",
+        S::Application,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::SkipVersion,
+        "Skip this version",
+        S::Application,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::OpenDownloadPage,
+        "Open the download page",
+        S::Application,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::Close,
         "Close, or go back",
         S::Application,
@@ -1714,11 +1807,18 @@ pub fn keywords(command: Command) -> &'static str {
     match command {
         C::ChooseTheme => "colors colours look appearance custom user",
         C::NewThemeFromCurrent => "create custom make theme colors colours file toml",
+        C::AddAgent => "custom cli tool command new agent register any",
+        C::RemoveAgent => "custom cli tool delete forget agent unregister",
         C::ExportTheme => "save write copy theme colors colours file toml backup",
         C::OpenThemesFolder => "themes folder directory reveal finder custom files",
         C::ReloadThemes => "refresh themes custom files toml",
         C::ShowThemeProblems => "errors warnings invalid validation themes report debug",
         C::Quit => "exit close application",
+        C::CheckForUpdates => "update upgrade new version latest release github",
+        C::RestartToUpdate => "update upgrade install relaunch restart new version",
+        C::ShowReleaseNotes => "changelog what's new changes update version",
+        C::SkipVersion => "ignore dismiss update later version",
+        C::OpenDownloadPage => "github releases browser manual update upgrade",
         C::Find => "search terminal scrollback",
         C::ClearBuffer | C::ClearScrollback => "reset empty erase terminal",
         C::PasteText | C::PasteImage => "clipboard image picture screenshot ctrl+v",
@@ -1732,6 +1832,8 @@ pub fn keywords(command: Command) -> &'static str {
         C::EditMachine => "ssh host user port identity key server remote change connect",
         C::WhyOffline => "offline unreachable diagnose test connection ssh remote server",
         C::Settings => "preferences options configuration config",
+        C::RestoreSessions => "reopen open terminals tabs panes crash power quit previous session workspace",
+        C::WhyMissing => "history sessions lost gone disappeared import diagnose opencode claude codex report",
         C::ShowUsage | C::RefreshUsage => "limits quota rate tokens credits remaining percent reset five hour weekly claude codex opencode",
         C::OpenSettingsFile => "preferences json edit configuration config file",
         C::RevealSettingsFolder => "preferences json configuration config finder directory data",
@@ -1878,6 +1980,8 @@ mod tests {
             C::Collapse,
             C::Open,
             C::NewSession,
+            C::AddAgent,
+            C::RemoveAgent,
             C::NewWorktree,
             C::ResumeIn,
             C::ResumeAnyway,
@@ -1933,6 +2037,8 @@ mod tests {
             C::Settings,
             C::ShowUsage,
             C::RefreshUsage,
+            C::WhyMissing,
+            C::RestoreSessions,
             C::OpenSettingsFile,
             C::RevealSettingsFolder,
             C::Larger,
@@ -1943,6 +2049,11 @@ mod tests {
             C::Quit,
             C::CloseWindow,
             C::About,
+            C::CheckForUpdates,
+            C::RestartToUpdate,
+            C::ShowReleaseNotes,
+            C::SkipVersion,
+            C::OpenDownloadPage,
             C::Find,
             C::FindNext,
             C::FindPrevious,
@@ -1991,6 +2102,8 @@ mod tests {
                 | C::Collapse
                 | C::Open
                 | C::NewSession
+                | C::AddAgent
+                | C::RemoveAgent
                 | C::NewWorktree
                 | C::ResumeIn
                 | C::ResumeAnyway
@@ -2047,6 +2160,8 @@ mod tests {
                 | C::Settings
                 | C::ShowUsage
                 | C::RefreshUsage
+                | C::WhyMissing
+                | C::RestoreSessions
                 | C::OpenSettingsFile
                 | C::RevealSettingsFolder
                 | C::Larger
@@ -2057,6 +2172,11 @@ mod tests {
                 | C::Quit
                 | C::CloseWindow
                 | C::About
+                | C::CheckForUpdates
+                | C::RestartToUpdate
+                | C::ShowReleaseNotes
+                | C::SkipVersion
+                | C::OpenDownloadPage
                 | C::Find
                 | C::FindNext
                 | C::FindPrevious
