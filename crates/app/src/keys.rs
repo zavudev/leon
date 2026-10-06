@@ -139,14 +139,28 @@ pub enum Command {
     /// Opens a folder as a project: the system's folder picker on this
     /// computer, the palette's questions on another machine.
     OpenProject,
+    /// Clones a git URL into a folder and adds it as a project.
+    CloneProject,
+    /// Creates a new git repository and adds it as a project.
+    NewProject,
     /// Adds a project to a machine by typing its path.
     AddProject,
     /// Removes a project from the list, after asking.
     RemoveProject,
     /// Removes a git worktree, after asking.
     RemoveWorktree,
-    /// Renames the machine or the live terminal the keyboard is on.
+    /// Renames the project, machine or live terminal the keyboard is on.
     Rename,
+    /// Moves the row the keyboard is on one step up in its list: a project,
+    /// a worktree or a session (which pins itself there).
+    MoveRowUp,
+    /// Moves the row the keyboard is on one step down in its list.
+    MoveRowDown,
+    /// Pins the session the keyboard is on on top of its list.
+    PinSession,
+    /// Unpins the session the keyboard is on: it goes back to its place by
+    /// recency.
+    UnpinSession,
     /// Removes the SSH machine the keyboard is on, after asking.
     RemoveMachine,
     /// Changes the name, host, user, port or identity file of an SSH machine.
@@ -1113,6 +1127,22 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::CloneProject,
+        "Clone a repository…",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::NewProject,
+        "New project…",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::AddProject,
         "Add a remote project by path…",
         S::Create,
@@ -1161,6 +1191,24 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(C::Rename, "Rename", S::Create, W::Panes, &[key("f2")], true),
+    bind(C::MoveRowUp, "Move up", S::Create, W::Panes, &[], false),
+    bind(C::MoveRowDown, "Move down", S::Create, W::Panes, &[], false),
+    bind(
+        C::PinSession,
+        "Pin the session",
+        S::Create,
+        W::Panes,
+        &[],
+        false,
+    ),
+    bind(
+        C::UnpinSession,
+        "Unpin the session",
+        S::Create,
+        W::Panes,
+        &[],
+        false,
+    ),
     bind(
         C::CopyPath,
         "Copy the path",
@@ -2004,6 +2052,10 @@ mod tests {
             C::NextTab,
             C::PreviousTab,
             C::Rename,
+            C::MoveRowUp,
+            C::MoveRowDown,
+            C::PinSession,
+            C::UnpinSession,
             C::RemoveMachine,
             C::EditMachine,
             C::WhyOffline,
@@ -2023,6 +2075,8 @@ mod tests {
             C::AddMachine,
             C::ShareMachine,
             C::OpenProject,
+            C::CloneProject,
+            C::NewProject,
             C::AddProject,
             C::RemoveProject,
             C::RemoveWorktree,
@@ -2127,6 +2181,10 @@ mod tests {
                 | C::PreviousTab
                 | C::Tab(_)
                 | C::Rename
+                | C::MoveRowUp
+                | C::MoveRowDown
+                | C::PinSession
+                | C::UnpinSession
                 | C::RemoveMachine
                 | C::EditMachine
                 | C::WhyOffline
@@ -2146,6 +2204,8 @@ mod tests {
                 | C::AddMachine
                 | C::ShareMachine
                 | C::OpenProject
+                | C::CloneProject
+                | C::NewProject
                 | C::AddProject
                 | C::RemoveProject
                 | C::RemoveWorktree

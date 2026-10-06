@@ -167,6 +167,12 @@ impl ScriptedRunner {
         self
     }
 
+    /// Queues the output of the next command, for a test that drives the
+    /// runner after it was shared (the engine holds it).
+    pub fn queue(&self, output: Output) {
+        self.push(Ok(output));
+    }
+
     /// Queues a failure to run the next command.
     pub fn fail(self, error: RunError) -> Self {
         self.push(Err(error));

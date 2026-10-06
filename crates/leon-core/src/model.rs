@@ -167,6 +167,22 @@ pub struct Session {
     pub updated_at: DateTime<Utc>,
     /// Number of messages stored for the session.
     pub message_count: u32,
+    /// Pinned position inside its parent's list, when the user pinned it
+    /// there by dragging; `None` means automatic (by recency). Pinned
+    /// sessions come first, in this order, then the rest newest-first.
+    pub sort_order: Option<i64>,
+}
+
+/// What holds sessions in the sidebar: the parent whose list a session is
+/// pinned in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionScope {
+    /// The sessions of a worktree.
+    Worktree(WorktreeId),
+    /// The sessions directly under a project (no worktree holds them).
+    Project(ProjectId),
+    /// The sessions of one unsorted folder on a machine.
+    Folder(MachineId, String),
 }
 
 /// One entry of a session transcript.

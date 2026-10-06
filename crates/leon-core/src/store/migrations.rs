@@ -25,7 +25,7 @@ use crate::error::{Result, StoreError};
 /// branches that both wanted "version 4". Neither was ever released: the only
 /// public schema is version 3, so version 4 never existed in the wild and this
 /// order (usage, then relay) is the one every database goes through.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
 
 const V1: &str = r#"
 CREATE TABLE machine (
@@ -266,6 +266,43 @@ CREATE TABLE saved_terminal (
 ) WITHOUT ROWID;
 "#;
 
+/// Version 9: the order of the projects in the sidebar. `sort_order` is the
+/// position of the project among the projects of its machine, lowest first.
+/// Existing projects all start at zero, so they keep their alphabetical order
+/// until somebody drags one; new projects go after the greatest position of
+/// their machine.
+const V9: &str = r#"
+ALTER TABLE project ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
+UPDATE project SET sort_order = (
+    SELECT COUNT(*) FROM project AS other
+    WHERE other.machine_id = project.machine_id
+      AND (other.name < project.name
+           OR (other.name = project.name AND other.id < project.id))
+);
+"#;
+
+/// Version 10: the order of the worktrees in the sidebar, like the projects'.
+/// The main worktree keeps its first place until somebody drags one; new
+/// worktrees go last.
+const V10: &str = r#"
+ALTER TABLE worktree ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
+UPDATE worktree SET sort_order = (
+    SELECT COUNT(*) FROM worktree AS other
+    WHERE other.project_id = worktree.project_id
+      AND (other.is_main > worktree.is_main
+           OR (other.is_main = worktree.is_main
+               AND (other.path < worktree.path
+                    OR (other.path = worktree.path AND other.id < worktree.id))))
+);
+"#;
+
+/// Version 11: pinned sessions. `sort_order` holds the pinned position inside
+/// the parent's list, lowest first; `NULL` means automatic (by recency), as
+/// before. Every existing session starts unpinned, so nothing moves.
+const V11: &str = r#"
+ALTER TABLE session ADD COLUMN sort_order INTEGER;
+"#;
+
 /// Brings the database up to the latest schema version.
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     let supported = MIGRATIONS.len() as u32;
@@ -313,7 +350,7 @@ mod tests {
             )
             .unwrap();
         migrate(&mut connection).unwrap();
-        assert_eq!(version(&connection), 8);
+        assert_eq!(version(&connection), MIGRATIONS.len() as u32);
         let (host, key): (String, Option<String>) = connection
             .query_row(
                 "SELECT host, relay_host_key FROM machine WHERE id = 'm1'",
@@ -408,7 +445,7 @@ mod tests {
     fn a_fresh_database_has_both_the_usage_tables_and_the_relay_columns() {
         let mut connection = Connection::open_in_memory().unwrap();
         migrate(&mut connection).unwrap();
-        assert_eq!(version(&connection), 8);
+        assert_eq!(version(&connection), MIGRATIONS.len() as u32);
         connection
             .execute(
                 "INSERT INTO usage_history (machine_id, agent, account, window, observed_at, used_percent)

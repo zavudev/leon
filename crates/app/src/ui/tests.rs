@@ -520,6 +520,26 @@ impl Harness {
         self.settle(cx);
     }
 
+    /// Drags a sidebar row onto another one, releasing at `to_fraction` of
+    /// the target row's height (below the middle means after it).
+    fn drag_rows(&self, from: usize, to: usize, to_fraction: f32, cx: &mut TestAppContext) {
+        let from_bounds = self
+            .bounds_of(format!("tree-row-{from}"), cx)
+            .unwrap_or_else(|| panic!("tree-row-{from} is not drawn"));
+        let to_bounds = self
+            .bounds_of(format!("tree-row-{to}"), cx)
+            .unwrap_or_else(|| panic!("tree-row-{to} is not drawn"));
+        let to_point = Point {
+            x: to_bounds.center().x,
+            y: to_bounds.origin.y + to_bounds.size.height * to_fraction,
+        };
+        cx.update_window(self.window.into(), |_, window, cx| {
+            window.drag(from_bounds.center(), to_point, cx);
+        })
+        .unwrap();
+        self.settle(cx);
+    }
+
     /// Replaces the whole text of the palette's field in one step, as a paste
     /// does: one change of the field instead of one per key. Typing costs a
     /// few milliseconds a character (the input lays its text out and the
@@ -1087,6 +1107,7 @@ fn a_worktree_shows_the_sessions_that_ran_inside_it(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[gpui_kit::test]
 fn a_worktree_screen_offers_its_actions_and_opens_a_session_from_its_list(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
     let linked = h
@@ -1125,6 +1146,132 @@ fn a_worktree_screen_offers_its_actions_and_opens_a_session_from_its_list(cx: &m
     h.mouse_on("worktree-session-0".into(), gpui_kit::MouseButton::Left, cx);
     assert_eq!(h.main_kind(cx), "session:add oauth");
     assert!(h.shows("transcript", cx));
+}
+
+#[gpui_kit::test]
+fn dragging_a_project_onto_another_reorders_them(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    let local = MachineId::local();
+    let order = || {
+        h.store
+            .projects(Some(&local))
+            .unwrap()
+            .into_iter()
+            .map(|project| project.name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(), ["api", "web"]);
+    let row_of = |h: &Harness, cx: &mut TestAppContext, name: &str| {
+        let id = h
+            .store
+            .projects(Some(&local))
+            .unwrap()
+            .into_iter()
+            .find(|project| project.name == name)
+            .unwrap()
+            .id;
+        h.row_of(NodeId::Project(id), cx).unwrap()
+    };
+    let api = row_of(&h, cx, "api");
+    let web = row_of(&h, cx, "web");
+    // Below the middle of web's row: api goes after it.
+    h.drag_rows(api, web, 0.75, cx);
+    assert_eq!(order(), ["web", "api"]);
+    assert!(
+        h.shell(cx, |shell| shell
+            .engine
+            .status()
+            .is_some_and(|status| status.text.contains("Moved the project"))),
+        "the drop reports what it did"
+    );
+    // A drop onto the very project being dragged changes nothing.
+    let web = row_of(&h, cx, "web");
+    h.drag_rows(web, web, 0.75, cx);
+    assert_eq!(order(), ["web", "api"]);
+}
+
+#[gpui_kit::test]
+fn dragging_a_worktree_onto_another_reorders_them(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    let api = h
+        .store
+        .projects(Some(&MachineId::local()))
+        .unwrap()
+        .into_iter()
+        .find(|project| project.name == "api")
+        .unwrap();
+    let branches = |h: &Harness| -> Vec<Option<String>> {
+        h.store
+            .worktrees(&api.id)
+            .unwrap()
+            .into_iter()
+            .map(|worktree| worktree.branch)
+            .collect()
+    };
+    assert_eq!(
+        branches(&h),
+        [Some("main".into()), Some("feature/login".into())]
+    );
+    let main = h
+        .row_of(NodeId::Worktree(worktree_id(&h, "main")), cx)
+        .unwrap();
+    let linked = h
+        .row_of(NodeId::Worktree(worktree_id(&h, "feature/login")), cx)
+        .unwrap();
+    // Below the middle of the linked row: main goes after it.
+    h.drag_rows(main, linked, 0.75, cx);
+    assert_eq!(
+        branches(&h),
+        [Some("feature/login".into()), Some("main".into())]
+    );
+}
+
+#[gpui_kit::test]
+fn dragging_a_session_pins_it_where_it_was_dropped(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    session_at(
+        &h.store,
+        &MachineId::local(),
+        API_ROOT,
+        "brand new",
+        0,
+        &[(Role::User, "hello")],
+    );
+    h.settle(cx);
+    let id_of = |h: &Harness, title: &str| {
+        h.store
+            .recent_sessions(&leon_core::SessionFilter::default(), 50)
+            .unwrap()
+            .into_iter()
+            .find(|session| session.title == title)
+            .unwrap()
+            .id
+    };
+    let older = id_of(&h, "fix the login bug");
+    let newer = id_of(&h, "brand new");
+    // Both unpinned, newest first: brand new, then fix the login bug. Drop
+    // the older below the newer: it is pinned on top of the list.
+    let older_row = h.row_of(NodeId::Session(older.clone()), cx).unwrap();
+    let newer_row = h.row_of(NodeId::Session(newer.clone()), cx).unwrap();
+    h.drag_rows(older_row, newer_row, 0.75, cx);
+    assert_eq!(h.store.session(&older).unwrap().sort_order, Some(0));
+    assert_eq!(
+        h.store.session(&newer).unwrap().sort_order,
+        None,
+        "the other session stays automatic"
+    );
+    // Unpin from the menu: it goes back to recency.
+    put_cursor(&h, cx, NodeId::Session(older.clone()));
+    h.press("m", cx);
+    assert!(h.shell(cx, |shell| {
+        shell
+            .menu
+            .as_ref()
+            .is_some_and(|menu| menu.items[2].label == "Unpin")
+    }));
+    h.type_text("unpin", cx);
+    h.press("enter", cx);
+    assert_eq!(h.store.session(&older).unwrap().sort_order, None);
 }
 
 #[gpui_kit::test]
@@ -1767,6 +1914,198 @@ fn adding_a_project_by_path_asks_machine_then_folder_then_name_and_syncs_its_wor
     assert_eq!(added.name, "leon");
     assert_eq!(h.store.worktrees(&added.id).unwrap().len(), 1);
     assert!(h.status().contains("Added project leon"), "{}", h.status());
+}
+
+#[gpui_kit::test]
+fn the_palette_clones_a_repository_into_a_typed_folder(cx: &mut TestAppContext) {
+    let h = open(
+        cx,
+        ScriptedRunner::new()
+            .reply(Output::ok("Cloning into 'leon'..."))
+            .reply(Output::ok(API_LISTING)),
+    );
+    h.press("ctrl-shift-p", cx);
+    h.type_text("clone a repository", cx);
+    h.press("enter", cx);
+    // The machine, this computer first: type "m2" is not needed; pick the
+    // remote one to exercise a typed folder.
+    let titles = h.palette_titles(cx);
+    assert_eq!(titles, ["This machine", "build box"]);
+    h.press("down", cx);
+    h.press("enter", cx); // build box
+    answer(&h, "git@host:owner/leon.git", cx);
+    h.press("enter", cx); // the name offered from the URL
+    answer(&h, "/srv/code", cx);
+    h.settle(cx);
+    let remote = h
+        .store
+        .machines()
+        .unwrap()
+        .into_iter()
+        .find(|machine| machine.name == "build box")
+        .unwrap();
+    let projects = h.store.projects(Some(&remote.id)).unwrap();
+    let cloned = projects
+        .iter()
+        .find(|project| project.root == "/srv/code/leon")
+        .expect("cloned");
+    assert_eq!(cloned.name, "leon");
+    assert!(h.status().contains("Cloned leon"), "{}", h.status());
+}
+
+#[gpui_kit::test]
+fn the_sidebar_button_adds_a_project_and_choosing_clone_asks_the_palette(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    h.mouse_on(
+        "sidebar-add-project".to_owned(),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::AddProject);
+    assert!(h.shows("add-project", cx));
+    // The host cycles with the arrows; the keyboard starts on "Browse".
+    h.press("up", cx); // browse -> host
+    h.press("right", cx); // host: This machine -> build box
+    h.press("down", cx); // host -> browse
+    h.press("down", cx); // browse -> clone
+    h.press("enter", cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Palette);
+    assert!(
+        h.shell(cx, |s| s.palette.flow.as_ref().is_some_and(|flow| flow
+            .command
+            == Command::CloneProject
+            && flow.answers.len() == 1
+            && flow.answers[0] != MachineId::local().as_str())),
+        "the host answered"
+    );
+    // Escape walks back the flow, then closes the palette; the dialog is
+    // not open behind it.
+    for _ in 0..3 {
+        h.press("escape", cx);
+    }
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+}
+
+#[gpui_kit::test]
+fn the_new_worktree_dialog_offers_name_base_agent_more_and_create(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    let api = h
+        .store
+        .projects(Some(&MachineId::local()))
+        .unwrap()
+        .into_iter()
+        .find(|project| project.name == "api")
+        .unwrap()
+        .id;
+    put_cursor(&h, cx, NodeId::Project(api));
+    h.press("ctrl-shift-n", cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::NewWorktree);
+    assert!(h.shows("new-worktree", cx));
+    for row in 0..3 {
+        assert!(h.shows_dynamic(format!("worktree-row-{row}"), cx), "{row}");
+    }
+    assert!(h.shows("worktree-more", cx));
+    assert!(h.shows("worktree-create", cx));
+    // Tab walks to the agent row and opens its list; the arrows walk it and
+    // Enter picks.
+    h.press("tab", cx);
+    h.press("tab", cx);
+    assert!(h.shows("agent-list", cx));
+    h.press("down", cx);
+    h.press("down", cx);
+    h.press("down", cx);
+    h.press("enter", cx);
+    assert_eq!(
+        h.shell(cx, |s| s.new_worktree_ui.as_ref().unwrap().agent),
+        Some(AgentId::OPENCODE)
+    );
+    h.press("escape", cx); // closes the agent list
+    h.press("escape", cx); // closes the dialog
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+    assert!(h.shell(cx, |s| s.new_worktree_ui.is_none()));
+}
+
+#[gpui_kit::test]
+fn typing_in_the_new_worktree_dialog_reaches_the_name_field(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    let api = h
+        .store
+        .projects(Some(&MachineId::local()))
+        .unwrap()
+        .into_iter()
+        .find(|project| project.name == "api")
+        .unwrap()
+        .id;
+    put_cursor(&h, cx, NodeId::Project(api));
+    h.press("ctrl-shift-n", cx);
+    // The Name row has the keyboard: what is typed lands in the field.
+    h.type_text("feature/login", cx);
+    let name = cx.update(|cx| {
+        let shell = h.shell.read(cx);
+        let ui = shell.new_worktree_ui.as_ref().unwrap();
+        ui.name.read(cx).value().to_string()
+    });
+    assert_eq!(name, "feature/login");
+}
+
+#[gpui_kit::test]
+fn the_base_field_offers_the_branches_git_reported(cx: &mut TestAppContext) {
+    let h = open(
+        cx,
+        ScriptedRunner::new().reply(Output::ok(
+            "main\norigin/HEAD\norigin/main\norigin/release\n",
+        )),
+    );
+    let api = h
+        .store
+        .projects(Some(&MachineId::local()))
+        .unwrap()
+        .into_iter()
+        .find(|project| project.name == "api")
+        .unwrap()
+        .id;
+    put_cursor(&h, cx, NodeId::Project(api));
+    h.press("ctrl-shift-n", cx);
+    h.settle(cx);
+    let base = |h: &Harness, cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let shell = h.shell.read(cx);
+            shell
+                .new_worktree_ui
+                .as_ref()
+                .unwrap()
+                .base
+                .read(cx)
+                .value()
+                .to_string()
+        })
+    };
+    // A fresh dialog answers with what a clone would have checked out.
+    assert_eq!(base(&h, cx), "origin/main");
+    // The base row opens the list of branches; typing searches them, and
+    // Enter takes the highlighted one.
+    h.press("down", cx); // name -> base: the list opens
+    h.settle(cx);
+    eprintln!(
+        "ui={:?}",
+        h.shell(cx, |s| s.new_worktree_ui.as_ref().map(|ui| (
+            ui.cursor,
+            ui.base_list,
+            ui.base_refs.len()
+        )))
+    );
+    assert!(h.shows("base-list", cx));
+    h.type_text("relea", cx);
+    h.settle(cx);
+    assert!(h.shows("base-option-0", cx));
+    assert!(!h.shows("base-option-1", cx), "filtered to one");
+    h.press("enter", cx);
+    assert_eq!(base(&h, cx), "origin/release");
+    // The arrows still cycle what git reported.
+    h.press("down", cx);
+    h.press("right", cx);
+    assert_eq!(base(&h, cx), "HEAD", "it wraps");
+    h.press("escape", cx);
 }
 
 #[gpui_kit::test]
@@ -4305,6 +4644,9 @@ mod live {
                     "New agent session",
                     "Open shell here",
                     "Copy path",
+                    "Rename",
+                    "Move up",
+                    "Move down",
                     "Reveal in file manager",
                     "Refresh icon",
                     "Choose icon…",
@@ -4609,6 +4951,9 @@ mod live {
             [
                 "Open",
                 "Open transcript",
+                "Pin",
+                "Move up",
+                "Move down",
                 "Copy session id",
                 "Remove from history"
             ]
@@ -4823,6 +5168,26 @@ mod live {
     }
 
     #[gpui_kit::test]
+    fn a_worktree_detail_lists_the_terminals_running_inside_it(cx: &mut TestAppContext) {
+        let h = open_live(cx);
+        let _real = real_worktree(&h, cx);
+        // The new project's worktree has no history sessions, yet a
+        // terminal is about to run in it: its detail must not claim no
+        // sessions ran here.
+        h.press("ctrl-n", cx);
+        h.press("enter", cx); // Claude Code
+        wait_until(&h, cx, "the live row", |h, cx| {
+            h.shows("tree-live-led-1", cx)
+        });
+        show_worktree_detail(&h, cx, "real", "trunk");
+        assert!(
+            !h.shows("worktree-no-sessions", cx),
+            "a terminal is running here"
+        );
+        assert!(h.shows("worktree-live-led-1", cx));
+    }
+
+    #[gpui_kit::test]
     fn output_turns_the_dot_working_silence_turns_it_waiting_and_the_shell_back_turns_it_idle(
         cx: &mut TestAppContext,
     ) {
@@ -5006,8 +5371,47 @@ mod live {
         );
     }
 
-    // ----- opening a history session resumes it in a terminal ------------------------
+    #[gpui_kit::test]
+    fn a_checkout_in_a_live_terminals_project_is_noticed_by_the_timer(cx: &mut TestAppContext) {
+        let h = open_live(cx);
+        let _real = real_worktree(&h, cx);
+        // The next listing reports a checkout: a new branch at a new commit.
+        let path = h
+            .shell(cx, |shell| shell.snapshot.projects.clone())
+            .into_iter()
+            .find(|entry| entry.project.name == "real")
+            .map(|entry| entry.project.root)
+            .unwrap();
+        h.runner.queue(Output::ok(format!(
+            "worktree {path}\nHEAD 9999999999999999999999999999999999999999\nbranch refs/heads/trunk-2\n"
+        )));
+        h.press("ctrl-t", cx);
+        wait_until(&h, cx, "the shell", |h, cx| {
+            screen(h, cx, 1).contains("READY>")
+        });
+        // The first check runs on the fifth turn of the activity timer.
+        cx.executor().advance_clock(Duration::from_secs(12));
+        h.settle(cx);
+        let worktree = h
+            .store
+            .projects(Some(&MachineId::local()))
+            .unwrap()
+            .into_iter()
+            .find(|project| project.name == "real")
+            .and_then(|project| h.store.worktrees(&project.id).unwrap().into_iter().next())
+            .unwrap();
+        assert_eq!(
+            worktree.branch.as_deref(),
+            Some("trunk-2"),
+            "the checkout was noticed"
+        );
+        assert_eq!(
+            worktree.head.as_deref(),
+            Some("9999999999999999999999999999999999999999")
+        );
+    }
 
+    // ----- opening a history session resumes it in a terminal ------------------------
     /// A session of `agent` that ran in a folder that exists on this computer
     /// and that no project contains, so it is listed under unsorted. The
     /// folder lives as long as the returned value.
@@ -5526,6 +5930,9 @@ mod live {
             [
                 "Open",
                 "Open transcript",
+                "Pin",
+                "Move up",
+                "Move down",
                 "Copy session id",
                 "Remove from history"
             ]

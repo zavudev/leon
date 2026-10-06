@@ -16,6 +16,7 @@
 mod activity;
 mod connect;
 mod connect_view;
+mod dialogs;
 mod expansion;
 mod filter;
 mod find;

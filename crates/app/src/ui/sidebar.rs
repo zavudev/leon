@@ -9,7 +9,7 @@
 
 use super::activity::Activity;
 use super::live::LiveState;
-use super::shell::{Pane, Shell};
+use super::shell::{Pane, RowDrag, Shell};
 use super::tree::{folder_name, worktree_label, Kind, Row};
 use super::widgets::{
     activity_dot, elsewhere_mark, focus_rule, key_cap, led, mark, mono, section_label, Lion,
@@ -26,9 +26,20 @@ use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, uniform_list, AnyElement, Context, Div, FontWeight, Hsla, SharedString, Stateful,
+    div, uniform_list, AnyElement, Context, Div, DragMoveEvent, FontWeight, Hsla, Render,
+    SharedString, Stateful,
 };
 use gpui_kit::{HighlightStyle, StyledText};
+
+/// The ghost shown while a row is dragged: nothing is drawn, the target's
+/// line says where the drop goes.
+struct RowDragGhost;
+
+impl Render for RowDragGhost {
+    fn render(&mut self, _: &mut gpui_kit::Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
 
 /// The colour of a machine's status light: green while it is reachable,
 /// amber while it is being probed, red when it is not, grey when nobody has
@@ -53,7 +64,7 @@ pub fn state_label(state: &MachineState) -> &'static str {
 }
 
 /// The colour of the light of a live terminal: its state, never the icon.
-fn live_light(state: LiveState, colours: &Palette) -> Hsla {
+pub(super) fn live_light(state: LiveState, colours: &Palette) -> Hsla {
     match state {
         LiveState::Running => colours.success,
         LiveState::Starting => colours.warning,
@@ -112,9 +123,34 @@ impl Shell {
                             .font_weight(FontWeight::MEDIUM)
                             .child(product::PRODUCT_NAME),
                     )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("sidebar-add-project")
+                            .debug_selector(|| "sidebar-add-project".into())
+                            .flex_none()
+                            .size(metrics::CONTROL())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(metrics::RADIUS())
+                            .cursor_pointer()
+                            .hover({
+                                let hover = colours.surface;
+                                move |style| style.bg(hover)
+                            })
+                            .tooltip({
+                                let tip: SharedString = tooltip_text(Command::OpenProject).into();
+                                move |window, cx| Tooltip::new(tip.clone()).build(window, cx)
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_add_project(window, cx);
+                            }))
+                            .child(icon(IconName::Plus, px(14.), colours.text_muted)),
+                    )
                     .when(focused, |this| this.child(focus_rule(colours))),
             )
-            .child(self.render_filter(colours))
+            .child(self.render_filter(colours, cx))
             .child(
                 div()
                     .relative()
@@ -240,8 +276,9 @@ impl Shell {
             ))
     }
 
-    /// The field above the tree that filters the projects.
-    fn render_filter(&self, colours: &Palette) -> Div {
+    /// The field above the tree that filters the projects, with the +
+    /// that adds one.
+    fn render_filter(&self, colours: &Palette, cx: &mut Context<Self>) -> Div {
         let empty = self.filter_query.is_empty();
         div()
             .debug_selector(|| "sidebar-filter".into())
@@ -267,6 +304,32 @@ impl Shell {
                         .map(|text| key_cap(text, colours)),
                 )
             })
+            // The same "+" as the header's: add a project without knowing the
+            // chord.
+            .child(
+                div()
+                    .id("filter-add-project")
+                    .debug_selector(|| "filter-add-project".into())
+                    .flex_none()
+                    .size(metrics::CONTROL())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(metrics::RADIUS())
+                    .cursor_pointer()
+                    .hover({
+                        let hover = colours.surface;
+                        move |style| style.bg(hover)
+                    })
+                    .tooltip({
+                        let tip: SharedString = "Add a project\u{2026}".into();
+                        move |window, cx| Tooltip::new(tip.clone()).build(window, cx)
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_add_project(window, cx);
+                    }))
+                    .child(icon(IconName::Plus, px(14.), colours.text_muted)),
+            )
     }
 
     /// The tools at the foot of the sidebar, each with its shortcut in its
@@ -373,6 +436,71 @@ impl Shell {
         Some(self.render_row_content(index, row, base, colours, cx))
     }
 
+    /// How a movable row (`Order::Project`, `Worktree` or `Session`) drags:
+    /// the row reports every drag move over its own list (see
+    /// `note_row_drag_over`), a line marks where the drop would go, and the
+    /// window-wide release listener completes it. Rows that cannot move (the
+    /// only one of their list) get no drag at all.
+    fn draggable_row(
+        &self,
+        row: &Row,
+        index: usize,
+        base: Stateful<Div>,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let Some(tree_order) = self.tree_order(&row.kind, &row.machine) else {
+            return base;
+        };
+        let order = tree_order.order;
+        if !self.can_order(&order) {
+            return base;
+        }
+        let source = order.clone();
+        let target = order;
+        let target_for_move = target.clone();
+        let show_line = self
+            .row_drop_target
+            .as_ref()
+            .filter(|drop| drop.target == target)
+            .map(|drop| drop.after);
+        let line_colour = *colours;
+        let debug = format!("tree-drop-line-{index}");
+        base.on_drag(RowDrag(source), |_, _, _, cx| cx.new(|_| RowDragGhost))
+            .on_drag_move(
+                cx.listener(move |this, event: &DragMoveEvent<RowDrag>, _, cx| {
+                    // This listener runs for every movable row on every move
+                    // of the drag (capture phase, no hover gating), so only
+                    // the row under the pointer answers. The check is
+                    // geometric on purpose: while anything is dragged the
+                    // sheet over the window takes the pointer, so no row
+                    // reports hovered.
+                    if !event.bounds.contains(&event.event.position) {
+                        return;
+                    }
+                    let dragged = event.drag(cx).0.clone();
+                    let after = event.event.position.y > event.bounds.center().y;
+                    if this.note_row_drag_over(&dragged, &target_for_move, after) {
+                        cx.notify();
+                    }
+                }),
+            )
+            .when(show_line.is_some(), |this| {
+                let after = show_line.unwrap_or(false);
+                this.child(
+                    div()
+                        .debug_selector(move || debug.clone())
+                        .absolute()
+                        .left(px(8.))
+                        .right(px(8.))
+                        .when(after, |this| this.bottom_0())
+                        .when(!after, |this| this.top_0())
+                        .h(px(2.))
+                        .bg(line_colour.signal),
+                )
+            })
+    }
+
     fn render_row_content(
         &self,
         index: usize,
@@ -437,37 +565,46 @@ impl Shell {
                     .child(mono(state_label(&state)).text_color(colours.text_faint))
                     .into_any_element()
             }
-            Kind::Project { project, sessions } => base
-                .child(chevron)
-                .child(self.logo(
-                    &project.id,
-                    metrics::PROJECT_ICON(),
-                    &format!("tree-{index}"),
-                    colours,
-                ))
-                .child(
-                    label()
-                        .debug_selector(move || format!("tree-label-{index}"))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(self.emphasised(&self.project_label(project), colours)),
-                )
-                .child(self.dot(index, self.project_activity(&project.id), colours))
-                .child(count(*sessions))
-                .into_any_element(),
-            Kind::Worktree { worktree, .. } => base
-                .child(chevron)
-                .child(self.dot(index, self.worktree_activity(&worktree.id), colours))
-                .child(icon(IconName::GitBranch, px(13.), colours.text_muted))
-                .child(
-                    label()
-                        .debug_selector(move || format!("tree-label-{index}"))
-                        .child(self.emphasised(&worktree_label(worktree), colours)),
-                )
-                .when(worktree.is_main, |this| {
-                    this.child(mono("MAIN").text_color(colours.text_faint))
-                })
-                .into_any_element(),
+            Kind::Project { project, sessions } => {
+                let base = self.draggable_row(row, index, base, colours, cx);
+                let sessions = *sessions;
+                let activity = self.project_activity(&project.id);
+                base.child(chevron)
+                    .child(self.logo(
+                        &project.id,
+                        metrics::PROJECT_ICON(),
+                        &format!("tree-{index}"),
+                        colours,
+                    ))
+                    .child(
+                        label()
+                            .debug_selector(move || format!("tree-label-{index}"))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(self.emphasised(&self.project_label(project), colours)),
+                    )
+                    .child(self.dot(index, activity, colours))
+                    .child(count(sessions))
+                    .into_any_element()
+            }
+            Kind::Worktree { worktree, sessions } => {
+                let base = self.draggable_row(row, index, base, colours, cx);
+                let _ = sessions;
+                let activity = self.worktree_activity(&worktree.id);
+                base.child(chevron)
+                    .child(self.dot(index, activity, colours))
+                    .child(icon(IconName::GitBranch, px(13.), colours.text_muted))
+                    .child(
+                        label()
+                            .debug_selector(move || format!("tree-label-{index}"))
+                            .child(self.emphasised(&worktree_label(worktree), colours)),
+                    )
+                    .when(worktree.is_main, |this| {
+                        this.child(mono("MAIN").text_color(colours.text_faint))
+                    })
+                    .into_any_element()
+            }
             Kind::Session(session) => {
+                let base = self.draggable_row(row, index, base, colours, cx);
                 let name: SharedString = format::agent_name(session.agent).into();
                 // A session with a terminal of its own folder is that
                 // terminal's row: it shows the terminal's state, not its age.

@@ -167,7 +167,14 @@ The icon is the glare mark on its ink tile, generated from
 1. `Open project…` on this computer (`Cmd+O` or `Ctrl+O`) opens the system's
    own folder dialog. For an SSH machine (`Connect a machine…` first, see below)
    there is no dialog to show, so you pick one of the repositories Leon found
-   there or type the path.
+   there or type the path. Two more ways to start a project, both offered on
+   this computer and on a machine: `Clone a repository…` clones a git URL
+   (HTTPS or SSH; the name and folder are offered from the URL, exactly as
+   `git clone` would name them) and `New project…` creates a brand-new
+   repository (empty, with one initial commit, so worktrees have a branch to
+   hang from) in a folder you pick with the dialog or type. Cloning or
+   creating on a machine runs `git` there through the same SSH runner as
+   everything else; an existing folder is only used when it is empty.
 2. Select a worktree and start a session: `New agent session`, choose the
    agent. Without a selected worktree it asks for one first.
 3. `Open a shell here` opens a terminal in the selected worktree.
@@ -360,6 +367,8 @@ platform (see below).
 | Connect a machine… | `⇧⌘M` | `Ctrl+Shift+M` |
 | Share this machine… | palette only | palette only |
 | Open project… | `⌘O` | `Ctrl+O` |
+| Clone a repository… | palette only | palette only |
+| New project… | palette only | palette only |
 | Add a remote project by path… | palette only | palette only |
 | Remove a project | palette only | palette only |
 | Remove a worktree | palette only | palette only |
@@ -367,6 +376,10 @@ platform (see below).
 | Edit a machine… | palette only | palette only |
 | Why is it offline? | palette only | palette only |
 | Rename | `F2` | `F2` |
+| Move up | context menu | context menu |
+| Move down | context menu | context menu |
+| Pin the session | context menu | context menu |
+| Unpin the session | context menu | context menu |
 | Copy the path | palette only | palette only |
 | Refresh project icon | palette only | palette only |
 | Choose project icon… | palette only | palette only |
@@ -637,9 +650,9 @@ typing selects an item. Every item shows the shortcut it has.
 | Row | Items |
 | --- | --- |
 | Machine | Open project…, New shell, Probe, Why is it offline? and Edit machine… (SSH machines), Rename, Connect a machine…, Remove machine (not for this computer) |
-| Project | New worktree…, New agent session ▸ (Claude Code, Codex, opencode and your own agents; the palette lists the whole catalogue), Open shell here, Copy path, Reveal in file manager (this computer), Refresh icon, Choose icon…, Reset icon, Remove project |
-| Worktree | New agent session ▸, Open shell here, Copy path, Copy branch name, Reveal in file manager (this computer), Remove worktree (not the main one) |
-| History session | Open (resumes it in a terminal), Open transcript, Copy session id, Remove from history |
+| Project | New worktree…, New agent session ▸ (Claude Code, Codex, opencode and your own agents; the palette lists the whole catalogue), Open shell here, Copy path, Rename, Move up, Move down, Reveal in file manager (this computer), Refresh icon, Choose icon…, Reset icon, Remove project |
+| Worktree | New agent session ▸, Open shell here, Copy path, Copy branch name, Move up, Move down, Reveal in file manager (this computer), Remove worktree (not the main one) |
+| History session | Open (resumes it in a terminal), Open transcript, Pin or Unpin, Move up, Move down, Copy session id, Remove from history |
 | Live terminal | Focus, Split right, Split down, Rename, Close |
 
 Removals and closing a terminal with a program running in it ask first.
@@ -1176,6 +1189,18 @@ Two projects of one machine with the same name are told apart: by the origin's
 `owner/repo` when every one of them has a known remote and they differ,
 otherwise by their folders (`zavu/monorepo`, `acme.io/monorepo`).
 
+### Order and names
+
+Projects, worktrees and sessions keep the order you give them. Drag one onto
+another of the same list to move it (a line marks before or after), or use
+"Move up" / "Move down" in its context menu; the order is stored, so it
+survives restarts, and new projects and worktrees go last. Sessions sort
+themselves by recency until you move one: a dragged or moved session is
+*pinned* where you put it, on top of its list ("Pin" also does that;
+"Unpin" sends it back to recency). Sessions can only move inside their own
+list; projects inside their machine; worktrees inside their project. `F2` or
+"Rename" renames the project under the cursor.
+
 ### A logo per project
 
 Each project shows a small logo (16 px in the tree and the palette, 24 px in
@@ -1235,6 +1260,17 @@ looked up either (it needs the Git host's API).
 Each worktree row leads with a dot, and a project row rolls up its worktrees
 (the most urgent state wins: error, then waiting, working, idle). A machine keeps
 its connection light. Hover a dot for its words.
+
+### Keeping the worktrees fresh
+
+The branches and commit hashes a project shows come from `git worktree list`.
+They are read when a project is opened or discovered, on `Refresh`, and — while
+a terminal of this computer is running inside a project — every ten seconds or
+so: a `git checkout` made in a shell is noticed within a moment and the tree
+updates, without asking git anything when nothing changed. Projects on other
+machines are only read on `Refresh` (a check per project per turn over the
+network is not worth it), so a checkout made over SSH shows up on `⌘R` /
+`Ctrl+R`.
 
 | Dot | State | When |
 | --- | --- | --- |

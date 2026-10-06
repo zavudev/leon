@@ -28,10 +28,10 @@ use crate::model::{AgentId, Message, NewMessage, NewSession, Role, Session};
 /// The session columns, in the order [`session_from_row`] expects them, for a
 /// `session` table aliased as `s`.
 pub(crate) const SESSION_COLUMNS: &str = "s.id, s.agent, s.external_id, s.machine_id, s.cwd, \
-     s.project_id, s.title, s.model, s.started_at, s.updated_at, s.message_count";
+     s.project_id, s.title, s.model, s.started_at, s.updated_at, s.message_count, s.sort_order";
 
 /// How many columns [`SESSION_COLUMNS`] selects.
-pub(crate) const SESSION_COLUMN_COUNT: usize = 11;
+pub(crate) const SESSION_COLUMN_COUNT: usize = 12;
 
 /// Restricts a session listing. An absent field does not restrict.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -524,6 +524,7 @@ pub(crate) fn session_from_row(row: &Row<'_>, offset: usize) -> rusqlite::Result
         started_at: from_millis(row.get(offset + 8)?),
         updated_at: from_millis(row.get(offset + 9)?),
         message_count: row.get(offset + 10)?,
+        sort_order: row.get(offset + 11)?,
     })
 }
 

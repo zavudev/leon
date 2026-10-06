@@ -142,9 +142,61 @@ pub enum Op {
         /// The name shown in the list.
         name: String,
     },
+    /// Clone a repository into a folder on a machine, then add it as a
+    /// project. Any git URL git itself accepts works (HTTPS, SSH, a path to
+    /// a local repository).
+    CloneProject {
+        /// The machine the clone happens on.
+        machine: MachineId,
+        /// The repository to clone.
+        url: String,
+        /// Absolute path of the folder the clone goes into.
+        parent: String,
+        /// The folder the clone takes (its name).
+        name: String,
+    },
+    /// Create a brand-new git repository (empty, with one initial commit so
+    /// worktrees have a branch to hang from), then add it as a project.
+    CreateProject {
+        /// The machine the repository is created on.
+        machine: MachineId,
+        /// Absolute path of the folder that holds it.
+        parent: String,
+        /// Its name, which is also its folder's.
+        name: String,
+    },
     /// Remove a project from the list and remember that it was removed, so
     /// that discovery does not bring it back.
     RemoveProject(ProjectId),
+    /// Give a project another name.
+    RenameProject {
+        /// The project.
+        project: ProjectId,
+        /// Its new name.
+        name: String,
+    },
+    /// Write the sidebar order of one machine's projects: first row first.
+    ReorderProjects {
+        /// The machine the projects live on.
+        machine: MachineId,
+        /// Every project of the machine in its new order.
+        ordered: Vec<ProjectId>,
+    },
+    /// Write the sidebar order of one project's worktrees: first row first.
+    ReorderWorktrees {
+        /// The project the worktrees belong to.
+        project: ProjectId,
+        /// Every worktree of the project in its new order.
+        ordered: Vec<WorktreeId>,
+    },
+    /// Pin sessions on top of their parent's list, in this order; every
+    /// other session of that parent goes back to automatic (by recency).
+    PinSessions {
+        /// The parent whose list is pinned.
+        parent: leon_core::SessionScope,
+        /// The pinned sessions, first row first.
+        pinned: Vec<leon_core::SessionId>,
+    },
     /// Give an SSH machine another name.
     RenameMachine {
         /// The machine.
@@ -1138,7 +1190,36 @@ impl Engine {
                 path,
                 name,
             } => self.add_project(&machine, &path, &name).await.map(Some),
+            Op::CloneProject {
+                machine,
+                url,
+                parent,
+                name,
+            } => self
+                .clone_project(&machine, &url, &parent, &name)
+                .await
+                .map(Some),
+            Op::CreateProject {
+                machine,
+                parent,
+                name,
+            } => self
+                .create_project(&machine, &parent, &name)
+                .await
+                .map(Some),
             Op::RemoveProject(project) => self.remove_project(&project).map(Some),
+            Op::RenameProject { project, name } => self.rename_project(&project, &name).map(Some),
+            Op::ReorderProjects { machine, ordered } => {
+                self.reorder_projects(&machine, &ordered).map(Some)
+            }
+            Op::ReorderWorktrees { project, ordered } => {
+                self.inner.store.reorder_worktrees(&project, &ordered)?;
+                Ok(Some("Moved the worktree.".to_owned()))
+            }
+            Op::PinSessions { parent, pinned } => {
+                self.inner.store.pin_sessions(&parent, &pinned)?;
+                Ok(Some("Pinned the session.".to_owned()))
+            }
             Op::RenameMachine { machine, name } => self.rename_machine(&machine, &name).map(Some),
             Op::RemoveMachine(machine) => self.remove_machine(&machine).map(Some),
             Op::RemoveSession(session) => self.remove_session(&session).map(Some),
@@ -1284,6 +1365,57 @@ impl Engine {
             .store
             .replace_worktrees(project_id, listed)?
             .len())
+    }
+
+    /// Asks git for a project's worktrees and writes them back only when
+    /// something changed (a checkout, a new worktree). Runs quietly: it is
+    /// called on a timer while a terminal has that project open, and a
+    /// failure is not something to say unless the worktrees really change.
+    pub fn check_worktrees(&self, project: ProjectId) -> JoinHandle<()> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            if let Err(error) = engine.sync_worktrees_if_changed(&project).await {
+                tracing::debug!(%error, "could not check the worktrees");
+            }
+        })
+    }
+
+    async fn sync_worktrees_if_changed(&self, project_id: &ProjectId) -> Result<(), EngineError> {
+        let project = self.inner.store.project(project_id)?;
+        let machine = self.inner.store.machine(&project.machine_id)?;
+        let runner = SharedRunner(self.inner.runner.clone());
+        let ssh = self.ssh();
+        let git = Git::new(&runner, &machine, &ssh);
+        let listed = new_worktrees(&git.list_worktrees(&project).await?);
+        let stored = self.inner.store.worktrees(project_id)?;
+        let same = listed.len() == stored.len()
+            && listed.iter().zip(&stored).all(|(new, old)| {
+                trim(new.path.as_str()) == trim(old.path.as_str())
+                    && new.branch == old.branch
+                    && new.head == old.head
+                    && new.is_main == old.is_main
+            });
+        if !same {
+            self.inner.store.replace_worktrees(project_id, listed)?;
+        }
+        Ok(())
+    }
+
+    /// Asks git for the branches of `project` (local and remote-tracking),
+    /// for a worktree's base to choose from. Quiet on failure: the field
+    /// stays free text.
+    pub fn base_refs(&self, project: ProjectId) -> JoinHandle<Option<Vec<String>>> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            let project = engine.inner.store.project(&project).ok()?;
+            let machine = engine.inner.store.machine(&project.machine_id).ok()?;
+            let runner = SharedRunner(engine.inner.runner.clone());
+            let ssh = engine.ssh();
+            Git::new(&runner, &machine, &ssh)
+                .branches(&project.root)
+                .await
+                .ok()
+        })
     }
 
     async fn add_worktree(
@@ -1498,10 +1630,153 @@ impl Engine {
         }
     }
 
+    /// The machine, name and absolute target a clone or a creation needs,
+    /// checked before anything runs.
+    fn new_project_plan(
+        &self,
+        machine: &MachineId,
+        parent: &str,
+        name: &str,
+    ) -> Result<(Machine, String, String, String), EngineError> {
+        let machine = self.inner.store.machine(machine)?;
+        let name = name.trim().to_owned();
+        address::validate_project_name(&name)
+            .map_err(|why| EngineError::Invalid(why.to_owned()))?;
+        let parent = parent.trim();
+        if !address::is_absolute_path(parent) {
+            return Err(EngineError::Invalid(
+                "The parent folder must be an absolute path.".to_owned(),
+            ));
+        }
+        let target = address::join_path(parent, &name);
+        Ok((machine, name, parent.to_owned(), target))
+    }
+
+    /// Runs one command on `machine` and answers its output, whether or not
+    /// it succeeded; the caller decides what a failure means.
+    async fn run_command(
+        &self,
+        machine: &Machine,
+        spec: CommandSpec,
+    ) -> Result<Output, EngineError> {
+        let runner = SharedRunner(self.inner.runner.clone());
+        let placed = leon_remote::run_on(machine, &spec, &self.ssh());
+        runner
+            .run(&placed)
+            .await
+            .map_err(|error| EngineError::Job(error.to_string()))
+    }
+
+    async fn clone_project(
+        &self,
+        machine: &MachineId,
+        url: &str,
+        parent: &str,
+        name: &str,
+    ) -> Result<String, EngineError> {
+        // An empty name is what the URL offers, as git itself would name the
+        // folder.
+        let name = match name.trim() {
+            "" => address::default_project_name_from_url(url),
+            name => name.to_owned(),
+        };
+        let (machine, name, parent, target) = self.new_project_plan(machine, parent, &name)?;
+        self.set_status(StatusKind::Busy, format!("Cloning {name}..."));
+        let runner = SharedRunner(self.inner.runner.clone());
+        Git::new(&runner, &machine, &self.ssh())
+            .clone(url.trim(), &parent, &target)
+            .await?;
+        let count = self.register_project(&machine, &name, &target).await?;
+        Ok(format!(
+            "Cloned {name} into {target} with {}.",
+            plural(count, "worktree")
+        ))
+    }
+
+    async fn create_project(
+        &self,
+        machine: &MachineId,
+        parent: &str,
+        name: &str,
+    ) -> Result<String, EngineError> {
+        let (machine, name, parent, target) = self.new_project_plan(machine, parent, name)?;
+        self.set_status(StatusKind::Busy, format!("Creating {name}..."));
+        let made_parent = self
+            .run_command(&machine, CommandSpec::new("mkdir").args(["-p", &parent]))
+            .await?;
+        if !made_parent.success() {
+            return Err(EngineError::Invalid(format!(
+                "Could not make {parent}: {}",
+                made_parent.stderr.trim()
+            )));
+        }
+        // An existing folder is only taken when it is empty: creating a
+        // project must never write into files that are already there.
+        let listing = self
+            .run_command(&machine, CommandSpec::new("ls").args(["-A", &target]))
+            .await?;
+        if listing.success() && !listing.stdout.trim().is_empty() {
+            return Err(EngineError::Invalid(format!(
+                "{target} already exists and is not empty."
+            )));
+        }
+        let made_target = self
+            .run_command(&machine, CommandSpec::new("mkdir").args(["-p", &target]))
+            .await?;
+        if !made_target.success() {
+            return Err(EngineError::Invalid(format!(
+                "Could not make {target}: {}",
+                made_target.stderr.trim()
+            )));
+        }
+        let runner = SharedRunner(self.inner.runner.clone());
+        Git::new(&runner, &machine, &self.ssh())
+            .init(&target)
+            .await?;
+        let count = self.register_project(&machine, &name, &target).await?;
+        Ok(format!(
+            "Created project {name} at {target} with {}.",
+            plural(count, "worktree")
+        ))
+    }
+
+    /// Saves a freshly cloned or created repository as a project and fills in
+    /// its worktrees, so the sidebar shows it whole at once.
+    async fn register_project(
+        &self,
+        machine: &Machine,
+        name: &str,
+        path: &str,
+    ) -> Result<usize, EngineError> {
+        let project = self.inner.store.add_project(&machine.id, name, path)?;
+        let count = self.sync_worktrees(&project.id).await?;
+        self.detect_icon_quietly(&project.id).await;
+        Ok(count)
+    }
+
     fn remove_project(&self, id: &ProjectId) -> Result<String, EngineError> {
         let project = self.inner.store.project(id)?;
         self.inner.store.remove_project(id)?;
         Ok(format!("Removed project {}.", project.name))
+    }
+
+    fn rename_project(&self, id: &ProjectId, name: &str) -> Result<String, EngineError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(EngineError::Invalid("A project needs a name.".to_owned()));
+        }
+        let old = self.inner.store.project(id)?.name;
+        self.inner.store.rename_project(id, name)?;
+        Ok(format!("Renamed {old} to {name}."))
+    }
+
+    fn reorder_projects(
+        &self,
+        machine: &MachineId,
+        ordered: &[ProjectId],
+    ) -> Result<String, EngineError> {
+        self.inner.store.reorder_projects(machine, ordered)?;
+        Ok("Moved the project.".to_owned())
     }
 
     fn rename_machine(&self, id: &MachineId, name: &str) -> Result<String, EngineError> {
@@ -2121,6 +2396,17 @@ fn new_worktrees(listing: &[leon_remote::GitWorktree]) -> Vec<NewWorktree> {
         .collect()
 }
 
+/// A path without trailing separators, for comparing what git reports with
+/// what the store kept (the store drops them). A bare root keeps its own.
+fn trim(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        path
+    } else {
+        trimmed
+    }
+}
+
 fn plural(count: usize, noun: &str) -> String {
     if count == 1 {
         format!("1 {noun}")
@@ -2488,6 +2774,118 @@ branch refs/heads/feature/login
         assert_eq!(
             rig.engine.machine_state(&MachineId::from_string("x")),
             MachineState::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn cloning_runs_git_then_saves_and_syncs_the_project() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok("Cloning into 'repo'..."))
+            .reply(Output::ok(LISTING)));
+        rig.engine
+            .run(Op::CloneProject {
+                machine: MachineId::local(),
+                url: "https://host/owner/repo.git".into(),
+                parent: "/srv/code".into(),
+                name: "repo".into(),
+            })
+            .await;
+        let projects = rig.store.projects(None).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "repo");
+        assert_eq!(projects[0].root, "/srv/code/repo");
+        let calls = rig.runner.calls();
+        assert_eq!(
+            calls[0].args,
+            [
+                "clone",
+                "--",
+                "https://host/owner/repo.git",
+                "/srv/code/repo"
+            ]
+        );
+        let line = status(&rig.engine);
+        assert_eq!(line.kind, StatusKind::Info);
+        assert!(
+            line.text.starts_with("Cloned repo into /srv/code/repo"),
+            "{}",
+            line.text
+        );
+    }
+
+    #[tokio::test]
+    async fn a_clone_of_a_name_with_a_slash_is_refused_before_git_runs() {
+        let rig = rig(ScriptedRunner::new());
+        rig.engine
+            .run(Op::CloneProject {
+                machine: MachineId::local(),
+                url: "https://host/owner/repo.git".into(),
+                parent: "/srv/code".into(),
+                name: "a/b".into(),
+            })
+            .await;
+        assert!(rig.store.projects(None).unwrap().is_empty());
+        assert!(rig.runner.calls().is_empty());
+        assert_eq!(status(&rig.engine).kind, StatusKind::Error);
+    }
+
+    #[tokio::test]
+    async fn creating_a_project_makes_the_folder_initializes_git_and_commits() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok("")) // mkdir -p parent
+            .reply(Output::failed(2, "No such file or directory")) // ls -A target: new folder
+            .reply(Output::ok("")) // mkdir -p target
+            .reply(Output::ok("Initialized empty Git repository"))
+            .reply(Output::ok(""))
+            .reply(Output::ok(LISTING)));
+        rig.engine
+            .run(Op::CreateProject {
+                machine: MachineId::local(),
+                parent: "/srv/code".into(),
+                name: "api".into(),
+            })
+            .await;
+        let projects = rig.store.projects(None).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].root, "/srv/code/api");
+        let calls = rig.runner.calls();
+        assert_eq!(calls[1].args, ["-A", "/srv/code/api"]);
+        assert_eq!(calls[3].args, ["init"]);
+        assert_eq!(
+            calls[4].args,
+            ["commit", "--allow-empty", "-m", "Initial commit"]
+        );
+        let line = status(&rig.engine);
+        assert_eq!(line.kind, StatusKind::Info);
+        assert!(
+            line.text
+                .starts_with("Created project api at /srv/code/api"),
+            "{}",
+            line.text
+        );
+    }
+
+    #[tokio::test]
+    async fn creating_over_a_non_empty_folder_is_refused() {
+        let rig = rig(
+            ScriptedRunner::new()
+                .reply(Output::ok("")) // mkdir -p parent
+                .reply(Output::ok("something\n")), // ls -A target: not empty
+        );
+        rig.engine
+            .run(Op::CreateProject {
+                machine: MachineId::local(),
+                parent: "/srv/code".into(),
+                name: "api".into(),
+            })
+            .await;
+        assert!(rig.store.projects(None).unwrap().is_empty());
+        let line = status(&rig.engine);
+        assert_eq!(line.kind, StatusKind::Error);
+        assert!(
+            line.text.contains("already exists and is not empty"),
+            "{}",
+            line.text
         );
     }
 

@@ -288,6 +288,7 @@ mod tests {
             started_at: Utc.timestamp_opt(updated - 60, 0).unwrap(),
             updated_at: Utc.timestamp_opt(updated, 0).unwrap(),
             message_count: 3,
+            sort_order: None,
         }
     }
 
