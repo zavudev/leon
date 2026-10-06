@@ -5529,6 +5529,92 @@ mod live {
     }
 
     #[gpui_kit::test]
+    fn a_worktree_merged_by_its_branch_and_one_merged_by_a_pull_request_say_so(
+        cx: &mut TestAppContext,
+    ) {
+        let h = open_live(cx);
+        let _real = real_worktree(&h, cx);
+        // A worktree whose branch is inside the base, and one whose pull
+        // request GitHub says is merged.
+        let worktrees = h.store.all_worktrees().unwrap();
+        let trunk = worktrees
+            .iter()
+            .find(|worktree| worktree.is_main)
+            .unwrap()
+            .id
+            .clone();
+        for worktree in worktrees.iter().filter(|worktree| !worktree.is_main) {
+            h.store
+                .set_merged(
+                    &worktree.id,
+                    leon_core::Merged {
+                        branch: Some(false),
+                        pull_request: Some(true),
+                    },
+                )
+                .unwrap();
+        }
+        // The main worktree is merged by definition: it carries no mark.
+        let other = worktrees
+            .iter()
+            .find(|worktree| !worktree.is_main)
+            .map(|worktree| worktree.id.clone())
+            .unwrap();
+        h.settle(cx);
+        assert!(
+            !h.shows_dynamic(format!("tree-merged-{}", row_of_id(&h, trunk, cx)), cx),
+            "the main worktree says nothing about being merged"
+        );
+        let row = row_of_id(&h, other.clone(), cx);
+        assert!(
+            h.shows_dynamic(format!("tree-merged-{row}"), cx),
+            "the pull request that merged shows its mark"
+        );
+
+        // And the branch alone is the other mark.
+        h.store
+            .set_merged(
+                &other,
+                leon_core::Merged {
+                    branch: Some(true),
+                    pull_request: None,
+                },
+            )
+            .unwrap();
+        h.settle(cx);
+        assert!(
+            h.shows_dynamic(format!("tree-merged-{row}"), cx),
+            "the branch that merged shows its mark too"
+        );
+
+        // Nothing merged: the quiet branch icon the row always had, with no
+        // mark of its own.
+        h.store
+            .set_merged(
+                &other,
+                leon_core::Merged {
+                    branch: Some(false),
+                    pull_request: Some(false),
+                },
+            )
+            .unwrap();
+        h.settle(cx);
+        assert!(!h.shows_dynamic(format!("tree-merged-{row}"), cx));
+        // The same for nobody having been asked.
+        h.store
+            .set_merged(&other, leon_core::Merged::default())
+            .unwrap();
+        h.settle(cx);
+        assert!(!h.shows_dynamic(format!("tree-merged-{row}"), cx));
+    }
+
+    /// The row the worktree with this id is drawn in.
+    fn row_of_id(h: &Harness, id: leon_core::WorktreeId, cx: &mut TestAppContext) -> usize {
+        h.row_of(NodeId::Worktree(id), cx)
+            .expect("the worktree is in the tree")
+    }
+
+    #[gpui_kit::test]
     fn the_coarse_timer_runs_only_while_a_terminal_is_live(cx: &mut TestAppContext) {
         let h = open_live(cx);
         let _real = real_worktree(&h, cx);

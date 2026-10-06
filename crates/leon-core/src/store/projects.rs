@@ -15,7 +15,7 @@ use super::Store;
 use crate::change::StoreChange;
 use crate::error::{Result, StoreError};
 use crate::ids::{MachineId, ProjectId, SessionId, WorktreeId};
-use crate::model::{NewWorktree, Project, Session, SessionScope, Worktree};
+use crate::model::{Merged, NewWorktree, Project, Session, SessionScope, Worktree};
 
 impl Store {
     /// Projects in the order of the sidebar, optionally restricted to one
@@ -207,7 +207,9 @@ impl Store {
     pub fn all_worktrees(&self) -> Result<Vec<Worktree>> {
         self.read(|connection| {
             let mut statement = connection.prepare_cached(
-                "SELECT id, project_id, path, branch, head, is_main FROM worktree
+                "SELECT id, project_id, path, branch, head, is_main,
+                        merged_branch, merged_pull_request
+                 FROM worktree
                  ORDER BY project_id, sort_order, is_main DESC, path",
             )?;
             let worktrees = statement
@@ -403,6 +405,25 @@ impl Store {
         })
     }
 
+    /// What is known about a worktree being merged. Writes nothing when the
+    /// row already says this, so a probe that runs on a timer does not rewrite
+    /// the database (nor wake every listener) on every pass.
+    ///
+    /// Returns whether the row changed.
+    pub fn set_merged(&self, id: &WorktreeId, merged: Merged) -> Result<bool> {
+        self.write(StoreChange::Worktrees, |tx| {
+            let current = find_worktree(tx, id)?;
+            if current.merged == merged {
+                return Ok(false);
+            }
+            tx.prepare_cached(
+                "UPDATE worktree SET merged_branch = ?2, merged_pull_request = ?3 WHERE id = ?1",
+            )?
+            .execute(params![id.as_str(), merged.branch, merged.pull_request])?;
+            Ok(true)
+        })
+    }
+
     /// Pins `pinned` sessions, in this order, on top of their parent's list;
     /// every other session of that parent goes back to automatic (by
     /// recency). Every pinned session must belong to `parent`.
@@ -484,7 +505,9 @@ fn find_project(connection: &Connection, id: &ProjectId) -> Result<Project> {
 fn find_worktree(connection: &Connection, id: &WorktreeId) -> Result<Worktree> {
     connection
         .prepare_cached(
-            "SELECT id, project_id, path, branch, head, is_main FROM worktree WHERE id = ?1",
+            "SELECT id, project_id, path, branch, head, is_main,
+                    merged_branch, merged_pull_request
+             FROM worktree WHERE id = ?1",
         )?
         .query_row([id.as_str()], worktree_from_row)
         .optional()?
@@ -506,7 +529,9 @@ fn find_session(connection: &Connection, id: &SessionId) -> Result<Session> {
 
 fn load_worktrees(connection: &Connection, project_id: &ProjectId) -> Result<Vec<Worktree>> {
     let mut statement = connection.prepare_cached(
-        "SELECT id, project_id, path, branch, head, is_main FROM worktree
+        "SELECT id, project_id, path, branch, head, is_main,
+                merged_branch, merged_pull_request
+         FROM worktree
          WHERE project_id = ?1
          ORDER BY sort_order, is_main DESC, path",
     )?;
@@ -524,6 +549,10 @@ fn worktree_from_row(row: &Row<'_>) -> rusqlite::Result<Worktree> {
         branch: row.get(3)?,
         head: row.get(4)?,
         is_main: row.get(5)?,
+        merged: Merged {
+            branch: row.get(6)?,
+            pull_request: row.get(7)?,
+        },
     })
 }
 
@@ -736,6 +765,97 @@ mod tests {
             head: Some("0123abc".into()),
             is_main,
         }
+    }
+
+    #[test]
+    fn what_a_worktree_says_about_being_merged_is_kept_across_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("leon.db");
+        let wanted = {
+            let store = Store::open(&path).unwrap();
+            let project = store.add_project(&local(), "api", "/srv/api").unwrap();
+            store
+                .replace_worktrees(
+                    &project.id,
+                    vec![
+                        worktree("/srv/api", Some("main"), true),
+                        worktree("/srv/api-worktrees/feature", Some("feature/login"), false),
+                    ],
+                )
+                .unwrap();
+            let worktree = store
+                .worktrees(&project.id)
+                .unwrap()
+                .into_iter()
+                .find(|worktree| !worktree.is_main)
+                .unwrap();
+            // A new worktree is "not known" until something asks.
+            assert_eq!(worktree.merged, Merged::default());
+            assert!(store
+                .set_merged(
+                    &worktree.id,
+                    Merged {
+                        branch: Some(true),
+                        pull_request: Some(false),
+                    },
+                )
+                .unwrap());
+            worktree.id
+        };
+        // A second run of the application reads what the first one wrote.
+        let store = Store::open(&path).unwrap();
+        let stored = store
+            .all_worktrees()
+            .unwrap()
+            .into_iter()
+            .find(|worktree| worktree.id == wanted)
+            .unwrap();
+        assert_eq!(
+            stored.merged,
+            Merged {
+                branch: Some(true),
+                pull_request: Some(false),
+            }
+        );
+    }
+
+    #[test]
+    fn a_worktree_that_cannot_change_again_is_not_written_again() {
+        let store = Store::open_in_memory().unwrap();
+        let project = store.add_project(&local(), "api", "/srv/api").unwrap();
+        store
+            .replace_worktrees(&project.id, vec![worktree("/srv/api", Some("main"), true)])
+            .unwrap();
+        let worktree = store.worktrees(&project.id).unwrap().remove(0);
+        let merged = Merged {
+            branch: Some(false),
+            pull_request: None,
+        };
+        assert!(store.set_merged(&worktree.id, merged).unwrap());
+        assert!(
+            !store.set_merged(&worktree.id, merged).unwrap(),
+            "the same answer writes nothing"
+        );
+        assert_eq!(
+            store.worktrees(&project.id).unwrap().remove(0).merged,
+            merged
+        );
+    }
+
+    #[test]
+    fn a_worktree_that_cannot_be_found_is_refused() {
+        let store = Store::open_in_memory().unwrap();
+        let refused = store.set_merged(
+            &WorktreeId::from_string("nope"),
+            Merged {
+                branch: Some(true),
+                pull_request: None,
+            },
+        );
+        assert!(
+            matches!(refused, Err(StoreError::NotFound(_))),
+            "{refused:?}"
+        );
     }
 
     fn session_in(cwd: &str, external_id: &str) -> NewSession {

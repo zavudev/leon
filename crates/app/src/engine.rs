@@ -23,14 +23,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use leon_core::icon::{IconImage, IconKind, NewIcon};
 use leon_core::{
-    AgentId, Machine, MachineId, MachineKind, NewWorktree, ProjectId, SessionFilter, Store,
-    StoreError, WorktreeId,
+    AgentId, Machine, MachineId, MachineKind, Merged, NewWorktree, Project, ProjectId,
+    SessionFilter, Store, StoreError, WorktreeId,
 };
 use leon_history::{HistoryRoots, ImportReport, Importer};
 use leon_remote::connect::{self, Checklist, Target as Login};
 use leon_remote::{
-    probe, CommandSpec, Git, GitError, Output, ProbeError, ProbeReport, RunError, Runner,
-    SshOptions,
+    github, probe, CommandSpec, Git, GitError, Github, Output, ProbeError, ProbeReport, RunError,
+    Runner, SshOptions,
 };
 use thiserror::Error;
 use tokio::runtime::Handle;
@@ -1360,11 +1360,17 @@ impl Engine {
         let ssh = self.ssh();
         let git = Git::new(&runner, &machine, &ssh);
         let listed = new_worktrees(&git.list_worktrees(&project).await?);
-        Ok(self
+        let count = self
             .inner
             .store
             .replace_worktrees(project_id, listed)?
-            .len())
+            .len();
+        // A sync is somebody asking about the project (opening it, refreshing
+        // it, finding it again), so it is also when the sidebar gets to know
+        // what is merged: the pull requests included, which the timer asks
+        // for far less often.
+        self.probe_merged(&project, true).await?;
+        Ok(count)
     }
 
     /// Asks git for a project's worktrees and writes them back only when
@@ -1398,7 +1404,141 @@ impl Engine {
         if !same {
             self.inner.store.replace_worktrees(project_id, listed)?;
         }
+        self.probe_merged(&project, false).await
+    }
+
+    /// Asks what is merged and writes it on the worktrees whose answer
+    /// changed. Two questions, at two costs: git knows which branches are
+    /// inside the base without leaving the machine, and only GitHub knows
+    /// about a merged pull request, which is one network call for the whole
+    /// repository and therefore asked far less often.
+    ///
+    /// Quiet on failure: a project whose repository cannot be asked keeps what
+    /// it already knew, and a worktree nobody could ask about stays "not
+    /// known".
+    async fn probe_merged(
+        &self,
+        project: &Project,
+        pull_requests: bool,
+    ) -> Result<(), EngineError> {
+        let machine = self.inner.store.machine(&project.machine_id)?;
+        let runner = SharedRunner(self.inner.runner.clone());
+        let ssh = self.ssh();
+        let git = Git::new(&runner, &machine, &ssh);
+        let worktrees = self.inner.store.worktrees(&project.id)?;
+        // Nothing but the main worktree: there is no work that could be
+        // merged, so git and GitHub are not asked anything about it.
+        let branches: Vec<&str> = worktrees
+            .iter()
+            .filter(|worktree| !worktree.is_main)
+            .filter_map(|worktree| worktree.branch.as_deref())
+            .collect();
+        if branches.is_empty() {
+            return Ok(());
+        }
+
+        // The base is the branch of the main worktree: what a new worktree is
+        // created from, and therefore what "merged" is measured against.
+        let Some(base) = worktrees
+            .iter()
+            .find(|worktree| worktree.is_main)
+            .and_then(|worktree| worktree.branch.clone())
+        else {
+            return Ok(());
+        };
+        let merged: Option<HashSet<String>> = match git.merged_branches(&project.root, &base).await
+        {
+            Ok(branches) => Some(branches.into_iter().collect()),
+            Err(error) => {
+                tracing::debug!(%error, "could not read the merged branches");
+                None
+            }
+        };
+        // Not one worktree branch inside the base means no merged pull
+        // request either (a merged pull request merges its branch), so the
+        // question that leaves the machine can be skipped.
+        let none_merged = merged
+            .as_ref()
+            .is_some_and(|merged| !branches.iter().any(|branch| merged.contains(*branch)));
+        let pull_requests: Option<HashSet<String>> = match merged.as_ref() {
+            Some(_) if none_merged => Some(HashSet::new()),
+            _ if pull_requests => {
+                self.merged_pull_requests(&runner, &machine, &ssh, &project.root)
+                    .await
+            }
+            _ => None,
+        };
+
+        for worktree in worktrees.iter().filter(|worktree| !worktree.is_main) {
+            // The main worktree is the base: merged by definition, and it is
+            // never marked.
+            let Some(branch) = worktree.branch.clone() else {
+                continue;
+            };
+            // A signal that was not asked about keeps what was known before.
+            let merged = Merged {
+                branch: merged.as_ref().map_or(worktree.merged.branch, |merged| {
+                    Some(merged.contains(&branch))
+                }),
+                pull_request: pull_requests
+                    .as_ref()
+                    .map_or(worktree.merged.pull_request, |set| {
+                        Some(set.contains(&branch))
+                    }),
+            };
+            self.inner.store.set_merged(&worktree.id, merged)?;
+        }
         Ok(())
+    }
+
+    /// The branches whose pull request GitHub says is merged, or `None` when
+    /// the repository is not on GitHub, `gh` is not there, or the answer says
+    /// nothing about the branches.
+    async fn merged_pull_requests(
+        &self,
+        runner: &SharedRunner,
+        machine: &Machine,
+        ssh: &SshOptions,
+        root: &str,
+    ) -> Option<HashSet<String>> {
+        let git = Git::new(runner, machine, ssh);
+        let url = match git.remote_url(root, "origin").await {
+            Ok(Some(url)) => url,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::debug!(%error, "could not read the remote of the project");
+                return None;
+            }
+        };
+        if !github::is_github_url(&url) {
+            return None;
+        }
+        match Github::new(runner, machine, ssh)
+            .merged_pull_request_branches(root, github::DEFAULT_LIMIT)
+            .await
+        {
+            Ok(Some(branches)) => Some(branches.into_iter().collect()),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::debug!(%error, "could not read the merged pull requests");
+                None
+            }
+        }
+    }
+
+    /// Asks GitHub, for the pull requests of `project`, as often as a sidebar
+    /// with live terminals is worth it. The same quiet rules as
+    /// [`Engine::check_worktrees`].
+    pub fn check_pull_requests(&self, project: ProjectId) -> JoinHandle<()> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            let Ok(project) = engine.inner.store.project(&project) else {
+                return;
+            };
+            if let Err(error) = engine.probe_merged(&project, true).await {
+                tracing::debug!(%error, "could not check the merged pull requests");
+            }
+        })
     }
 
     /// Asks git for the branches of `project` (local and remote-tracking),
@@ -2524,6 +2664,233 @@ branch refs/heads/feature/login
         assert_eq!(call.cwd.as_deref(), Some(PROJECT_ROOT));
     }
 
+    /// A project with its main worktree and one more, as git reports them.
+    fn project_with_worktrees(store: &Store) -> Project {
+        let project = local_project(store);
+        store
+            .replace_worktrees(
+                &project.id,
+                new_worktrees(&leon_remote::parse_worktree_list(LISTING)),
+            )
+            .unwrap();
+        project
+    }
+
+    /// What each worktree says about being merged, by branch name.
+    fn merged_by_branch(store: &Store, project: &ProjectId) -> Vec<(String, Merged)> {
+        store
+            .worktrees(project)
+            .unwrap()
+            .into_iter()
+            .map(|worktree| (worktree.branch.clone().unwrap_or_default(), worktree.merged))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_branch_inside_the_base_is_known_as_merged() {
+        let rig = rig(ScriptedRunner::new().reply(Output::ok("main\nfeature/login\n")));
+        let project = project_with_worktrees(&rig.store);
+        let worktrees = rig.store.worktrees(&project.id).unwrap();
+        rig.engine.probe_merged(&project, false).await.unwrap();
+
+        let by_branch = merged_by_branch(&rig.store, &project.id);
+        assert_eq!(
+            by_branch,
+            [
+                ("main".to_owned(), Merged::default()),
+                (
+                    "feature/login".to_owned(),
+                    Merged {
+                        branch: Some(true),
+                        pull_request: None,
+                    }
+                ),
+            ]
+        );
+        // The main worktree is the base: merged by definition, and never asked.
+        assert_eq!(worktrees[0].merged, Merged::default());
+        let calls = rig.runner.calls();
+        assert_eq!(calls[0].program, "git");
+        assert_eq!(
+            calls[0].args,
+            [
+                "for-each-ref",
+                "--merged=main",
+                "--format=%(refname:short)",
+                "refs/heads"
+            ]
+        );
+        assert_eq!(calls[0].cwd.as_deref(), Some(PROJECT_ROOT));
+        // Git alone knows this: the pull requests were not asked about.
+        assert!(calls.iter().all(|call| call.program == "git"));
+    }
+
+    #[tokio::test]
+    async fn a_branch_outside_the_base_is_known_as_not_merged() {
+        let rig = rig(ScriptedRunner::new().reply(Output::ok("main\n")));
+        let project = project_with_worktrees(&rig.store);
+        rig.engine.probe_merged(&project, false).await.unwrap();
+        assert_eq!(
+            merged_by_branch(&rig.store, &project.id)[1],
+            (
+                "feature/login".to_owned(),
+                Merged {
+                    branch: Some(false),
+                    // No branch is inside the base, so no pull request can be
+                    // merged either: that needs no question.
+                    pull_request: Some(false),
+                }
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merged_pull_request_is_read_from_github_when_the_repository_is_there() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok("main\nfeature/login\n"))
+            .reply(Output::ok("git@github.com:zavudev/leon.git\n"))
+            .reply(Output::ok(
+                r#"[{"headRefName":"feature/login"},{"headRefName":"main"}]"#,
+            )));
+        let project = project_with_worktrees(&rig.store);
+        rig.engine.probe_merged(&project, true).await.unwrap();
+        assert_eq!(
+            merged_by_branch(&rig.store, &project.id)[1],
+            (
+                "feature/login".to_owned(),
+                Merged {
+                    branch: Some(true),
+                    pull_request: Some(true),
+                }
+            )
+        );
+        let calls = rig.runner.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call.program.as_str())
+                .collect::<Vec<_>>(),
+            ["git", "git", "gh"]
+        );
+        assert_eq!(calls[2].args[0], "pr");
+        assert!(calls[2].args.iter().any(|arg| arg == "merged"));
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_of_another_branch_does_not_merge_this_one() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok("main\nfeature/login\n"))
+            .reply(Output::ok("git@github.com:zavudev/leon.git\n"))
+            .reply(Output::ok(r#"[{"headRefName":"feature/other"}]"#)));
+        let project = project_with_worktrees(&rig.store);
+        rig.engine.probe_merged(&project, true).await.unwrap();
+        assert_eq!(
+            merged_by_branch(&rig.store, &project.id)[1].1.pull_request,
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repository_that_is_not_on_github_is_not_asked_about() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok("main\nfeature/login\n"))
+            .reply(Output::ok("git@gitlab.com:zavudev/leon.git\n")));
+        let project = project_with_worktrees(&rig.store);
+        rig.engine.probe_merged(&project, true).await.unwrap();
+        assert_eq!(
+            merged_by_branch(&rig.store, &project.id)[1],
+            (
+                "feature/login".to_owned(),
+                Merged {
+                    branch: Some(true),
+                    pull_request: None,
+                }
+            )
+        );
+        assert!(
+            rig.runner.calls().iter().all(|call| call.program == "git"),
+            "gh is never run"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repository_with_no_branch_merged_does_not_ask_github_at_all() {
+        let rig = rig(ScriptedRunner::new().reply(Output::ok("main\n")));
+        let project = project_with_worktrees(&rig.store);
+        rig.engine.probe_merged(&project, true).await.unwrap();
+        assert!(
+            rig.runner.calls().iter().all(|call| call.program == "git"),
+            "one question answered both: nothing is merged"
+        );
+        assert_eq!(
+            merged_by_branch(&rig.store, &project.id)[1].1,
+            Merged {
+                branch: Some(false),
+                pull_request: Some(false),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_fails_leaves_what_was_known_and_never_errors() {
+        let rig = rig(ScriptedRunner::new().fail(RunError::Spawn {
+            program: "git".into(),
+            source: std::io::Error::other("no git"),
+        }));
+        let project = project_with_worktrees(&rig.store);
+        rig.engine.probe_merged(&project, false).await.unwrap();
+        assert_eq!(
+            merged_by_branch(&rig.store, &project.id)[1].1,
+            Merged::default(),
+            "nothing is known, which is not the same as not merged"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_probe_that_fails_keeps_the_branch_answer() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok("main\nfeature/login\n"))
+            .reply(Output::failed(1, "not logged in"))
+            .reply(Output::failed(1, "not logged in")));
+        let project = project_with_worktrees(&rig.store);
+        // Once with the answer known, then with GitHub refusing.
+        rig.engine.probe_merged(&project, false).await.unwrap();
+        assert_eq!(
+            merged_by_branch(&rig.store, &project.id)[1].1,
+            Merged {
+                branch: Some(true),
+                pull_request: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn the_state_survives_a_restart_and_is_not_written_again_unchanged() {
+        let rig = rig(ScriptedRunner::new().reply(Output::ok("main\nfeature/login\n")));
+        let project = project_with_worktrees(&rig.store);
+        rig.engine.probe_merged(&project, false).await.unwrap();
+        let worktree = rig
+            .store
+            .worktrees(&project.id)
+            .unwrap()
+            .into_iter()
+            .find(|worktree| !worktree.is_main)
+            .unwrap();
+        assert_eq!(worktree.merged.branch, Some(true));
+        // A second pass with the same answer writes nothing.
+        assert!(!rig.store.set_merged(&worktree.id, worktree.merged).unwrap());
+        // And what was written is what a fresh reading of the row gives.
+        let reread = rig.store.worktrees(&project.id).unwrap();
+        assert_eq!(
+            reread
+                .into_iter()
+                .find(|other| other.id == worktree.id)
+                .unwrap()
+                .merged,
+            worktree.merged
+        );
+    }
+
     #[tokio::test]
     async fn a_bare_repository_entry_is_not_a_worktree() {
         let listing =
@@ -2634,13 +3001,14 @@ branch refs/heads/feature/login
         let project = local_project(&rig.store);
         rig.engine.run(Op::SyncWorktrees(project.id.clone())).await;
         let main = rig.store.worktrees(&project.id).unwrap()[0].clone();
+        let before = rig.runner.calls().len();
         rig.engine
             .run(Op::RemoveWorktree {
                 project: project.id,
                 worktree: main.id,
             })
             .await;
-        assert_eq!(rig.runner.calls().len(), 1, "only the sync ran");
+        assert_eq!(rig.runner.calls().len(), before, "nothing else ran");
         assert!(status(&rig.engine).text.contains("main worktree"));
     }
 
@@ -2649,8 +3017,10 @@ branch refs/heads/feature/login
         let after = "worktree /srv/api\nHEAD abc\nbranch refs/heads/main\n";
         let rig = rig(ScriptedRunner::new()
             .reply(Output::ok(LISTING))
+            .reply(Output::ok("main\n"))
             .reply(Output::ok(""))
-            .reply(Output::ok(after)));
+            .reply(Output::ok(after))
+            .reply(Output::ok("main\n")));
         let project = local_project(&rig.store);
         rig.engine.run(Op::SyncWorktrees(project.id.clone())).await;
         let extra = rig.store.worktrees(&project.id).unwrap()[1].clone();
@@ -2660,9 +3030,11 @@ branch refs/heads/feature/login
                 worktree: extra.id,
             })
             .await;
-        assert_eq!(
-            rig.runner.calls()[1].args,
-            ["worktree", "remove", "/srv/api-worktrees/feature-login"]
+        assert!(
+            rig.runner.calls().iter().any(|call| call.args
+                == ["worktree", "remove", "/srv/api-worktrees/feature-login"]),
+            "the worktree was removed: {:?}",
+            rig.runner.calls()
         );
         assert_eq!(rig.store.worktrees(&project.id).unwrap().len(), 1);
     }
@@ -3034,6 +3406,7 @@ branch refs/heads/feature/login
         let rig = rig(ScriptedRunner::new()
             .reply(Output::ok(PROBE_OUTPUT))
             .reply(Output::ok(LISTING))
+            .reply(Output::ok("main\n"))
             .reply(Output::ok(NO_ICON)));
         let machine = ssh_machine(&rig.store);
         let project = rig
@@ -3042,8 +3415,19 @@ branch refs/heads/feature/login
             .unwrap();
         rig.engine.run(Op::Refresh).await;
         let calls = rig.runner.calls();
-        assert_eq!(calls.len(), 3, "the probe, git, and the one icon command");
-        assert!(calls[2].args.last().unwrap().contains("LEON-ICON"));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.args.iter().any(|arg| arg.contains("LEON-ICON")))
+                .count(),
+            1,
+            "the one icon command, over the same ssh: {}",
+            calls.len()
+        );
+        assert!(
+            calls.iter().all(|call| call.program == "ssh"),
+            "everything went to the machine: {calls:?}"
+        );
         assert!(
             calls[0].args.last().unwrap().contains("uname"),
             "the probe came first"
@@ -3286,7 +3670,10 @@ branch refs/heads/feature/login
             .into_iter()
             .filter_map(|call| call.cwd)
             .collect();
-        assert_eq!(asked, ["/srv/api"], "only the project's own sync ran");
+        assert!(
+            asked.iter().all(|cwd| cwd == "/srv/api"),
+            "only the project's own folder was asked about: {asked:?}"
+        );
     }
 
     #[tokio::test]
@@ -3643,6 +4030,7 @@ branch refs/heads/feature/login
     async fn refreshing_detects_a_logo_once_and_never_again() {
         let rig = rig(ScriptedRunner::new()
             .reply(Output::ok(LISTING))
+            .reply(Output::ok(""))
             .reply(Output::ok(scan_with_logo())));
         let project = local_project(&rig.store);
         rig.engine.run(Op::Refresh).await;
@@ -4013,6 +4401,7 @@ branch refs/heads/feature/login
     async fn disabling_logo_detection_stops_the_automatic_search_but_not_the_one_asked_for() {
         let rig = rig(ScriptedRunner::new()
             .reply(Output::ok(LISTING))
+            .reply(Output::ok(""))
             .reply(Output::ok(scan_with_logo())));
         let project = local_project(&rig.store);
         prefs_of(&rig.engine, |prefs| prefs.detect_logos = false);
@@ -4021,10 +4410,13 @@ branch refs/heads/feature/login
             rig.store.project_icons().unwrap().is_empty(),
             "refresh looked for nothing"
         );
-        assert_eq!(
-            rig.runner.calls().len(),
-            1,
-            "only the worktree listing ran, no logo scan"
+        assert!(
+            rig.runner
+                .calls()
+                .iter()
+                .all(|call| !call.args.iter().any(|arg| arg.contains("LEON-ICON"))),
+            "refresh looked for no logo: {:?}",
+            rig.runner.calls()
         );
         rig.engine.run(Op::DetectIcon(project.id.clone())).await;
         assert!(

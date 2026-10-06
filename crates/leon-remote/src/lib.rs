@@ -33,6 +33,7 @@ pub mod command;
 pub mod connect;
 pub mod diagnosis;
 pub mod git;
+pub mod github;
 pub mod icon;
 pub mod probe;
 pub mod processes;
@@ -45,6 +46,7 @@ pub use agent::{agent_launch, session_command};
 pub use command::{interactive_on, remote_shell_command, run_on, CommandSpec, SshOptions};
 pub use diagnosis::{classify, Diagnosis, DiagnosisKind, Stage};
 pub use git::{parse_worktree_list, Git, GitError, GitWorktree};
+pub use github::{is_github_url, Github, GithubError};
 pub use probe::{
     catalogue_tools, parse_probe, probe, probe_command, probe_command_for, probe_script,
     ProbeError, ProbeReport, RemoteOs, MAX_TOOLS,

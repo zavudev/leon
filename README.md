@@ -1265,6 +1265,17 @@ Each worktree row leads with a dot, and a project row rolls up its worktrees
 (the most urgent state wins: error, then waiting, working, idle). A machine keeps
 its connection light. Hover a dot for its words.
 
+The branch icon after the dot says whether the worktree's work is **already
+merged**: GitHub's icon when the branch's pull request was merged (the stronger
+of the two answers), the branch's own when git says the branch is inside the
+project's base, and the accent, which no activity dot wears, so a merged
+worktree never reads as a running one. Hover it for the words; nothing is drawn
+for a worktree nobody could ask about, or one with work left. Git answers every
+ten seconds or so with the worktree listing; GitHub is asked far less often, and
+only for a project whose `origin` is on GitHub — without `gh` installed or
+logged in, the pull request answer stays unknown rather than wrong, and the
+branch answer still works.
+
 ### Keeping the worktrees fresh
 
 The branches and commit hashes a project shows come from `git worktree list`.

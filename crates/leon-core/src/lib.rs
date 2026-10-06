@@ -27,8 +27,8 @@ pub use error::{Result, StoreError};
 pub use icon::{IconFormat, IconImage, IconKind, NewIcon, ProjectIcon};
 pub use ids::{MachineId, ProjectId, SessionId, WorktreeId};
 pub use model::{
-    AgentId, Machine, MachineKind, Message, NewMessage, NewSession, NewWorktree, Project, Role,
-    Session, SessionScope, Worktree,
+    AgentId, Machine, MachineKind, Merged, Message, NewMessage, NewSession, NewWorktree, Project,
+    Role, Session, SessionScope, Worktree,
 };
 pub use store::search::{
     fts_query, snippet_segments, SearchHit, SearchQuery, SNIPPET_ELLIPSIS, SNIPPET_END,

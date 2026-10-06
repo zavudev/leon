@@ -50,6 +50,11 @@ const MAX_BANNERS: usize = 4;
 /// worktrees of the projects live terminals have open.
 const CHECK_WORKTREES_EVERY: u32 = 5;
 
+/// How many turns of the activity timer pass between two questions about what
+/// is merged: GitHub is asked over the network, which is slower and rate
+/// limited, and a merge does not change by being looked at.
+const CHECK_PULL_REQUESTS_EVERY: u32 = 60;
+
 /// When a freshly started shell is ready for the agent's command line to be
 /// typed into it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -583,6 +588,9 @@ impl Shell {
                     if turns % CHECK_WORKTREES_EVERY == 0 {
                         this.check_live_worktrees();
                     }
+                    if turns % CHECK_PULL_REQUESTS_EVERY == 0 {
+                        this.check_local_pull_requests();
+                    }
                     let alive = this
                         .live
                         .all()
@@ -605,6 +613,37 @@ impl Shell {
     /// has a terminal running in it. Only local ones: another machine would
     /// need a command per project per turn, which a timer must not cost.
     fn check_live_worktrees(&self) {
+        for project in self.live_projects() {
+            self.engine.check_worktrees(project);
+        }
+    }
+
+    /// Asks every local project what is merged, on a cadence of its own: the
+    /// question is one `gh` call per project, which the network does not need
+    /// often, and a worktree nobody asks about would carry no merged mark at
+    /// all. Local projects only, as with the worktrees themselves.
+    fn check_local_pull_requests(&self) {
+        for project in self.local_projects() {
+            self.engine.check_pull_requests(project);
+        }
+    }
+
+    /// Every project of this computer, without a repeat.
+    fn local_projects(&self) -> Vec<ProjectId> {
+        self.snapshot
+            .projects
+            .iter()
+            .filter(|entry| {
+                self.snapshot
+                    .machine(&entry.project.machine_id)
+                    .is_some_and(|machine| machine.id.is_local())
+            })
+            .map(|entry| entry.project.id.clone())
+            .collect()
+    }
+
+    /// The projects the live terminals have open, without a repeat.
+    fn live_projects(&self) -> Vec<ProjectId> {
         let mut projects: Vec<ProjectId> = Vec::new();
         for session in self.live.all() {
             if !session.machine.is_local() {
@@ -619,9 +658,7 @@ impl Shell {
                 }
             }
         }
-        for project in projects {
-            self.engine.check_worktrees(project);
-        }
+        projects
     }
 
     /// What a live terminal reports.

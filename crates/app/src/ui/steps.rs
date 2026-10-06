@@ -1693,7 +1693,7 @@ pub fn advance_setting(def: &'static Def, answers: &[String], current: &Value) -
 mod tests {
     use super::*;
     use crate::schema;
-    use leon_core::{MachineKind, WorktreeId};
+    use leon_core::{MachineKind, Merged, WorktreeId};
 
     fn machine(id: &str, name: &str) -> Machine {
         Machine {
@@ -1720,6 +1720,7 @@ mod tests {
             branch: branch.map(str::to_owned),
             head: None,
             is_main,
+            merged: Merged::default(),
         }
     }
 

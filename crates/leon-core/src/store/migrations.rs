@@ -25,7 +25,7 @@ use crate::error::{Result, StoreError};
 /// branches that both wanted "version 4". Neither was ever released: the only
 /// public schema is version 3, so version 4 never existed in the wild and this
 /// order (usage, then relay) is the one every database goes through.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12];
 
 const V1: &str = r#"
 CREATE TABLE machine (
@@ -301,6 +301,14 @@ UPDATE worktree SET sort_order = (
 /// before. Every existing session starts unpinned, so nothing moves.
 const V11: &str = r#"
 ALTER TABLE session ADD COLUMN sort_order INTEGER;
+"#;
+
+/// Version 12: what is known about each worktree being merged. Both columns
+/// hold NULL until a probe says otherwise, so a worktree is "not known" rather
+/// than "not merged" until then, and no existing worktree moves.
+const V12: &str = r#"
+ALTER TABLE worktree ADD COLUMN merged_branch INTEGER;
+ALTER TABLE worktree ADD COLUMN merged_pull_request INTEGER;
 "#;
 
 /// Brings the database up to the latest schema version.

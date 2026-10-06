@@ -73,6 +73,32 @@ pub struct Project {
     pub root: String,
 }
 
+/// What is known about whether a worktree's work is already merged. The two
+/// signals are kept apart because they answer different questions and can
+/// disagree: a branch can be in the base without a pull request ever existing,
+/// and a pull request can be merged from a branch that was deleted after. `None`
+/// is "not asked yet" (or "cannot be asked here"), never "no".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Merged {
+    /// Whether the branch is contained in the project's base branch.
+    pub branch: Option<bool>,
+    /// Whether the branch's pull request is merged.
+    pub pull_request: Option<bool>,
+}
+
+impl Merged {
+    /// Whether either signal says the work is merged.
+    pub fn is_merged(self) -> bool {
+        self.branch == Some(true) || self.pull_request == Some(true)
+    }
+
+    /// Whether anything was asked, which is what tells "not merged" from "not
+    /// known".
+    pub fn is_known(self) -> bool {
+        self.branch.is_some() || self.pull_request.is_some()
+    }
+}
+
 /// A git worktree belonging to a project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Worktree {
@@ -90,6 +116,9 @@ pub struct Worktree {
     pub head: Option<String>,
     /// Whether this is the repository's main worktree.
     pub is_main: bool,
+    /// What is known about this worktree's work being merged. Not part of what
+    /// git reports: [`Store::set_merged`](crate::Store::set_merged) writes it.
+    pub merged: Merged,
 }
 
 /// A worktree as reported by git, before the store has assigned it an id.

@@ -207,6 +207,54 @@ impl<'a, R: Runner> Git<'a, R> {
         Ok((!branch.is_empty()).then(|| branch.to_owned()))
     }
 
+    /// The local branches already contained in `base`: what "merged" means
+    /// without a pull request. `base` is a ref of the same repository (`main`,
+    /// `origin/main`); an unknown base fails, which the caller turns into
+    /// "not known" rather than an error.
+    pub async fn merged_branches(&self, cwd: &str, base: &str) -> Result<Vec<String>, GitError> {
+        reject_option_like("base", base)?;
+        let merged = format!("--merged={base}");
+        let stdout = self
+            .run(
+                "for-each-ref",
+                git(
+                    cwd,
+                    [
+                        "for-each-ref",
+                        &merged,
+                        "--format=%(refname:short)",
+                        "refs/heads",
+                    ],
+                ),
+            )
+            .await?;
+        let mut seen = std::collections::HashSet::new();
+        Ok(stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && seen.insert((*line).to_owned()))
+            .map(str::to_owned)
+            .collect())
+    }
+
+    /// The url of `remote` (usually `origin`), or `None` when the repository
+    /// has no such remote. What tells a GitHub project from one that is not.
+    pub async fn remote_url(&self, cwd: &str, remote: &str) -> Result<Option<String>, GitError> {
+        reject_option_like("remote", remote)?;
+        match self
+            .run("remote", git(cwd, ["remote", "get-url", remote]))
+            .await
+        {
+            Ok(url) => {
+                let url = url.trim();
+                Ok((!url.is_empty()).then(|| url.to_owned()))
+            }
+            // A repository without that remote is an answer, not a failure.
+            Err(GitError::Failed { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Clones `url` into `path`, run from `parent` (both on this machine).
     pub async fn clone(&self, url: &str, parent: &str, path: &str) -> Result<(), GitError> {
         reject_option_like("url", url)?;
@@ -587,6 +635,86 @@ prunable gitdir file points to non-existent location
                 "refs/remotes"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn the_branches_inside_the_base_are_read_from_git() {
+        let machine = local();
+        let ssh = SshOptions::without_multiplexing();
+        let runner =
+            ScriptedRunner::new().reply(Output::ok("main\nfeature/done\n\nfeature/done\n"));
+        let merged = Git::new(&runner, &machine, &ssh)
+            .merged_branches("/srv/api", "origin/main")
+            .await
+            .unwrap();
+        assert_eq!(merged, ["main", "feature/done"]);
+        let calls = runner.calls();
+        assert_eq!(
+            calls[0].args,
+            [
+                "for-each-ref",
+                "--merged=origin/main",
+                "--format=%(refname:short)",
+                "refs/heads"
+            ]
+        );
+        assert_eq!(calls[0].cwd.as_deref(), Some("/srv/api"));
+    }
+
+    #[tokio::test]
+    async fn a_base_that_cannot_be_an_option_is_refused_before_git_runs() {
+        let machine = local();
+        let ssh = SshOptions::without_multiplexing();
+        let runner = ScriptedRunner::new();
+        for base in ["", "--upload-pack=evil"] {
+            let refused = Git::new(&runner, &machine, &ssh)
+                .merged_branches("/srv/api", base)
+                .await;
+            assert!(
+                matches!(refused, Err(GitError::InvalidArgument(_))),
+                "{base:?}"
+            );
+        }
+        assert!(runner.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_origin_url_answers_whether_the_project_has_a_github_remote() {
+        let machine = local();
+        let ssh = SshOptions::without_multiplexing();
+        let runner = ScriptedRunner::new()
+            .reply(Output::ok("git@github.com:zavudev/leon.git\n"))
+            .reply(Output::failed(128, "error: No such remote 'origin'"))
+            .reply(Output::ok("https://gitlab.com/zavudev/leon.git\n"));
+        let git = Git::new(&runner, &machine, &ssh);
+        assert_eq!(
+            git.remote_url("/srv/api", "origin")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("git@github.com:zavudev/leon.git")
+        );
+        assert_eq!(git.remote_url("/srv/api", "origin").await.unwrap(), None);
+        assert_eq!(
+            git.remote_url("/srv/api", "origin")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("https://gitlab.com/zavudev/leon.git")
+        );
+        assert_eq!(runner.calls()[0].args, ["remote", "get-url", "origin"]);
+    }
+
+    #[tokio::test]
+    async fn a_remote_that_is_not_a_option_is_refused_before_git_runs() {
+        let machine = local();
+        let ssh = SshOptions::without_multiplexing();
+        let runner = ScriptedRunner::new();
+        let refused = Git::new(&runner, &machine, &ssh)
+            .remote_url("/srv/api", "--upload-pack=evil")
+            .await;
+        assert!(matches!(refused, Err(GitError::InvalidArgument(_))));
+        assert!(runner.calls().is_empty());
     }
 
     #[tokio::test]
