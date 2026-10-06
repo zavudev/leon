@@ -4,11 +4,13 @@
 
 use super::activity::Activity;
 use super::lines::{empty_frame, frame_ticks};
+use super::live::{LiveId, LiveState};
 use super::shell::{Main, Pane, Shell, Transcript};
+use super::sidebar::live_light;
 use super::tree::worktree_label;
 use super::widgets::{activity_dot, focus_rule, key_cap, led, mono, section_label};
 use crate::format;
-use crate::icons::agent_icon;
+use crate::icons::{agent_icon, icon, IconName};
 use crate::keys::{self, Command};
 use crate::launch::Launch;
 use crate::theme::{fonts, hairline, metrics, px, Palette};
@@ -655,9 +657,26 @@ impl Shell {
             ));
         }
 
-        // ----- the sessions that ran here, newest first.
+        // ----- the sessions that ran here, newest first. Terminals running
+        // here go first, even when they did not resume history: the sidebar
+        // shows them under this worktree too, and one that resumed a history
+        // session of its own folder has no row of its own (that session's
+        // row below is it).
+        let running: Vec<(LiveId, Option<AgentId>)> = self
+            .placement
+            .live_of_worktree(&wt.id)
+            .iter()
+            .filter_map(|place| {
+                let entry = &self.placement.live[*place];
+                let merged = entry
+                    .history
+                    .as_ref()
+                    .is_some_and(|history| self.placement.merged.contains(history));
+                (!merged && self.live.get(entry.id).is_some()).then_some((entry.id, entry.agent))
+            })
+            .collect();
         let mut list = div().flex().flex_col();
-        if places.is_empty() {
+        if places.is_empty() && running.is_empty() {
             list = list.child(empty_frame(
                 "worktree-empty",
                 div()
@@ -680,9 +699,12 @@ impl Shell {
                 colours,
             ));
         } else {
-            for (index, place) in places.iter().take(WORKTREE_SESSIONS).enumerate() {
+            for (index, (id, agent)) in running.iter().enumerate() {
+                list = list.child(self.worktree_live_row(index, *id, *agent, colours, cx));
+            }
+            for (offset, place) in places.iter().take(WORKTREE_SESSIONS).enumerate() {
                 list = list.child(self.worktree_session_row(
-                    index,
+                    running.len() + offset,
                     &self.snapshot.sessions[*place],
                     now,
                     colours,
@@ -717,12 +739,14 @@ impl Shell {
                     .items_center()
                     .gap_2()
                     .child(section_label("Sessions", colours))
-                    .child(mono(places.len().to_string()).text_color(colours.text_faint))
+                    .child(
+                        mono((places.len() + running.len()).to_string())
+                            .text_color(colours.text_faint),
+                    )
                     .child(div().flex_1())
-                    .children(
-                        (live > 0)
-                            .then(|| mono(format!("{live} LIVE")).text_color(colours.success)),
-                    ),
+                    .children((live + running.len() > 0).then(|| {
+                        mono(format!("{} LIVE", live + running.len())).text_color(colours.success)
+                    })),
             )
             .child(list);
 
@@ -794,6 +818,62 @@ impl Shell {
     /// folder: what the sidebar marks with a green light.
     fn running_here(&self, id: &leon_core::SessionId) -> bool {
         self.live.of_history(id).is_some() && self.placement.merged.contains(id)
+    }
+
+    /// One terminal running in the worktree screen: its agent, label and
+    /// state. A click focuses it; it has no transcript to open.
+    fn worktree_live_row(
+        &self,
+        index: usize,
+        id: LiveId,
+        agent: Option<AgentId>,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let (label, state) = self.live.get(id).map_or_else(
+            || (String::new(), LiveState::Starting),
+            |session| (session.label(), session.state(cx)),
+        );
+        let lead = match agent {
+            Some(agent) => agent_icon(agent, px(14.), colours).into_any_element(),
+            None => icon(IconName::Terminal, px(14.), colours.text_muted).into_any_element(),
+        };
+        let hover = colours.surface_2;
+        div()
+            .id(("worktree-live", index))
+            .debug_selector(move || format!("worktree-live-{id}"))
+            .h(px(34.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_3()
+            .rounded(metrics::RADIUS())
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_live(id, window, cx);
+            }))
+            .child(lead)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(label),
+            )
+            .when(!matches!(state, LiveState::Running), |this| {
+                this.child(
+                    mono(state.label())
+                        .debug_selector(move || format!("worktree-live-state-{id}"))
+                        .text_color(colours.text_faint),
+                )
+            })
+            .child(
+                div()
+                    .debug_selector(move || format!("worktree-live-led-{id}"))
+                    .child(led(live_light(state, colours))),
+            )
     }
 
     /// One session of the worktree screen: its agent, title, model, size and

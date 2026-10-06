@@ -102,6 +102,8 @@ pub struct ElsewhereTarget {
 pub enum RenameTarget {
     /// An SSH machine, with its name now.
     Machine(MachineId, String),
+    /// A project, with its name now.
+    Project(ProjectId, String),
     /// A live terminal, with its label now.
     Live(LiveId, String),
 }
@@ -110,7 +112,7 @@ impl RenameTarget {
     /// The name it has now.
     pub fn current(&self) -> &str {
         match self {
-            Self::Machine(_, name) | Self::Live(_, name) => name,
+            Self::Machine(_, name) | Self::Project(_, name) | Self::Live(_, name) => name,
         }
     }
 }
@@ -558,6 +560,20 @@ pub enum Action {
     },
     /// Remove an agent of the user's.
     RemoveAgent(AgentId),
+    /// Clone `url` as `name`, asking this computer for the parent folder with
+    /// the system's folder dialog.
+    PickCloneParent {
+        /// The repository to clone.
+        url: String,
+        /// The project (and folder) name.
+        name: String,
+    },
+    /// Create the project `name`, asking this computer for the parent folder
+    /// with the system's folder dialog.
+    PickProjectParent {
+        /// The project (and folder) name.
+        name: String,
+    },
     /// Do nothing: the person backed out.
     Nothing,
 }
@@ -590,6 +606,8 @@ pub fn is_flow(command: Command) -> bool {
             | Command::ResumeAnyway
             | Command::NewWorktree
             | Command::AddProject
+            | Command::CloneProject
+            | Command::NewProject
             | Command::RemoveProject
             | Command::RemoveWorktree
             | Command::SetAppearance
@@ -631,6 +649,8 @@ pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
         Command::ResumeAnyway => resume_anyway(answers, world),
         Command::NewWorktree => new_worktree(answers, world),
         Command::AddProject => add_project(answers, world),
+        Command::CloneProject => clone_project(answers, world),
+        Command::NewProject => new_project(answers, world),
         Command::RemoveProject => remove_project(answers, world),
         Command::RemoveWorktree => remove_worktree(answers, world),
         Command::SetAppearance => set_appearance(answers, world),
@@ -830,13 +850,19 @@ fn worktree_choices(world: &World) -> Outcome {
 
 fn rename(answers: &[String], world: &World) -> Outcome {
     let Some(target) = &world.rename else {
-        return Outcome::Refuse("Select a machine or a live terminal to rename.".to_owned());
+        return Outcome::Refuse(
+            "Select a project, a machine or a live terminal to rename.".to_owned(),
+        );
     };
     match answers {
         [] => text("New name", target.current().to_owned(), Validate::Required),
         [name, ..] => match target {
             RenameTarget::Machine(machine, _) => Outcome::Run(Action::Engine(Op::RenameMachine {
                 machine: machine.clone(),
+                name: name.clone(),
+            })),
+            RenameTarget::Project(project, _) => Outcome::Run(Action::Engine(Op::RenameProject {
+                project: project.clone(),
                 name: name.clone(),
             })),
             RenameTarget::Live(id, _) => Outcome::Run(Action::RenameLive(*id, name.clone())),
@@ -1053,6 +1079,135 @@ fn new_worktree(answers: &[String], world: &World) -> Outcome {
             project: ProjectId::from_string(project.as_str()),
             branch: branch.clone(),
             base: (base != "HEAD").then(|| base.clone()),
+        })),
+    }
+}
+
+/// The machines a project can be cloned into or created on, this computer
+/// first.
+fn machine_choices(world: &World) -> Outcome {
+    if world.machines.is_empty() {
+        return Outcome::Refuse("There is no machine to work on.".to_owned());
+    }
+    choices(
+        "Machine",
+        world
+            .machines
+            .iter()
+            .map(|machine| {
+                Choice::new(
+                    machine.name.clone(),
+                    if machine.kind == MachineKind::Local {
+                        "this computer"
+                    } else {
+                        ""
+                    },
+                    machine.id.as_str(),
+                )
+                .current(world.selected.as_ref() == Some(&machine.id))
+            })
+            .collect(),
+        Custom::No,
+    )
+}
+
+/// The parent folder question: the system's folder dialog on this computer
+/// (a `pick` answer, handled by the window), a typed absolute path on any
+/// other machine.
+fn parent_step(machine: &str) -> Outcome {
+    if machine == MachineId::local().as_str() {
+        choices(
+            "Parent folder",
+            vec![Choice::new(
+                "Choose with the folder dialog\u{2026}",
+                "on this computer",
+                "pick",
+            )],
+            Custom::AbsolutePath,
+        )
+    } else {
+        text(
+            "Parent folder",
+            "an absolute path on that machine, such as /srv/code",
+            Validate::Required,
+        )
+    }
+}
+
+/// The name a clone takes: what was typed, else what the URL offers.
+fn clone_name(url: &str, typed: &str) -> String {
+    match typed.trim() {
+        "" => address::default_project_name_from_url(url),
+        name => name.to_owned(),
+    }
+}
+
+/// Clone a git URL into a folder and add it as a project: the machine, the
+/// URL, a name (offered from the URL, as git itself would name it), and the
+/// parent folder.
+fn clone_project(answers: &[String], world: &World) -> Outcome {
+    match answers {
+        [] => machine_choices(world),
+        [machine] => {
+            let known = world.machines.iter().any(|row| row.id.as_str() == machine);
+            if !known {
+                return Outcome::Refuse(format!("Unknown machine {machine:?}."));
+            }
+            text(
+                "Git URL",
+                "https://github.com/owner/repo.git",
+                Validate::Required,
+            )
+        }
+        [_, url] => text(
+            "Project name",
+            address::default_project_name_from_url(url),
+            Validate::Optional,
+        ),
+        [machine, url, name] => match address::validate_project_name(&clone_name(url, name)) {
+            Ok(()) => parent_step(machine),
+            Err(why) => Outcome::Refuse(why.to_owned()),
+        },
+        [machine, url, name, parent]
+            if parent == "pick" && machine == MachineId::local().as_str() =>
+        {
+            Outcome::Run(Action::PickCloneParent {
+                url: url.clone(),
+                name: clone_name(url, name),
+            })
+        }
+        [machine, url, name, parent, ..] => Outcome::Run(Action::Engine(Op::CloneProject {
+            machine: MachineId::from_string(machine.as_str()),
+            url: url.clone(),
+            parent: parent.clone(),
+            name: clone_name(url, name),
+        })),
+    }
+}
+
+/// Create a brand-new git repository and add it as a project: the machine, a
+/// name, and the parent folder.
+fn new_project(answers: &[String], world: &World) -> Outcome {
+    match answers {
+        [] => machine_choices(world),
+        [machine] => {
+            let known = world.machines.iter().any(|row| row.id.as_str() == machine);
+            if !known {
+                return Outcome::Refuse(format!("Unknown machine {machine:?}."));
+            }
+            text("Project name", "my-project", Validate::Required)
+        }
+        [machine, name] => match address::validate_project_name(name) {
+            Ok(()) => parent_step(machine),
+            Err(why) => Outcome::Refuse(why.to_owned()),
+        },
+        [machine, name, parent] if parent == "pick" && machine == MachineId::local().as_str() => {
+            Outcome::Run(Action::PickProjectParent { name: name.clone() })
+        }
+        [machine, name, parent, ..] => Outcome::Run(Action::Engine(Op::CreateProject {
+            machine: MachineId::from_string(machine.as_str()),
+            parent: parent.clone(),
+            name: name.clone(),
         })),
     }
 }
@@ -1565,6 +1720,7 @@ mod tests {
             branch: branch.map(str::to_owned),
             head: None,
             is_main,
+            merged_pull_request: None,
         }
     }
 
@@ -2083,6 +2239,123 @@ mod tests {
         // This computer's folders are never typed.
         assert!(matches!(
             advance(Command::AddProject, &strings(&["local"]), &world),
+            Outcome::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn cloning_asks_machine_url_name_and_folder_with_a_smart_name_from_the_url() {
+        let world = world();
+        let machine = advance(Command::CloneProject, &[], &world);
+        assert_eq!(labels(&machine), ["Local", "build box"], "every machine");
+        // The name is offered from the URL, as git would have it.
+        match advance(
+            Command::CloneProject,
+            &strings(&["m2", "git@github.com:zavudev/leon.git"]),
+            &world,
+        ) {
+            Outcome::Ask(Step {
+                kind: StepKind::Text { placeholder, .. },
+                ..
+            }) => assert_eq!(placeholder, "leon"),
+            other => panic!("unexpected {other:?}"),
+        }
+        // A remote machine types the folder; a local one picks it.
+        assert!(matches!(
+            advance(
+                Command::CloneProject,
+                &strings(&["m2", "git@host:a/b.git", "b"]),
+                &world
+            ),
+            Outcome::Ask(Step {
+                kind: StepKind::Text { .. },
+                ..
+            })
+        ));
+        assert_eq!(
+            advance(
+                Command::CloneProject,
+                &strings(&["m2", "git@host:a/b.git", "b", "/srv/code"]),
+                &world
+            ),
+            Outcome::Run(Action::Engine(Op::CloneProject {
+                machine: MachineId::from_string("m2"),
+                url: "git@host:a/b.git".into(),
+                parent: "/srv/code".into(),
+                name: "b".into(),
+            }))
+        );
+        // On this computer the folder comes from the dialog.
+        assert_eq!(
+            advance(
+                Command::CloneProject,
+                &strings(&["local", "git@host:a/b.git", "b", "pick"]),
+                &world
+            ),
+            Outcome::Run(Action::PickCloneParent {
+                url: "git@host:a/b.git".into(),
+                name: "b".into(),
+            })
+        );
+        // An empty name takes the URL's, like git would name the folder.
+        assert_eq!(
+            advance(
+                Command::CloneProject,
+                &strings(&["local", "git@host:a/leon.git", "", "/srv"]),
+                &world
+            ),
+            Outcome::Run(Action::Engine(Op::CloneProject {
+                machine: MachineId::local(),
+                url: "git@host:a/leon.git".into(),
+                parent: "/srv".into(),
+                name: "leon".into(),
+            }))
+        );
+        // A name that is not a folder name is refused before anything runs.
+        assert!(matches!(
+            advance(
+                Command::CloneProject,
+                &strings(&["local", "git@host:a/b.git", "b/c"]),
+                &world
+            ),
+            Outcome::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn creating_a_project_asks_machine_name_and_folder() {
+        let world = world();
+        assert_eq!(labels(&advance(Command::NewProject, &[], &world)).len(), 2);
+        assert!(matches!(
+            advance(Command::NewProject, &strings(&["m2", "b c"]), &world),
+            Outcome::Ask(Step {
+                kind: StepKind::Text { .. },
+                ..
+            })
+        ));
+        // On this computer the folder comes from the dialog.
+        assert_eq!(
+            advance(
+                Command::NewProject,
+                &strings(&["local", "api", "pick"]),
+                &world
+            ),
+            Outcome::Run(Action::PickProjectParent { name: "api".into() })
+        );
+        assert_eq!(
+            advance(
+                Command::NewProject,
+                &strings(&["m2", "api", "/srv/code"]),
+                &world
+            ),
+            Outcome::Run(Action::Engine(Op::CreateProject {
+                machine: MachineId::from_string("m2"),
+                parent: "/srv/code".into(),
+                name: "api".into(),
+            }))
+        );
+        assert!(matches!(
+            advance(Command::NewProject, &strings(&["local", "a/b"]), &world),
             Outcome::Refuse(_)
         ));
     }

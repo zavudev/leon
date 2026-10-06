@@ -114,6 +114,9 @@ pub fn items_for_held(kind: &Kind, local: bool, held: Option<bool>) -> Vec<Item>
             Some(Item::new_session()),
             Some(Item::new("Open shell here", C::OpenShell)),
             Some(Item::new("Copy path", C::CopyPath)),
+            Some(Item::new("Rename", C::Rename)),
+            Some(Item::new("Move up", C::MoveRowUp)),
+            Some(Item::new("Move down", C::MoveRowDown)),
             reveal(),
             Some(Item::new("Refresh icon", C::RefreshIcon)),
             Some(Item::new("Choose icon…", C::ChooseIcon)),
@@ -128,18 +131,34 @@ pub fn items_for_held(kind: &Kind, local: bool, held: Option<bool>) -> Vec<Item>
             Some(Item::new("Open shell here", C::OpenShell)),
             Some(Item::new("Copy path", C::CopyPath)),
             Some(Item::new("Copy branch name", C::CopyBranch)),
+            Some(Item::new("Move up", C::MoveRowUp)),
+            Some(Item::new("Move down", C::MoveRowDown)),
             reveal(),
             (!worktree.is_main).then(|| Item::new("Remove worktree", C::RemoveWorktree)),
         ]
         .into_iter()
         .flatten()
         .collect(),
-        Kind::Session(_) => [
+        Kind::Session(session) => [
             Some(Item::new("Open", C::Open)),
             Some(Item::new("Open transcript", C::OpenTranscript)),
             held.map(|_| Item::new("Resume here anyway…", C::ResumeAnyway)),
             held.filter(|can_reveal| *can_reveal)
                 .map(|_| Item::new("Reveal the terminal", C::RevealTerminal)),
+            Some(Item::new(
+                if session.sort_order.is_some() {
+                    "Unpin"
+                } else {
+                    "Pin"
+                },
+                if session.sort_order.is_some() {
+                    C::UnpinSession
+                } else {
+                    C::PinSession
+                },
+            )),
+            Some(Item::new("Move up", C::MoveRowUp)),
+            Some(Item::new("Move down", C::MoveRowDown)),
             Some(Item::new("Copy session id", C::CopySessionId)),
             Some(Item::new("Remove from history", C::RemoveFromHistory)),
         ]
@@ -520,13 +539,9 @@ impl Shell {
                     window,
                     cx,
                 ),
-            (None, Command::NewWorktree, Some(Kind::Project { project, .. })) => self
-                .begin_flow_with(
-                    Command::NewWorktree,
-                    vec![project.id.as_str().to_owned()],
-                    window,
-                    cx,
-                ),
+            (None, Command::NewWorktree, Some(Kind::Project { project, .. })) => {
+                self.open_new_worktree_for(&project.id, window, cx)
+            }
             (None, command, _) => {
                 self.run_command(command, window, cx);
             }
@@ -772,6 +787,7 @@ mod tests {
                 branch: Some("main".into()),
                 head: None,
                 is_main: main,
+                merged_pull_request: None,
             },
             sessions: 0,
         }
@@ -827,6 +843,9 @@ mod tests {
                 "New agent session",
                 "Open shell here",
                 "Copy path",
+                "Rename",
+                "Move up",
+                "Move down",
                 "Reveal in file manager",
                 "Refresh icon",
                 "Choose icon…",
@@ -841,6 +860,9 @@ mod tests {
                 "New agent session",
                 "Open shell here",
                 "Copy path",
+                "Rename",
+                "Move up",
+                "Move down",
                 "Refresh icon",
                 "Choose icon…",
                 "Reset icon",
@@ -877,6 +899,8 @@ mod tests {
                 "Open shell here",
                 "Copy path",
                 "Copy branch name",
+                "Move up",
+                "Move down",
                 "Reveal in file manager",
                 "Remove worktree"
             ]
@@ -899,12 +923,33 @@ mod tests {
             started_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             message_count: 0,
+            sort_order: None,
         });
         assert_eq!(
             labels(&items_for(&session, true)),
             [
                 "Open",
                 "Open transcript",
+                "Pin",
+                "Move up",
+                "Move down",
+                "Copy session id",
+                "Remove from history"
+            ]
+        );
+        // A pinned session offers to unpin instead.
+        let Kind::Session(mut session) = session else {
+            unreachable!()
+        };
+        session.sort_order = Some(0);
+        assert_eq!(
+            labels(&items_for(&Kind::Session(session), true)),
+            [
+                "Open",
+                "Open transcript",
+                "Unpin",
+                "Move up",
+                "Move down",
                 "Copy session id",
                 "Remove from history"
             ]

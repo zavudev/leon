@@ -30,7 +30,8 @@ use super::live::LiveId;
 use super::model::{ProjectEntry, Snapshot};
 use chrono::{DateTime, Duration, Utc};
 use leon_core::{
-    AgentId, Machine, MachineId, Project, ProjectId, Session, SessionId, Worktree, WorktreeId,
+    AgentId, Machine, MachineId, Project, ProjectId, Session, SessionId, SessionScope, Worktree,
+    WorktreeId,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -346,7 +347,10 @@ impl Placement {
     }
 
     /// Places every session of `snapshot`. Each session costs a walk up its
-    /// folder's ancestors, a handful of lookups.
+    /// folder's ancestors, a handful of lookups. Inside every parent the
+    /// pinned sessions go first, in their pinned order, then the rest
+    /// newest-first (the snapshot already lists newest first, and the sort
+    /// is stable).
     pub fn compute(snapshot: &Snapshot) -> Self {
         let owners = owner_tables(snapshot);
         let mut placement = Self::default();
@@ -391,6 +395,17 @@ impl Placement {
                 }
             }
         }
+        for places in placement.in_worktree.values_mut() {
+            pinned_first(snapshot, places);
+        }
+        for places in placement.in_project.values_mut() {
+            pinned_first(snapshot, places);
+        }
+        for folders in placement.unsorted.values_mut() {
+            for folder in folders {
+                pinned_first(snapshot, &mut folder.sessions);
+            }
+        }
         placement
     }
 
@@ -398,6 +413,14 @@ impl Placement {
     pub fn of_worktree(&self, id: &WorktreeId) -> &[usize] {
         self.in_worktree.get(id).map_or(&[], Vec::as_slice)
     }
+}
+
+/// Pinned sessions first, in their pinned order, then the rest as they were.
+fn pinned_first(snapshot: &Snapshot, places: &mut [usize]) {
+    places.sort_by_key(|place| {
+        let order = snapshot.sessions[*place].sort_order;
+        (order.is_none(), order.unwrap_or(0))
+    });
 }
 
 /// The folder a terminal started in `cwd` on `machine` belongs to: the deepest
@@ -779,6 +802,90 @@ pub fn reveal(
 
 // ----- moving through the rows ----------------------------------------------------
 
+/// What list a sidebar row can be moved in, with the row itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Order {
+    /// A project among the projects of its machine.
+    Project(ProjectId, MachineId),
+    /// A worktree among the worktrees of its project.
+    Worktree(WorktreeId, ProjectId),
+    /// A session among the sessions of one parent, pinned by dragging.
+    Session(SessionId, SessionScope),
+}
+
+/// The sidebar order of `scope`, and the rows a drag can target in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeOrder {
+    /// The scope: what `rows` holds.
+    pub order: Order,
+    /// The scope's rows in order: projects, worktrees, or sessions.
+    pub rows: Vec<NodeId>,
+}
+
+/// The new sidebar order after `dragged` is dropped onto `target`: the
+/// dragged row is taken out and put before the target, or after it when
+/// `after`. `None` when either is not in `current` or both are the same.
+pub fn dropped_order<T: PartialEq + Clone>(
+    current: &[T],
+    dragged: &T,
+    target: &T,
+    after: bool,
+) -> Option<Vec<T>> {
+    if dragged == target {
+        return None;
+    }
+    let mut rest: Vec<T> = current
+        .iter()
+        .filter(|id| *id != dragged)
+        .cloned()
+        .collect();
+    if rest.len() + 1 != current.len() {
+        return None;
+    }
+    let at = rest.iter().position(|id| id == target)?;
+    rest.insert(at + usize::from(after), dragged.clone());
+    Some(rest)
+}
+
+/// The new sidebar order after the row at `at` moves one step: `delta`
+/// is -1 (up) or 1 (down). At the ends the order is unchanged.
+pub fn stepped_order<T: Clone>(current: &[T], at: usize, delta: isize) -> Vec<T> {
+    let mut next = current.to_vec();
+    if next.is_empty() {
+        return next;
+    }
+    let last = next.len() - 1;
+    let to = at.min(last).saturating_add_signed(delta).min(last);
+    if to != at.min(last) {
+        let moved = next.remove(at.min(last));
+        next.insert(to, moved);
+    }
+    next
+}
+
+/// The pinned list after `moved` goes to place `to` (an index from 0 to
+/// `display.len()`) in `display` (the parent's sessions as shown: pinned
+/// first, then the rest newest-first). The moved session pins itself; every
+/// session pinned before stays pinned, in the new order; the rest go back to
+/// automatic.
+pub fn repinned(
+    display: &[SessionId],
+    pinned: &HashSet<SessionId>,
+    moved: &SessionId,
+    to: usize,
+) -> Vec<SessionId> {
+    let mut shown = display.to_vec();
+    if let Some(at) = shown.iter().position(|id| id == moved) {
+        let session = shown.remove(at);
+        let last = shown.len();
+        shown.insert(to.min(last), session);
+    }
+    shown
+        .into_iter()
+        .filter(|id| id == moved || pinned.contains(id))
+        .collect()
+}
+
 /// The row `delta` rows from `from` (negative is up), stopping at the ends.
 pub fn step(rows: &[Row], from: usize, delta: isize) -> Option<usize> {
     let last = rows.len().checked_sub(1)?;
@@ -853,6 +960,7 @@ mod tests {
             branch: branch.map(str::to_owned),
             head: None,
             is_main: main,
+            merged_pull_request: None,
         }
     }
 
@@ -888,6 +996,7 @@ mod tests {
             started_at: at,
             updated_at: at,
             message_count: 1,
+            sort_order: None,
         }
     }
 
@@ -1284,6 +1393,36 @@ mod tests {
             11
         );
         assert!(!rows.iter().any(|row| matches!(row.kind, Kind::More { .. })));
+    }
+
+    #[test]
+    fn pinned_sessions_come_first_in_their_worktree_in_pinned_order() {
+        let mut old = session("old", "local", "/srv/api", 60);
+        old.sort_order = Some(1);
+        let mut older = session("older", "local", "/srv/api", 120);
+        older.sort_order = Some(0);
+        let snapshot = fixture(vec![old, older, session("new", "local", "/srv/api", 1)]);
+        let placement = Placement::compute(&snapshot);
+        let titles: Vec<&str> = placement
+            .of_worktree(&WorktreeId::from_string("api-main"))
+            .iter()
+            .map(|place| snapshot.sessions[*place].title.as_str())
+            .collect();
+        assert_eq!(titles, ["older", "old", "new"]);
+    }
+
+    #[test]
+    fn repinning_moves_the_session_and_keeps_every_older_pin() {
+        let id = SessionId::from_string;
+        let pins: HashSet<SessionId> = [id("b")].into_iter().collect();
+        // Display: b pinned, then a, c by recency. Moving c to the top pins
+        // it there; b stays pinned behind it.
+        let display = [id("b"), id("a"), id("c")];
+        assert_eq!(repinned(&display, &pins, &id("c"), 0), [id("c"), id("b")]);
+        // Moving the pinned session itself keeps it pinned wherever it goes.
+        assert_eq!(repinned(&display, &pins, &id("b"), 2), [id("b")]);
+        // An unknown session leaves the pins in display order.
+        assert_eq!(repinned(&display, &pins, &id("nope"), 0), [id("b")]);
     }
 
     #[test]

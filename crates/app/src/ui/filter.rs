@@ -210,6 +210,7 @@ mod tests {
             branch: branch.map(str::to_owned),
             head: None,
             is_main: false,
+            merged_pull_request: None,
         }
     }
 
