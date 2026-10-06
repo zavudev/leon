@@ -291,6 +291,11 @@ async fn a_terminal_takes_input_shows_output_follows_resizes_and_reports_the_exi
     pty.expect("LEON> ").await;
     pty.write("stty size\n");
     pty.expect("24 80").await;
+    // Wait for the next prompt before resizing. The shell is still finishing
+    // the job that printed the size; macOS's /bin/sh (bash 3.2) restores the
+    // terminal state it saved when that job ended, which can silently put the
+    // old window size back if the resize lands in that window.
+    pty.expect("LEON> ").await;
     pty.resize(grid(100, 30));
     pty.write("stty size\n");
     pty.expect("30 100").await;
