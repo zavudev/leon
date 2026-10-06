@@ -14,17 +14,19 @@ use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use super::Store;
 use crate::change::StoreChange;
 use crate::error::{Result, StoreError};
-use crate::ids::{MachineId, ProjectId, WorktreeId};
-use crate::model::{NewWorktree, Project, Worktree};
+use crate::ids::{MachineId, ProjectId, SessionId, WorktreeId};
+use crate::model::{NewWorktree, Project, Session, SessionScope, Worktree};
 
 impl Store {
-    /// Projects ordered by name, optionally restricted to one machine.
+    /// Projects in the order of the sidebar, optionally restricted to one
+    /// machine: the dragged order first, the name to tell apart what was never
+    /// dragged.
     pub fn projects(&self, machine_id: Option<&MachineId>) -> Result<Vec<Project>> {
         self.read(|connection| {
             let mut statement = connection.prepare_cached(
                 "SELECT id, machine_id, name, root FROM project
                  WHERE ?1 IS NULL OR machine_id = ?1
-                 ORDER BY name COLLATE NOCASE, id",
+                 ORDER BY sort_order, name COLLATE NOCASE, id",
             )?;
             let projects = statement
                 .query_map([machine_id.map(MachineId::as_str)], project_from_row)?
@@ -41,7 +43,8 @@ impl Store {
     /// Registers a project rooted at `root` on a machine. Trailing path
     /// separators are dropped, and a machine cannot hold two projects with the
     /// same root. Sessions already imported from inside the root are linked to
-    /// the new project.
+    /// the new project. The project goes last in the sidebar order of its
+    /// machine.
     pub fn add_project(&self, machine_id: &MachineId, name: &str, root: &str) -> Result<Project> {
         let root = trim_trailing_separators(root);
         if root.is_empty() {
@@ -74,16 +77,20 @@ impl Store {
                     "a project rooted at {root} already exists on this machine"
                 )));
             }
+            let next: i64 = tx
+                .prepare_cached("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM project WHERE machine_id = ?1")?
+                .query_row([machine_id.as_str()], |row| row.get(0))?;
             let inserted = tx
                 .prepare_cached(
-                    "INSERT INTO project (id, machine_id, name, root) VALUES (?1, ?2, ?3, ?4)
+                    "INSERT INTO project (id, machine_id, name, root, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)
                      ON CONFLICT (machine_id, root) DO NOTHING",
                 )?
                 .execute(params![
                     project.id.as_str(),
                     project.machine_id.as_str(),
                     project.name,
-                    project.root
+                    project.root,
+                    next
                 ])?;
             if inserted == 0 {
                 return Err(StoreError::Invalid(format!(
@@ -100,8 +107,11 @@ impl Store {
         Ok(project)
     }
 
-    /// Changes the display name of a project.
+    /// Changes the display name of a project. An empty name is refused.
     pub fn rename_project(&self, id: &ProjectId, name: &str) -> Result<()> {
+        if name.trim().is_empty() {
+            return Err(StoreError::Invalid("a project needs a name".into()));
+        }
         self.write(StoreChange::Projects, |tx| {
             let updated = tx
                 .prepare_cached("UPDATE project SET name = ?2 WHERE id = ?1")?
@@ -111,6 +121,56 @@ impl Store {
             }
             Ok(())
         })
+    }
+
+    /// Writes the sidebar order of one machine's projects: `ordered` holds
+    /// every project of the machine, first row first. Anything else is
+    /// refused, so a filtered view cannot drop what it does not show.
+    pub fn reorder_projects(&self, machine_id: &MachineId, ordered: &[ProjectId]) -> Result<()> {
+        self.write(StoreChange::Projects, |tx| {
+            let current: Vec<String> = tx
+                .prepare_cached(
+                    "SELECT id FROM project WHERE machine_id = ?1 ORDER BY sort_order, name COLLATE NOCASE, id",
+                )?
+                .query_map([machine_id.as_str()], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut wanted: Vec<String> =
+                ordered.iter().map(ProjectId::as_str).map(str::to_owned).collect();
+            let mut current_sorted = current.clone();
+            current_sorted.sort();
+            wanted.sort();
+            if current_sorted != wanted {
+                return Err(StoreError::Invalid(
+                    "the order must hold every project of the machine exactly once".into(),
+                ));
+            }
+            for (position, id) in ordered.iter().enumerate() {
+                tx.prepare_cached("UPDATE project SET sort_order = ?2 WHERE id = ?1")?
+                    .execute(params![id.as_str(), position as i64])?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Moves one project one step in the sidebar order of its machine:
+    /// `delta` is -1 (up) or 1 (down). At the ends nothing changes.
+    /// Returns the new position, or `None` when the project is unknown.
+    pub fn move_project(&self, id: &ProjectId, delta: isize) -> Result<Option<usize>> {
+        let project = self.project(id)?;
+        let all = self.projects(Some(&project.machine_id))?;
+        let Some(at) = all.iter().position(|candidate| &candidate.id == id) else {
+            return Ok(None);
+        };
+        let last = all.len().saturating_sub(1);
+        let next = at.saturating_add_signed(delta).min(last);
+        if next == at {
+            return Ok(Some(at));
+        }
+        let mut ordered: Vec<ProjectId> = all.into_iter().map(|project| project.id).collect();
+        let moved = ordered.remove(at);
+        ordered.insert(next, moved);
+        self.reorder_projects(&project.machine_id, &ordered)?;
+        Ok(Some(next))
     }
 
     /// Removes a project and its worktrees. Its sessions are kept and become
@@ -134,19 +194,23 @@ impl Store {
         Ok(())
     }
 
-    /// The worktrees of a project, the main one first and the rest by path.
+    /// The worktrees of a project, in the order of the sidebar: the dragged
+    /// order first, the main worktree and then the path to tell apart what
+    /// was never dragged.
     pub fn worktrees(&self, project_id: &ProjectId) -> Result<Vec<Worktree>> {
         self.read(|connection| load_worktrees(connection, project_id))
     }
 
-    /// Every worktree of every project, in one read: grouped by project, the
-    /// main worktree of each first and the rest by path. Lets a view build a
-    /// whole tree without asking once per project.
+    /// Every worktree of every project, in one read: grouped by project, in
+    /// the order of the sidebar. Lets a view build a whole tree without
+    /// asking once per project.
     pub fn all_worktrees(&self) -> Result<Vec<Worktree>> {
         self.read(|connection| {
             let mut statement = connection.prepare_cached(
-                "SELECT id, project_id, path, branch, head, is_main FROM worktree
-                 ORDER BY project_id, is_main DESC, path",
+                "SELECT id, project_id, path, branch, head, is_main,
+                        merged_pull_request
+                 FROM worktree
+                 ORDER BY project_id, sort_order, is_main DESC, path",
             )?;
             let worktrees = statement
                 .query_map([], worktree_from_row)?
@@ -180,10 +244,11 @@ impl Store {
 
     /// Makes the stored worktrees of a project match what git reports.
     ///
-    /// Worktrees are matched by path: one that is still present keeps its id
-    /// and has its branch and head refreshed, a new one is added and one that
-    /// is no longer reported is removed, and its folder is remembered as
-    /// dismissed like a removed project's root, until git reports it again.
+    /// Worktrees are matched by path: one that is still present keeps its id,
+    /// its place in the sidebar order and has its branch and head refreshed,
+    /// a new one goes last and one that is no longer reported is removed, and
+    /// its folder is remembered as dismissed like a removed project's root,
+    /// until git reports it again.
     /// When a path is listed more than once the last entry wins. Returns the
     /// resulting worktrees.
     pub fn replace_worktrees(
@@ -191,6 +256,16 @@ impl Store {
         project_id: &ProjectId,
         reported: Vec<NewWorktree>,
     ) -> Result<Vec<Worktree>> {
+        // A path listed twice counts once, as its last entry.
+        let mut seen = HashSet::new();
+        let reported: Vec<&NewWorktree> = reported
+            .iter()
+            .rev()
+            .filter(|worktree| seen.insert(trim_trailing_separators(&worktree.path).to_owned()))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         let (worktrees, relinked) = self.transact(|tx| {
             let project = find_project(tx, project_id)?;
             // Matched by path identity: a worktree git now spells with `/` is
@@ -206,6 +281,35 @@ impl Store {
             {
                 by_key.insert(crate::path::key(&path), id.clone());
                 stale.insert(id, path);
+            }
+            let next: i64 = tx
+                .prepare_cached(
+                    "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM worktree WHERE project_id = ?1",
+                )?
+                .query_row([project_id.as_str()], |row| row.get(0))?;
+
+            // The paths not stored yet go last, main worktrees before linked
+            // ones, then by path: the order the sidebar shows until somebody
+            // drags one.
+            let mut added: Vec<&&NewWorktree> = reported
+                .iter()
+                .filter(|worktree| {
+                    !by_key.contains_key(&crate::path::key(trim_trailing_separators(
+                        &worktree.path
+                    )))
+                })
+                .collect();
+            added.sort_by(|a, b| {
+                b.is_main
+                    .cmp(&a.is_main)
+                    .then_with(|| a.path.cmp(&b.path))
+            });
+            let mut added_order: HashMap<String, i64> = HashMap::new();
+            for (offset, worktree) in added.into_iter().enumerate() {
+                added_order.insert(
+                    crate::path::key(trim_trailing_separators(&worktree.path)),
+                    next + offset as i64,
+                );
             }
 
             for worktree in &reported {
@@ -232,10 +336,13 @@ impl Store {
                             ])?;
                     }
                     None => {
+                        let slot = added_order
+                            .remove(&key)
+                            .expect("a new path has its slot");
                         let id = WorktreeId::generate();
                         tx.prepare_cached(
-                            "INSERT INTO worktree (id, project_id, path, branch, head, is_main)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                            "INSERT INTO worktree (id, project_id, path, branch, head, is_main, sort_order)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                              ON CONFLICT (project_id, path) DO UPDATE
                              SET branch = excluded.branch, head = excluded.head,
                                  is_main = excluded.is_main",
@@ -246,7 +353,8 @@ impl Store {
                             path,
                             worktree.branch,
                             worktree.head,
-                            worktree.is_main
+                            worktree.is_main,
+                            slot
                         ])?;
                         by_key.insert(key, id.as_str().to_owned());
                     }
@@ -270,6 +378,125 @@ impl Store {
         }
         Ok(worktrees)
     }
+
+    /// Writes the sidebar order of one project's worktrees: `ordered` holds
+    /// every worktree of the project, first row first. Anything else is
+    /// refused.
+    pub fn reorder_worktrees(&self, project_id: &ProjectId, ordered: &[WorktreeId]) -> Result<()> {
+        self.write(StoreChange::Worktrees, |tx| {
+            let current: Vec<String> = tx
+                .prepare_cached(
+                    "SELECT id FROM worktree WHERE project_id = ?1
+                     ORDER BY sort_order, is_main DESC, path, id",
+                )?
+                .query_map([project_id.as_str()], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut wanted: Vec<String> = ordered
+                .iter()
+                .map(WorktreeId::as_str)
+                .map(str::to_owned)
+                .collect();
+            let mut current_sorted = current.clone();
+            current_sorted.sort();
+            wanted.sort();
+            if current_sorted != wanted {
+                return Err(StoreError::Invalid(
+                    "the order must hold every worktree of the project exactly once".into(),
+                ));
+            }
+            for (position, id) in ordered.iter().enumerate() {
+                tx.prepare_cached("UPDATE worktree SET sort_order = ?2 WHERE id = ?1")?
+                    .execute(params![id.as_str(), position as i64])?;
+            }
+            Ok(())
+        })
+    }
+
+    /// What GitHub says about a worktree's pull request being merged. Writes
+    /// nothing when the row already says this, so a probe that runs on a timer
+    /// does not rewrite the database (nor wake every listener) on every pass.
+    ///
+    /// Returns whether the row changed.
+    pub fn set_merged(&self, id: &WorktreeId, merged: Option<bool>) -> Result<bool> {
+        self.write(StoreChange::Worktrees, |tx| {
+            let current = find_worktree(tx, id)?;
+            if current.merged_pull_request == merged {
+                return Ok(false);
+            }
+            tx.prepare_cached("UPDATE worktree SET merged_pull_request = ?2 WHERE id = ?1")?
+                .execute(params![id.as_str(), merged])?;
+            Ok(true)
+        })
+    }
+
+    /// Pins `pinned` sessions, in this order, on top of their parent's list;
+    /// every other session of that parent goes back to automatic (by
+    /// recency). Every pinned session must belong to `parent`.
+    pub fn pin_sessions(&self, parent: &SessionScope, pinned: &[SessionId]) -> Result<()> {
+        self.write(StoreChange::Sessions, |tx| {
+            for (position, id) in pinned.iter().enumerate() {
+                let session = find_session(tx, id)?;
+                if !scope_holds(tx, parent, &session)? {
+                    return Err(StoreError::Invalid(
+                        "a pinned session must belong to its parent".into(),
+                    ));
+                }
+                tx.prepare_cached("UPDATE session SET sort_order = ?2 WHERE id = ?1")?
+                    .execute(params![id.as_str(), position as i64])?;
+            }
+            // Unpin every other session of the parent.
+            let all: Vec<Session> = tx
+                .prepare_cached(&format!(
+                    "SELECT {} FROM session s",
+                    super::history::SESSION_COLUMNS
+                ))?
+                .query_map([], |row| super::history::session_from_row(row, 0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let pinned_set: HashSet<&str> = pinned.iter().map(SessionId::as_str).collect();
+            for session in &all {
+                if pinned_set.contains(session.id.as_str()) {
+                    continue;
+                }
+                if scope_holds(tx, parent, session)? {
+                    tx.prepare_cached("UPDATE session SET sort_order = NULL WHERE id = ?1")?
+                        .execute([session.id.as_str()])?;
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Whether `session` belongs to `parent`: the same grouping the sidebar
+/// tree uses (see `Placement`), so pinning a row pins what it shows.
+fn scope_holds(connection: &Connection, parent: &SessionScope, session: &Session) -> Result<bool> {
+    match parent {
+        SessionScope::Worktree(id) => {
+            let worktree = find_worktree(connection, id)?;
+            Ok(session.project_id.as_ref() == Some(&worktree.project_id)
+                && crate::path::is_within(&session.cwd, &worktree.path))
+        }
+        SessionScope::Project(id) => {
+            let project = find_project(connection, id)?;
+            if session.project_id.as_ref() != Some(&project.id)
+                || session.machine_id != project.machine_id
+            {
+                return Ok(false);
+            }
+            // Directly under the project: inside its root but inside none of
+            // its worktrees.
+            if !crate::path::is_within(&session.cwd, &project.root) {
+                return Ok(false);
+            }
+            let worktrees = load_worktrees(connection, &project.id)?;
+            Ok(!worktrees
+                .iter()
+                .any(|worktree| crate::path::is_within(&session.cwd, &worktree.path)))
+        }
+        SessionScope::Folder(machine, cwd) => {
+            Ok(session.machine_id == *machine && session.cwd == *cwd)
+        }
+    }
 }
 
 fn find_project(connection: &Connection, id: &ProjectId) -> Result<Project> {
@@ -280,11 +507,38 @@ fn find_project(connection: &Connection, id: &ProjectId) -> Result<Project> {
         .ok_or(StoreError::NotFound("project"))
 }
 
+fn find_worktree(connection: &Connection, id: &WorktreeId) -> Result<Worktree> {
+    connection
+        .prepare_cached(
+            "SELECT id, project_id, path, branch, head, is_main,
+                    merged_pull_request
+             FROM worktree WHERE id = ?1",
+        )?
+        .query_row([id.as_str()], worktree_from_row)
+        .optional()?
+        .ok_or(StoreError::NotFound("worktree"))
+}
+
+fn find_session(connection: &Connection, id: &SessionId) -> Result<Session> {
+    connection
+        .prepare_cached(&format!(
+            "SELECT {} FROM session s WHERE s.id = ?1",
+            super::history::SESSION_COLUMNS
+        ))?
+        .query_row([id.as_str()], |row| {
+            super::history::session_from_row(row, 0)
+        })
+        .optional()?
+        .ok_or(StoreError::NotFound("session"))
+}
+
 fn load_worktrees(connection: &Connection, project_id: &ProjectId) -> Result<Vec<Worktree>> {
     let mut statement = connection.prepare_cached(
-        "SELECT id, project_id, path, branch, head, is_main FROM worktree
+        "SELECT id, project_id, path, branch, head, is_main,
+                merged_pull_request
+         FROM worktree
          WHERE project_id = ?1
-         ORDER BY is_main DESC, path",
+         ORDER BY sort_order, is_main DESC, path",
     )?;
     let worktrees = statement
         .query_map([project_id.as_str()], worktree_from_row)?
@@ -300,6 +554,7 @@ fn worktree_from_row(row: &Row<'_>) -> rusqlite::Result<Worktree> {
         branch: row.get(3)?,
         head: row.get(4)?,
         is_main: row.get(5)?,
+        merged_pull_request: row.get(6)?,
     })
 }
 
@@ -514,6 +769,78 @@ mod tests {
         }
     }
 
+    #[test]
+    fn what_a_worktree_says_about_being_merged_is_kept_across_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("leon.db");
+        let wanted = {
+            let store = Store::open(&path).unwrap();
+            let project = store.add_project(&local(), "api", "/srv/api").unwrap();
+            store
+                .replace_worktrees(
+                    &project.id,
+                    vec![
+                        worktree("/srv/api", Some("main"), true),
+                        worktree("/srv/api-worktrees/feature", Some("feature/login"), false),
+                    ],
+                )
+                .unwrap();
+            let worktree = store
+                .worktrees(&project.id)
+                .unwrap()
+                .into_iter()
+                .find(|worktree| !worktree.is_main)
+                .unwrap();
+            // A new worktree is "not known" until something asks.
+            assert_eq!(worktree.merged_pull_request, None);
+            assert!(store.set_merged(&worktree.id, Some(true)).unwrap());
+            worktree.id
+        };
+        // A second run of the application reads what the first one wrote.
+        let store = Store::open(&path).unwrap();
+        let stored = store
+            .all_worktrees()
+            .unwrap()
+            .into_iter()
+            .find(|worktree| worktree.id == wanted)
+            .unwrap();
+        assert_eq!(stored.merged_pull_request, Some(true));
+    }
+
+    #[test]
+    fn a_worktree_that_cannot_change_again_is_not_written_again() {
+        let store = Store::open_in_memory().unwrap();
+        let project = store.add_project(&local(), "api", "/srv/api").unwrap();
+        store
+            .replace_worktrees(&project.id, vec![worktree("/srv/api", Some("main"), true)])
+            .unwrap();
+        let worktree = store.worktrees(&project.id).unwrap().remove(0);
+        let merged = Some(false);
+        assert!(store.set_merged(&worktree.id, merged).unwrap());
+        assert!(
+            !store.set_merged(&worktree.id, merged).unwrap(),
+            "the same answer writes nothing"
+        );
+        assert_eq!(
+            store
+                .worktrees(&project.id)
+                .unwrap()
+                .remove(0)
+                .merged_pull_request,
+            merged
+        );
+    }
+
+    #[test]
+    fn a_worktree_that_cannot_be_found_is_refused() {
+        let store = Store::open_in_memory().unwrap();
+        let refused = store.set_merged(&WorktreeId::from_string("nope"), Some(true));
+        assert!(
+            matches!(refused, Err(StoreError::NotFound(_))),
+            "{refused:?}"
+        );
+    }
+
     fn session_in(cwd: &str, external_id: &str) -> NewSession {
         NewSession {
             agent: AgentId::CLAUDE,
@@ -599,6 +926,114 @@ mod tests {
         let renamed = store.project(&project.id).unwrap();
         assert_eq!(renamed.name, "backend");
         assert_eq!(renamed.root, "/srv/api");
+    }
+
+    #[test]
+    fn renaming_a_project_refuses_an_empty_name() {
+        let store = Store::open_in_memory().unwrap();
+        let project = store.add_project(&local(), "api", "/srv/api").unwrap();
+        assert!(matches!(
+            store.rename_project(&project.id, "  "),
+            Err(StoreError::Invalid(_))
+        ));
+        assert_eq!(store.project(&project.id).unwrap().name, "api");
+    }
+
+    #[test]
+    fn reordering_worktrees_changes_only_their_order() {
+        let store = Store::open_in_memory().unwrap();
+        let project = store.add_project(&local(), "api", "/srv/api").unwrap();
+        store
+            .replace_worktrees(
+                &project.id,
+                vec![
+                    worktree("/srv/api", Some("main"), true),
+                    worktree("/srv/wt/a", Some("a"), false),
+                    worktree("/srv/wt/b", Some("b"), false),
+                ],
+            )
+            .unwrap();
+        let ids: Vec<WorktreeId> = store
+            .worktrees(&project.id)
+            .unwrap()
+            .into_iter()
+            .map(|worktree| worktree.id)
+            .collect();
+        let mut reversed = ids;
+        reversed.reverse();
+        store.reorder_worktrees(&project.id, &reversed).unwrap();
+        let paths: Vec<String> = store
+            .worktrees(&project.id)
+            .unwrap()
+            .into_iter()
+            .map(|worktree| worktree.path)
+            .collect();
+        assert_eq!(paths, ["/srv/wt/b", "/srv/wt/a", "/srv/api"]);
+        assert!(
+            matches!(
+                store.reorder_worktrees(&project.id, &reversed[..2]),
+                Err(StoreError::Invalid(_))
+            ),
+            "a partial order is refused"
+        );
+    }
+
+    fn session_at(cwd: &str, external_id: &str, seconds: i64) -> NewSession {
+        let at = DateTime::from_timestamp(seconds, 0).unwrap();
+        let mut session = session_in(cwd, external_id);
+        session.started_at = at;
+        session.updated_at = at;
+        session
+    }
+
+    #[test]
+    fn pinning_sessions_puts_them_first_and_unpin_restores_recency() {
+        let store = Store::open_in_memory().unwrap();
+        let project = store.add_project(&local(), "api", "/srv/api").unwrap();
+        store
+            .replace_worktrees(&project.id, vec![worktree("/srv/api", Some("main"), true)])
+            .unwrap();
+        let worktree = store.worktrees(&project.id).unwrap().remove(0);
+        let scope = SessionScope::Worktree(worktree.id.clone());
+        let s1 = store
+            .upsert_session(&session_at("/srv/api", "s1", 100), &[])
+            .unwrap();
+        let s2 = store
+            .upsert_session(&session_at("/srv/api", "s2", 200), &[])
+            .unwrap();
+        let s3 = store
+            .upsert_session(&session_at("/srv/api", "s3", 300), &[])
+            .unwrap();
+
+        store
+            .pin_sessions(&scope, std::slice::from_ref(&s1))
+            .unwrap();
+        assert_eq!(store.session(&s1).unwrap().sort_order, Some(0));
+        assert_eq!(store.session(&s2).unwrap().sort_order, None);
+
+        // A new pin order replaces the old one; the rest go automatic.
+        store
+            .pin_sessions(&scope, &[s3.clone(), s1.clone()])
+            .unwrap();
+        assert_eq!(store.session(&s3).unwrap().sort_order, Some(0));
+        assert_eq!(store.session(&s1).unwrap().sort_order, Some(1));
+        assert_eq!(store.session(&s2).unwrap().sort_order, None);
+
+        // An empty pin list unpins everything of the parent.
+        store.pin_sessions(&scope, &[]).unwrap();
+        assert_eq!(store.session(&s3).unwrap().sort_order, None);
+
+        // A session of another project cannot be pinned here.
+        let web = store.add_project(&local(), "web", "/srv/web").unwrap();
+        let far = store
+            .upsert_session(&session_at("/srv/web", "far", 400), &[])
+            .unwrap();
+        assert!(matches!(
+            store.pin_sessions(&scope, std::slice::from_ref(&far)),
+            Err(StoreError::Invalid(_))
+        ));
+        assert_eq!(store.session(&far).unwrap().sort_order, None);
+        let _ = web;
     }
 
     #[test]

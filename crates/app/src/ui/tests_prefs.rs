@@ -233,7 +233,7 @@ fn the_paste_setting_decides_what_a_mixed_clipboard_pastes(cx: &mut TestAppConte
     });
     let pasted = |h: &Harness, cx: &mut TestAppContext| {
         let sent = script_of(h, 1).written();
-        h.press_chord("cmd-v", "ctrl-shift-v", cx);
+        h.press_chord("cmd-v", "ctrl-v", cx);
         script_of(h, 1).written()[sent.len()..].to_vec()
     };
     // The shell is in front: automatic pastes the text.
@@ -383,6 +383,87 @@ fn the_default_agent_starts_without_a_question(cx: &mut TestAppContext) {
         screen(h, cx, 1).contains("FAKE-CODEX")
     });
     assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+}
+
+#[gpui_kit::test]
+fn a_new_claude_session_starts_without_the_permission_questions(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let (_dir, _) = real_worktree(&h, cx);
+    h.press("ctrl-n", cx);
+    h.press("enter", cx); // Claude Code
+    wait_until(&h, cx, "the line typed", |h, cx| {
+        screen(h, cx, 1).contains("FAKE-CLAUDE --dangerously-skip-permissions")
+    });
+}
+
+#[gpui_kit::test]
+fn a_new_codex_session_starts_without_the_approval_questions(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let (_dir, _) = real_worktree(&h, cx);
+    set(&h, cx, "agent_claude_enabled", Value::Bool(false));
+    h.press("ctrl-n", cx);
+    h.press("enter", cx); // Codex, the only agent on offer
+    wait_until(&h, cx, "the line typed", |h, cx| {
+        screen(h, cx, 1).contains("codex --ask-for-approval never")
+    });
+}
+
+#[gpui_kit::test]
+fn clearing_the_codex_arguments_brings_the_approval_questions_back(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let (_dir, _) = real_worktree(&h, cx);
+    set(&h, cx, "agent_claude_enabled", Value::Bool(false));
+    set(&h, cx, "agent_codex_args", Value::Text(String::new()));
+    h.press("ctrl-n", cx);
+    h.press("enter", cx); // Codex
+    wait_until(&h, cx, "the line typed", |h, cx| {
+        screen(h, cx, 1).contains("FAKE-CODEX")
+    });
+    assert!(
+        !screen(&h, cx, 1).contains("--ask-for-approval"),
+        "{}",
+        screen(&h, cx, 1)
+    );
+}
+
+#[gpui_kit::test]
+fn arguments_of_the_user_replace_the_default_of_the_agent(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let (_dir, _) = real_worktree(&h, cx);
+    set(&h, cx, "agent_claude_enabled", Value::Bool(false));
+    set(
+        &h,
+        cx,
+        "agent_codex_args",
+        Value::Text("--ask-for-approval on-request --model o3".into()),
+    );
+    h.press("ctrl-n", cx);
+    h.press("enter", cx); // Codex
+    wait_until(&h, cx, "the line typed", |h, cx| {
+        screen(h, cx, 1).contains("codex --ask-for-approval on-request --model o3")
+    });
+    assert!(
+        !screen(&h, cx, 1).contains("--ask-for-approval never"),
+        "{}",
+        screen(&h, cx, 1)
+    );
+}
+
+#[gpui_kit::test]
+fn clearing_the_arguments_brings_the_permission_questions_back(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let (_dir, _) = real_worktree(&h, cx);
+    set(&h, cx, "agent_claude_args", Value::Text(String::new()));
+    h.press("ctrl-n", cx);
+    h.press("enter", cx); // Claude Code
+    wait_until(&h, cx, "the line typed", |h, cx| {
+        screen(h, cx, 1).contains("FAKE-CLAUDE")
+    });
+    assert!(
+        !screen(&h, cx, 1).contains("--dangerously-skip-permissions"),
+        "{}",
+        screen(&h, cx, 1)
+    );
 }
 
 #[gpui_kit::test]

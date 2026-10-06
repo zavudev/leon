@@ -368,7 +368,11 @@ mod tests {
         for row in &off {
             for text in &row.keys {
                 let plain_ctrl = text.starts_with("Ctrl+") && !text.contains("Shift+");
-                assert!(!plain_ctrl, "{}: {text}", row.label);
+                assert!(
+                    !plain_ctrl || matches!(row.label.as_str(), "Copy the selection" | "Paste"),
+                    "{}: {text}",
+                    row.label
+                );
             }
         }
         let labels: Vec<&str> = off.iter().map(|row| row.label.as_str()).collect();

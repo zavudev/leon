@@ -95,6 +95,21 @@ fn overriding_one_token_changes_that_token_and_what_follows_the_accent() {
 }
 
 #[test]
+fn a_file_that_sets_the_text_paints_terminal_text_with_it() {
+    let item = one(&format!(
+        "{MINIMAL}[dark]\ntext = \"#FAFAF9\"\naccent = \"#FFEA00\"\n"
+    ));
+    assert!(item.is_valid(), "{:?}", item.problems);
+    let dark = p(&item, Appearance::Dark);
+    assert_eq!(bytes(dark.terminal.foreground), (0xFA, 0xFA, 0xF9, 255));
+    assert_ne!(
+        bytes(dark.terminal.foreground),
+        bytes(dark.signal),
+        "terminal text is not the accent"
+    );
+}
+
+#[test]
 fn a_chain_of_two_inherits_through_both() {
     let items = load(&[
         (

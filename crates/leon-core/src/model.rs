@@ -90,6 +90,16 @@ pub struct Worktree {
     pub head: Option<String>,
     /// Whether this is the repository's main worktree.
     pub is_main: bool,
+    /// What GitHub last said about this worktree's pull request being merged,
+    /// or `None` when nobody could ask. Not part of what git reports:
+    /// [`Store::set_merged`](crate::Store::set_merged) writes it.
+    ///
+    /// Git is not asked, because it cannot answer: a branch inside the
+    /// project's base looks exactly the same whether its work landed there or
+    /// it never had a commit of its own, and a worktree that never did any
+    /// work is not a merged one. So the answer comes from the record of the
+    /// merge or from nowhere, and `None` is "not known", never "no".
+    pub merged_pull_request: Option<bool>,
 }
 
 /// A worktree as reported by git, before the store has assigned it an id.
@@ -167,6 +177,22 @@ pub struct Session {
     pub updated_at: DateTime<Utc>,
     /// Number of messages stored for the session.
     pub message_count: u32,
+    /// Pinned position inside its parent's list, when the user pinned it
+    /// there by dragging; `None` means automatic (by recency). Pinned
+    /// sessions come first, in this order, then the rest newest-first.
+    pub sort_order: Option<i64>,
+}
+
+/// What holds sessions in the sidebar: the parent whose list a session is
+/// pinned in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionScope {
+    /// The sessions of a worktree.
+    Worktree(WorktreeId),
+    /// The sessions directly under a project (no worktree holds them).
+    Project(ProjectId),
+    /// The sessions of one unsorted folder on a machine.
+    Folder(MachineId, String),
 }
 
 /// One entry of a session transcript.

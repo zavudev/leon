@@ -33,7 +33,7 @@ use gpui_kit::{
     div, relative, AnyElement, App, Context, Div, DragMoveEvent, FontWeight, IntoElement, Render,
     Window,
 };
-use leon_core::{MachineId, MachineKind, Session, SessionId};
+use leon_core::{MachineId, MachineKind, ProjectId, Session, SessionId};
 use leon_term::{GridSize, TerminalView, ViewEvent};
 use std::time::{Duration, Instant};
 
@@ -45,6 +45,15 @@ const START_ROWS: u16 = 32;
 /// How many notification banners are on screen at once; the oldest goes
 /// first.
 const MAX_BANNERS: usize = 4;
+
+/// How many turns of the activity timer pass between two checks of the
+/// worktrees of the projects live terminals have open.
+const CHECK_WORKTREES_EVERY: u32 = 5;
+
+/// How many turns of the activity timer pass between two questions about what
+/// is merged: GitHub is asked over the network, which is slower and rate
+/// limited, and a merge does not change by being looked at.
+const CHECK_PULL_REQUESTS_EVERY: u32 = 60;
 
 /// When a freshly started shell is ready for the agent's command line to be
 /// typed into it.
@@ -269,6 +278,10 @@ impl Shell {
             Launch::Agent { kind, resume } => (Some(*kind), resume.clone()),
             Launch::Shell => (None, None),
         };
+        // Whatever starts here is what new dialogs offer first.
+        if agent.is_some() {
+            self.last_agent = agent;
+        }
         let subscriptions = vec![
             cx.subscribe_in(
                 &view,
@@ -553,35 +566,99 @@ impl Shell {
     /// Starts the coarse timer when a terminal is live and none runs. It
     /// looks at every terminal each `tick`, because a program going quiet
     /// wakes nobody, and ends itself once no terminal is live: nothing ticks
-    /// while nothing runs.
+    /// while nothing runs. Every few turns it also asks git about the
+    /// worktrees of the projects the terminals have open, so a checkout or a
+    /// new worktree made in a shell is noticed without a full refresh.
     pub(super) fn keep_watching(&mut self, cx: &mut Context<Self>) {
         if self.ticker.is_some() {
             return;
         }
-        self.ticker = Some(cx.spawn(async move |this, cx| loop {
-            let Ok(tick) = this.read_with(cx, |this, _| this.options.activity.tick) else {
-                return;
-            };
-            cx.background_executor().timer(tick).await;
-            let alive = this.update(cx, |this, cx| {
-                if this.refresh_activity(cx) {
-                    cx.notify();
+        self.ticker = Some(cx.spawn(async move |this, cx| {
+            let mut turns: u32 = 0;
+            loop {
+                let Ok(tick) = this.read_with(cx, |this, _| this.options.activity.tick) else {
+                    return;
+                };
+                cx.background_executor().timer(tick).await;
+                let alive = this.update(cx, |this, cx| {
+                    if this.refresh_activity(cx) {
+                        cx.notify();
+                    }
+                    turns = turns.wrapping_add(1);
+                    if turns % CHECK_WORKTREES_EVERY == 0 {
+                        this.check_live_worktrees();
+                    }
+                    if turns % CHECK_PULL_REQUESTS_EVERY == 0 {
+                        this.check_local_pull_requests();
+                    }
+                    let alive = this
+                        .live
+                        .all()
+                        .iter()
+                        .any(|session| session.view.read(cx).terminal().exit_info().is_none());
+                    if !alive {
+                        // Dropping the handle ends the task after this turn.
+                        this.ticker = None;
+                    }
+                    alive
+                });
+                if !matches!(alive, Ok(true)) {
+                    return;
                 }
-                let alive = this
-                    .live
-                    .all()
-                    .iter()
-                    .any(|session| session.view.read(cx).terminal().exit_info().is_none());
-                if !alive {
-                    // Dropping the handle ends the task after this turn.
-                    this.ticker = None;
-                }
-                alive
-            });
-            if !matches!(alive, Ok(true)) {
-                return;
             }
         }));
+    }
+
+    /// Asks the engine to look at the worktrees of every local project that
+    /// has a terminal running in it. Only local ones: another machine would
+    /// need a command per project per turn, which a timer must not cost.
+    fn check_live_worktrees(&self) {
+        for project in self.live_projects() {
+            self.engine.check_worktrees(project);
+        }
+    }
+
+    /// Asks every local project what is merged, on a cadence of its own: the
+    /// question is one `gh` call per project, which the network does not need
+    /// often, and a worktree nobody asks about would carry no merged mark at
+    /// all. Local projects only, as with the worktrees themselves.
+    fn check_local_pull_requests(&self) {
+        for project in self.local_projects() {
+            self.engine.check_pull_requests(project);
+        }
+    }
+
+    /// Every project of this computer, without a repeat.
+    fn local_projects(&self) -> Vec<ProjectId> {
+        self.snapshot
+            .projects
+            .iter()
+            .filter(|entry| {
+                self.snapshot
+                    .machine(&entry.project.machine_id)
+                    .is_some_and(|machine| machine.id.is_local())
+            })
+            .map(|entry| entry.project.id.clone())
+            .collect()
+    }
+
+    /// The projects the live terminals have open, without a repeat.
+    fn live_projects(&self) -> Vec<ProjectId> {
+        let mut projects: Vec<ProjectId> = Vec::new();
+        for session in self.live.all() {
+            if !session.machine.is_local() {
+                continue;
+            }
+            let root = tree::workspace_root(&self.snapshot, &session.machine, &session.cwd);
+            if let Some((project, _)) =
+                tree::detail_of_root(&self.snapshot, &session.machine, &root)
+            {
+                if !projects.contains(&project) {
+                    projects.push(project);
+                }
+            }
+        }
+        projects
     }
 
     /// What a live terminal reports.

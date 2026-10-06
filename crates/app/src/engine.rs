@@ -23,14 +23,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use leon_core::icon::{IconImage, IconKind, NewIcon};
 use leon_core::{
-    AgentId, Machine, MachineId, MachineKind, NewWorktree, ProjectId, SessionFilter, Store,
-    StoreError, WorktreeId,
+    AgentId, Machine, MachineId, MachineKind, NewWorktree, Project, ProjectId, SessionFilter,
+    Store, StoreError, WorktreeId,
 };
 use leon_history::{HistoryRoots, ImportReport, Importer};
 use leon_remote::connect::{self, Checklist, Target as Login};
 use leon_remote::{
-    probe, CommandSpec, Git, GitError, Output, ProbeError, ProbeReport, RunError, Runner,
-    SshOptions,
+    github, probe, CommandSpec, Git, GitError, Github, Output, ProbeError, ProbeReport, RunError,
+    Runner, SshOptions,
 };
 use thiserror::Error;
 use tokio::runtime::Handle;
@@ -142,9 +142,61 @@ pub enum Op {
         /// The name shown in the list.
         name: String,
     },
+    /// Clone a repository into a folder on a machine, then add it as a
+    /// project. Any git URL git itself accepts works (HTTPS, SSH, a path to
+    /// a local repository).
+    CloneProject {
+        /// The machine the clone happens on.
+        machine: MachineId,
+        /// The repository to clone.
+        url: String,
+        /// Absolute path of the folder the clone goes into.
+        parent: String,
+        /// The folder the clone takes (its name).
+        name: String,
+    },
+    /// Create a brand-new git repository (empty, with one initial commit so
+    /// worktrees have a branch to hang from), then add it as a project.
+    CreateProject {
+        /// The machine the repository is created on.
+        machine: MachineId,
+        /// Absolute path of the folder that holds it.
+        parent: String,
+        /// Its name, which is also its folder's.
+        name: String,
+    },
     /// Remove a project from the list and remember that it was removed, so
     /// that discovery does not bring it back.
     RemoveProject(ProjectId),
+    /// Give a project another name.
+    RenameProject {
+        /// The project.
+        project: ProjectId,
+        /// Its new name.
+        name: String,
+    },
+    /// Write the sidebar order of one machine's projects: first row first.
+    ReorderProjects {
+        /// The machine the projects live on.
+        machine: MachineId,
+        /// Every project of the machine in its new order.
+        ordered: Vec<ProjectId>,
+    },
+    /// Write the sidebar order of one project's worktrees: first row first.
+    ReorderWorktrees {
+        /// The project the worktrees belong to.
+        project: ProjectId,
+        /// Every worktree of the project in its new order.
+        ordered: Vec<WorktreeId>,
+    },
+    /// Pin sessions on top of their parent's list, in this order; every
+    /// other session of that parent goes back to automatic (by recency).
+    PinSessions {
+        /// The parent whose list is pinned.
+        parent: leon_core::SessionScope,
+        /// The pinned sessions, first row first.
+        pinned: Vec<leon_core::SessionId>,
+    },
     /// Give an SSH machine another name.
     RenameMachine {
         /// The machine.
@@ -1138,7 +1190,36 @@ impl Engine {
                 path,
                 name,
             } => self.add_project(&machine, &path, &name).await.map(Some),
+            Op::CloneProject {
+                machine,
+                url,
+                parent,
+                name,
+            } => self
+                .clone_project(&machine, &url, &parent, &name)
+                .await
+                .map(Some),
+            Op::CreateProject {
+                machine,
+                parent,
+                name,
+            } => self
+                .create_project(&machine, &parent, &name)
+                .await
+                .map(Some),
             Op::RemoveProject(project) => self.remove_project(&project).map(Some),
+            Op::RenameProject { project, name } => self.rename_project(&project, &name).map(Some),
+            Op::ReorderProjects { machine, ordered } => {
+                self.reorder_projects(&machine, &ordered).map(Some)
+            }
+            Op::ReorderWorktrees { project, ordered } => {
+                self.inner.store.reorder_worktrees(&project, &ordered)?;
+                Ok(Some("Moved the worktree.".to_owned()))
+            }
+            Op::PinSessions { parent, pinned } => {
+                self.inner.store.pin_sessions(&parent, &pinned)?;
+                Ok(Some("Pinned the session.".to_owned()))
+            }
             Op::RenameMachine { machine, name } => self.rename_machine(&machine, &name).map(Some),
             Op::RemoveMachine(machine) => self.remove_machine(&machine).map(Some),
             Op::RemoveSession(session) => self.remove_session(&session).map(Some),
@@ -1279,11 +1360,166 @@ impl Engine {
         let ssh = self.ssh();
         let git = Git::new(&runner, &machine, &ssh);
         let listed = new_worktrees(&git.list_worktrees(&project).await?);
-        Ok(self
+        let count = self
             .inner
             .store
             .replace_worktrees(project_id, listed)?
-            .len())
+            .len();
+        // A sync is somebody asking about the project (opening it, refreshing
+        // it, finding it again), so it is also when the sidebar gets to know
+        // what is merged: the pull requests included, which the timer asks
+        // for far less often.
+        self.probe_merged(&project, true).await?;
+        Ok(count)
+    }
+
+    /// Asks git for a project's worktrees and writes them back only when
+    /// something changed (a checkout, a new worktree). Runs quietly: it is
+    /// called on a timer while a terminal has that project open, and a
+    /// failure is not something to say unless the worktrees really change.
+    pub fn check_worktrees(&self, project: ProjectId) -> JoinHandle<()> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            if let Err(error) = engine.sync_worktrees_if_changed(&project).await {
+                tracing::debug!(%error, "could not check the worktrees");
+            }
+        })
+    }
+
+    async fn sync_worktrees_if_changed(&self, project_id: &ProjectId) -> Result<(), EngineError> {
+        let project = self.inner.store.project(project_id)?;
+        let machine = self.inner.store.machine(&project.machine_id)?;
+        let runner = SharedRunner(self.inner.runner.clone());
+        let ssh = self.ssh();
+        let git = Git::new(&runner, &machine, &ssh);
+        let listed = new_worktrees(&git.list_worktrees(&project).await?);
+        let stored = self.inner.store.worktrees(project_id)?;
+        let same = listed.len() == stored.len()
+            && listed.iter().zip(&stored).all(|(new, old)| {
+                trim(new.path.as_str()) == trim(old.path.as_str())
+                    && new.branch == old.branch
+                    && new.head == old.head
+                    && new.is_main == old.is_main
+            });
+        if !same {
+            self.inner.store.replace_worktrees(project_id, listed)?;
+        }
+        // The timer that watches a project's worktrees does not also leave
+        // the machine for GitHub; `check_pull_requests` does, on its own
+        // slower cadence.
+        self.probe_merged(&project, false).await
+    }
+
+    /// Asks GitHub what is merged and writes it on the worktrees whose answer
+    /// changed. One question for the whole repository, and `pull_requests`
+    /// says whether this is one of the moments worth leaving the machine for:
+    /// GitHub is asked when somebody is looking at the project and on its own
+    /// slower cadence, not on the timer that lists worktrees.
+    ///
+    /// Git is deliberately not asked: a branch inside the base looks the same
+    /// whether its work landed there or it never had any, so the honest
+    /// answer is only the one GitHub recorded.
+    ///
+    /// Quiet on failure: a project whose repository cannot be asked keeps what
+    /// it already knew, and a worktree nobody could ask about stays "not
+    /// known".
+    async fn probe_merged(
+        &self,
+        project: &Project,
+        pull_requests: bool,
+    ) -> Result<(), EngineError> {
+        let worktrees = self.inner.store.worktrees(&project.id)?;
+        // Nothing but the main worktree: there is no pull request that could
+        // be merged, so GitHub is not asked about this project.
+        if !pull_requests || worktrees.iter().all(|worktree| worktree.is_main) {
+            return Ok(());
+        }
+        let machine = self.inner.store.machine(&project.machine_id)?;
+        let runner = SharedRunner(self.inner.runner.clone());
+        let ssh = self.ssh();
+        let merged: Option<HashSet<String>> = self
+            .merged_pull_requests(&runner, &machine, &ssh, &project.root)
+            .await;
+
+        for worktree in worktrees.iter().filter(|worktree| !worktree.is_main) {
+            let Some(branch) = worktree.branch.clone() else {
+                continue;
+            };
+            let merged = merged
+                .as_ref()
+                .map_or(worktree.merged_pull_request, |merged| {
+                    Some(merged.contains(&branch))
+                });
+            self.inner.store.set_merged(&worktree.id, merged)?;
+        }
+        Ok(())
+    }
+
+    /// The branches whose pull request GitHub says is merged, or `None` when
+    /// the repository is not on GitHub, `gh` is not there, or the answer says
+    /// nothing about the branches.
+    async fn merged_pull_requests(
+        &self,
+        runner: &SharedRunner,
+        machine: &Machine,
+        ssh: &SshOptions,
+        root: &str,
+    ) -> Option<HashSet<String>> {
+        let git = Git::new(runner, machine, ssh);
+        let url = match git.remote_url(root, "origin").await {
+            Ok(Some(url)) => url,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::debug!(%error, "could not read the remote of the project");
+                return None;
+            }
+        };
+        if !github::is_github_url(&url) {
+            return None;
+        }
+        match Github::new(runner, machine, ssh)
+            .merged_pull_request_branches(root, github::DEFAULT_LIMIT)
+            .await
+        {
+            Ok(Some(branches)) => Some(branches.into_iter().collect()),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::debug!(%error, "could not read the merged pull requests");
+                None
+            }
+        }
+    }
+
+    /// Asks GitHub, for the pull requests of `project`, as often as a sidebar
+    /// with live terminals is worth it. The same quiet rules as
+    /// [`Engine::check_worktrees`].
+    pub fn check_pull_requests(&self, project: ProjectId) -> JoinHandle<()> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            let Ok(project) = engine.inner.store.project(&project) else {
+                return;
+            };
+            if let Err(error) = engine.probe_merged(&project, true).await {
+                tracing::debug!(%error, "could not check the merged pull requests");
+            }
+        })
+    }
+
+    /// Asks git for the branches of `project` (local and remote-tracking),
+    /// for a worktree's base to choose from. Quiet on failure: the field
+    /// stays free text.
+    pub fn base_refs(&self, project: ProjectId) -> JoinHandle<Option<Vec<String>>> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            let project = engine.inner.store.project(&project).ok()?;
+            let machine = engine.inner.store.machine(&project.machine_id).ok()?;
+            let runner = SharedRunner(engine.inner.runner.clone());
+            let ssh = engine.ssh();
+            Git::new(&runner, &machine, &ssh)
+                .branches(&project.root)
+                .await
+                .ok()
+        })
     }
 
     async fn add_worktree(
@@ -1498,10 +1734,153 @@ impl Engine {
         }
     }
 
+    /// The machine, name and absolute target a clone or a creation needs,
+    /// checked before anything runs.
+    fn new_project_plan(
+        &self,
+        machine: &MachineId,
+        parent: &str,
+        name: &str,
+    ) -> Result<(Machine, String, String, String), EngineError> {
+        let machine = self.inner.store.machine(machine)?;
+        let name = name.trim().to_owned();
+        address::validate_project_name(&name)
+            .map_err(|why| EngineError::Invalid(why.to_owned()))?;
+        let parent = parent.trim();
+        if !address::is_absolute_path(parent) {
+            return Err(EngineError::Invalid(
+                "The parent folder must be an absolute path.".to_owned(),
+            ));
+        }
+        let target = address::join_path(parent, &name);
+        Ok((machine, name, parent.to_owned(), target))
+    }
+
+    /// Runs one command on `machine` and answers its output, whether or not
+    /// it succeeded; the caller decides what a failure means.
+    async fn run_command(
+        &self,
+        machine: &Machine,
+        spec: CommandSpec,
+    ) -> Result<Output, EngineError> {
+        let runner = SharedRunner(self.inner.runner.clone());
+        let placed = leon_remote::run_on(machine, &spec, &self.ssh());
+        runner
+            .run(&placed)
+            .await
+            .map_err(|error| EngineError::Job(error.to_string()))
+    }
+
+    async fn clone_project(
+        &self,
+        machine: &MachineId,
+        url: &str,
+        parent: &str,
+        name: &str,
+    ) -> Result<String, EngineError> {
+        // An empty name is what the URL offers, as git itself would name the
+        // folder.
+        let name = match name.trim() {
+            "" => address::default_project_name_from_url(url),
+            name => name.to_owned(),
+        };
+        let (machine, name, parent, target) = self.new_project_plan(machine, parent, &name)?;
+        self.set_status(StatusKind::Busy, format!("Cloning {name}..."));
+        let runner = SharedRunner(self.inner.runner.clone());
+        Git::new(&runner, &machine, &self.ssh())
+            .clone(url.trim(), &parent, &target)
+            .await?;
+        let count = self.register_project(&machine, &name, &target).await?;
+        Ok(format!(
+            "Cloned {name} into {target} with {}.",
+            plural(count, "worktree")
+        ))
+    }
+
+    async fn create_project(
+        &self,
+        machine: &MachineId,
+        parent: &str,
+        name: &str,
+    ) -> Result<String, EngineError> {
+        let (machine, name, parent, target) = self.new_project_plan(machine, parent, name)?;
+        self.set_status(StatusKind::Busy, format!("Creating {name}..."));
+        let made_parent = self
+            .run_command(&machine, CommandSpec::new("mkdir").args(["-p", &parent]))
+            .await?;
+        if !made_parent.success() {
+            return Err(EngineError::Invalid(format!(
+                "Could not make {parent}: {}",
+                made_parent.stderr.trim()
+            )));
+        }
+        // An existing folder is only taken when it is empty: creating a
+        // project must never write into files that are already there.
+        let listing = self
+            .run_command(&machine, CommandSpec::new("ls").args(["-A", &target]))
+            .await?;
+        if listing.success() && !listing.stdout.trim().is_empty() {
+            return Err(EngineError::Invalid(format!(
+                "{target} already exists and is not empty."
+            )));
+        }
+        let made_target = self
+            .run_command(&machine, CommandSpec::new("mkdir").args(["-p", &target]))
+            .await?;
+        if !made_target.success() {
+            return Err(EngineError::Invalid(format!(
+                "Could not make {target}: {}",
+                made_target.stderr.trim()
+            )));
+        }
+        let runner = SharedRunner(self.inner.runner.clone());
+        Git::new(&runner, &machine, &self.ssh())
+            .init(&target)
+            .await?;
+        let count = self.register_project(&machine, &name, &target).await?;
+        Ok(format!(
+            "Created project {name} at {target} with {}.",
+            plural(count, "worktree")
+        ))
+    }
+
+    /// Saves a freshly cloned or created repository as a project and fills in
+    /// its worktrees, so the sidebar shows it whole at once.
+    async fn register_project(
+        &self,
+        machine: &Machine,
+        name: &str,
+        path: &str,
+    ) -> Result<usize, EngineError> {
+        let project = self.inner.store.add_project(&machine.id, name, path)?;
+        let count = self.sync_worktrees(&project.id).await?;
+        self.detect_icon_quietly(&project.id).await;
+        Ok(count)
+    }
+
     fn remove_project(&self, id: &ProjectId) -> Result<String, EngineError> {
         let project = self.inner.store.project(id)?;
         self.inner.store.remove_project(id)?;
         Ok(format!("Removed project {}.", project.name))
+    }
+
+    fn rename_project(&self, id: &ProjectId, name: &str) -> Result<String, EngineError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(EngineError::Invalid("A project needs a name.".to_owned()));
+        }
+        let old = self.inner.store.project(id)?.name;
+        self.inner.store.rename_project(id, name)?;
+        Ok(format!("Renamed {old} to {name}."))
+    }
+
+    fn reorder_projects(
+        &self,
+        machine: &MachineId,
+        ordered: &[ProjectId],
+    ) -> Result<String, EngineError> {
+        self.inner.store.reorder_projects(machine, ordered)?;
+        Ok("Moved the project.".to_owned())
     }
 
     fn rename_machine(&self, id: &MachineId, name: &str) -> Result<String, EngineError> {
@@ -1700,6 +2079,18 @@ impl Engine {
             };
             match store.replace_worktrees(&id, worktrees) {
                 Ok(_) => {
+                    // A project that has just been found has a sidebar too,
+                    // and its sidebar asks what is merged as well: waiting for
+                    // somebody to open it would leave the row unmarked for as
+                    // long as nobody did.
+                    match store.project(&id) {
+                        Ok(project) => {
+                            if let Err(error) = self.probe_merged(&project, true).await {
+                                tracing::debug!(%error, "could not check the merged pull requests");
+                            }
+                        }
+                        Err(error) => tracing::warn!(%root, %error, "could not read the project"),
+                    }
                     found.synced.insert(id);
                 }
                 Err(error) => tracing::warn!(%root, %error, "could not store its worktrees"),
@@ -2123,6 +2514,17 @@ fn new_worktrees(listing: &[leon_remote::GitWorktree]) -> Vec<NewWorktree> {
         .collect()
 }
 
+/// A path without trailing separators, for comparing what git reports with
+/// what the store kept (the store drops them). A bare root keeps its own.
+fn trim(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        path
+    } else {
+        trimmed
+    }
+}
+
 fn plural(count: usize, noun: &str) -> String {
     if count == 1 {
         format!("1 {noun}")
@@ -2235,6 +2637,32 @@ branch refs/heads/feature/login
     }
 
     #[tokio::test]
+    async fn github_is_asked_when_somebody_looks_and_not_when_the_timer_watches() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok(LISTING))
+            .reply(Output::ok("git@github.com:zavudev/leon.git\n"))
+            .reply(Output::ok("[]")));
+        let project = local_project(&rig.store);
+        rig.engine
+            .check_worktrees(project.id.clone())
+            .await
+            .unwrap();
+        assert!(
+            rig.runner.calls().iter().all(|call| call.program != "gh"),
+            "the timer that watches worktrees does not leave the machine: {:?}",
+            rig.runner.calls()
+        );
+        rig.engine
+            .check_pull_requests(project.id.clone())
+            .await
+            .unwrap();
+        assert!(
+            rig.runner.calls().iter().any(|call| call.program == "gh"),
+            "the slower cadence does ask, and keeps the worktrees it found"
+        );
+    }
+
+    #[tokio::test]
     async fn syncing_stores_the_worktrees_git_reports() {
         let rig = rig(ScriptedRunner::new().reply(Output::ok(LISTING)));
         let project = local_project(&rig.store);
@@ -2247,6 +2675,171 @@ branch refs/heads/feature/login
         let call = &rig.runner.calls()[0];
         assert_eq!(call.program, "git");
         assert_eq!(call.cwd.as_deref(), Some(PROJECT_ROOT));
+    }
+
+    /// A project with its main worktree and one more, as git reports them.
+    fn project_with_worktrees(store: &Store) -> Project {
+        let project = local_project(store);
+        store
+            .replace_worktrees(
+                &project.id,
+                new_worktrees(&leon_remote::parse_worktree_list(LISTING)),
+            )
+            .unwrap();
+        project
+    }
+
+    /// The worktree of `branch`.
+    fn worktree_of(store: &Store, project: &ProjectId, branch: &str) -> leon_core::WorktreeId {
+        store
+            .worktrees(project)
+            .unwrap()
+            .into_iter()
+            .find(|worktree| worktree.branch.as_deref() == Some(branch))
+            .expect("a worktree with that branch")
+            .id
+    }
+
+    /// What each worktree says about being merged, by branch name.
+    fn merged_by_branch(store: &Store, project: &ProjectId) -> Vec<(String, Option<bool>)> {
+        store
+            .worktrees(project)
+            .unwrap()
+            .into_iter()
+            .map(|worktree| {
+                (
+                    worktree.branch.clone().unwrap_or_default(),
+                    worktree.merged_pull_request,
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_branch_inside_the_base_is_not_called_merged_without_github_saying_so() {
+        // The branch is inside the base, which is what git calls merged, and
+        // it never had a commit of its own: there is no history to have been
+        // merged. Asking git was the false positive; GitHub is the only
+        // witness, so git is only asked where the remote comes from.
+        let rig = rig(ScriptedRunner::new().reply(Output::ok("git@github.com:zavudev/leon.git\n")));
+        let project = project_with_worktrees(&rig.store);
+        rig.engine.probe_merged(&project, true).await.unwrap();
+        assert_eq!(
+            merged_by_branch(&rig.store, &project.id)[1].1,
+            None,
+            "nothing is known, which is not the same as not merged"
+        );
+        assert!(
+            rig.runner.calls().iter().all(|call| !matches!(
+                call.args.first().map(String::as_str),
+                Some("for-each-ref" | "rev-list" | "status")
+            )),
+            "no branch, no history, no worktree: git is not asked about merges, only GitHub is"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_merged_with_a_squash_is_found_though_its_branch_is_not_inside() {
+        // What GitHub does by default: the branch's commits never reach the
+        // base, so git cannot see the merge at all, and only GitHub can.
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok("git@github.com:zavudev/leon.git\n"))
+            .reply(Output::ok(r#"[{"headRefName":"feature/login"}]"#)));
+        let project = project_with_worktrees(&rig.store);
+        rig.engine.probe_merged(&project, true).await.unwrap();
+        assert_eq!(merged_by_branch(&rig.store, &project.id)[1].1, Some(true));
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_that_is_open_is_not_merged() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok("git@github.com:zavudev/leon.git\n"))
+            .reply(Output::ok("[]")));
+        let project = project_with_worktrees(&rig.store);
+        rig.engine.probe_merged(&project, true).await.unwrap();
+        assert_eq!(merged_by_branch(&rig.store, &project.id)[1].1, Some(false));
+    }
+
+    #[tokio::test]
+    async fn a_repository_that_is_not_on_github_is_not_asked_about() {
+        let rig = rig(ScriptedRunner::new().reply(Output::ok("git@gitlab.com:zavudev/leon.git\n")));
+        let project = project_with_worktrees(&rig.store);
+        rig.engine.probe_merged(&project, true).await.unwrap();
+        assert_eq!(
+            merged_by_branch(&rig.store, &project.id)[1].1,
+            None,
+            "a repository GitHub knows nothing about is not known, not merged"
+        );
+        assert!(
+            rig.runner.calls().iter().all(|call| call.program == "git"),
+            "gh is never run"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_fails_leaves_what_was_known_and_never_errors() {
+        let rig = rig(ScriptedRunner::new().fail(RunError::Spawn {
+            program: "git".into(),
+            source: std::io::Error::other("no git"),
+        }));
+        let project = project_with_worktrees(&rig.store);
+        rig.engine.probe_merged(&project, true).await.unwrap();
+        assert_eq!(
+            merged_by_branch(&rig.store, &project.id)[1].1,
+            None,
+            "nothing is known, which is not the same as not merged"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_probe_that_fails_keeps_what_was_known() {
+        // The remote cannot even be read, so gh is never run at all.
+        let rig = rig(ScriptedRunner::new().reply(Output::failed(1, "not logged in")));
+        let project = project_with_worktrees(&rig.store);
+        rig.store
+            .set_merged(
+                &worktree_of(&rig.store, &project.id, "feature/login"),
+                Some(true),
+            )
+            .unwrap();
+        rig.engine.probe_merged(&project, true).await.unwrap();
+        assert_eq!(
+            merged_by_branch(&rig.store, &project.id)[1].1,
+            Some(true),
+            "what GitHub said before is better than nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_state_survives_a_restart_and_is_not_written_again_unchanged() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok("git@github.com:zavudev/leon.git\n"))
+            .reply(Output::ok(r#"[{"headRefName":"feature/login"}]"#)));
+        let project = project_with_worktrees(&rig.store);
+        rig.engine.probe_merged(&project, true).await.unwrap();
+        let worktree = rig
+            .store
+            .worktrees(&project.id)
+            .unwrap()
+            .into_iter()
+            .find(|worktree| !worktree.is_main)
+            .unwrap();
+        assert_eq!(worktree.merged_pull_request, Some(true));
+        // A second pass with the same answer writes nothing.
+        assert!(!rig
+            .store
+            .set_merged(&worktree.id, worktree.merged_pull_request)
+            .unwrap());
+        // And what was written is what a fresh reading of the row gives.
+        let reread = rig.store.worktrees(&project.id).unwrap();
+        assert_eq!(
+            reread
+                .into_iter()
+                .find(|other| other.id == worktree.id)
+                .unwrap()
+                .merged_pull_request,
+            worktree.merged_pull_request
+        );
     }
 
     #[tokio::test]
@@ -2359,13 +2952,14 @@ branch refs/heads/feature/login
         let project = local_project(&rig.store);
         rig.engine.run(Op::SyncWorktrees(project.id.clone())).await;
         let main = rig.store.worktrees(&project.id).unwrap()[0].clone();
+        let before = rig.runner.calls().len();
         rig.engine
             .run(Op::RemoveWorktree {
                 project: project.id,
                 worktree: main.id,
             })
             .await;
-        assert_eq!(rig.runner.calls().len(), 1, "only the sync ran");
+        assert_eq!(rig.runner.calls().len(), before, "nothing else ran");
         assert!(status(&rig.engine).text.contains("main worktree"));
     }
 
@@ -2375,7 +2969,9 @@ branch refs/heads/feature/login
         let rig = rig(ScriptedRunner::new()
             .reply(Output::ok(LISTING))
             .reply(Output::ok(""))
-            .reply(Output::ok(after)));
+            .reply(Output::ok(""))
+            .reply(Output::ok(after))
+            .reply(Output::ok("")));
         let project = local_project(&rig.store);
         rig.engine.run(Op::SyncWorktrees(project.id.clone())).await;
         let extra = rig.store.worktrees(&project.id).unwrap()[1].clone();
@@ -2385,9 +2981,11 @@ branch refs/heads/feature/login
                 worktree: extra.id,
             })
             .await;
-        assert_eq!(
-            rig.runner.calls()[1].args,
-            ["worktree", "remove", "/srv/api-worktrees/feature-login"]
+        assert!(
+            rig.runner.calls().iter().any(|call| call.args
+                == ["worktree", "remove", "/srv/api-worktrees/feature-login"]),
+            "the worktree was removed: {:?}",
+            rig.runner.calls()
         );
         assert_eq!(rig.store.worktrees(&project.id).unwrap().len(), 1);
     }
@@ -2499,6 +3097,118 @@ branch refs/heads/feature/login
         assert_eq!(
             rig.engine.machine_state(&MachineId::from_string("x")),
             MachineState::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn cloning_runs_git_then_saves_and_syncs_the_project() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok("Cloning into 'repo'..."))
+            .reply(Output::ok(LISTING)));
+        rig.engine
+            .run(Op::CloneProject {
+                machine: MachineId::local(),
+                url: "https://host/owner/repo.git".into(),
+                parent: "/srv/code".into(),
+                name: "repo".into(),
+            })
+            .await;
+        let projects = rig.store.projects(None).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "repo");
+        assert_eq!(projects[0].root, "/srv/code/repo");
+        let calls = rig.runner.calls();
+        assert_eq!(
+            calls[0].args,
+            [
+                "clone",
+                "--",
+                "https://host/owner/repo.git",
+                "/srv/code/repo"
+            ]
+        );
+        let line = status(&rig.engine);
+        assert_eq!(line.kind, StatusKind::Info);
+        assert!(
+            line.text.starts_with("Cloned repo into /srv/code/repo"),
+            "{}",
+            line.text
+        );
+    }
+
+    #[tokio::test]
+    async fn a_clone_of_a_name_with_a_slash_is_refused_before_git_runs() {
+        let rig = rig(ScriptedRunner::new());
+        rig.engine
+            .run(Op::CloneProject {
+                machine: MachineId::local(),
+                url: "https://host/owner/repo.git".into(),
+                parent: "/srv/code".into(),
+                name: "a/b".into(),
+            })
+            .await;
+        assert!(rig.store.projects(None).unwrap().is_empty());
+        assert!(rig.runner.calls().is_empty());
+        assert_eq!(status(&rig.engine).kind, StatusKind::Error);
+    }
+
+    #[tokio::test]
+    async fn creating_a_project_makes_the_folder_initializes_git_and_commits() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok("")) // mkdir -p parent
+            .reply(Output::failed(2, "No such file or directory")) // ls -A target: new folder
+            .reply(Output::ok("")) // mkdir -p target
+            .reply(Output::ok("Initialized empty Git repository"))
+            .reply(Output::ok(""))
+            .reply(Output::ok(LISTING)));
+        rig.engine
+            .run(Op::CreateProject {
+                machine: MachineId::local(),
+                parent: "/srv/code".into(),
+                name: "api".into(),
+            })
+            .await;
+        let projects = rig.store.projects(None).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].root, "/srv/code/api");
+        let calls = rig.runner.calls();
+        assert_eq!(calls[1].args, ["-A", "/srv/code/api"]);
+        assert_eq!(calls[3].args, ["init"]);
+        assert_eq!(
+            calls[4].args,
+            ["commit", "--allow-empty", "-m", "Initial commit"]
+        );
+        let line = status(&rig.engine);
+        assert_eq!(line.kind, StatusKind::Info);
+        assert!(
+            line.text
+                .starts_with("Created project api at /srv/code/api"),
+            "{}",
+            line.text
+        );
+    }
+
+    #[tokio::test]
+    async fn creating_over_a_non_empty_folder_is_refused() {
+        let rig = rig(
+            ScriptedRunner::new()
+                .reply(Output::ok("")) // mkdir -p parent
+                .reply(Output::ok("something\n")), // ls -A target: not empty
+        );
+        rig.engine
+            .run(Op::CreateProject {
+                machine: MachineId::local(),
+                parent: "/srv/code".into(),
+                name: "api".into(),
+            })
+            .await;
+        assert!(rig.store.projects(None).unwrap().is_empty());
+        let line = status(&rig.engine);
+        assert_eq!(line.kind, StatusKind::Error);
+        assert!(
+            line.text.contains("already exists and is not empty"),
+            "{}",
+            line.text
         );
     }
 
@@ -2647,6 +3357,7 @@ branch refs/heads/feature/login
         let rig = rig(ScriptedRunner::new()
             .reply(Output::ok(PROBE_OUTPUT))
             .reply(Output::ok(LISTING))
+            .reply(Output::ok("main\n"))
             .reply(Output::ok(NO_ICON)));
         let machine = ssh_machine(&rig.store);
         let project = rig
@@ -2655,8 +3366,19 @@ branch refs/heads/feature/login
             .unwrap();
         rig.engine.run(Op::Refresh).await;
         let calls = rig.runner.calls();
-        assert_eq!(calls.len(), 3, "the probe, git, and the one icon command");
-        assert!(calls[2].args.last().unwrap().contains("LEON-ICON"));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.args.iter().any(|arg| arg.contains("LEON-ICON")))
+                .count(),
+            1,
+            "the one icon command, over the same ssh: {}",
+            calls.len()
+        );
+        assert!(
+            calls.iter().all(|call| call.program == "ssh"),
+            "everything went to the machine: {calls:?}"
+        );
         assert!(
             calls[0].args.last().unwrap().contains("uname"),
             "the probe came first"
@@ -2922,10 +3644,14 @@ branch refs/heads/feature/login
             session_in(&rig.store, &local, "/srv/api/src", id);
         }
         rig.engine.run(Op::Refresh).await;
+        // Only the question that lists the worktrees: the refresh asks the
+        // project's own folder about them being merged as well, which is a
+        // different question in a different folder.
         let asked: Vec<_> = rig
             .runner
             .calls()
             .into_iter()
+            .filter(|call| call.args.iter().any(|arg| arg == "worktree"))
             .filter_map(|call| call.cwd)
             .collect();
         assert_eq!(asked, ["/srv/api/src"]);
@@ -2944,7 +3670,10 @@ branch refs/heads/feature/login
             .into_iter()
             .filter_map(|call| call.cwd)
             .collect();
-        assert_eq!(asked, ["/srv/api"], "only the project's own sync ran");
+        assert!(
+            asked.iter().all(|cwd| cwd == "/srv/api"),
+            "only the project's own folder was asked about: {asked:?}"
+        );
     }
 
     #[tokio::test]
@@ -3301,6 +4030,7 @@ branch refs/heads/feature/login
     async fn refreshing_detects_a_logo_once_and_never_again() {
         let rig = rig(ScriptedRunner::new()
             .reply(Output::ok(LISTING))
+            .reply(Output::ok(""))
             .reply(Output::ok(scan_with_logo())));
         let project = local_project(&rig.store);
         rig.engine.run(Op::Refresh).await;
@@ -3671,6 +4401,7 @@ branch refs/heads/feature/login
     async fn disabling_logo_detection_stops_the_automatic_search_but_not_the_one_asked_for() {
         let rig = rig(ScriptedRunner::new()
             .reply(Output::ok(LISTING))
+            .reply(Output::ok(""))
             .reply(Output::ok(scan_with_logo())));
         let project = local_project(&rig.store);
         prefs_of(&rig.engine, |prefs| prefs.detect_logos = false);
@@ -3679,10 +4410,13 @@ branch refs/heads/feature/login
             rig.store.project_icons().unwrap().is_empty(),
             "refresh looked for nothing"
         );
-        assert_eq!(
-            rig.runner.calls().len(),
-            1,
-            "only the worktree listing ran, no logo scan"
+        assert!(
+            rig.runner
+                .calls()
+                .iter()
+                .all(|call| !call.args.iter().any(|arg| arg.contains("LEON-ICON"))),
+            "refresh looked for no logo: {:?}",
+            rig.runner.calls()
         );
         rig.engine.run(Op::DetectIcon(project.id.clone())).await;
         assert!(

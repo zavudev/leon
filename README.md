@@ -54,15 +54,28 @@ _No screenshots yet._
 
 ## Install
 
-Builds for macOS, Linux and Windows are on the
-[releases page](https://github.com/zavudev/leon/releases). Pick the file for your
-computer (`<version>` is the release, for example `0.1.0`):
+On Linux, install Leon completely for your user (binary, applications-menu
+entry, icons and licences) with no root access:
+
+```sh
+curl -fsSL https://github.com/zavudev/leon/releases/latest/download/install.sh | sh
+```
+
+Run the command again to upgrade, or download the `.deb`/`.rpm` from the
+[releases page](https://github.com/zavudev/leon/releases) for a system install.
+The script verifies the archive against the release's SHA-256 checksums and
+supports `--uninstall` without removing projects or settings. Leon's Linux build
+requires x86_64 and glibc 2.35 or newer (Ubuntu 22.04 or a similarly recent
+distribution).
+
+Builds for macOS, Linux and Windows are on that releases page. Pick the file for
+your computer (`<version>` is the release, for example `0.1.0`):
 
 | Platform | File | To install |
 | --- | --- | --- |
 | macOS, Apple Silicon | `leon-<version>-macos-aarch64.dmg` | Open it and drag Leon to Applications. |
 | macOS, Intel | `leon-<version>-macos-x86_64.dmg` | The same. |
-| Linux, x86_64 | `leon-<version>-linux-x86_64.tar.gz` | Unpack it and follow `INSTALL.txt`: the binary, a desktop entry and the icons. |
+| Linux, x86_64 | `install.sh`, `leon_<version>_amd64.deb`, or `leon-<version>-1.x86_64.rpm` | Use the command above for a user install, or install the package for the whole system. The tarball remains available for manual installs. |
 | Windows, x86_64 | `leon-<version>-windows-x86_64.zip` | There is no installer: unzip it and run `leon.exe` from a folder you own. |
 
 `SHA256SUMS` in the release lists the checksum of every file
@@ -154,7 +167,14 @@ The icon is the glare mark on its ink tile, generated from
 1. `Open project…` on this computer (`Cmd+O` or `Ctrl+O`) opens the system's
    own folder dialog. For an SSH machine (`Connect a machine…` first, see below)
    there is no dialog to show, so you pick one of the repositories Leon found
-   there or type the path.
+   there or type the path. Two more ways to start a project, both offered on
+   this computer and on a machine: `Clone a repository…` clones a git URL
+   (HTTPS or SSH; the name and folder are offered from the URL, exactly as
+   `git clone` would name them) and `New project…` creates a brand-new
+   repository (empty, with one initial commit, so worktrees have a branch to
+   hang from) in a folder you pick with the dialog or type. Cloning or
+   creating on a machine runs `git` there through the same SSH runner as
+   everything else; an existing folder is only used when it is empty.
 2. Select a worktree and start a session: `New agent session`, choose the
    agent. Without a selected worktree it asks for one first.
 3. `Open a shell here` opens a terminal in the selected worktree.
@@ -347,6 +367,8 @@ platform (see below).
 | Connect a machine… | `⇧⌘M` | `Ctrl+Shift+M` |
 | Share this machine… | palette only | palette only |
 | Open project… | `⌘O` | `Ctrl+O` |
+| Clone a repository… | palette only | palette only |
+| New project… | palette only | palette only |
 | Add a remote project by path… | palette only | palette only |
 | Remove a project | palette only | palette only |
 | Remove a worktree | palette only | palette only |
@@ -354,6 +376,10 @@ platform (see below).
 | Edit a machine… | palette only | palette only |
 | Why is it offline? | palette only | palette only |
 | Rename | `F2` | `F2` |
+| Move up | context menu | context menu |
+| Move down | context menu | context menu |
+| Pin the session | context menu | context menu |
+| Unpin the session | context menu | context menu |
 | Copy the path | palette only | palette only |
 | Refresh project icon | palette only | palette only |
 | Choose project icon… | palette only | palette only |
@@ -403,8 +429,8 @@ platform (see below).
 | Go to terminal tab 8 | `⌥⌘8` | `Ctrl+Shift+8` |
 | Go to terminal tab 9 | `⌥⌘9` | `Ctrl+Shift+9` |
 | Close the pane | `⌘W` | `Ctrl+Shift+W` |
-| Copy the selection | `⌘C` `⇧⌘C` | `Ctrl+Shift+C` |
-| Paste | `⌘V` `⇧⌘V` `⇧Insert` | `Ctrl+Shift+V` `Shift+Insert` |
+| Copy the selection | `⌘C` `⇧⌘C` | `Ctrl+C` `Ctrl+Shift+C` |
+| Paste | `⌘V` `⇧⌘V` `⇧Insert` | `Ctrl+V` `Ctrl+Shift+V` `Shift+Insert` |
 | Scroll the terminal back a page | `⇧PgUp` | `Shift+PgUp` |
 | Scroll the terminal forward a page | `⇧PgDn` | `Shift+PgDn` |
 | **Data** | | |
@@ -454,10 +480,12 @@ always reach the program.
   uses `Cmd`; this includes the `Ctrl+Cmd` chords that resize panes), and
   `Cmd+C` and `Cmd+V` copy and paste. A `Ctrl` chord on its own always goes
   to the program.
-* **Linux and Windows**: only chords that also hold `Shift` stay Leon's,
-  because a terminal cannot tell `Ctrl+Shift+X` from `Ctrl+X` and so no
-  program uses it; `Shift+Insert`, `Shift+PgUp` and `Shift+PgDn` too.
-  `Ctrl+P`, `Ctrl+N`, `Ctrl+W`, `Ctrl+D`, `Ctrl+1` and so on go to the program.
+* **Linux and Windows**: the operating system's ordinary `Ctrl+C` and `Ctrl+V`
+  copy and paste; the `Ctrl+Shift` aliases continue to work. Other Leon chords
+  must also hold `Shift`, because a terminal cannot tell `Ctrl+Shift+X` from
+  `Ctrl+X` and so no program uses it; `Shift+Insert`, `Shift+PgUp` and
+  `Shift+PgDn` work too. `Ctrl+P`, `Ctrl+N`, `Ctrl+W`, `Ctrl+D`, `Ctrl+1` and
+  so on go to the program.
 * Bare keys are never Leon's in a terminal.
 
 The chords that stay Leon's, in full:
@@ -574,7 +602,9 @@ Linux and Windows:
 * Go to terminal tab 8 `Ctrl+Shift+8`
 * Go to terminal tab 9 `Ctrl+Shift+9`
 * Close the pane `Ctrl+Shift+W`
+* Copy the selection `Ctrl+C`
 * Copy the selection `Ctrl+Shift+C`
+* Paste `Ctrl+V`
 * Paste `Ctrl+Shift+V`
 * Paste `Shift+Insert`
 * Scroll the terminal back a page `Shift+PgUp`
@@ -624,9 +654,9 @@ typing selects an item. Every item shows the shortcut it has.
 | Row | Items |
 | --- | --- |
 | Machine | Open project…, New shell, Probe, Why is it offline? and Edit machine… (SSH machines), Rename, Connect a machine…, Remove machine (not for this computer) |
-| Project | New worktree…, New agent session ▸ (Claude Code, Codex, opencode and your own agents; the palette lists the whole catalogue), Open shell here, Copy path, Reveal in file manager (this computer), Refresh icon, Choose icon…, Reset icon, Remove project |
-| Worktree | New agent session ▸, Open shell here, Copy path, Copy branch name, Reveal in file manager (this computer), Remove worktree (not the main one) |
-| History session | Open (resumes it in a terminal), Open transcript, Copy session id, Remove from history |
+| Project | New worktree…, New agent session ▸ (Claude Code, Codex, opencode and your own agents; the palette lists the whole catalogue), Open shell here, Copy path, Rename, Move up, Move down, Reveal in file manager (this computer), Refresh icon, Choose icon…, Reset icon, Remove project |
+| Worktree | New agent session ▸, Open shell here, Copy path, Copy branch name, Move up, Move down, Reveal in file manager (this computer), Remove worktree (not the main one) |
+| History session | Open (resumes it in a terminal), Open transcript, Pin or Unpin, Move up, Move down, Copy session id, Remove from history |
 | Live terminal | Focus, Split right, Split down, Rename, Close |
 
 Removals and closing a terminal with a program running in it ask first.
@@ -701,7 +731,7 @@ which Leon does not read) and logging to a file as output arrives.
 
 ### Paste: text, images and files
 
-`Cmd+V` (`Ctrl+Shift+V` on Linux and Windows) pastes by what the clipboard
+`Cmd+V` (`Ctrl+V` on Linux and Windows) pastes by what the clipboard
 holds. **An image** (a screenshot, a copied picture) sends `Ctrl+V` to the
 program, which is how Claude Code, Codex and opencode read an image from the
 clipboard themselves; Leon never inlines image bytes. **Text** is pasted,
@@ -958,7 +988,11 @@ a test fails when it is stale.
   that finds `git`) and then the rest, dimmed, with "not installed" and the
   agent's docs link. Type to filter: the list is long.
 * Settings ▸ Agents has, per agent, whether it is offered, the program and the
-  extra arguments (the three headline agents keep their old setting keys).
+  extra arguments (the three headline agents keep their old setting keys). A
+  new session starts working without stopping to ask: Claude Code gets
+  `--dangerously-skip-permissions` and Codex `--ask-for-approval never`. Both
+  are only the setting's default, so clearing the field brings the questions
+  back, and every other agent starts with nothing.
 * **Your own agents.** The palette's **Add a custom agent…** asks for a name, the
   command, the arguments of a new session and, optionally, the arguments that
   resume one: with `{id}` they resume that session (`--resume {id}`), without
@@ -1164,6 +1198,18 @@ Two projects of one machine with the same name are told apart: by the origin's
 `owner/repo` when every one of them has a known remote and they differ,
 otherwise by their folders (`zavu/monorepo`, `acme.io/monorepo`).
 
+### Order and names
+
+Projects, worktrees and sessions keep the order you give them. Drag one onto
+another of the same list to move it (a line marks before or after), or use
+"Move up" / "Move down" in its context menu; the order is stored, so it
+survives restarts, and new projects and worktrees go last. Sessions sort
+themselves by recency until you move one: a dragged or moved session is
+*pinned* where you put it, on top of its list ("Pin" also does that;
+"Unpin" sends it back to recency). Sessions can only move inside their own
+list; projects inside their machine; worktrees inside their project. `F2` or
+"Rename" renames the project under the cursor.
+
 ### A logo per project
 
 Each project shows a small logo (16 px in the tree and the palette, 24 px in
@@ -1223,6 +1269,29 @@ looked up either (it needs the Git host's API).
 Each worktree row leads with a dot, and a project row rolls up its worktrees
 (the most urgent state wins: error, then waiting, working, idle). A machine keeps
 its connection light. Hover a dot for its words.
+
+The branch icon after the dot becomes GitHub's icon in the accent — which no
+activity dot wears, so a merged worktree never reads as a running one — when the
+branch's pull request was merged, and stays the branch's own otherwise. Hover it
+for the words. Git alone never makes the claim: a branch inside the project's
+base looks exactly the same whether its work landed there or it never had a
+commit of its own, and a worktree that never did any work is not a merged one.
+So the mark comes from GitHub's record or from nowhere, and only for a project
+whose `origin` is on GitHub: without `gh` installed or logged in the answer
+stays unknown rather than wrong, and the row keeps its branch icon. GitHub is
+asked when a project is opened, discovered or refreshed, and on its own slower
+cadence — not on the ten-second timer, which stays on the machine.
+
+### Keeping the worktrees fresh
+
+The branches and commit hashes a project shows come from `git worktree list`.
+They are read when a project is opened or discovered, on `Refresh`, and — while
+a terminal of this computer is running inside a project — every ten seconds or
+so: a `git checkout` made in a shell is noticed within a moment and the tree
+updates, without asking git anything when nothing changed. Projects on other
+machines are only read on `Refresh` (a check per project per turn over the
+network is not worth it), so a checkout made over SSH shows up on `⌘R` /
+`Ctrl+R`.
 
 | Dot | State | When |
 | --- | --- | --- |

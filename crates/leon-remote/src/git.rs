@@ -207,6 +207,75 @@ impl<'a, R: Runner> Git<'a, R> {
         Ok((!branch.is_empty()).then(|| branch.to_owned()))
     }
 
+    /// The url of `remote` (usually `origin`), or `None` when the repository
+    /// has no such remote. What tells a GitHub project from one that is not.
+    pub async fn remote_url(&self, cwd: &str, remote: &str) -> Result<Option<String>, GitError> {
+        reject_option_like("remote", remote)?;
+        match self
+            .run("remote", git(cwd, ["remote", "get-url", remote]))
+            .await
+        {
+            Ok(url) => {
+                let url = url.trim();
+                Ok((!url.is_empty()).then(|| url.to_owned()))
+            }
+            // A repository without that remote is an answer, not a failure.
+            Err(GitError::Failed { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Clones `url` into `path`, run from `parent` (both on this machine).
+    pub async fn clone(&self, url: &str, parent: &str, path: &str) -> Result<(), GitError> {
+        reject_option_like("url", url)?;
+        reject_option_like("path", path)?;
+        self.run("clone", git(parent, ["clone", "--", url, path]))
+            .await
+            .map(drop)
+    }
+
+    /// The branches of the repository that contains `cwd`: the local ones
+    /// first, then the remote-tracking ones (`origin/main`), in git's order.
+    /// `*/HEAD` is left out; duplicates appear once.
+    pub async fn branches(&self, cwd: &str) -> Result<Vec<String>, GitError> {
+        let stdout = self
+            .run(
+                "for-each-ref",
+                git(
+                    cwd,
+                    [
+                        "for-each-ref",
+                        "--format=%(refname:short)",
+                        "refs/heads",
+                        "refs/remotes",
+                    ],
+                ),
+            )
+            .await?;
+        let mut seen = std::collections::HashSet::new();
+        Ok(stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.ends_with("/HEAD"))
+            .filter(|line| seen.insert((*line).to_owned()))
+            .map(str::to_owned)
+            .collect())
+    }
+
+    /// Initializes a repository at `path` (which must exist) and makes the
+    /// empty first commit git needs before any branch ref exists, which is
+    /// what worktrees are made from.
+    pub async fn init(&self, path: &str) -> Result<(), GitError> {
+        reject_option_like("path", path)?;
+        self.run("init", git(path, ["init"])).await?;
+        self.run(
+            "commit",
+            git(path, ["commit", "--allow-empty", "-m", "Initial commit"]),
+        )
+        .await
+        .map(drop)
+    }
+
     async fn run(&self, operation: &'static str, command: CommandSpec) -> Result<String, GitError> {
         let placed = run_on(self.machine, &command, self.ssh);
         let output = self.runner.run(&placed).await?;
@@ -477,6 +546,123 @@ prunable gitdir file points to non-existent location
                 "/srv/wt/x",
                 "origin/main"
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cloning_runs_git_clone_from_the_parent_folder() {
+        let machine = local();
+        let ssh = SshOptions::without_multiplexing();
+        let runner = ScriptedRunner::new().reply(Output::ok(""));
+        Git::new(&runner, &machine, &ssh)
+            .clone("https://host/owner/repo.git", "/srv/code", "/srv/code/repo")
+            .await
+            .unwrap();
+        let call = &runner.calls()[0];
+        assert_eq!(call.program, "git");
+        assert_eq!(
+            call.args,
+            [
+                "clone",
+                "--",
+                "https://host/owner/repo.git",
+                "/srv/code/repo"
+            ]
+        );
+        assert_eq!(call.cwd.as_deref(), Some("/srv/code"));
+    }
+
+    #[tokio::test]
+    async fn a_clone_url_that_looks_like_an_option_is_refused_before_running() {
+        let machine = local();
+        let ssh = SshOptions::without_multiplexing();
+        let runner = ScriptedRunner::new();
+        let refused = Git::new(&runner, &machine, &ssh)
+            .clone("--upload-pack=evil", "/srv/code", "/srv/code/repo")
+            .await;
+        assert!(matches!(refused, Err(GitError::InvalidArgument(_))));
+        assert!(runner.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn listing_branches_keeps_local_and_remote_ones_and_drops_head() {
+        let machine = local();
+        let ssh = SshOptions::without_multiplexing();
+        let runner = ScriptedRunner::new().reply(Output::ok(
+            "main\nfeature/x\norigin/HEAD\norigin/main\norigin/release\n",
+        ));
+        let refs = Git::new(&runner, &machine, &ssh)
+            .branches("/srv/api")
+            .await
+            .unwrap();
+        assert_eq!(refs, ["main", "feature/x", "origin/main", "origin/release"]);
+        assert_eq!(
+            runner.calls()[0].args,
+            [
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/heads",
+                "refs/remotes"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_origin_url_answers_whether_the_project_has_a_github_remote() {
+        let machine = local();
+        let ssh = SshOptions::without_multiplexing();
+        let runner = ScriptedRunner::new()
+            .reply(Output::ok("git@github.com:zavudev/leon.git\n"))
+            .reply(Output::failed(128, "error: No such remote 'origin'"))
+            .reply(Output::ok("https://gitlab.com/zavudev/leon.git\n"));
+        let git = Git::new(&runner, &machine, &ssh);
+        assert_eq!(
+            git.remote_url("/srv/api", "origin")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("git@github.com:zavudev/leon.git")
+        );
+        assert_eq!(git.remote_url("/srv/api", "origin").await.unwrap(), None);
+        assert_eq!(
+            git.remote_url("/srv/api", "origin")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("https://gitlab.com/zavudev/leon.git")
+        );
+        assert_eq!(runner.calls()[0].args, ["remote", "get-url", "origin"]);
+    }
+
+    #[tokio::test]
+    async fn a_remote_that_is_not_a_option_is_refused_before_git_runs() {
+        let machine = local();
+        let ssh = SshOptions::without_multiplexing();
+        let runner = ScriptedRunner::new();
+        let refused = Git::new(&runner, &machine, &ssh)
+            .remote_url("/srv/api", "--upload-pack=evil")
+            .await;
+        assert!(matches!(refused, Err(GitError::InvalidArgument(_))));
+        assert!(runner.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn initializing_a_repository_makes_an_empty_first_commit() {
+        let machine = local();
+        let ssh = SshOptions::without_multiplexing();
+        let runner = ScriptedRunner::new()
+            .reply(Output::ok("Initialized empty Git repository"))
+            .reply(Output::ok(""));
+        Git::new(&runner, &machine, &ssh)
+            .init("/srv/code/repo")
+            .await
+            .unwrap();
+        let calls = runner.calls();
+        assert_eq!(calls[0].args, ["init"]);
+        assert_eq!(calls[0].cwd.as_deref(), Some("/srv/code/repo"));
+        assert_eq!(
+            calls[1].args,
+            ["commit", "--allow-empty", "-m", "Initial commit"]
         );
     }
 

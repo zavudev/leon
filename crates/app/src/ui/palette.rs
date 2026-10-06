@@ -1003,6 +1003,8 @@ impl Shell {
     /// What a finished flow does.
     pub(super) fn apply(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
         match action {
+            Action::PickCloneParent { url, name } => self.pick_clone_parent(url, name, window, cx),
+            Action::PickProjectParent { name } => self.pick_project_parent(name, window, cx),
             Action::Engine(op) => self.engine.submit(op),
             Action::StartSession(intent) => self.start_intent(intent, window, cx),
             Action::CloseLive(id) => self.close_live(id, window, cx),

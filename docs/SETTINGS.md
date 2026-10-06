@@ -55,11 +55,11 @@ How each coding agent is started and resumed.
 | Your own agents | `custom_agents` | a list of text | empty | Any command line tool, added with Add a custom agent: a name, the command, its arguments and how to resume a session. |
 | Claude Code | `agent_claude_enabled` | on, off | `on` | Offer Claude Code for new sessions. |
 | Claude Code executable | `agent_claude_executable` | a path | empty | The program that starts Claude Code. Empty lets the login shell find `claude`. |
-| Claude Code arguments, new session | `agent_claude_args` | text | empty | Extra arguments typed after the command of a new Claude Code session. |
+| Claude Code arguments, new session | `agent_claude_args` | text | `--dangerously-skip-permissions` | Extra arguments typed after the command of a new Claude Code session. The default, `--dangerously-skip-permissions`, starts it without stopping to ask; empty brings the questions back. |
 | Claude Code arguments, resume | `agent_claude_resume_args` | text | empty | Extra arguments typed after the command that resumes a Claude Code session. |
 | Codex | `agent_codex_enabled` | on, off | `on` | Offer Codex for new sessions. |
 | Codex executable | `agent_codex_executable` | a path | empty | The program that starts Codex. Empty lets the login shell find `codex`. |
-| Codex arguments, new session | `agent_codex_args` | text | empty | Extra arguments typed after the command of a new Codex session. |
+| Codex arguments, new session | `agent_codex_args` | text | `--ask-for-approval never` | Extra arguments typed after the command of a new Codex session. The default, `--ask-for-approval never`, starts it without stopping to ask; empty brings the questions back. |
 | Codex arguments, resume | `agent_codex_resume_args` | text | empty | Extra arguments typed after the command that resumes a Codex session. |
 | opencode | `agent_opencode_enabled` | on, off | `on` | Offer opencode for new sessions. |
 | opencode executable | `agent_opencode_executable` | a path | empty | The program that starts opencode. Empty lets the login shell find `opencode`. |

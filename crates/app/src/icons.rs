@@ -25,6 +25,7 @@ icon_assets!(
         Folder,
         FolderOpen,
         GitBranch,
+        Github,
         Hash,
         Info,
         Keyboard,
@@ -129,6 +130,18 @@ mod tests {
             let Some(path) = crate::brand::agent_mark(spec.id) else {
                 continue;
             };
+            let loaded = Assets.load(&path).unwrap();
+            assert!(
+                loaded.is_some_and(|bytes| bytes.starts_with(b"<svg")),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sidebar_icons_load_through_the_asset_source() {
+        for name in [IconName::GitBranch, IconName::Github, IconName::Check] {
+            let path = gpui_kit::assets::IconNamed::path(name);
             let loaded = Assets.load(&path).unwrap();
             assert!(
                 loaded.is_some_and(|bytes| bytes.starts_with(b"<svg")),

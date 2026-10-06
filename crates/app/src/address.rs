@@ -110,6 +110,63 @@ pub fn default_project_name(path: &str) -> String {
         .to_owned()
 }
 
+/// The name a clone of `url` takes: git's own rule, the last path segment
+/// without a trailing `.git`. Both URL shapes count (`https://host/owner/repo.git`
+/// and `git@host:owner/repo.git`), and an empty answer means the URL names
+/// nothing to clone.
+pub fn default_project_name_from_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    // A URL has a path after its last slash; the scp-like `host:path` form
+    // has none, so its colon is what separates the path.
+    let tail = match trimmed.rsplit_once('/') {
+        Some((_, last)) => last,
+        None => trimmed.rsplit(':').next().unwrap_or_default(),
+    }
+    .trim_end_matches(".git");
+    if tail.is_empty() || tail == "." || tail == ".." {
+        String::new()
+    } else {
+        tail.to_owned()
+    }
+}
+
+/// `parent` and `name` joined with the separator the parent was written
+/// with, so a Windows path stays a Windows path. A bare root keeps its
+/// separator (`/` + `api` is `/api`, not `//api`).
+pub fn join_path(parent: &str, name: &str) -> String {
+    let windows = parent.contains('\\') && !parent.contains('/');
+    let separator = if windows { '\\' } else { '/' };
+    let trimmed = parent.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        // The parent itself is a root ("/" or "C:\").
+        if parent.ends_with(['/', '\\']) {
+            format!("{parent}{name}")
+        } else {
+            format!("{parent}{separator}{name}")
+        }
+    } else {
+        format!("{trimmed}{separator}{name}")
+    }
+}
+
+/// Why a project name was refused.
+pub fn validate_project_name(name: &str) -> Result<(), &'static str> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Type a name.");
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("A project name cannot contain a slash.");
+    }
+    if name == "." || name == ".." {
+        return Err("A project name cannot be . or ..");
+    }
+    if name.starts_with('-') {
+        return Err("A project name cannot start with a dash.");
+    }
+    Ok(())
+}
+
 /// Why a branch name was refused.
 pub fn validate_branch(name: &str) -> Result<(), &'static str> {
     if name.trim().is_empty() {
@@ -260,6 +317,47 @@ mod tests {
         assert_eq!(default_project_name("/srv/api/"), "api");
         assert_eq!(default_project_name("C:\\code\\api"), "api");
         assert_eq!(default_project_name("/"), "");
+    }
+
+    #[test]
+    fn a_clone_takes_its_name_from_the_url_like_git_does() {
+        assert_eq!(
+            default_project_name_from_url("https://github.com/zavudev/leon.git"),
+            "leon"
+        );
+        assert_eq!(
+            default_project_name_from_url("git@github.com:zavudev/leon.git"),
+            "leon"
+        );
+        assert_eq!(
+            default_project_name_from_url("ssh://git@host/owner/repo"),
+            "repo"
+        );
+        assert_eq!(
+            default_project_name_from_url("/srv/git/thing.git/"),
+            "thing"
+        );
+        assert_eq!(default_project_name_from_url("https://host/"), "host");
+        assert_eq!(default_project_name_from_url("  "), "");
+    }
+
+    #[test]
+    fn paths_join_with_the_separator_they_were_written_with() {
+        assert_eq!(join_path("/srv", "api"), "/srv/api");
+        assert_eq!(join_path("/srv/", "api"), "/srv/api");
+        assert_eq!(join_path("/", "api"), "/api");
+        assert_eq!(join_path("C:\\code", "api"), "C:\\code\\api");
+        assert_eq!(join_path("C:\\", "api"), "C:\\api");
+    }
+
+    #[test]
+    fn project_names_with_a_slash_or_a_dot_are_refused() {
+        for bad in ["", "  ", "a/b", "a\\b", ".", "..", "-x"] {
+            assert!(validate_project_name(bad).is_err(), "{bad:?}");
+        }
+        for good in ["api", "my project", "leon-2"] {
+            assert!(validate_project_name(good).is_ok(), "{good:?}");
+        }
     }
 
     #[test]

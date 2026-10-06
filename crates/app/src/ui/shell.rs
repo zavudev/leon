@@ -32,7 +32,9 @@ use super::panes::{Axis, Dir};
 use super::settings_screen::SettingsUi;
 use super::steps::{LiveInfo, Where, World};
 use super::terminals::Readiness;
-use super::tree::{self, build_rows_filtered, Kind, LiveEntry, NodeId, Placement, Row};
+use super::tree::{
+    self, build_rows_filtered, Kind, LiveEntry, NodeId, Order, Placement, Row, TreeOrder,
+};
 use super::workspace::Workspaces;
 use crate::elsewhere::{self, Found, OwnTerminal};
 use crate::engine::Engine;
@@ -49,7 +51,8 @@ use gpui_kit::{
     Stateful, Subscription, Task, UniformListScrollHandle, Window,
 };
 use leon_core::{
-    AgentId, MachineId, MachineKind, Message, ProjectId, Result as StoreResult, Session, WorktreeId,
+    AgentId, MachineId, MachineKind, Message, ProjectId, Result as StoreResult, Session, SessionId,
+    SessionScope, WorktreeId,
 };
 use leon_term::{Backend, Pty};
 use std::path::PathBuf;
@@ -68,6 +71,24 @@ pub struct SidebarDrag {
     pub width: u16,
     /// Whether the pointer is far enough below the minimum to close.
     pub closing: bool,
+}
+
+/// A sidebar row being dragged to change its order: a project, a worktree
+/// or a session. It carries the row itself (with the list it belongs to), so
+/// a drop on another list can be refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RowDrag(pub Order);
+
+/// A row drag passing over a row of its own list: what releasing the pointer
+/// now would do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RowDropTarget {
+    /// The dragged row and its list.
+    pub dragged: Order,
+    /// The row it is over.
+    pub target: Order,
+    /// Whether the drop goes after the target row.
+    pub after: bool,
 }
 
 /// The two panes the keyboard moves between.
@@ -90,6 +111,10 @@ pub enum Overlay {
     Shortcuts,
     /// The context menu of a row of the tree.
     Menu,
+    /// The "Add a project" dialog.
+    AddProject,
+    /// The "Create worktree" dialog.
+    NewWorktree,
     /// The About panel.
     About,
     /// The problems of the theme files.
@@ -446,6 +471,14 @@ pub struct Shell {
     pub(super) choosing: Option<Task<()>>,
     /// The context menu, while one is open.
     pub(super) menu: Option<Menu>,
+    /// The "Add a project" dialog.
+    pub(super) add_project_ui: super::dialogs::AddProjectUi,
+    /// The "Create worktree" dialog, while it is open.
+    pub(super) new_worktree_ui: Option<super::dialogs::NewWorktreeUi>,
+    /// The wait for a worktree an agent should start in, while it runs.
+    pub(super) worktree_task: Option<Task<()>>,
+    /// The agent of the last session started: new dialogs offer it first.
+    pub(super) last_agent: Option<leon_core::AgentId>,
     pub(super) sheet_scroll: ScrollHandle,
     /// The find bar of each terminal pane that has had one.
     pub(super) find: std::collections::HashMap<LiveId, FindBar>,
@@ -454,6 +487,11 @@ pub struct Shell {
     pub(super) find_shown: Option<LiveId>,
     /// The drag of the sidebar's edge, while the button is down.
     pub(super) sidebar_drag: Option<SidebarDrag>,
+    /// The row a dragged row hovers over, with the drag and whether the drop
+    /// would go after it (else before it). Drawn as a line; cleared on
+    /// release. Only a drop that would change something is kept: a drag over
+    /// a row of another list (or over itself) clears it.
+    pub(super) row_drop_target: Option<RowDropTarget>,
     /// The write of a saved terminal, while it runs.
     pub(super) saving: Option<Task<()>>,
     /// The themes folder and how it is followed.
@@ -481,7 +519,7 @@ pub struct Shell {
     /// window opens.
     pub(super) intro_played: std::cell::Cell<bool>,
     _watchers: Vec<Task<()>>,
-    _subscriptions: Vec<Subscription>,
+    pub(super) _subscriptions: Vec<Subscription>,
 }
 
 impl Shell {
@@ -668,11 +706,16 @@ impl Shell {
             next_banner: 0,
             choosing: None,
             menu: None,
+            add_project_ui: super::dialogs::AddProjectUi::default(),
+            new_worktree_ui: None,
+            worktree_task: None,
+            last_agent: None,
             sheet_scroll: ScrollHandle::new(),
             find: std::collections::HashMap::new(),
             find_input,
             find_shown: None,
             sidebar_drag: None,
+            row_drop_target: None,
             saving: None,
             themes: super::themes::ThemeFiles::new(settings::sibling(super::themes::FOLDER, cx)),
             menu_state: crate::menus::Availability::default(),
@@ -1006,14 +1049,24 @@ impl Shell {
         }
     }
 
-    /// What a rename would rename: the machine or the live terminal the
-    /// keyboard is on.
+    /// What a rename would rename: the project, the machine or the live
+    /// terminal the keyboard is on.
     fn rename_target(&self, cx: &App) -> Option<super::steps::RenameTarget> {
         use super::steps::RenameTarget;
         let machine = || {
             let id = self.machine_row()?;
             let machine = self.snapshot.machine(&id)?;
             (!id.is_local()).then(|| RenameTarget::Machine(id, machine.name.clone()))
+        };
+        let project = || {
+            let row = self.rows.get(self.cursor?)?;
+            match &row.kind {
+                Kind::Project { project, .. } => Some(RenameTarget::Project(
+                    project.id.clone(),
+                    project.name.clone(),
+                )),
+                _ => None,
+            }
         };
         let live = || {
             let id = self.here_live()?;
@@ -1022,10 +1075,361 @@ impl Shell {
             Some(RenameTarget::Live(id, session.label()))
         };
         if self.pane == Pane::Sidebar {
-            machine().or_else(live)
+            project().or_else(machine).or_else(live)
         } else {
-            live().or_else(machine)
+            live().or_else(project).or_else(machine)
         }
+    }
+
+    // ----- the sidebar order -----------------------------------------------------
+
+    /// The scope a row belongs to, with the list it is ordered in.
+    pub(super) fn tree_order(&self, kind: &Kind, machine: &MachineId) -> Option<TreeOrder> {
+        match kind {
+            Kind::Project { project, .. } => {
+                let machine = project.machine_id.clone();
+                Some(TreeOrder {
+                    order: Order::Project(project.id.clone(), machine.clone()),
+                    rows: self
+                        .snapshot
+                        .projects
+                        .iter()
+                        .filter(|entry| entry.project.machine_id == machine)
+                        .map(|entry| NodeId::Project(entry.project.id.clone()))
+                        .collect(),
+                })
+            }
+            Kind::Worktree { worktree, .. } => Some(TreeOrder {
+                order: Order::Worktree(worktree.id.clone(), worktree.project_id.clone()),
+                rows: self
+                    .snapshot
+                    .project(&worktree.project_id)
+                    .map(|entry| {
+                        entry
+                            .worktrees
+                            .iter()
+                            .map(|worktree| NodeId::Worktree(worktree.id.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            }),
+            Kind::Session(session) => {
+                let scope = self.session_scope(session, machine)?;
+                Some(TreeOrder {
+                    order: Order::Session(session.id.clone(), scope.clone()),
+                    rows: self
+                        .sessions_in(&scope)
+                        .iter()
+                        .map(|id| NodeId::Session(id.clone()))
+                        .collect(),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// What holds a history session: the worktree its folder is in, else the
+    /// project containing it, else the unsorted folder on its machine.
+    pub(super) fn session_scope(
+        &self,
+        session: &Session,
+        machine: &MachineId,
+    ) -> Option<SessionScope> {
+        let entry = self.snapshot.project(session.project_id.as_ref()?)?;
+        if &entry.project.machine_id != machine {
+            return None;
+        }
+        let worktree = entry
+            .worktrees
+            .iter()
+            .filter(|worktree| tree::ancestors(&session.cwd).any(|folder| folder == worktree.path))
+            .max_by_key(|worktree| worktree.path.len());
+        if let Some(worktree) = worktree {
+            return Some(SessionScope::Worktree(worktree.id.clone()));
+        }
+        Some(SessionScope::Project(entry.project.id.clone()))
+    }
+
+    /// The sessions of `scope` in the order of the sidebar: pinned first,
+    /// then newest-first.
+    fn sessions_in(&self, scope: &SessionScope) -> Vec<SessionId> {
+        let mut sessions: Vec<&Session> = self
+            .snapshot
+            .sessions
+            .iter()
+            .filter(|session| {
+                self.session_scope(session, &session.machine_id).as_ref() == Some(scope)
+            })
+            .collect();
+        sessions.sort_by_key(|session| {
+            (
+                session.sort_order.is_none(),
+                session.sort_order.unwrap_or(0),
+                std::cmp::Reverse(session.updated_at),
+            )
+        });
+        sessions
+            .into_iter()
+            .map(|session| session.id.clone())
+            .collect()
+    }
+
+    /// Whether a row can be moved, so a drag can be started on it.
+    pub(super) fn can_order(&self, order: &Order) -> bool {
+        match order {
+            Order::Project(id, machine) => {
+                let rows = self.project_order(machine);
+                rows.len() > 1 && rows.contains(id)
+            }
+            Order::Worktree(id, project) => {
+                let rows = self.worktree_order(project);
+                rows.len() > 1 && rows.contains(id)
+            }
+            Order::Session(id, scope) => {
+                let rows = self.sessions_in(scope);
+                rows.len() > 1 && rows.contains(id)
+            }
+        }
+    }
+
+    /// Notes a row drag passing over a row of the same list: what releasing
+    /// the pointer now would do. A drag over another list, or over the very
+    /// row being dragged, is no drop: the target is cleared instead, so a
+    /// release there (or anywhere else) does nothing. Returns true when
+    /// anything changed.
+    pub(super) fn note_row_drag_over(
+        &mut self,
+        dragged: &Order,
+        target: &Order,
+        after: bool,
+    ) -> bool {
+        let same_list = match (dragged, target) {
+            (Order::Project(_, a), Order::Project(_, b)) => a == b,
+            (Order::Worktree(_, a), Order::Worktree(_, b)) => a == b,
+            (Order::Session(_, a), Order::Session(_, b)) => a == b,
+            _ => false,
+        };
+        let drop = (same_list && dragged != target).then(|| RowDropTarget {
+            dragged: dragged.clone(),
+            target: target.clone(),
+            after,
+        });
+        if self.row_drop_target != drop {
+            self.row_drop_target = drop;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A dragged row was dropped onto `target`, with the drop going after it
+    /// when `after`. Projects and worktrees get the new order; a session is
+    /// pinned there, on top of its parent's list.
+    pub(super) fn drop_row_here(&mut self, dragged: &Order, target: &Order, after: bool) {
+        self.row_drop_target = None;
+        match (dragged.clone(), target.clone()) {
+            (Order::Project(project, machine), Order::Project(target, _)) => {
+                let current = self.project_order(&machine);
+                if let Some(ordered) = tree::dropped_order(&current, &project, &target, after) {
+                    self.engine
+                        .submit(crate::engine::Op::ReorderProjects { machine, ordered });
+                }
+            }
+            (Order::Worktree(worktree, project), Order::Worktree(target, _)) => {
+                let current = self.worktree_order(&project);
+                if let Some(ordered) = tree::dropped_order(&current, &worktree, &target, after) {
+                    self.engine
+                        .submit(crate::engine::Op::ReorderWorktrees { project, ordered });
+                }
+            }
+            (Order::Session(session, scope), Order::Session(target, _)) => {
+                let display = self.sessions_in(&scope);
+                let Some(target_at) = display.iter().position(|id| id == &target) else {
+                    return;
+                };
+                let to = target_at + usize::from(after);
+                let pinned: std::collections::HashSet<SessionId> = self
+                    .snapshot
+                    .sessions
+                    .iter()
+                    .filter(|session| session.sort_order.is_some())
+                    .filter(|session| {
+                        self.session_scope(session, &session.machine_id).as_ref() == Some(&scope)
+                    })
+                    .map(|session| session.id.clone())
+                    .collect();
+                let repinned = tree::repinned(&display, &pinned, &session, to);
+                self.engine.submit(crate::engine::Op::PinSessions {
+                    parent: scope,
+                    pinned: repinned,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// The projects of `machine` in the order of the sidebar.
+    pub(super) fn project_order(&self, machine: &MachineId) -> Vec<ProjectId> {
+        self.snapshot
+            .projects
+            .iter()
+            .filter(|entry| &entry.project.machine_id == machine)
+            .map(|entry| entry.project.id.clone())
+            .collect()
+    }
+
+    /// The worktrees of `project` in the order of the sidebar.
+    pub(super) fn worktree_order(&self, project: &ProjectId) -> Vec<WorktreeId> {
+        self.snapshot
+            .project(project)
+            .map(|entry| {
+                entry
+                    .worktrees
+                    .iter()
+                    .map(|worktree| worktree.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The row the keyboard is on, as something movable.
+    fn order_here(&self) -> Option<Order> {
+        let row = self.rows.get(self.cursor?)?;
+        match &row.kind {
+            Kind::Project { project, .. } => Some(Order::Project(
+                project.id.clone(),
+                project.machine_id.clone(),
+            )),
+            Kind::Worktree { worktree, .. } => Some(Order::Worktree(
+                worktree.id.clone(),
+                worktree.project_id.clone(),
+            )),
+            Kind::Session(session) => Some(Order::Session(
+                session.id.clone(),
+                self.session_scope(session, &row.machine)?,
+            )),
+            _ => None,
+        }
+    }
+
+    /// Moves the row under the cursor one step: -1 is up, 1 is down. A
+    /// session pins itself at the new place; the rest of the list stays as
+    /// it was.
+    pub(super) fn move_row_here(&mut self, delta: isize) {
+        let Some(order) = self.order_here() else {
+            self.engine.report(
+                crate::engine::StatusKind::Info,
+                "Select a project, worktree or session first.",
+            );
+            return;
+        };
+        match &order {
+            Order::Project(project, machine) => {
+                let current = self.project_order(machine);
+                let Some(at) = current.iter().position(|id| id == project) else {
+                    return;
+                };
+                let next = tree::stepped_order(&current, at, delta);
+                if next != current {
+                    self.engine.submit(crate::engine::Op::ReorderProjects {
+                        machine: machine.clone(),
+                        ordered: next,
+                    });
+                }
+            }
+            Order::Worktree(worktree, project) => {
+                let current = self.worktree_order(project);
+                let Some(at) = current.iter().position(|id| id == worktree) else {
+                    return;
+                };
+                let next = tree::stepped_order(&current, at, delta);
+                if next != current {
+                    self.engine.submit(crate::engine::Op::ReorderWorktrees {
+                        project: project.clone(),
+                        ordered: next,
+                    });
+                }
+            }
+            Order::Session(session, scope) => {
+                let display = self.sessions_in(scope);
+                let Some(at) = display.iter().position(|id| id == session) else {
+                    return;
+                };
+                let to = at
+                    .min(display.len().saturating_sub(1))
+                    .saturating_add_signed(delta);
+                let to = to.min(display.len());
+                let pinned: std::collections::HashSet<SessionId> = self
+                    .snapshot
+                    .sessions
+                    .iter()
+                    .filter(|session| session.sort_order.is_some())
+                    .filter(|candidate| {
+                        self.session_scope(candidate, &candidate.machine_id)
+                            .as_ref()
+                            == Some(scope)
+                    })
+                    .map(|session| session.id.clone())
+                    .collect();
+                let repinned = tree::repinned(&display, &pinned, session, to);
+                self.engine.submit(crate::engine::Op::PinSessions {
+                    parent: scope.clone(),
+                    pinned: repinned,
+                });
+            }
+        }
+    }
+
+    /// Pins or unpins the session under the cursor. Pinning puts it on top
+    /// of its list; unpinning sends it back to its place by recency. The
+    /// other pins of the list stay, in their order.
+    pub(super) fn pin_session_here(&mut self, pinned: bool) {
+        let Some(Order::Session(session, scope)) = self.order_here() else {
+            self.engine
+                .report(crate::engine::StatusKind::Info, "Select a session first.");
+            return;
+        };
+        let display = self.sessions_in(&scope);
+        let pins: std::collections::HashSet<SessionId> = self
+            .snapshot
+            .sessions
+            .iter()
+            .filter(|session| session.sort_order.is_some())
+            .filter(|candidate| {
+                self.session_scope(candidate, &candidate.machine_id)
+                    .as_ref()
+                    == Some(&scope)
+            })
+            .map(|session| session.id.clone())
+            .collect();
+        let next = if pinned {
+            tree::repinned(&display, &pins, &session, 0)
+        } else {
+            display
+                .iter()
+                .filter(|id| *id != &session && pins.contains(id))
+                .cloned()
+                .collect()
+        };
+        self.engine.submit(crate::engine::Op::PinSessions {
+            parent: scope,
+            pinned: next,
+        });
+    }
+
+    /// Completes the row drop the drag moves saw last, if any. Called from
+    /// the window-wide mouse-up listener: row `on_drop` handlers cannot run
+    /// while the drag sheet over the window takes the pointer.
+    fn finish_row_drop(&mut self) {
+        if let Some(drop) = self.row_drop_target.take() {
+            self.drop_row_here(&drop.dragged, &drop.target, drop.after);
+        }
+    }
+
+    /// Forgets any row drop in flight. A new press starts a new gesture, so
+    /// whatever the moves saw before is stale.
+    fn forget_row_drop(&mut self) {
+        self.row_drop_target = None;
     }
 
     // ----- what the tree's commands do to the row under the cursor --------------------
@@ -1529,6 +1933,68 @@ impl Shell {
         }));
     }
 
+    /// Clones `url` as `name` on this computer: the parent folder is chosen
+    /// with the system's folder dialog, then the engine clones.
+    pub(super) fn pick_clone_parent(
+        &mut self,
+        url: String,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let picking = (self.options.pick_folder)(cx);
+        self.picking = Some(cx.spawn_in(window, async move |this, cx| {
+            let picked = picking.await;
+            this.update_in(cx, |this, window, _cx| match picked {
+                Picked::Folder(parent) => this.engine.submit(crate::engine::Op::CloneProject {
+                    machine: MachineId::local(),
+                    url,
+                    parent: parent.to_string_lossy().into_owned(),
+                    name,
+                }),
+                Picked::Cancelled => {}
+                Picked::Unavailable => {
+                    let _ = window;
+                    this.engine.report(
+                        crate::engine::StatusKind::Error,
+                        "This system has no folder dialog to choose a folder with.",
+                    );
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Creates the project `name` on this computer: the parent folder is
+    /// chosen with the system's folder dialog, then the engine creates it.
+    pub(super) fn pick_project_parent(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let picking = (self.options.pick_folder)(cx);
+        self.picking = Some(cx.spawn_in(window, async move |this, cx| {
+            let picked = picking.await;
+            this.update_in(cx, |this, window, _cx| match picked {
+                Picked::Folder(parent) => this.engine.submit(crate::engine::Op::CreateProject {
+                    machine: MachineId::local(),
+                    parent: parent.to_string_lossy().into_owned(),
+                    name,
+                }),
+                Picked::Cancelled => {}
+                Picked::Unavailable => {
+                    let _ = window;
+                    this.engine.report(
+                        crate::engine::StatusKind::Error,
+                        "This system has no folder dialog to choose a folder with.",
+                    );
+                }
+            })
+            .ok();
+        }));
+    }
+
     /// Adds the repository of a folder of this computer, and selects it once
     /// it is in the store.
     fn open_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -1591,6 +2057,12 @@ impl Shell {
         if self.overlay == Overlay::Menu && self.menu_key(stroke, window, cx) {
             return true;
         }
+        if self.overlay == Overlay::AddProject && self.add_project_key(stroke, window, cx) {
+            return true;
+        }
+        if self.overlay == Overlay::NewWorktree && self.new_worktree_key(stroke, window, cx) {
+            return true;
+        }
         if self.overlay == Overlay::Settings && self.settings_key(stroke, window, cx) {
             return true;
         }
@@ -1619,7 +2091,12 @@ impl Shell {
         }
         let typing = matches!(
             self.overlay,
-            Overlay::Palette | Overlay::Settings | Overlay::Connect | Overlay::Pair
+            Overlay::Palette
+                | Overlay::Settings
+                | Overlay::Connect
+                | Overlay::Pair
+                | Overlay::AddProject
+                | Overlay::NewWorktree
         ) || filtering
             || finding;
         if self.overlay == Overlay::Palette && self.palette_key(stroke, window, cx) {
@@ -1703,11 +2180,17 @@ impl Shell {
                 let machine = self.current_machine();
                 self.open_project_on(&machine, window, cx);
             }
+            C::CloneProject | C::NewProject => self.begin_flow(command, window, cx),
+            C::NewWorktree => self.open_new_worktree(window, cx),
             C::OpenShell => self.open_shell_here(window, cx),
             C::ContextMenu => self.open_menu_here(window, cx),
             C::Rename | C::RemoveMachine | C::RemoveFromHistory | C::ResumeIn | C::ResumeAnyway => {
                 self.begin_flow(command, window, cx)
             }
+            C::MoveRowUp => self.move_row_here(-1),
+            C::MoveRowDown => self.move_row_here(1),
+            C::PinSession => self.pin_session_here(true),
+            C::UnpinSession => self.pin_session_here(false),
             C::RevealTerminal => self.reveal_terminal_here(cx),
             C::CopyPath => self.copy_path_here(cx),
             C::CopyBranch => self.copy_branch_here(cx),
@@ -1740,7 +2223,6 @@ impl Shell {
             | C::AddAgent
             | C::RemoveAgent
             | C::CloseSession
-            | C::NewWorktree
             | C::AddProject
             | C::RemoveProject
             | C::RemoveWorktree
@@ -1855,6 +2337,8 @@ impl Shell {
                 | Overlay::Usage
                 | Overlay::Pair
                 | Overlay::Share
+                | Overlay::AddProject
+                | Overlay::NewWorktree
                 | Overlay::Settings => self.close_overlay(window, cx),
                 Overlay::None => {
                     if self.pane == Pane::Sidebar {
@@ -1893,6 +2377,11 @@ impl Shell {
             | Overlay::Problems
             | Overlay::Usage => {
                 self.overlay = Overlay::None;
+                self.focus.focus(window, cx);
+            }
+            Overlay::AddProject | Overlay::NewWorktree => {
+                self.overlay = Overlay::None;
+                self.new_worktree_ui = None;
                 self.focus.focus(window, cx);
             }
             Overlay::None => {}
@@ -2186,6 +2675,49 @@ impl Shell {
                     if phase == gpui_kit::DispatchPhase::Capture {
                         released.update(cx, |this, cx| this.end_sidebar_drag(cx));
                         cx.stop_propagation();
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
+    }
+
+    /// The press that starts a new gesture and the release that ends a row
+    /// drag, for the whole window, in the capture phase. Row drops cannot
+    /// rely on a row's `on_drop`: while anything is dragged the sheet over
+    /// the window takes the pointer (see `render`), so no row is hovered.
+    /// The rows still report every drag move (`note_row_drag_over`), and the
+    /// release completes the drop from what the moves saw last. Nothing is
+    /// stopped here: clicks and the other drags keep working exactly as
+    /// before.
+    fn row_drop_listeners(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity();
+        gpui_kit::canvas(
+            |_, _, _| (),
+            move |_, _, window, _| {
+                let pressed = entity.clone();
+                window.on_mouse_event(move |_: &gpui_kit::MouseDownEvent, phase, _, cx| {
+                    if phase == gpui_kit::DispatchPhase::Capture {
+                        pressed.update(cx, |this, cx| {
+                            if this.row_drop_target.is_some() {
+                                this.forget_row_drop();
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+                let released = entity.clone();
+                window.on_mouse_event(move |event: &gpui_kit::MouseUpEvent, phase, _, cx| {
+                    if phase == gpui_kit::DispatchPhase::Capture
+                        && event.button == MouseButton::Left
+                    {
+                        released.update(cx, |this, cx| {
+                            if this.row_drop_target.is_some() {
+                                this.finish_row_drop();
+                                cx.notify();
+                            }
+                        });
                     }
                 });
             },
@@ -2519,6 +3051,8 @@ impl Shell {
             Overlay::Palette => self.render_palette(colours, cx).into_any_element(),
             Overlay::Shortcuts => self.render_sheet(colours).into_any_element(),
             Overlay::About => self.render_about(colours, cx).into_any_element(),
+            Overlay::AddProject => self.render_add_project(colours, cx).into_any_element(),
+            Overlay::NewWorktree => self.render_new_worktree(colours, cx).into_any_element(),
             Overlay::Problems => self.render_problems(colours).into_any_element(),
             Overlay::Settings => self.render_settings(colours, cx).into_any_element(),
             Overlay::Connect => self.render_connect(colours, cx).into_any_element(),
@@ -2622,6 +3156,7 @@ impl Render for Shell {
             // First, so that its capture-phase listeners run before every
             // other element's (a terminal's "mouse up outside" included).
             .child(self.sidebar_drag_listeners(cx))
+            .child(self.row_drop_listeners(cx))
             .when(settings::get(cx).sidebar_visible, |this| {
                 this.child(self.render_sidebar(&colours, cx))
             })

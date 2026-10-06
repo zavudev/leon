@@ -190,6 +190,7 @@ mod tests {
             started_at: started,
             updated_at: started,
             message_count: 1,
+            sort_order: None,
         }
     }
 

@@ -1,0 +1,43 @@
+# package.sh substitutes VERSION and LINUX_DIR in a temporary copy before nFPM
+# reads this file. These packages install under /usr, where the system package
+# manager owns every application file.
+
+name: leon
+arch: amd64
+platform: linux
+version: ${VERSION}
+section: devel
+priority: optional
+maintainer: Zavu <support@zavu.dev>
+vendor: Zavu
+homepage: https://github.com/zavudev/leon
+license: Apache-2.0
+description: |
+  A fast, keyboard-first desktop for coding agents.
+  Leon runs Claude Code, Codex and opencode side by side in local projects,
+  worktrees and remote machines.
+contents:
+  - src: ${LINUX_DIR}/leon
+    dst: /usr/bin/leon
+    file_info:
+      mode: 0755
+  - src: ${LINUX_DIR}/share/applications/dev.zavu.leon.desktop
+    dst: /usr/share/applications/dev.zavu.leon.desktop
+  - src: ${LINUX_DIR}/share/icons/hicolor/16x16/apps/dev.zavu.leon.png
+    dst: /usr/share/icons/hicolor/16x16/apps/dev.zavu.leon.png
+  - src: ${LINUX_DIR}/share/icons/hicolor/32x32/apps/dev.zavu.leon.png
+    dst: /usr/share/icons/hicolor/32x32/apps/dev.zavu.leon.png
+  - src: ${LINUX_DIR}/share/icons/hicolor/48x48/apps/dev.zavu.leon.png
+    dst: /usr/share/icons/hicolor/48x48/apps/dev.zavu.leon.png
+  - src: ${LINUX_DIR}/share/icons/hicolor/64x64/apps/dev.zavu.leon.png
+    dst: /usr/share/icons/hicolor/64x64/apps/dev.zavu.leon.png
+  - src: ${LINUX_DIR}/share/icons/hicolor/128x128/apps/dev.zavu.leon.png
+    dst: /usr/share/icons/hicolor/128x128/apps/dev.zavu.leon.png
+  - src: ${LINUX_DIR}/share/icons/hicolor/256x256/apps/dev.zavu.leon.png
+    dst: /usr/share/icons/hicolor/256x256/apps/dev.zavu.leon.png
+  - src: ${LINUX_DIR}/share/icons/hicolor/512x512/apps/dev.zavu.leon.png
+    dst: /usr/share/icons/hicolor/512x512/apps/dev.zavu.leon.png
+  - src: ${LINUX_DIR}/LICENSE
+    dst: /usr/share/doc/leon/LICENSE
+  - src: ${LINUX_DIR}/NOTICE
+    dst: /usr/share/doc/leon/NOTICE
