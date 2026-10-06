@@ -11,6 +11,7 @@ members = [
     "crates/leon-host",
     "crates/leon-wire",
     "crates/leon-link",
+    "crates/leon-update",
     "crates/app",
     "crates/xtask",
 ]
@@ -33,6 +34,7 @@ leon-pty = { path = "crates/leon-pty" }
 leon-host = { path = "crates/leon-host" }
 leon-wire = { path = "crates/leon-wire" }
 leon-link = { path = "crates/leon-link" }
+leon-update = { path = "crates/leon-update" }
 
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 rusqlite = { version = "0.40", features = ["bundled"] }

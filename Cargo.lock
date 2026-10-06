@@ -4082,6 +4082,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "leon-update"
+version = "0.2.0"
+dependencies = [
+ "flate2",
+ "leon-remote",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "zip",
+]
+
+[[package]]
 name = "leon-usage"
 version = "0.2.0"
 dependencies = [
