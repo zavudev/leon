@@ -120,7 +120,7 @@ fn the_bar_shows_each_agents_primary_window_with_its_figure(cx: &mut TestAppCont
 fn the_marker_and_level_change_as_a_window_crosses_the_thresholds(cx: &mut TestAppContext) {
     let (h, _) = open_usage(cx);
     let mut seen = Vec::new();
-    for used in [60.0, 80.0, 95.0] {
+    for used in [59.0, 60.0, 80.0] {
         put(
             &h,
             &reading(
@@ -154,22 +154,25 @@ fn an_unknown_agent_shows_why_instead_of_a_number(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn a_narrow_window_collapses_the_bar_in_steps(cx: &mut TestAppContext) {
-    let (h, _) = open_usage(cx);
-    for agent in [AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE] {
-        put(
-            &h,
-            &reading(
-                agent,
-                &local(),
-                &[(
-                    WindowKind::FiveHour,
-                    20.0 + agent.as_str().len() as f64,
-                    3600,
-                )],
-            ),
-            cx,
-        );
+    fn fill(h: &Harness, cx: &mut TestAppContext) {
+        for agent in [AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE] {
+            put(
+                h,
+                &reading(
+                    agent,
+                    &local(),
+                    &[(
+                        WindowKind::FiveHour,
+                        20.0 + agent.as_str().len() as f64,
+                        3600,
+                    )],
+                ),
+                cx,
+            );
+        }
     }
+    let (h, _) = open_usage(cx);
+    fill(&h, cx);
     let at = |width: f32, cx: &mut TestAppContext| {
         VisualTestContext::from_window(h.window.into(), cx)
             .simulate_resize(size(px(width), px(800.)));
@@ -180,7 +183,13 @@ fn a_narrow_window_collapses_the_bar_in_steps(cx: &mut TestAppContext) {
             .collect();
         (bar(&h, cx).density, shown)
     };
-    assert_eq!(at(1900.0, cx), (Density::Full, vec![true, true, true]));
+    assert_eq!(at(1900.0, cx), (Density::Detailed, vec![true, true, true]));
+    // The compact bar steps down in its own right.
+    set_text(&h, "usage_bar_mode", "compact", cx);
+    // Changing a setting reads the limits at once, which on a computer with no
+    // POSIX shell replaces what was put: put it again.
+    fill(&h, cx);
+    assert_eq!(at(1950.0, cx), (Density::Full, vec![true, true, true]));
     let (density, _) = at(1200.0, cx);
     assert!(
         matches!(density, Density::Short | Density::Minimal),
@@ -192,6 +201,53 @@ fn a_narrow_window_collapses_the_bar_in_steps(cx: &mut TestAppContext) {
         shown.iter().filter(|s| **s).count(),
         1,
         "one worst-case indicator"
+    );
+}
+
+/// Sets a text setting, as the Settings screen does.
+fn set_text(h: &Harness, key: &str, value: &str, cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        settings::set_value(
+            cx,
+            crate::schema::find(key).unwrap(),
+            crate::schema::Value::Text(value.to_owned()),
+        )
+    });
+    h.shell.update(cx, |_, cx| cx.notify());
+    h.settle(cx);
+}
+
+#[gpui_kit::test]
+fn the_detailed_bar_gives_way_to_the_compact_one_as_the_window_narrows(cx: &mut TestAppContext) {
+    let (h, _) = open_usage(cx);
+    for agent in [AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE] {
+        put(
+            &h,
+            &reading(
+                agent,
+                &local(),
+                &[
+                    (WindowKind::FiveHour, 10.0, 8940),
+                    (WindowKind::Weekly, 91.0, 126_000),
+                    (WindowKind::ModelWeekly("Fable".into()), 0.0, 126_000),
+                ],
+            ),
+            cx,
+        );
+    }
+    let at = |width: f32, cx: &mut TestAppContext| {
+        VisualTestContext::from_window(h.window.into(), cx)
+            .simulate_resize(size(px(width), px(800.)));
+        h.settle(cx);
+        bar(&h, cx).density
+    };
+    assert_eq!(at(2400.0, cx), Density::Detailed);
+    assert_eq!(at(1500.0, cx), Density::Full, "too narrow for every window");
+    assert!(matches!(at(1000.0, cx), Density::Short | Density::Minimal));
+    assert_eq!(at(500.0, cx), Density::Single);
+    assert_eq!(
+        bar(&h, cx).items[0].detailed_text(),
+        "10% used 2h 29m · 91% used 1d 11h !! · 0% used Fable"
     );
 }
 
@@ -387,10 +443,11 @@ fn the_view_shows_resets_provenance_and_the_unknown_reason(cx: &mut TestAppConte
     h.press_chord("cmd-shift-u", "ctrl-shift-alt-u", cx);
     let rows = cx.update(|cx| h.shell.read(cx).usage_view_rows(cx));
     assert_eq!(rows.len(), 2);
-    let claude = &rows[0];
+    // Worst first: the agent with numbers, then the one that has none.
+    let claude = &rows[1];
     assert_eq!(claude.view.agent, AgentId::CLAUDE);
     assert_eq!(claude.view.provenance(), Reason::SourceDisabled.sentence());
-    let codex = &rows[1];
+    let codex = &rows[0];
     assert_eq!(codex.windows.len(), 2);
     assert_eq!(
         codex.windows[0].meter.reset_text().as_deref(),
@@ -400,9 +457,46 @@ fn the_view_shows_resets_provenance_and_the_unknown_reason(cx: &mut TestAppConte
         codex.view.provenance(),
         "from Codex's own session log, 3 min ago"
     );
-    assert!(h.shows("usage-window-1-0", cx));
-    assert!(h.shows("usage-window-1-1", cx));
-    assert!(h.shows("usage-unknown-0", cx));
+    assert!(h.shows("usage-window-0-0", cx));
+    assert!(h.shows("usage-window-0-1", cx));
+    assert!(h.shows("usage-unknown-1", cx));
+}
+
+#[gpui_kit::test]
+fn opening_the_view_reads_once_when_the_last_reading_is_older_than_the_interval(
+    cx: &mut TestAppContext,
+) {
+    let (h, _) = open_usage(cx);
+    let codex = reading(
+        AgentId::CODEX,
+        &local(),
+        &[(WindowKind::FiveHour, 38.0, 8940)],
+    );
+    // Read three minutes ago, with a ten-minute interval: shown as it is.
+    put(&h, &codex, cx);
+    h.press_chord("cmd-shift-u", "ctrl-shift-alt-u", cx);
+    assert_eq!(h.shell(cx, |s| s.usage.last_request), None);
+    h.press("escape", cx);
+    // Read eleven minutes ago: opening the view reads, once.
+    h.store
+        .put_usage_reading(
+            &local(),
+            AgentId::CODEX,
+            &serde_json::to_string(&codex).unwrap(),
+            now() - 11 * 60,
+        )
+        .unwrap();
+    h.settle(cx);
+    h.press_chord("cmd-shift-u", "ctrl-shift-alt-u", cx);
+    let asked = h.shell(cx, |s| s.usage.last_request);
+    assert!(asked.is_some(), "the view read the stale numbers");
+    h.press("escape", cx);
+    h.press_chord("cmd-shift-u", "ctrl-shift-alt-u", cx);
+    assert_eq!(
+        h.shell(cx, |s| s.usage.last_request),
+        asked,
+        "not again within the interval"
+    );
 }
 
 #[gpui_kit::test]
@@ -569,7 +663,7 @@ fn below_the_critical_limit_or_with_the_setting_off_nothing_is_said(cx: &mut Tes
         &reading(
             AgentId::CLAUDE,
             &local(),
-            &[(WindowKind::FiveHour, 80.0, 3600)],
+            &[(WindowKind::FiveHour, 79.0, 3600)],
         ),
         cx,
     );
@@ -798,7 +892,7 @@ fn the_network_sources_are_on_by_default_and_a_file_that_set_them_off_stays_off(
         !policy.allows(AgentId::OPENCODE),
         "a file that says off stays off"
     );
-    assert_eq!(cx.update(|cx| settings::usage_interval_seconds(cx)), 60);
+    assert_eq!(cx.update(|cx| settings::usage_interval_seconds(cx)), 600);
 }
 
 #[gpui_kit::test]
@@ -1007,6 +1101,7 @@ fn a_window_at_93_percent_is_critical_with_a_marker_in_the_view_the_bar_and_the_
         &[AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE],
         now(),
         thresholds,
+        Default::default(),
         1600.0,
     )
     .items
@@ -1018,9 +1113,12 @@ fn a_window_at_93_percent_is_critical_with_a_marker_in_the_view_the_bar_and_the_
     let leon_usage::Body::Ready { primary, .. } = &rows[0].view.body else {
         panic!("numbers expected");
     };
-    assert!(crate::ui::usage_view::chip_text(primary).contains("93% !!"));
-    // And from 75 a warning, from the settings' own thresholds.
-    assert_eq!(thresholds.classify(75.0).glyph(), "!");
+    assert!(
+        crate::ui::usage_view::chip_text(primary, leon_usage::PercentDisplay::Used)
+            .contains("93% !!")
+    );
+    // And from 60 a warning, from the settings' own thresholds.
+    assert_eq!(thresholds.classify(60.0).glyph(), "!");
 }
 
 #[gpui_kit::test]
@@ -1133,6 +1231,7 @@ fn with_many_agents_the_bar_lists_those_with_numbers_and_folds_the_rest_into_a_c
         &all,
         1_790_000_000,
         leon_usage::Thresholds::default(),
+        Default::default(),
         1600.0,
     );
     let shown: Vec<AgentId> = model.items.iter().map(|i| i.agent).collect();
@@ -1151,6 +1250,7 @@ fn with_many_agents_the_bar_lists_those_with_numbers_and_folds_the_rest_into_a_c
         &all,
         1_790_000_000,
         leon_usage::Thresholds::default(),
+        Default::default(),
         1600.0,
     );
     assert_eq!(model.items.len(), 2);
@@ -1208,7 +1308,7 @@ fn the_view_tells_the_agents_with_numbers_from_those_not_installed_or_without_da
     assert_eq!(inactive, [AgentId::GROK, AgentId::CURSOR]);
     assert_eq!(
         active,
-        [AgentId::CLAUDE, AgentId::CODEX],
-        "signed out is not inactive: it needs you"
+        [AgentId::CODEX, AgentId::CLAUDE],
+        "signed out is not inactive: it needs you, after the agents with numbers"
     );
 }

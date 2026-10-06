@@ -316,6 +316,8 @@ const APPEARANCES: Choices =
 const LINES: Choices = Choices::Fixed(&[("theme", "Theme default"), ("on", "On"), ("off", "Off")]);
 const MOTION: Choices =
     Choices::Fixed(&[("system", "Follow system"), ("on", "On"), ("off", "Off")]);
+const BAR_MODES: Choices = Choices::Fixed(&[("detailed", "Detailed"), ("compact", "Compact")]);
+const PERCENT_DISPLAYS: Choices = Choices::Fixed(&[("used", "Used"), ("remaining", "Left")]);
 const CURSORS: Choices = Choices::Fixed(&[
     ("block", "Block"),
     ("beam", "Beam"),
@@ -810,7 +812,7 @@ const BASE: &[Def] = &[
         "usage_refresh_seconds",
         S::Usage,
         "Refresh interval",
-        "How often, in seconds, the limits are read again while the window is focused; it pauses in the background and reads once when you return. Network sources back off by themselves when the service asks for it.",
+        "How often, in seconds, the limits are read again while the window is focused; it pauses in the background and reads once when you return or open the usage view with an older reading. A source that calls a vendor is never called more often than every 60 seconds, and after a 429 it rests at least 5 minutes (or what the service asks for) and keeps the last numbers on show. Codex's own session log may follow a shorter interval.",
         "poll seconds minutes limits refresh",
         K::Number {
             min: 30,
@@ -818,13 +820,31 @@ const BASE: &[Def] = &[
             step: 30,
             unit: "s",
         },
-        D::Int(60),
+        D::Int(600),
+    ),
+    def(
+        "usage_bar_mode",
+        S::Usage,
+        "Usage bar",
+        "Detailed shows every window of each agent (`10% used 2h 29m · 91% used 1d 11h`, the countdown to the reset, a model's name for its own window) and gives way to Compact, one window per agent, as the window narrows. Compact shows only the window closest to its limit.",
+        "footer detailed compact verbose windows chips limits",
+        K::Choice(BAR_MODES),
+        D::Text("detailed"),
+    ),
+    def(
+        "usage_percentage_display",
+        S::Usage,
+        "Show limits as",
+        "Used (`38% used`) or what is left (`62% left`). Warnings always follow what is used.",
+        "percent remaining left used consumed limits",
+        K::Choice(PERCENT_DISPLAYS),
+        D::Text("used"),
     ),
     def(
         "usage_warn",
         S::Usage,
         "Warn from",
-        "From this percentage a limit is shown as high, with a marker as well as a colour.",
+        "From this percentage of what is used a limit is shown as high, with a marker as well as a colour.",
         "threshold warning percent limits",
         K::Number {
             min: 10,
@@ -832,13 +852,13 @@ const BASE: &[Def] = &[
             step: 5,
             unit: "%",
         },
-        D::Int(75),
+        D::Int(60),
     ),
     def(
         "usage_critical",
         S::Usage,
         "Critical from",
-        "From this percentage a limit is shown as near its end, and starting a session says so first.",
+        "From this percentage of what is used a limit is shown as near its end, and starting a session says so first.",
         "threshold error percent limits",
         K::Number {
             min: 11,
@@ -846,7 +866,7 @@ const BASE: &[Def] = &[
             step: 5,
             unit: "%",
         },
-        D::Int(90),
+        D::Int(80),
     ),
     def(
         "usage_warn_before_session",
@@ -1085,7 +1105,7 @@ fn network_texts(provider: UsageProvider) -> (String, String, &'static str) {
         ),
         UsageProvider::OpencodeGo => (
             "Read the opencode Go limits from opencode".into(),
-            "For an opencode Go subscription, Leon reads the API key opencode stored (~/.local/share/opencode/auth.json) and sends it over HTTPS to opencode.ai only to ask for the usage; it is never stored, logged or shown. On by default.".into(),
+            "For an opencode Go subscription, Leon reads the API key opencode stored (its auth.json, its credential database, or OPENCODE_API_KEY, read only) and sends it over HTTPS to opencode.ai only to ask for the usage; it is never stored, logged or shown. On by default.".into(),
             "network go credential key privacy limits",
         ),
         UsageProvider::Codex => (
@@ -1100,7 +1120,7 @@ fn network_texts(provider: UsageProvider) -> (String, String, &'static str) {
         ),
         UsageProvider::Cursor => (
             "Read Cursor's limits from Cursor".into(),
-            format!("Leon reads the session cursor-agent holds (the macOS keychain, or its auth.json) and sends it over HTTPS to cursor.com only to ask for your usage; it is never stored, logged or shown, and an expired session is reported, not refreshed. On by default; macOS may ask once for keychain access.{unverified}"),
+            format!("Leon reads the session cursor-agent holds (the macOS keychain, its auth.json, or the Cursor IDE's own session, read only) and sends it over HTTPS to cursor.com only to ask for your usage; it is never stored, logged or shown, and an expired session is reported, not refreshed. On by default; macOS may ask once for keychain access.{unverified}"),
             "network cursor credential token session privacy limits",
         ),
         UsageProvider::Kimi => (
@@ -1627,11 +1647,11 @@ pub fn render_docs() -> String {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_usage_network_sources_are_on_by_default_and_the_refresh_is_a_minute() {
+    fn the_usage_network_sources_are_on_by_default_and_the_refresh_is_ten_minutes() {
         let store = Store::new();
         assert_eq!(store.value("usage_claude_network"), Value::Bool(true));
         assert_eq!(store.value("usage_opencode_network"), Value::Bool(true));
-        assert_eq!(store.value("usage_refresh_seconds"), Value::Int(60));
+        assert_eq!(store.value("usage_refresh_seconds"), Value::Int(600));
         let def = find("usage_refresh_seconds").unwrap();
         assert!(def.parse_input("30").is_ok(), "30 s is the least");
         assert!(def.parse_input("29").is_err());

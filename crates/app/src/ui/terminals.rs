@@ -325,6 +325,7 @@ impl Shell {
             agent,
             (self.options.now)().timestamp(),
             crate::settings::usage_thresholds(cx),
+            crate::settings::usage_percent_display(cx),
         );
         if let Some(notice) = notice {
             self.engine.report(StatusKind::Info, notice);

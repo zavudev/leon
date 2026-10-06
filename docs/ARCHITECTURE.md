@@ -154,7 +154,7 @@ above: the engine writes the store and the UI reads it.
   pure parsers (`grok`, `cursor`, `kimi`, `zcode`, `antigravity`, `codex`,
   `claude`, `opencode`) plus one function in `network.rs`; every vendor host is
   in `ALLOWED_HOSTS` and a test pins that an unlisted host is refused. An
-  expired stored sign-in is `Reason::SessionExpired` and is never refreshed. Those run on this computer only and through the `Http` trait
+  expired stored sign-in (a 401, a 403 that is not a missing scope, or a credential with only a refresh token) is `Reason::SessionExpired` and is never refreshed; `Reason::keeps_numbers` says which failures leave the earlier numbers on show (`agent_usage::merge`), marked with their age; `NotSignedIn` is only for no credential at all, with `MissingScope`, `ApiKeyBilling`, `NoSubscription`, `KeyRejected` and `SpendsATurn` (Antigravity's latch, per machine, for the session) as their own reasons. Those run on this computer only and through the `Http` trait
   (`CurlHttp`: the system `curl`, the header on standard input so the token is
   never in a process list, HTTPS to one allowed host, no redirects, a time limit);
   a disabled source reads no credential and makes no call (tested with a
@@ -162,11 +162,11 @@ above: the engine writes the store and the UI reads it.
   (`Engine::set_usage_policy`, applied from the settings on every change, which
   also asks for a read at once, `Op::CollectUsageNow`), at most one collection
   at a time (so one request per source), a `Throttle` per source (exponential
-  back-off with jitter, `Retry-After` honoured, cleared when the source is
+  back-off with jitter, `Retry-After` honoured, at least `Throttle::RATE_LIMIT_MIN` (5 minutes) after a 429, cleared when the source is
   switched or the user chooses Try again), and a keychain refusal remembered for
   the session. Nothing is read until the window is up (`defer_usage` /
   `start_usage`); the schedule (`agent_usage::due`) reads every
-  `usage_refresh_seconds` (60, at least 30) in a focused window only. The credential is a `Secret` (no `Display`, no
+  `usage_refresh_seconds` (600, at least 30) in a focused window only; a scheduled read never calls a vendor within `network::MIN_GAP` (60 s) of its last call (`UsageSetup::last_called`), opening the usage view reads once when the reading is older than the interval, and a manual read goes through. The credential is a `Secret` (no `Display`, no
   `Serialize`, `Debug` prints `***`), read at the moment of the call, dropped with
   the request, and a failed call backs off (`Throttle`) and is shown as unknown,
   never as a number.
@@ -179,17 +179,18 @@ above: the engine writes the store and the UI reads it.
   under a local hash of the account, bounded to 14 days and 300 points a series;
   `Store::forget_usage_history`). `StoreChange::Usage` announces both.
 * **UI.** `agent_usage::Board` is what the window reads. `ui/usage_view.rs` holds
-  the pure model (`bar_model`, `density`, `usage_rows`, `step_scope`, tested
+  the pure model (`bar_model` with its `BarStyle`: detailed, every window, as Orca's footer, or compact; `density`; `usage_rows`, worst first; `step_scope`; tested
   without a window) and the drawing: the footer strip under the main pane (it
   absorbs the status line, and sits level with the sidebar's tools), the usage
   view overlay (`Overlay::Usage`, `Command::ShowUsage`) and the chip in a live
-  session's header. A level is a colour token of the theme **and** a marker.
+  session's header. A level is a colour token of the theme **and** a marker. Percentages go through one function (`present::percent_round`, half away from zero, clamped) and `PercentDisplay` (`usage_percentage_display`: used or left; levels always judge what is used). The default thresholds are Orca's, 60 and 80.
   `agent_usage::start_notice` words the line shown when a session of an agent at
   its critical limit starts.
 * **Settings.** The `Usage` section of the schema: the bar, the agents shown,
   the interval, the thresholds, the notice, the two network opt-ins (each with
   the exact text of what is read and where it is sent) and "Forget stored usage
   history".
+* **Differences from Orca, on purpose** (also in the README's Usage section): no hidden sessions, PTY scraping or `codex app-server`; no refreshing or rewriting of any CLI's credentials; no pasted cookies or multi-account switching; an honest `User-Agent: Leon/<version>` instead of imitating `claude-code` or `codex-cli` (only the protocol headers `anthropic-beta`, `OpenAI-Beta` and `ChatGPT-Account-Id` are sent); a 10 minute default refresh with a 60 second per-vendor floor; the `CLAUDE_CONFIG_DIR` keychain suffix is taken without NFC normalisation.
 * **`leon --diagnose usage`** runs the real collection for this computer and
   prints no account, e-mail, token or path; its network sources follow the
   settings (on by default), overridden by `--network <agent>` and

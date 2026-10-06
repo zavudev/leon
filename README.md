@@ -962,17 +962,36 @@ a test fails when it is stale.
 How much of each agent's limits is left, per machine. The footer under the main
 pane (level with the sidebar's tools, the whole width when the sidebar is
 hidden) shows, for every agent that is installed on the machine in context, its
-logo, a small meter and **one primary number**: the window closest to its limit,
-with the time to reset (`wk  91% !!  1d 11h`). The other windows (the five-hour
-one, the weekly one, a per-model bucket) are in the tooltip. A level is a colour
-**and** a marker, never a colour alone: `!` from the warning threshold (75% by
-default), `!!` from the critical one (90%). A window that has already reset
-since the numbers were read shows 0% and says so; one with no usable reading says
-why (`signed out`, `source off`, `too old`, `no data yet`) instead of a number.
-On a narrow window the bar gives up detail in steps: logo, meter, figure and
-time; then logo and figure; then a single indicator for the agent closest to
+logo, a small meter and, by default (**Usage bar: Detailed**), **every window**
+in Orca's wording, `N% used <label>` joined by `·`: the label of the five-hour
+and the weekly window is the live countdown to their reset (`2h 29m`, `1d 11h`,
+floored: `47m`, `6d 7h`, `now`), the label of a per-model window is the model's
+name: `10% used 2h 29m · 91% used 1d 11h !! · 0% used Fable`. **Compact** shows
+the one window closest to its limit (`wk  91% !!  1d 11h`). A level is a colour
+**and** a marker, never a colour alone: `!` from the warning threshold (60% used
+by default), `!!` from the critical one (80%), as Orca's. **Show limits as**
+(`usage_percentage_display`) shows what is left instead (`9% left`); the
+levels, the warnings and the notice always judge what is **used**. Every figure
+is rounded the same way everywhere (half away from zero: 12.5 reads 13, never
+12), between 0 and 100. A window that has already reset since the numbers were
+read shows 0% and says so; one with no usable reading says why (`signed out`,
+`source off`, `too old`, `no data yet`) instead of a number. On a narrow window
+the bar gives up detail in steps: every window of every agent; then the one
+closest to its limit (logo, meter, label, figure, time); then logo, meter and
+figure; then logo and figure; then a single indicator for the agent closest to
 its limit. The refresh button reads the limits again and says when they were
 last read.
+
+**When a read fails the numbers stay.** An expired or rejected sign-in (a 401,
+or a 403 that is not a missing scope), a rate limit, being offline and a vendor
+error keep the last good numbers on show, marked with their age (`(12 min ago)`
+in the bar, and the reason and when the next read is in the tooltip and the
+view), instead of an empty "not signed in". `Not signed in` is only said when
+there is no credential at all; an expired sign-in says what to do (run the
+agent once so it refreshes its own sign-in: Leon never does); a 403 that names a
+missing scope says the sign-in lacks permission to read usage; an account on an
+API key says that usage limits do not apply to API-key billing; an opencode key
+with no Go subscription says so, and a rejected key says that.
 
 `⇧⌘U` (`Ctrl+Shift+Alt+U`), a click on the bar and the palette's **Show usage**
 open the usage view: one row per agent and machine with `Resets in …`, a labelled
@@ -981,7 +1000,8 @@ fresh they are** ("from Codex's own session log, 3 min ago"), a small history
 line per window and, when at least two observations of the current window exist,
 a **burn-rate estimate** ("At this pace: limit in ~1h 10m (estimate)", or "you
 will not hit the limit before the reset"). `M` switches Detailed and Compact,
-`←`/`→` choose this machine, another machine or all of them, `R` reads again,
+`←`/`→` choose this machine, another machine or all of them, `R` reads again
+(the agent nearest a limit is listed first),
 `S` opens Settings ▸ Usage, `Esc` closes. The header of a live agent session
 shows that agent's primary window, and starting a session of an agent that is
 at or above the critical threshold says so in the status line, with the reset
@@ -996,13 +1016,13 @@ SSH machine's limits are the ones of that machine's account).
 | --- | --- | --- | --- |
 | Codex | its own session log | the `rate_limits` of the `token_count` events in `~/.codex/sessions` (five-hour and weekly windows, plan) | none |
 | Claude Code | Anthropic's usage endpoint | the sign-in token Claude Code already holds, sent to `api.anthropic.com` over HTTPS | on this computer only, **on by default**; turn it off in Settings ▸ Usage |
-| opencode | the Go usage endpoint | the Go API key opencode stored, sent to `opencode.ai` over HTTPS | on this computer only, **on by default**; turn it off in Settings ▸ Usage |
+| opencode | the Go usage endpoint | the Go API key opencode stored (the inline `OPENCODE_AUTH_CONTENT`, `auth.json`, OpenCode 2's credential database opened read only, or `OPENCODE_API_KEY`, in Orca's order), sent to `opencode.ai` over HTTPS | on this computer only, **on by default**; turn it off in Settings ▸ Usage |
 | Codex, fresher | OpenAI's backend usage endpoint | used only when the session log is more than ten minutes old: the ChatGPT sign-in Codex holds (`~/.codex/auth.json`, read only), sent to `chatgpt.com` over HTTPS; it starts no session and writes nothing | on this computer only, **on by default**; **implemented from Orca's reference, unverified against the live service** |
 | Grok | the billing endpoint of its CLI | the sign-in in `~/.grok/auth.json`, sent to `cli-chat-proxy.grok.com`; weekly credits, or the monthly budget | on this computer only, **on by default**; **unverified against the live service** |
-| Cursor | the dashboard's usage summary | the session `cursor-agent` holds (macOS keychain, or its `auth.json`), sent to `cursor.com` as the dashboard's session cookie; monthly plan, two model pools, on-demand | on this computer only, **on by default**; **unverified against the live service** |
+| Cursor | the dashboard's usage summary | the session `cursor-agent` holds (macOS keychain, or its `auth.json`) or, failing a live one, the Cursor IDE's own session (`state.vscdb`, opened read only), sent to `cursor.com` as the dashboard's session cookie; monthly plan, two model pools, on-demand | on this computer only, **on by default**; **unverified against the live service** |
 | Kimi | the managed `usages` endpoint | the sign-in in `~/.kimi-code/credentials/kimi-code.json`, sent to `api.kimi.com`; five-hour and weekly | on this computer only, **on by default**; **unverified against the live service** |
-| ZCode | the GLM Coding Plan quota | the plan key in `~/.zcode/cli/config.json`, sent to the plan's own host (`api.z.ai`, `open.bigmodel.cn`, `dev.bigmodel.cn`); five-hour, weekly, monthly | on this computer only, **on by default**; **unverified against the live service** |
-| Antigravity | its own `agy -p /usage` | the command's JSON (no credential read by Leon), only when `agy --version` is 1.1.11 or newer | on any machine through the runner, **on by default**; **unverified against the live service** |
+| ZCode | the GLM Coding Plan quota | the plan key in `~/.zcode/cli/config.json`, sent to the plan's own host (`api.z.ai`, `open.bigmodel.cn`, `dev.bigmodel.cn`); the five-hour and weekly plan windows and the `MCP` allowance, as Orca keeps them | on this computer only, **on by default**; **unverified against the live service** |
+| Antigravity | its own `agy -p /usage` | the command's JSON (no credential read by Leon), only when `agy --version` is 1.1.11 or newer; if a build answers with a model turn, Leon stops asking for the session on that machine (it would spend quota at every read) | on any machine through the runner, **on by default**; **unverified against the live service** |
 
 Of these, only Claude Code and the Codex session log have been checked against a
 live service; the opencode Go endpoint (from an earlier release) and the others
@@ -1041,13 +1061,45 @@ they are or why they are unknown, and nothing that identifies an account. It
 follows the same settings (on unless turned off); `--network <agent>` and
 `--no-network <agent|all>` override them for one run.
 
-**How often.** Every 60 seconds by default (Settings ▸ Usage, at least 30), only
-while the window is focused: it pauses in the background and reads once on
-return when the last reading is older than the interval. A network source has at
-most one request in flight, adds a little jitter, honours `Retry-After` and
-backs off exponentially after HTTP 429, 5xx or a failure (shown as "rate
-limited, next read in …"), and is skipped when the agent is not installed or not
-signed in. The first read happens after the window is up.
+**How often.** Every 10 minutes by default (Settings ▸ Usage, from 30 seconds;
+a value you set yourself is kept), only while the window is focused: it pauses
+in the background and reads once on return, or when you open the usage view,
+when the last reading is older than the interval. **Refresh now** reads at
+once. Whatever the setting, a source that calls a vendor is not called more
+often than every 60 seconds by the schedule (Codex's own session log may follow
+a shorter interval, it costs nothing). A network source has at most one request
+in flight, adds a little jitter, honours `Retry-After`, backs off exponentially
+after a 5xx or a failure, and after an HTTP 429 rests at least 5 minutes (or
+what the service asked, if longer), says "Rate limited by Anthropic: … Next
+read in 5m" and keeps the last numbers. A source is skipped when the agent is
+not installed or not signed in. The first read happens after the window is up.
+
+**Where Leon deliberately differs from Orca.** The counters follow Orca's rules
+(its windows, thresholds, rounding, rate-limit handling and wording; Orca's
+code is MIT-licensed and was read, not copied), with these differences, all on
+purpose:
+
+* No hidden agent sessions, no PTY scraping and no `codex app-server` launch to
+  read usage: only the files the agent already writes, the agent's own command
+  line where it has a metadata command, and the vendor's usage endpoint.
+* Leon never refreshes, rotates or rewrites any CLI's credentials (Orca's
+  recovery paths do): an expired sign-in is reported and the agent renews its
+  own.
+* No pasted cookies or keys, and no multi-account switching: Leon reads the one
+  account each agent is signed in to.
+* Leon says who it is. Orca sends `User-Agent: claude-code/2.1.0` to
+  Anthropic and `codex-cli` with `originator: Codex Desktop` to OpenAI; Leon
+  sends `User-Agent: Leon/<version>` and only the headers that are part of each
+  API's contract (`anthropic-beta`, `OpenAI-Beta`, `ChatGPT-Account-Id`).
+  Imitating another client is misrepresentation to the vendor.
+* The refresh default is 10 minutes (Orca polls every 15 minutes with a 5
+  minute gap), settable down to 30 seconds with a 60 second floor per vendor.
+* Where Orca's `expiresAt` is not authoritative (the server decides), neither
+  is it Leon's: a 401 is a stale sign-in whatever the stored time says.
+* Leon takes the `CLAUDE_CONFIG_DIR` folder as the environment spells it when it
+  scopes the keychain item (Orca normalises it to NFC first).
+* The footer also shows a marker (`!`, `!!`) after a window at a warning or
+  critical level, so that colour is never the only signal.
 
 ## The sidebar
 

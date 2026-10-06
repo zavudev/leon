@@ -51,6 +51,7 @@ pub use shell::{system_picker, Options, Picked, Shell};
 pub use themes::FOLDER as THEMES_FOLDER;
 pub use tree::DEFAULT as DEFAULT_SESSIONS_SHOWN;
 pub use usage_view::agent_name as agent_display_name;
+pub use usage_view::footer_text;
 
 #[cfg(test)]
 mod tests;

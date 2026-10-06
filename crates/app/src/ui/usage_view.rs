@@ -21,8 +21,8 @@ use gpui_kit::prelude::*;
 use gpui_kit::{div, Context, Div, FontWeight, Hsla, SharedString, Stateful, Task, Window};
 use leon_core::{AgentId, MachineId, UsagePoint};
 use leon_usage::{
-    compact_duration, forecast, series_key, view, AgentUsage, AgentView, Body, Level, Meter,
-    Sample, Thresholds,
+    countdown, forecast, series_key, view, AgentUsage, AgentView, Body, Level, Meter,
+    PercentDisplay, Sample, Thresholds, WindowKind,
 };
 
 use super::shell::{Overlay, Shell};
@@ -42,7 +42,12 @@ pub const SPARK_POINTS: usize = 24;
 /// How much of the bar's meters fit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Density {
-    /// Logo, meter, label, figure, marker and time to reset.
+    /// Every window of every agent, as Orca's default footer: the logo, a
+    /// meter for the closest window, then `N% used <countdown>` for each
+    /// window, joined by dots.
+    Detailed,
+    /// Logo, meter, label, figure, marker and time to reset: the one window
+    /// closest to its limit.
     Full,
     /// Logo, meter, figure and marker.
     Short,
@@ -61,9 +66,20 @@ const COST_FULL: f32 = 250.0;
 const COST_SHORT: f32 = 150.0;
 const COST_MINIMAL: f32 = 74.0;
 
+/// What the bar's text takes per character, an item's logo, padding and gap,
+/// and a meter, in pixels.
+const CHAR: f32 = 7.0;
+const ITEM: f32 = 13.0 + 6.0 + 8.0 + 12.0;
+const METER: f32 = 36.0;
+
+/// The room the bar's meters have at this window width, in pixels.
+fn room(width: f32) -> f32 {
+    (width - RESERVED).max(0.0)
+}
+
 /// The densest the bar can be at this window width for this many agents.
 pub fn density(width: f32, agents: usize) -> Density {
-    let room = (width - RESERVED).max(0.0);
+    let room = room(width);
     let n = agents.max(1) as f32;
     if n * COST_FULL <= room {
         Density::Full
@@ -73,6 +89,51 @@ pub fn density(width: f32, agents: usize) -> Density {
         Density::Minimal
     } else {
         Density::Single
+    }
+}
+
+/// How the bar words and draws what it shows: all windows or the worst one,
+/// and used or left.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BarStyle {
+    /// Every window of each agent (`true`) or only the one closest to its
+    /// limit.
+    pub detailed: bool,
+    /// `N% used` or `N% left`.
+    pub display: PercentDisplay,
+}
+
+impl Default for BarStyle {
+    fn default() -> Self {
+        Self {
+            detailed: true,
+            display: PercentDisplay::Used,
+        }
+    }
+}
+
+/// What a detailed bar says of one window.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BarWindow {
+    /// `10% used 2h 29m`: the figure, then the countdown to the reset (a
+    /// model's name for its own window).
+    pub text: String,
+    /// The marker of the level: empty, `!` or `!!`.
+    pub glyph: &'static str,
+    /// How close to its limit.
+    pub level: Level,
+    /// The used percentage.
+    pub percent: f32,
+}
+
+/// What a window is called in the detailed bar: the live countdown to its
+/// reset for the session, the week and the month, the model's name for a
+/// model's window, the source's own label for any other.
+fn window_label(meter: &Meter) -> String {
+    match &meter.kind {
+        WindowKind::ModelWeekly(name) | WindowKind::Custom(name) => name.clone(),
+        _ if meter.reset_since_seen => countdown(0),
+        kind => meter.resets_in.map_or_else(|| kind.short(), countdown),
     }
 }
 
@@ -87,6 +148,14 @@ pub struct BarItem {
     pub label: String,
     /// The percentage as a fixed-width figure, empty when unknown.
     pub figure: String,
+    /// Whether the figure is what is left, not what is used.
+    pub left: bool,
+    /// Every window, for the detailed bar; empty when nothing is known.
+    pub windows: Vec<BarWindow>,
+    /// How old the numbers are, in seconds.
+    pub age: Option<i64>,
+    /// When the numbers are kept after a failed read: how old they are.
+    pub stale: Option<String>,
     /// The marker of the level: empty, `!` or `!!`.
     pub glyph: &'static str,
     /// Time to reset in the compact form (`2h 29m`), when known.
@@ -101,6 +170,28 @@ pub struct BarItem {
     pub tip: String,
     /// Why nothing is known, when nothing is.
     pub reason: Option<leon_usage::Reason>,
+}
+
+impl BarItem {
+    /// What the detailed bar says: `10% used 2h 29m · 91% used 1d 11h !! · 0%
+    /// used Fable`, each window's marker after its text.
+    pub fn detailed_text(&self) -> String {
+        self.windows
+            .iter()
+            .map(|w| format!("{}{}", w.text, glyph_tail(w.glyph)))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+
+    /// What this agent takes of the bar in the detailed form, in pixels.
+    fn detailed_cost(&self) -> f32 {
+        let text = if self.known {
+            METER + 6.0 + self.detailed_text().chars().count() as f32 * CHAR
+        } else {
+            self.label.chars().count() as f32 * CHAR
+        };
+        ITEM + text
+    }
 }
 
 /// How many agents the bar lists one by one. With more, the ones with numbers
@@ -125,15 +216,15 @@ pub struct BarModel {
 }
 
 /// The line of hover text of one meter.
-fn meter_line(meter: &Meter) -> String {
+fn meter_line(meter: &Meter, display: PercentDisplay) -> String {
     let tail = meter
         .reset_text()
         .map(|text| format!(" · {text}"))
         .unwrap_or_default();
     format!(
-        "{}: {:.0}% used{}{}",
+        "{}: {}{}{}",
         meter.kind.long(),
-        meter.percent,
+        display.label(meter.percent),
         if meter.level.glyph().is_empty() {
             String::new()
         } else {
@@ -144,6 +235,7 @@ fn meter_line(meter: &Meter) -> String {
 }
 
 /// What the bar shows for the machine in context.
+#[allow(clippy::too_many_arguments)]
 pub fn bar_model(
     board: &Board,
     context: &MachineId,
@@ -151,6 +243,7 @@ pub fn bar_model(
     shown: &[AgentId],
     now: i64,
     thresholds: Thresholds,
+    style: BarStyle,
     width: f32,
 ) -> BarModel {
     let mut items = Vec::new();
@@ -164,6 +257,10 @@ pub fn bar_model(
                 machine: reading.machine.clone(),
                 label: reason.short().to_owned(),
                 figure: String::new(),
+                left: false,
+                windows: Vec::new(),
+                age: None,
+                stale: None,
                 glyph: "",
                 reset: None,
                 level: Level::Normal,
@@ -179,7 +276,7 @@ pub fn bar_model(
                 }
                 for meter in meters {
                     tip.push('\n');
-                    tip.push_str(&meter_line(meter));
+                    tip.push_str(&meter_line(meter, style.display));
                 }
                 tip.push('\n');
                 tip.push_str(&v.provenance());
@@ -187,12 +284,28 @@ pub fn bar_model(
                     agent: reading.agent,
                     machine: reading.machine.clone(),
                     label: primary.kind.short(),
-                    figure: leon_usage::percent_fixed(primary.percent),
+                    figure: style.display.fixed(primary.percent),
+                    left: style.display == PercentDisplay::Remaining,
+                    windows: meters
+                        .iter()
+                        .map(|meter| BarWindow {
+                            text: format!(
+                                "{} {}",
+                                style.display.label(meter.percent),
+                                window_label(meter)
+                            ),
+                            glyph: meter.level.glyph(),
+                            level: meter.level,
+                            percent: meter.percent as f32,
+                        })
+                        .collect(),
+                    age: v.age,
+                    stale: None,
                     glyph: primary.level.glyph(),
                     reset: primary
                         .resets_in
                         .filter(|_| !primary.reset_since_seen)
-                        .map(compact_duration),
+                        .map(countdown),
                     level: primary.level,
                     percent: primary.percent as f32,
                     known: true,
@@ -216,15 +329,52 @@ pub fn bar_model(
         .filter(|(_, item)| item.known)
         .max_by(|a, b| a.1.percent.total_cmp(&b.1.percent))
         .map(|(index, _)| index);
+    let detailed_fits = style.detailed
+        && !items.is_empty()
+        && items.iter().map(BarItem::detailed_cost).sum::<f32>() <= room(width);
     BarModel {
         folded,
-        density: density(width, items.len()),
+        density: if detailed_fits {
+            Density::Detailed
+        } else {
+            density(width, items.len())
+        },
         worst,
         updated: board
             .collected_at()
             .map(|at| leon_usage::ago((now - at).max(0))),
         items,
     }
+}
+
+/// What the detailed footer says of one reading, as the bar draws it:
+/// `10% used 2h 29m · 91% used 1d 11h !!`. `None` when nothing is known.
+pub fn footer_text(
+    reading: &AgentUsage,
+    now: i64,
+    thresholds: Thresholds,
+    display: PercentDisplay,
+) -> Option<String> {
+    let board = Board::new_for(vec![reading.clone()]);
+    let machine = MachineId::from_string(reading.machine.clone());
+    let model = bar_model(
+        &board,
+        &machine,
+        "",
+        &[reading.agent],
+        now,
+        thresholds,
+        BarStyle {
+            detailed: true,
+            display,
+        },
+        f32::MAX,
+    );
+    model
+        .items
+        .first()
+        .filter(|item| item.known)
+        .map(BarItem::detailed_text)
 }
 
 /// What an agent is called.
@@ -301,7 +451,7 @@ pub fn usage_rows(
     thresholds: Thresholds,
     history: &HashMap<HistoryKey, Vec<UsagePoint>>,
 ) -> Vec<UsageRow> {
-    board
+    let mut rows: Vec<UsageRow> = board
         .select(scope, context, shown)
         .into_iter()
         .map(|reading: &AgentUsage| {
@@ -328,7 +478,21 @@ pub fn usage_rows(
                 try_again: false,
             }
         })
-        .collect()
+        .collect();
+    // Worst first, as Orca's roster does: the agent nearest a limit on top,
+    // those with nothing known after the ones with numbers. The sort is stable,
+    // so equal agents keep the catalogue's order.
+    rows.sort_by(|a, b| worst_percent(b).total_cmp(&worst_percent(a)));
+    rows
+}
+
+/// The used percentage of the window closest to its limit; below any real
+/// figure when nothing is known.
+fn worst_percent(row: &UsageRow) -> f64 {
+    match &row.view.body {
+        Body::Ready { primary, .. } => primary.percent,
+        Body::Unknown(_) => -1.0,
+    }
 }
 
 /// What the engine and the clock add to a reading: see [`annotate_rows`].
@@ -416,7 +580,23 @@ pub fn annotate_rows(rows: &mut [UsageRow], note: &Note<'_>) {
 /// "reading…" or its failure.
 pub fn annotate_bar(model: &mut BarModel, note: &Note<'_>) {
     for item in &mut model.items {
-        if item.known || item.machine != note.local {
+        if item.machine != note.local {
+            continue;
+        }
+        if item.known {
+            // Numbers kept after a failed read stay on show, marked with their
+            // age, and the tip says why they are not newer.
+            let status = note.status(item.agent);
+            if status.failed.is_some() && !status.reading {
+                if let Some(age) = item.age {
+                    item.stale = Some(leon_usage::ago(age));
+                }
+                if let Some(text) =
+                    failure_note(item.agent, &status, note.now, note.next_read, note.mac)
+                {
+                    item.tip = format!("{}\n{text}", item.tip);
+                }
+            }
             continue;
         }
         let Some(reason) = item.reason else { continue };
@@ -601,6 +781,10 @@ impl Shell {
             &settings::usage_agents(cx),
             self.usage_now(),
             settings::usage_thresholds(cx),
+            BarStyle {
+                detailed: settings::usage_bar_detailed(cx),
+                display: settings::usage_percent_display(cx),
+            },
             self.strip_width(cx),
         );
         annotate_bar(&mut model, &self.usage_note(&statuses));
@@ -755,7 +939,28 @@ impl Shell {
         self.usage.scope = Scope::Context;
         self.usage_reload();
         self.usage_load_history();
+        self.usage_read_if_stale(cx);
         self.focus.focus(window, cx);
+    }
+
+    /// Opening the view reads once when the last read is older than the
+    /// interval, as coming back to the window does; a fresh reading is shown
+    /// as it is.
+    fn usage_read_if_stale(&mut self, cx: &mut Context<Self>) {
+        if !self.engine.collects_usage() || self.engine.usage_collecting() {
+            return;
+        }
+        let interval = settings::usage_interval_seconds(cx);
+        let stale = self
+            .usage
+            .board
+            .collected_at()
+            .is_none_or(|at| self.usage_now() - at >= interval);
+        if stale
+            && crate::agent_usage::due(self.usage.last_request, self.usage_now(), interval, 0, true)
+        {
+            self.usage_request(Op::CollectUsage, cx);
+        }
     }
 
     /// Reads the limits again now.
@@ -1013,8 +1218,39 @@ impl Shell {
                     .child(item.label.clone()),
             );
         }
-        if matches!(density, Density::Full | Density::Short) {
-            chip = chip.child(meter_bar(item.percent, 36.0, colour, colours));
+        if matches!(density, Density::Detailed | Density::Full | Density::Short) {
+            chip = chip.child(meter_bar(item.percent, METER, colour, colours));
+        }
+        if density == Density::Detailed {
+            // Every window: `10% used 2h 29m · 91% used 1d 11h !!`, each in
+            // the colour of its own level, with its marker after it.
+            let mut text = div()
+                .debug_selector({
+                    let name = format!("usage-figure-{}", item.agent.as_str());
+                    move || name.clone()
+                })
+                .flex()
+                .items_center()
+                .gap(px(5.));
+            for (n, window) in item.windows.iter().enumerate() {
+                if n > 0 {
+                    text = text.child(mono("·").text_color(colours.text_faint));
+                }
+                text = text.child(
+                    mono(format!("{}{}", window.text, glyph_tail(window.glyph)))
+                        .text_size(metrics::TEXT_SMALL())
+                        .text_color(level_colour(window.level, colours)),
+                );
+            }
+            chip = chip.child(text);
+            if let Some(age) = &item.stale {
+                chip = chip.child(
+                    mono(format!("({age})"))
+                        .text_size(metrics::TEXT_SMALL())
+                        .text_color(colours.text_faint),
+                );
+            }
+            return chip;
         }
         if density == Density::Full {
             chip = chip.child(
@@ -1024,18 +1260,30 @@ impl Shell {
             );
         }
         chip = chip.child(
-            mono(format!("{}{}", item.figure, glyph_tail(item.glyph)))
-                .debug_selector({
-                    let name = format!("usage-figure-{}", item.agent.as_str());
-                    move || name.clone()
-                })
-                .text_size(metrics::TEXT_SMALL())
-                .text_color(colour),
+            mono(format!(
+                "{}{}{}",
+                item.figure,
+                if item.left { " left" } else { "" },
+                glyph_tail(item.glyph)
+            ))
+            .debug_selector({
+                let name = format!("usage-figure-{}", item.agent.as_str());
+                move || name.clone()
+            })
+            .text_size(metrics::TEXT_SMALL())
+            .text_color(colour),
         );
         if density == Density::Full {
             if let Some(reset) = &item.reset {
                 chip = chip.child(
                     mono(reset.clone())
+                        .text_size(metrics::TEXT_SMALL())
+                        .text_color(colours.text_faint),
+                );
+            }
+            if let Some(age) = &item.stale {
+                chip = chip.child(
+                    mono(format!("({age})"))
                         .text_size(metrics::TEXT_SMALL())
                         .text_color(colours.text_faint),
                 );
@@ -1068,7 +1316,7 @@ impl Shell {
             return None;
         };
         let colour = level_colour(primary.level, colours);
-        let text = chip_text(primary);
+        let text = chip_text(primary, settings::usage_percent_display(cx));
         Some(
             div()
                 .id("header-usage")
@@ -1300,6 +1548,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let v = &row.view;
+        let display = settings::usage_percent_display(cx);
         let name = format!(
             "{}{}",
             agent_name(v.agent),
@@ -1357,7 +1606,7 @@ impl Shell {
                     for window in &row.windows {
                         let colour = level_colour(window.meter.level, colours);
                         line = line.child(
-                            mono(window.meter.text())
+                            mono(window.meter.text_for(display))
                                 .text_size(metrics::TEXT_SMALL())
                                 .text_color(colour),
                         );
@@ -1386,11 +1635,16 @@ impl Shell {
                 ))
                 .child(
                     mono(format!(
-                        "{}{}",
-                        leon_usage::percent_fixed(window.meter.percent),
+                        "{}{}{}",
+                        display.fixed(window.meter.percent),
+                        if display == PercentDisplay::Remaining {
+                            " left"
+                        } else {
+                            ""
+                        },
                         glyph_tail(window.meter.level.glyph())
                     ))
-                    .w(px(64.))
+                    .w(px(96.))
                     .text_color(colour),
                 )
                 .child(
@@ -1455,18 +1709,24 @@ impl Shell {
     }
 }
 
-/// What the header's chip says of a window: `wk 93 % !! · 1d 11h`, with the
-/// marker of its level as well as its colour.
-pub fn chip_text(primary: &Meter) -> String {
+/// What the header's chip says of a window: `wk 93% !! · 1d 11h`, or `wk 7%
+/// left !! · 1d 11h` when the setting shows what is left, with the marker of
+/// its level as well as its colour.
+pub fn chip_text(primary: &Meter, display: PercentDisplay) -> String {
     format!(
-        "{} {}{}{}",
+        "{} {}%{}{}{}",
         primary.kind.short(),
-        leon_usage::percent_fixed(primary.percent).trim_start(),
+        display.number(primary.percent),
+        if display == PercentDisplay::Remaining {
+            " left"
+        } else {
+            ""
+        },
         glyph_tail(primary.level.glyph()),
         primary
             .resets_in
             .filter(|_| !primary.reset_since_seen)
-            .map(|s| format!(" · {}", compact_duration(s)))
+            .map(|s| format!(" · {}", countdown(s)))
             .unwrap_or_default()
     )
 }
@@ -1565,6 +1825,7 @@ mod tests {
             &[AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE],
             NOW,
             Thresholds::default(),
+            BarStyle::default(),
             width,
         )
     }
@@ -1623,10 +1884,10 @@ mod tests {
             let item = model(&board, 1600.0).items.remove(0);
             (item.level, item.glyph)
         };
-        assert_eq!(level_of(74.0), (Level::Normal, ""));
-        assert_eq!(level_of(75.0), (Level::Warning, "!"));
-        assert_eq!(level_of(89.0), (Level::Warning, "!"));
-        assert_eq!(level_of(90.0), (Level::Critical, "!!"));
+        assert_eq!(level_of(59.0), (Level::Normal, ""));
+        assert_eq!(level_of(60.0), (Level::Warning, "!"));
+        assert_eq!(level_of(79.0), (Level::Warning, "!"));
+        assert_eq!(level_of(80.0), (Level::Critical, "!!"));
     }
 
     #[test]
@@ -1858,5 +2119,232 @@ mod tests {
         let s = step_scope(&s, &machines, &local, 1);
         assert_eq!(s, Scope::Context);
         assert_eq!(step_scope(&s, &machines, &local, -1), Scope::All);
+    }
+
+    fn model_styled(board: &Board, width: f32, style: BarStyle) -> BarModel {
+        bar_model(
+            board,
+            &MachineId::local(),
+            "This computer",
+            &[AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE],
+            NOW,
+            Thresholds::default(),
+            style,
+            width,
+        )
+    }
+
+    fn orca_like() -> Board {
+        Board::new(vec![reading(
+            AgentId::CLAUDE,
+            "local",
+            vec![
+                (WindowKind::FiveHour, 10.0, 2 * 3600 + 29 * 60 + 40),
+                (WindowKind::Weekly, 91.0, DAY_AND_11H + 59),
+                (
+                    WindowKind::ModelWeekly("Fable".into()),
+                    0.0,
+                    6 * 86_400 + 7 * 3600,
+                ),
+            ],
+        )])
+    }
+
+    const DAY_AND_11H: i64 = 86_400 + 11 * 3600;
+
+    #[test]
+    fn the_detailed_bar_is_orcas_text_with_countdowns_and_model_names() {
+        let item = model(&orca_like(), 2400.0).items.remove(0);
+        assert_eq!(
+            item.detailed_text(),
+            "10% used 2h 29m · 91% used 1d 11h !! · 0% used Fable"
+        );
+        assert_eq!(model(&orca_like(), 2400.0).density, Density::Detailed);
+    }
+
+    #[test]
+    fn the_countdown_floors_and_a_reset_that_has_passed_says_now() {
+        let board = Board::new(vec![reading(
+            AgentId::CLAUDE,
+            "local",
+            vec![
+                (WindowKind::FiveHour, 20.0, 47 * 60 + 59),
+                (WindowKind::Weekly, 30.0, 6 * 86_400 + 7 * 3600 + 3000),
+                (WindowKind::Monthly, 40.0, -5),
+            ],
+        )]);
+        let item = model(&board, 2400.0).items.remove(0);
+        assert_eq!(
+            item.detailed_text(),
+            "20% used 47m · 30% used 6d 7h · 0% used now"
+        );
+    }
+
+    #[test]
+    fn the_compact_bar_is_one_window_per_agent_and_the_detailed_one_gives_way_to_it() {
+        let compact = BarStyle {
+            detailed: false,
+            ..BarStyle::default()
+        };
+        let m = model_styled(&orca_like(), 2400.0, compact);
+        assert_eq!(m.density, Density::Full);
+        let item = &m.items[0];
+        assert_eq!((item.label.as_str(), item.figure.as_str()), ("wk", " 91%"));
+        // Detailed, but the window is too narrow for every window: compact.
+        let m = model(&orca_like(), 600.0);
+        assert!(
+            matches!(m.density, Density::Full | Density::Short),
+            "{:?}",
+            m.density
+        );
+    }
+
+    #[test]
+    fn percent_left_is_the_complement_of_the_rounded_used_figure_in_every_surface() {
+        let left = BarStyle {
+            display: PercentDisplay::Remaining,
+            ..BarStyle::default()
+        };
+        let m = model_styled(&orca_like(), 2400.0, left);
+        let item = &m.items[0];
+        assert_eq!(
+            item.detailed_text(),
+            "90% left 2h 29m · 9% left 1d 11h !! · 100% left Fable"
+        );
+        assert_eq!((item.figure.as_str(), item.left), ("  9%", true));
+        assert!(
+            item.tip.contains("Weekly: 9% left (near the limit)"),
+            "{}",
+            item.tip
+        );
+        // The level is still judged on what is used.
+        assert_eq!(item.level, Level::Critical);
+        let rows = usage_rows(
+            &orca_like(),
+            &Scope::Context,
+            &MachineId::local(),
+            &[AgentId::CLAUDE],
+            &|id| id.to_owned(),
+            NOW,
+            Thresholds::default(),
+            &HashMap::new(),
+        );
+        let weekly = &rows[0].windows[1].meter;
+        assert_eq!(
+            weekly.text_for(PercentDisplay::Remaining),
+            "wk   9% left !!"
+        );
+        assert_eq!(
+            chip_text(weekly, PercentDisplay::Remaining),
+            "wk 9% left !! · 1d 11h"
+        );
+        assert_eq!(
+            chip_text(weekly, PercentDisplay::Used),
+            "wk 91% !! · 1d 11h"
+        );
+    }
+
+    #[test]
+    fn a_half_percent_rounds_up_in_the_bar_the_tip_and_the_chip() {
+        let board = Board::new(vec![reading(
+            AgentId::CODEX,
+            "local",
+            vec![(WindowKind::FiveHour, 12.5, 3600)],
+        )]);
+        let item = model(&board, 2400.0).items.remove(0);
+        assert_eq!(item.figure, " 13%");
+        assert_eq!(item.detailed_text(), "13% used 1h");
+        assert!(item.tip.contains("13% used"), "{}", item.tip);
+        let left = model_styled(
+            &board,
+            2400.0,
+            BarStyle {
+                display: PercentDisplay::Remaining,
+                ..BarStyle::default()
+            },
+        );
+        assert_eq!(left.items[0].detailed_text(), "87% left 1h");
+    }
+
+    #[test]
+    fn the_view_lists_the_agent_nearest_a_limit_first() {
+        let board = Board::new(vec![
+            reading(
+                AgentId::CLAUDE,
+                "local",
+                vec![(WindowKind::Weekly, 20.0, 100)],
+            ),
+            reading(
+                AgentId::CODEX,
+                "local",
+                vec![(WindowKind::Weekly, 91.0, 100)],
+            ),
+            AgentUsage::unknown(AgentId::OPENCODE, "local", Reason::NotSignedIn),
+        ]);
+        let rows = usage_rows(
+            &board,
+            &Scope::Context,
+            &MachineId::local(),
+            &[AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE],
+            &|id| id.to_owned(),
+            NOW,
+            Thresholds::default(),
+            &HashMap::new(),
+        );
+        let order: Vec<AgentId> = rows.iter().map(|r| r.view.agent).collect();
+        assert_eq!(order, [AgentId::CODEX, AgentId::CLAUDE, AgentId::OPENCODE]);
+    }
+
+    #[test]
+    fn numbers_kept_after_a_failed_read_are_marked_with_their_age_and_say_why() {
+        let board = Board::new(vec![reading(
+            AgentId::CLAUDE,
+            "local",
+            vec![(WindowKind::Weekly, 40.0, 100_000)],
+        )]);
+        let mut m = model(&board, 2400.0);
+        assert_eq!(m.items[0].stale, None);
+        let mut statuses = Statuses::new();
+        statuses.insert(
+            AgentId::CLAUDE,
+            SourceStatus {
+                failed: Some(Reason::SessionExpired),
+                retry_at: Some(NOW + 120),
+                ..Default::default()
+            },
+        );
+        let note = Note {
+            statuses: &statuses,
+            now: NOW,
+            next_read: None,
+            mac: false,
+            local: "local",
+        };
+        annotate_bar(&mut m, &note);
+        assert_eq!(m.items[0].stale.as_deref(), Some("1 min ago"));
+        assert!(m.items[0].known, "the numbers stay");
+        assert!(
+            m.items[0].tip.contains("Run the agent once"),
+            "{}",
+            m.items[0].tip
+        );
+        let mut rows = usage_rows(
+            &board,
+            &Scope::Context,
+            &MachineId::local(),
+            &[AgentId::CLAUDE],
+            &|id| id.to_owned(),
+            NOW,
+            Thresholds::default(),
+            &HashMap::new(),
+        );
+        annotate_rows(&mut rows, &note);
+        assert!(matches!(rows[0].view.body, Body::Ready { .. }));
+        assert!(rows[0]
+            .note
+            .as_deref()
+            .unwrap()
+            .contains("Run the agent once"));
+        assert!(rows[0].try_again);
     }
 }

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::engine::SourceStatus;
 use leon_core::{AgentId, MachineId, Store, UsagePoint};
-use leon_usage::{series_key, AgentUsage, MachineUsage, Reason, State, Thresholds};
+use leon_usage::{series_key, AgentUsage, MachineUsage, PercentDisplay, Reason, State, Thresholds};
 use leon_usage::{view, Body, Level};
 
 /// How long the stored observations are kept, in seconds.
@@ -32,16 +32,8 @@ pub fn merge(previous: Option<AgentUsage>, new: AgentUsage) -> AgentUsage {
                     ..
                 },
             ),
-            State::Unknown {
-                reason:
-                    Reason::Unreachable
-                    | Reason::NoData
-                    | Reason::Offline
-                    | Reason::VendorError(_)
-                    | Reason::RateLimited(_)
-                    | Reason::KeychainDenied,
-            },
-        ) => old,
+            State::Unknown { reason },
+        ) if reason.keeps_numbers() => old,
         _ => new,
     }
 }
@@ -118,7 +110,10 @@ pub fn unknown_text(
         return format!("Not signed in to {name}. Sign in there, then choose Try again.");
     }
     let base = match reason {
-        Reason::RateLimited(_) => "Rate limited: the service asked for fewer calls.".to_owned(),
+        Reason::RateLimited(_) => format!(
+            "Rate limited by {}: it asked for fewer calls.",
+            leon_usage::model::vendor(agent)
+        ),
         Reason::ParseError => "Unexpected response from the service.".to_owned(),
         other => other.text(),
     };
@@ -230,12 +225,17 @@ pub struct Board {
 
 impl Board {
     /// A board over these readings.
-    #[cfg(test)]
-    pub fn new(readings: Vec<AgentUsage>) -> Self {
+    pub fn new_for(readings: Vec<AgentUsage>) -> Self {
         Self {
             readings,
             collected_at: None,
         }
+    }
+
+    /// A board over these readings, in tests.
+    #[cfg(test)]
+    pub fn new(readings: Vec<AgentUsage>) -> Self {
+        Self::new_for(readings)
     }
 
     /// The same board, collected at this time (Unix seconds).
@@ -322,6 +322,7 @@ pub fn start_notice(
     agent: AgentId,
     now: i64,
     thresholds: Thresholds,
+    display: PercentDisplay,
 ) -> Option<String> {
     let reading = board.get(machine, agent)?;
     let v = view(reading, now, thresholds);
@@ -337,10 +338,14 @@ pub fn start_notice(
         .map(|s| format!(", resets in {}", leon_usage::compact_duration(s)))
         .unwrap_or_default();
     let name = agent.name();
-    let state = if worst.percent >= 100.0 {
+    // The window is judged on what is used; only the wording follows the
+    // setting.
+    let state = if leon_usage::percent_round(worst.percent) >= 100 {
         "is at its limit".to_owned()
+    } else if display == PercentDisplay::Remaining {
+        format!("has {}", display.label(worst.percent))
     } else {
-        format!("is {:.0}% used", worst.percent)
+        format!("is {}", display.label(worst.percent))
     };
     Some(format!("{name}: {} {state}{when}.", worst.kind.long()))
 }
@@ -404,12 +409,24 @@ mod tests {
             Reason::VendorError(500),
             Reason::RateLimited(60),
             Reason::KeychainDenied,
+            Reason::SessionExpired,
         ] {
             let new = AgentUsage::unknown(AgentId::CLAUDE, "box", reason);
             assert_eq!(merge(Some(old.clone()), new), old, "{reason:?}");
         }
-        let signed_out = AgentUsage::unknown(AgentId::CLAUDE, "box", Reason::NotSignedIn);
-        assert_eq!(merge(Some(old), signed_out.clone()), signed_out);
+        // A sign-out, a missing permission, an API-key account or a rejected
+        // key say something about the account: they replace the numbers.
+        for reason in [
+            Reason::NotSignedIn,
+            Reason::MissingScope,
+            Reason::ApiKeyBilling,
+            Reason::KeyRejected,
+            Reason::NoSubscription,
+            Reason::SourceDisabled,
+        ] {
+            let said = AgentUsage::unknown(AgentId::CLAUDE, "box", reason);
+            assert_eq!(merge(Some(old.clone()), said.clone()), said, "{reason:?}");
+        }
     }
 
     #[test]
@@ -439,26 +456,28 @@ mod tests {
     }
 
     #[test]
-    fn the_schedule_is_one_read_a_minute_in_a_focused_window_and_none_in_the_background() {
-        let interval = 60;
+    fn the_schedule_is_one_read_per_interval_in_a_focused_window_and_none_in_the_background() {
+        // The default interval: ten minutes.
+        let interval = 600;
         assert!(due(None, NOW, interval, 0, true), "the first read");
         assert!(!due(None, NOW, interval, 0, false), "not while away");
-        // A clock ticking every TICK_SECONDS for ten minutes, focused: one
-        // read a minute.
+        // A clock ticking every TICK_SECONDS for an hour, focused: one read
+        // per ten minutes.
+        let hour = 3600 / TICK_SECONDS as i64;
         let mut last = None;
         let mut reads = 0;
-        for tick in 0..(600 / TICK_SECONDS as i64) {
+        for tick in 0..hour {
             let now = NOW + tick * TICK_SECONDS as i64;
             if due(last, now, interval, 0, true) {
                 reads += 1;
                 last = Some(now);
             }
         }
-        assert_eq!(reads, 10);
-        // Ten minutes in the background, then back: one read at once, not ten.
+        assert_eq!(reads, 6);
+        // An hour in the background, then back: one read at once, not six.
         let mut reads = 0;
         let mut last = Some(NOW);
-        for tick in 0..(600 / TICK_SECONDS as i64) {
+        for tick in 0..hour {
             let now = NOW + tick * TICK_SECONDS as i64;
             if due(last, now, interval, 0, false) {
                 reads += 1;
@@ -466,10 +485,14 @@ mod tests {
             }
         }
         assert_eq!(reads, 0, "paused in the background");
-        assert!(due(last, NOW + 600, interval, 0, true), "once on return");
+        assert!(due(last, NOW + 3600, interval, 0, true), "once on return");
         assert!(
-            !due(Some(NOW + 580), NOW + 600, interval, 0, true),
+            !due(Some(NOW + 3580), NOW + 3600, interval, 0, true),
             "a fresh reading is not repeated"
+        );
+        assert!(
+            !due(Some(NOW), NOW + 599, interval, 0, true),
+            "nothing before the interval"
         );
     }
 
@@ -637,12 +660,25 @@ mod tests {
         let local = MachineId::local();
         let t = Thresholds::default();
         assert_eq!(
-            start_notice(&board, &local, AgentId::CODEX, NOW, t).as_deref(),
+            start_notice(&board, &local, AgentId::CODEX, NOW, t, PercentDisplay::Used).as_deref(),
             Some("Codex: 5-hour window is 97% used, resets in 2h 29m.")
         );
-        let low = Board::new(vec![known(AgentId::CODEX, "local", 89.0, 100)]);
-        assert_eq!(start_notice(&low, &local, AgentId::CODEX, NOW, t), None);
-        assert_eq!(start_notice(&board, &local, AgentId::CLAUDE, NOW, t), None);
+        let low = Board::new(vec![known(AgentId::CODEX, "local", 79.0, 100)]);
+        assert_eq!(
+            start_notice(&low, &local, AgentId::CODEX, NOW, t, PercentDisplay::Used),
+            None
+        );
+        assert_eq!(
+            start_notice(
+                &board,
+                &local,
+                AgentId::CLAUDE,
+                NOW,
+                t,
+                PercentDisplay::Used
+            ),
+            None
+        );
     }
 
     #[test]
@@ -654,6 +690,7 @@ mod tests {
             AgentId::CODEX,
             NOW,
             Thresholds::default(),
+            PercentDisplay::Used,
         )
         .unwrap();
         assert!(notice.contains("is at its limit"), "{notice}");
@@ -669,7 +706,8 @@ mod tests {
                 &MachineId::local(),
                 AgentId::CODEX,
                 NOW,
-                Thresholds::default()
+                Thresholds::default(),
+                PercentDisplay::Used
             ),
             None
         );
@@ -696,5 +734,70 @@ mod tests {
             board.get(&MachineId::local(), AgentId::CODEX),
             Some(&reading)
         );
+    }
+
+    #[test]
+    fn the_notice_follows_the_display_setting_but_is_judged_on_what_is_used() {
+        let board = Board::new(vec![known(AgentId::CODEX, "local", 85.0, 600)]);
+        let local = MachineId::local();
+        let t = Thresholds::default();
+        assert_eq!(
+            start_notice(
+                &board,
+                &local,
+                AgentId::CODEX,
+                NOW,
+                t,
+                PercentDisplay::Remaining
+            )
+            .as_deref(),
+            Some("Codex: 5-hour window has 15% left, resets in 10m.")
+        );
+        // 79 % used is below the critical level whatever the wording.
+        let low = Board::new(vec![known(AgentId::CODEX, "local", 79.0, 600)]);
+        for display in [PercentDisplay::Used, PercentDisplay::Remaining] {
+            assert_eq!(
+                start_notice(&low, &local, AgentId::CODEX, NOW, t, display),
+                None
+            );
+        }
+        // 12.5 rounds up, as everywhere else.
+        let half = Board::new(vec![known(AgentId::CODEX, "local", 99.5, 600)]);
+        assert!(
+            start_notice(&half, &local, AgentId::CODEX, NOW, t, PercentDisplay::Used)
+                .unwrap()
+                .contains("is at its limit")
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_names_the_vendor_and_the_next_read_and_an_expired_sign_in_says_what_to_do() {
+        let status = SourceStatus {
+            retry_at: Some(NOW + 300),
+            failed: Some(Reason::RateLimited(0)),
+            ..Default::default()
+        };
+        let text = unknown_text(
+            AgentId::CLAUDE,
+            Reason::RateLimited(0),
+            &status,
+            NOW,
+            None,
+            true,
+        );
+        assert_eq!(
+            text,
+            "Rate limited by Anthropic: it asked for fewer calls. Next read in 5m; or choose Try again."
+        );
+        let expired = unknown_text(
+            AgentId::CODEX,
+            Reason::SessionExpired,
+            &SourceStatus::default(),
+            NOW,
+            None,
+            true,
+        );
+        assert!(expired.contains("Run the agent once"), "{expired}");
+        assert!(expired.contains("Leon never does"), "{expired}");
     }
 }

@@ -297,6 +297,10 @@ struct UsageSetup {
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     /// The back-off of each network source.
     throttle: HashMap<leon_core::AgentId, leon_usage::network::Throttle>,
+    /// When each network source was last called (Unix seconds): a scheduled
+    /// read never calls a vendor again within [`leon_usage::network::MIN_GAP`],
+    /// whatever the refresh setting says.
+    last_called: HashMap<leon_core::AgentId, i64>,
     /// Whether a collection is running: at most one request per source is in
     /// flight at any time.
     collecting: bool,
@@ -628,6 +632,7 @@ impl Engine {
             http,
             clock,
             throttle: HashMap::new(),
+            last_called: HashMap::new(),
             collecting: false,
             rerun: false,
             reading: Default::default(),
@@ -678,6 +683,7 @@ impl Engine {
             for agent in leon_usage::network::switchable_agents() {
                 if before.allows(agent) != policy.allows(agent) {
                     setup.throttle.remove(&agent);
+                    setup.last_called.remove(&agent);
                     setup.refused.remove(&agent);
                     setup.failed.remove(&agent);
                 }
@@ -774,6 +780,7 @@ impl Engine {
             let all = leon_usage::network::switchable_agents();
             for agent in if agents.is_empty() { &all[..] } else { agents } {
                 setup.throttle.remove(agent);
+                setup.last_called.remove(agent);
                 setup.refused.remove(agent);
                 setup.failed.remove(agent);
             }
@@ -838,12 +845,19 @@ impl Engine {
                 return;
             }
             let now = (setup.clock)();
-            let held: Vec<leon_core::AgentId> = setup
+            let mut held: Vec<leon_core::AgentId> = setup
                 .throttle
                 .iter()
                 .filter(|(_, throttle)| !throttle.allows(now))
                 .map(|(agent, _)| *agent)
                 .collect();
+            held.extend(
+                setup
+                    .last_called
+                    .iter()
+                    .filter(|(_, at)| now - **at < leon_usage::network::MIN_GAP)
+                    .map(|(agent, _)| *agent),
+            );
             (
                 setup.credentials.clone(),
                 setup.http.clone(),
@@ -895,6 +909,7 @@ impl Engine {
             let mut usage = self.usage_setup();
             if let Some(setup) = usage.as_mut() {
                 for (agent, reason) in collected.called.clone() {
+                    setup.last_called.insert(agent, now);
                     match reason {
                         Some(reason) if reason.is_failure() => {
                             setup.failed.insert(agent, reason);
@@ -903,10 +918,13 @@ impl Engine {
                                 // the schedule says.
                                 setup.refused.insert(agent);
                             } else {
+                                // After a 429 the source rests at least five
+                                // minutes, or what the vendor asked if longer.
                                 let after = match reason {
-                                    leon_usage::Reason::RateLimited(seconds) if seconds > 0 => {
-                                        Some(i64::from(seconds))
-                                    }
+                                    leon_usage::Reason::RateLimited(seconds) => Some(
+                                        i64::from(seconds)
+                                            .max(leon_usage::network::Throttle::RATE_LIMIT_MIN),
+                                    ),
                                     _ => None,
                                 };
                                 setup.throttle.entry(agent).or_default().record_with(
@@ -3862,6 +3880,106 @@ branch refs/heads/feature/login
             .usage_status(leon_core::AgentId::CLAUDE)
             .failed
             .is_none());
+    }
+
+    /// Gives the engine a clock the test moves.
+    fn moving_clock(
+        rig: &Rig,
+        credentials: &Arc<Scripted>,
+        http: &Arc<leon_usage::network::ScriptedHttp>,
+    ) -> Arc<std::sync::atomic::AtomicI64> {
+        let clock = Arc::new(std::sync::atomic::AtomicI64::new(USAGE_NOW));
+        let read = clock.clone();
+        rig.engine.set_usage(
+            credentials.clone(),
+            http.clone(),
+            Arc::new(move || read.load(std::sync::atomic::Ordering::SeqCst)),
+        );
+        clock
+    }
+
+    #[tokio::test]
+    async fn a_scheduled_read_never_calls_a_vendor_twice_within_a_minute() {
+        let (rig, credentials, http) = network_rig(
+            Mode::Found,
+            leon_usage::network::ScriptedHttp::new()
+                .reply(200, CLAUDE_ANSWER)
+                .reply(200, CLAUDE_ANSWER)
+                .reply(200, CLAUDE_ANSWER),
+            5,
+        );
+        let clock = moving_clock(&rig, &credentials, &http);
+        rig.engine.set_usage_policy(on());
+        rig.engine.run(Op::CollectUsage).await;
+        assert_eq!(http.calls().len(), 1);
+        // A schedule set below a minute asks again after thirty seconds:
+        // the vendor is not called.
+        clock.fetch_add(30, std::sync::atomic::Ordering::SeqCst);
+        rig.engine.run(Op::CollectUsage).await;
+        assert_eq!(http.calls().len(), 1, "within a minute of the last call");
+        assert!(claude_row(&rig).contains("\"known\""), "the numbers stay");
+        clock.fetch_add(31, std::sync::atomic::Ordering::SeqCst);
+        rig.engine.run(Op::CollectUsage).await;
+        assert_eq!(http.calls().len(), 2, "a minute on, it may be called");
+        // A manual refresh reads at once.
+        rig.engine.run(Op::CollectUsageNow(vec![])).await;
+        assert_eq!(http.calls().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_429_without_a_wait_rests_five_minutes_and_keeps_the_numbers() {
+        let (rig, credentials, http) = network_rig(
+            Mode::Found,
+            leon_usage::network::ScriptedHttp::new()
+                .reply(200, CLAUDE_ANSWER)
+                .reply(429, "{}")
+                .reply(200, CLAUDE_ANSWER),
+            5,
+        );
+        let clock = moving_clock(&rig, &credentials, &http);
+        rig.engine.set_usage_policy(on());
+        rig.engine.run(Op::CollectUsage).await;
+        rig.engine.run(Op::CollectUsageNow(vec![])).await;
+        assert_eq!(http.calls().len(), 2);
+        let status = rig.engine.usage_status(leon_core::AgentId::CLAUDE);
+        assert_eq!(status.failed, Some(leon_usage::Reason::RateLimited(0)));
+        let rest = status.retry_at.unwrap() - USAGE_NOW;
+        assert!((300..=330).contains(&rest), "{rest}");
+        assert!(claude_row(&rig).contains("\"known\""), "numbers kept");
+        // Four minutes on the schedule still keeps off; after five it reads.
+        clock.fetch_add(4 * 60, std::sync::atomic::Ordering::SeqCst);
+        rig.engine.run(Op::CollectUsage).await;
+        assert_eq!(http.calls().len(), 2);
+        clock.fetch_add(2 * 60, std::sync::atomic::Ordering::SeqCst);
+        rig.engine.run(Op::CollectUsage).await;
+        assert_eq!(http.calls().len(), 3);
+        assert!(rig
+            .engine
+            .usage_status(leon_core::AgentId::CLAUDE)
+            .failed
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn an_expired_token_keeps_the_last_numbers_and_says_what_to_do() {
+        let (rig, _, http) = network_rig(
+            Mode::Found,
+            leon_usage::network::ScriptedHttp::new()
+                .reply(200, CLAUDE_ANSWER)
+                .reply(401, "{}"),
+            3,
+        );
+        rig.engine.set_usage_policy(on());
+        rig.engine.run(Op::CollectUsageNow(vec![])).await;
+        rig.engine.run(Op::CollectUsageNow(vec![])).await;
+        assert_eq!(http.calls().len(), 2);
+        assert_eq!(
+            rig.engine.usage_status(leon_core::AgentId::CLAUDE).failed,
+            Some(leon_usage::Reason::SessionExpired)
+        );
+        let row = claude_row(&rig);
+        assert!(row.contains("\"known\""), "the numbers stay: {row}");
+        assert!(!row.contains("not_signed_in"), "{row}");
     }
 
     #[tokio::test]

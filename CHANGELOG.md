@@ -6,6 +6,32 @@
 
 ### Added
 
+* **The usage counters follow Orca's rules.** The footer now shows every window
+  of each agent, Orca's way (`10% used 2h 29m · 91% used 1d 11h !! · 0% used
+  Fable`: the countdown to the reset for the five-hour and weekly windows,
+  floored; a model's name for its own), and gives way to the single worst window
+  as the window narrows (Settings, Usage: `Usage bar`, `Detailed` or
+  `Compact`); the usage view lists the agent nearest a limit first. `Show limits
+  as` (`used` or `left`) applies to the bar, the view, the header chip and the
+  notice before a session. The default warning and critical levels are Orca's 60
+  and 80 percent (they were 75 and 90; a value you set keeps). Figures round half
+  away from zero everywhere (12.5 is 13). An expired, rejected or rate-limited
+  read no longer erases the numbers: they stay, marked with their age, with what
+  to do (run the agent once so it refreshes its own sign-in) or when the next
+  read is. Distinct reasons for a sign-in without the permission to read usage,
+  an API-key account (no limits apply), an opencode key with no Go subscription
+  or a rejected key. Claude's per-model windows come only from the scoped limits
+  and a short list of known keys; Codex windows are told apart by length within a
+  minute, else by position; ZCode shows the session, week and `MCP` windows;
+  Kimi reset times in any of the usual forms; opencode's key from
+  `OPENCODE_AUTH_CONTENT`, `auth.json`, OpenCode 2's credential database (read
+  only) or `OPENCODE_API_KEY`; Claude's keychain item scoped by
+  `CLAUDE_CONFIG_DIR`; the Cursor IDE's own session (read only). Antigravity: a
+  build that answers `/usage` with a model turn is never asked again that
+  session. Differences from Orca (no hidden sessions, no credential refreshing,
+  an honest `User-Agent: Leon/<version>`, no pasted cookies) are in the README's
+  Usage section.
+
 * **Updates, from the GitHub releases of this repository and nowhere else.** A
   few seconds after the window opens and every six hours Leon asks the GitHub API
   for the latest release (conditional requests with the `ETag`, so asking again
@@ -63,7 +89,7 @@
   `leon --diagnose usage`. Codex is read from its own session log; Claude Code
   and the opencode Go subscription use a network source that is on by default
   and can be turned off in Settings, Usage (macOS may ask once for keychain
-  access). Limits are read every 60 seconds (at least 30) while the window is
+  access). Limits are read every 10 minutes (at least 30 seconds) while the window is
   focused, with back-off, `Retry-After` and jitter.
 * **Connect a machine, with a code.** Install Leon on the other computer, choose
   Share this machine, type the short code it shows: both computers dial out to a
@@ -85,8 +111,14 @@
 
 ### Changed
 
+* The usage refresh default is **10 minutes** (it was a minute; an explicit
+  setting is kept). A source that calls a vendor is never called by the schedule
+  more than once a minute, opening the usage view reads when the reading is
+  older than the interval, and after a 429 a source rests at least 5 minutes and
+  keeps the last numbers.
+
 * The default relay address is `wss://relay.getleon.dev`.
-* Usage limits are on by default and are read every 60 seconds (at least 30)
+* Usage limits are on by default and are read every 10 minutes (at least 30 seconds)
   while the window is focused. `usage_interval` (minutes) is replaced by
   `usage_refresh_seconds`.
 * Settings ▸ Agents and the new-session list are generated from the agent

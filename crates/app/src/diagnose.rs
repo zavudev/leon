@@ -487,10 +487,18 @@ pub fn usage_lines(collected: &leon_usage::MachineUsage, now: i64) -> Vec<String
                         .map(|text| format!(", {}", text.to_lowercase()))
                         .unwrap_or_default();
                     lines.push(format!(
-                        "    {:<14} {:>3.0}% used{reset}",
+                        "    {:<14} {:>3}% used{reset}",
                         meter.kind.long(),
-                        meter.percent
+                        leon_usage::percent_round(meter.percent)
                     ));
+                }
+                if let Some(footer) = crate::ui::footer_text(
+                    reading,
+                    now,
+                    Thresholds::default(),
+                    leon_usage::PercentDisplay::Used,
+                ) {
+                    lines.push(format!("    footer: {footer}"));
                 }
             }
         }
@@ -840,6 +848,10 @@ mod tests {
         assert!(text.contains("38% used, resets in 2h 29m"), "{text}");
         assert!(
             text.contains("Weekly") && text.contains("0% used, reset since last seen"),
+            "{text}"
+        );
+        assert!(
+            text.contains("footer: 38% used 2h 29m · 0% used now"),
             "{text}"
         );
         assert!(!text.contains("secret-label"), "{text}");
