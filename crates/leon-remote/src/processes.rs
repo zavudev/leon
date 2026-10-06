@@ -129,6 +129,23 @@ pub struct Scan {
 const MAX_DEPTH: usize = 64;
 
 impl Scan {
+    /// The processes above `pid`, nearest first (its parent, the parent's
+    /// parent, ...), as far as the scan knows them.
+    pub fn ancestors(&self, pid: u32) -> Vec<u32> {
+        let mut chain = Vec::new();
+        let mut at = pid;
+        for _ in 0..MAX_DEPTH {
+            match self.parents.get(&at) {
+                Some((parent, _)) if *parent != at && *parent != 0 => {
+                    chain.push(*parent);
+                    at = *parent;
+                }
+                _ => break,
+            }
+        }
+        chain
+    }
+
     /// Whether `pid` is `root` or runs below it.
     pub fn descends_from(&self, pid: u32, root: u32) -> bool {
         let mut at = pid;

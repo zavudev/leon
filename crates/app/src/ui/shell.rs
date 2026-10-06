@@ -187,6 +187,11 @@ pub struct Options {
     pub banner_duration: Duration,
     /// How long a change of the open terminals waits before it is written.
     pub save_debounce: Duration,
+    /// How long a request for an incremental history import waits, so a
+    /// burst of them is one import.
+    pub import_debounce: Duration,
+    /// How often history is imported on a timer; zero is never.
+    pub import_interval: Duration,
     /// How an image file is picked on this computer, for a project's logo.
     pub pick_image: PickFolder,
     /// Where a file is saved: the system's save dialog.
@@ -265,6 +270,8 @@ impl Default for Options {
             notify: Rc::new(notify::system),
             banner_duration: Duration::from_secs(8),
             save_debounce: Duration::from_millis(500),
+            import_debounce: Duration::from_secs(2),
+            import_interval: Duration::from_secs(60),
             pick_image: super::projects::default_image_picker(),
             save_file: Rc::new(super::terminal_tools::system_save_dialog),
             read_clipboard: Rc::new(|cx| cx.read_from_clipboard()),
@@ -417,6 +424,8 @@ pub struct Shell {
     pub(super) history_scroll: ScrollHandle,
     /// What is remembered and offered back (see `restore_view.rs`).
     pub(super) restore: super::restore_view::RestoreUi,
+    /// Prompt history imports (see `history_sync.rs`).
+    pub(super) sync: super::history_sync::SyncUi,
     /// Watches the terminals' activity while any is live.
     pub(super) ticker: Option<Task<()>>,
     /// The notifications shown for what sessions just did, oldest first.
@@ -544,6 +553,7 @@ impl Shell {
             cx.observe_window_activation(window, |this, window, cx| {
                 this.window_active = window.is_window_active();
                 if window.is_window_active() {
+                    this.request_import(cx);
                     this.scan_elsewhere_now(true, cx);
                     // Back in front: a reading older than the interval is
                     // made once.
@@ -588,7 +598,13 @@ impl Shell {
         let engine_watcher = cx.spawn(async move |this, cx| {
             use tokio::sync::broadcast::error::RecvError;
             while !matches!(events.recv().await, Err(RecvError::Closed)) {
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                if this
+                    .update(cx, |this, cx| {
+                        this.learn_session_ids(cx);
+                        cx.notify()
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -635,6 +651,7 @@ impl Shell {
             logos: Logos::default(),
             history_scroll: ScrollHandle::new(),
             restore: Default::default(),
+            sync: Default::default(),
             ticker: None,
             banners: Vec::new(),
             banner_ticker: None,
@@ -670,6 +687,7 @@ impl Shell {
         shell.watch_usage(window, cx);
         shell.watch_updates(window, cx);
         shell.begin_session_restore(window, cx);
+        shell.watch_history(window, cx);
         // Values of settings.json that could not be used were read as defaults.
         let problems = settings::take_problems(cx);
         shell.report_problems(&problems);
@@ -813,6 +831,8 @@ impl Shell {
                 self.fill_palette(cx);
             }
         }
+        // A session that was just imported may be the id a terminal waits for.
+        self.learn_session_ids(cx);
         cx.notify();
     }
 

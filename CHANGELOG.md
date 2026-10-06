@@ -6,6 +6,12 @@
 
 ### Added
 
+* A session started in Leon shows up in the tree within seconds: history is
+  imported again (only what changed) when an agent starts, goes quiet or ends,
+  when the window regains the focus and every minute. Leon also learns the
+  agent's own session id for terminals started fresh (Claude Code's state file,
+  else the newest session of the folder created after the terminal started), so
+  the tree shows one row and a restore can resume it.
 * **Sessions come back.** Leon remembers the open terminals as they change (not
   only at quit, so a crash or a power cut loses at most half a second): machine,
   folder, agent and its session id, your renames, the tabs and panes with their

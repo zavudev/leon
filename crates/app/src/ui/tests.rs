@@ -386,6 +386,8 @@ fn open_core(
         notify: Rc::new(move |note, _| notes_in.borrow_mut().push(note.clone())),
         banner_duration: std::time::Duration::from_secs(30),
         save_debounce: std::time::Duration::ZERO,
+        import_debounce: std::time::Duration::ZERO,
+        import_interval: std::time::Duration::ZERO,
         pick_image: Rc::new(|_| Task::ready(Picked::Cancelled)),
         save_file: Rc::new(|_, _| Task::ready(Picked::Cancelled)),
         read_clipboard: Rc::new(|_| None),

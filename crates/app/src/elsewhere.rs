@@ -86,6 +86,9 @@ pub struct Found {
     pub link: Option<Link>,
     /// Whether it runs below this Leon process (always false over SSH).
     pub leon_child: bool,
+    /// The processes above it, nearest first: how a terminal of Leon's own
+    /// recognises the agent that runs in it.
+    pub ancestors: Vec<u32>,
     /// The terminal application it runs in, when the process tree says.
     pub app: Option<AppBundle>,
 }
@@ -144,6 +147,7 @@ pub fn resolve(scan: &Scan, sessions: &[Session], leon_pid: Option<u32>) -> Vec<
             session: None,
             link: None,
             leon_child: leon_pid.is_some_and(|root| scan.descends_from(process.pid, root)),
+            ancestors: scan.ancestors(process.pid),
             app: scan.owning_app(process.pid),
         })
         .collect();

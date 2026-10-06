@@ -120,6 +120,11 @@ pub enum Op {
     ImportHistory,
     /// Collect the history report of "Why is a session missing?".
     DiagnoseHistory,
+    /// Import what changed in the agents' history since the last time, and
+    /// say nothing unless a source cannot be read. What the window asks for
+    /// after an agent went quiet or ended, when it regains the focus and on
+    /// a timer.
+    SyncHistory,
     /// Ask git for the worktrees of a project.
     #[allow(dead_code)] // The vocabulary of the engine; the UI asks through `Refresh` for now.
     SyncWorktrees(ProjectId),
@@ -402,6 +407,10 @@ struct Inner {
     fetcher: Mutex<Arc<dyn IconFetcher>>,
     scanner: Mutex<Option<Arc<Scanner>>>,
     usage: Mutex<Option<UsageSetup>>,
+    /// What each history source looked like at the last incremental import.
+    history_stamps: Mutex<HashMap<String, String>>,
+    /// Whether the unreadable-layout notice was shown by an incremental import.
+    unsupported_told: std::sync::atomic::AtomicBool,
     /// The home folder the history report writes as `~`.
     history_home: Mutex<Option<std::path::PathBuf>>,
     /// Which network sources are switched on.
@@ -459,6 +468,8 @@ impl Engine {
                 fetcher: Mutex::new(Arc::new(NoFetch)),
                 scanner: Mutex::new(None),
                 usage: Mutex::new(None),
+                history_stamps: Mutex::new(HashMap::new()),
+                unsupported_told: std::sync::atomic::AtomicBool::new(false),
                 history_home: Mutex::new(leon_history::home_dir()),
                 usage_policy: Mutex::new(leon_usage::network::NetworkPolicy::default()),
                 blocking: std::sync::atomic::AtomicUsize::new(0),
@@ -1037,6 +1048,14 @@ impl Engine {
 
     /// Changes what the settings ask of the engine; the next job reads it.
     pub fn set_prefs(&self, prefs: Prefs) {
+        // Another place to read: nothing is known of it yet.
+        if self.prefs().roots != prefs.roots {
+            self.inner
+                .history_stamps
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clear();
+        }
         *self
             .inner
             .prefs
@@ -1093,6 +1112,10 @@ impl Engine {
         match op {
             Op::Refresh => self.refresh().await.map(Some),
             Op::ImportHistory => self.import_history().await.map(Some),
+            Op::SyncHistory => {
+                self.sync_history().await?;
+                Ok(None)
+            }
             Op::DiagnoseHistory => {
                 self.diagnose_history().await?;
                 Ok(None)
@@ -1162,6 +1185,32 @@ impl Engine {
             .blocking(move || Importer::run(&store, &MachineId::local(), &roots))
             .await?;
         Ok(describe_import(&report))
+    }
+
+    /// An incremental import that only speaks when something is wrong: a
+    /// session that appears shows itself in the tree.
+    async fn sync_history(&self) -> Result<(), EngineError> {
+        let store = self.inner.store.clone();
+        let roots = self.prefs().roots;
+        let inner = self.inner.clone();
+        let report = self
+            .blocking(move || {
+                let mut stamps = inner
+                    .history_stamps
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                Importer::run_changed(&store, &MachineId::local(), &roots, &mut stamps)
+            })
+            .await?;
+        if report.unsupported > 0
+            && !self
+                .inner
+                .unsupported_told
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.set_status(StatusKind::Error, UNSUPPORTED_NOTICE.trim().to_owned());
+        }
+        Ok(())
     }
 
     /// The report of "Why is a session missing?": reads every history source

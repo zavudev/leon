@@ -324,6 +324,10 @@ impl Shell {
         });
         self.refresh_activity(cx);
         self.keep_watching(cx);
+        if agent.is_some() {
+            // A new session appears in the history within seconds.
+            self.request_import(cx);
+        }
         Some(id)
     }
 
@@ -471,6 +475,8 @@ impl Shell {
         let before = std::mem::replace(&mut session.activity, now);
         if before != now && now == Activity::Waiting {
             self.raise(notify::Event::Waiting, id, cx);
+            // The agent finished its turn: its session was written.
+            self.request_import(cx);
         }
         before != now
     }
@@ -619,6 +625,8 @@ impl Shell {
                         self.flash_error(cx);
                     }
                 }
+                // The agent ended: its session is complete.
+                self.request_import(cx);
                 // The end of a session is said the ways the settings ask for.
                 self.raise(notify::Event::of_exit(info.code), id, cx);
             }

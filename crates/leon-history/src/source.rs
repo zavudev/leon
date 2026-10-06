@@ -624,11 +624,13 @@ impl HistorySource for OpencodeData {
         for path in self.databases() {
             let mut wal = path.clone().into_os_string();
             wal.push("-wal");
-            stamp.push_str(&format!(
-                "{}|{};",
-                file_stamp(&path),
-                file_stamp(Path::new(&wal))
-            ));
+            // An empty log is the same as none: opening a database in WAL mode
+            // may create it without anything having changed.
+            let log = match fs::metadata(&wal) {
+                Ok(metadata) if metadata.len() > 0 => file_stamp(Path::new(&wal)),
+                _ => "-".to_owned(),
+            };
+            stamp.push_str(&format!("{}|{log};", file_stamp(&path)));
         }
         stamp.push_str(&file_stamp(&self.storage().join("session")));
         stamp.push_str(&file_stamp(&self.storage().join("message")));

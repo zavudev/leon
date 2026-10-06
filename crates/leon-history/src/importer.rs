@@ -84,8 +84,40 @@ impl Importer {
         roots: &HistoryRoots,
         now: impl Fn() -> DateTime<Utc>,
     ) -> ImportReport {
+        Self::run_each(store, machine_id, roots, now, None)
+    }
+
+    /// An incremental run for a poll: a source whose
+    /// [`stamp`](HistorySource::stamp) is the one remembered in `stamps` from
+    /// the previous call (nothing in it moved, its database's `-wal` file
+    /// included) is not even listed. A source that cannot give a stamp is
+    /// always imported. The stamp is taken before the run, so a change made
+    /// while it runs is seen by the next call.
+    pub fn run_changed(
+        store: &Store,
+        machine_id: &MachineId,
+        roots: &HistoryRoots,
+        stamps: &mut std::collections::HashMap<String, String>,
+    ) -> ImportReport {
+        Self::run_each(store, machine_id, roots, Utc::now, Some(stamps))
+    }
+
+    fn run_each(
+        store: &Store,
+        machine_id: &MachineId,
+        roots: &HistoryRoots,
+        now: impl Fn() -> DateTime<Utc>,
+        mut stamps: Option<&mut std::collections::HashMap<String, String>>,
+    ) -> ImportReport {
         let mut total = ImportReport::default();
         for source in roots.sources() {
+            let tag = source.agent().as_str().to_owned();
+            let stamp = stamps.as_ref().and(source.stamp());
+            if let (Some(known), Some(stamp)) = (stamps.as_ref(), &stamp) {
+                if known.get(&tag) == Some(stamp) {
+                    continue;
+                }
+            }
             let started = Instant::now();
             let report = Self::run_sources(store, machine_id, &[source.as_ref()]);
             let run = ImportRun {
@@ -102,6 +134,14 @@ impl Importer {
             };
             if let Err(error) = store.record_import_run(machine_id, &run) {
                 tracing::debug!(%error, "cannot record an import run");
+            }
+            if let (Some(stamps), Some(stamp)) = (stamps.as_deref_mut(), stamp) {
+                // A source that failed is looked at again next time.
+                if report.failed == 0 {
+                    stamps.insert(tag, stamp);
+                } else {
+                    stamps.remove(&tag);
+                }
             }
             total += report;
         }
@@ -635,5 +675,54 @@ mod tests {
         let report = Importer::run(&store, &MachineId::local(), &roots);
         assert_eq!(report.unsupported, 1);
         assert!(report.failed >= 1);
+    }
+
+    #[test]
+    fn a_poll_skips_a_source_that_did_not_move_and_sees_a_change_that_only_reached_the_wal() {
+        let home = tempfile::tempdir().unwrap();
+        let roots = fixture(home.path());
+        // Put the opencode database in WAL mode and keep the log from being
+        // folded back into the main file.
+        let writer = rusqlite::Connection::open(home.path().join("opencode.db")).unwrap();
+        writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+        writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let mut stamps = std::collections::HashMap::new();
+
+        let first = Importer::run_changed(&store, &MachineId::local(), &roots, &mut stamps);
+        assert_eq!(first.imported, 3);
+        let quiet = Importer::run_changed(&store, &MachineId::local(), &roots, &mut stamps);
+        assert_eq!(
+            quiet,
+            ImportReport::default(),
+            "nothing moved: nothing listed"
+        );
+
+        let main_size = fs::metadata(home.path().join("opencode.db")).unwrap().len();
+        opencode::fixture::message(&writer, "m9", "ses_1", 9_500, r#"{"role":"user"}"#);
+        opencode::fixture::part(
+            &writer,
+            "p9",
+            "m9",
+            "ses_1",
+            9_500,
+            serde_json::json!({"type": "text", "text": "a late question"}),
+        );
+        assert_eq!(
+            fs::metadata(home.path().join("opencode.db")).unwrap().len(),
+            main_size
+        );
+        let after = Importer::run_changed(&store, &MachineId::local(), &roots, &mut stamps);
+        assert_eq!(
+            after.imported, 1,
+            "only opencode changed, and only in the log"
+        );
+        assert_eq!(
+            store
+                .search(&SearchQuery::new("late question"))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

@@ -27,6 +27,7 @@ mod history_report;
 mod icons;
 mod keys;
 mod launch;
+mod learn;
 mod logging;
 mod menus;
 mod pair;

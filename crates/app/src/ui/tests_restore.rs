@@ -455,3 +455,149 @@ fn a_paused_session_never_notifies(cx: &mut TestAppContext) {
     );
     assert!(h.notes.borrow().is_empty());
 }
+
+// ----- learning the session id and importing promptly ---------------------------------------
+
+use crate::launch::Launch;
+use crate::ui::terminals::Place;
+
+fn start_fresh(h: &Harness, cx: &mut TestAppContext, agent: leon_core::AgentId, cwd: &str) {
+    let cwd = cwd.to_owned();
+    cx.update_window(h.window.into(), |_, window, cx| {
+        h.shell.update(cx, |s, cx| {
+            s.start_live(
+                Launch::Agent {
+                    kind: agent,
+                    resume: None,
+                },
+                &MachineId::local(),
+                &cwd,
+                Place::Tab,
+                None,
+                window,
+                cx,
+            )
+        })
+    })
+    .unwrap();
+    cx.run_until_parked();
+}
+
+fn new_session(h: &Harness, agent: leon_core::AgentId, external: &str, cwd: &str, minute: u32) {
+    use chrono::TimeZone;
+    let at = chrono::Utc
+        .with_ymd_and_hms(2026, 10, 4, 12, minute, 0)
+        .unwrap();
+    h.store
+        .upsert_session(
+            &leon_core::NewSession {
+                agent,
+                external_id: external.to_owned(),
+                machine_id: MachineId::local(),
+                cwd: cwd.to_owned(),
+                title: "t".to_owned(),
+                model: None,
+                started_at: at,
+                updated_at: at,
+            },
+            &[leon_core::NewMessage {
+                role: leon_core::Role::User,
+                text: "hi".to_owned(),
+                at,
+            }],
+        )
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_fresh_agent_learns_its_session_id_and_the_tree_shows_one_row(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let (_dir, path) = real_worktree(&h, cx);
+    start_fresh(&h, cx, leon_core::AgentId::CODEX, &path);
+    assert_eq!(
+        h.shell(cx, |s| s.live.get(LiveId(1)).unwrap().learned.clone()),
+        None
+    );
+    // The importer stores the session the agent just wrote.
+    new_session(&h, leon_core::AgentId::CODEX, "codex-new", &path, 6);
+    h.settle(cx);
+    let (learned, history) = h.shell(cx, |s| {
+        let live = s.live.get(LiveId(1)).unwrap();
+        (live.learned.clone(), live.history.clone())
+    });
+    assert_eq!(
+        learned,
+        Some(("codex-new".to_owned(), "newest-in-folder".to_owned()))
+    );
+    let history = history.expect("linked to the history row");
+    assert!(
+        h.shell(cx, |s| s.placement.merged.contains(&history)),
+        "one row: live now, history later"
+    );
+    // The remembered state carries the id so a restore can resume it.
+    let state = saved_of(&h, cx);
+    assert_eq!(state.terminals[0].session.as_deref(), Some("codex-new"));
+    assert_eq!(
+        state.terminals[0].confidence.as_deref(),
+        Some("newest-in-folder")
+    );
+}
+
+#[gpui_kit::test]
+fn two_terminals_of_one_agent_in_one_folder_are_not_guessed_onto_one_session(
+    cx: &mut TestAppContext,
+) {
+    let h = open_live(cx);
+    let (_dir, path) = real_worktree(&h, cx);
+    start_fresh(&h, cx, leon_core::AgentId::CODEX, &path);
+    start_fresh(&h, cx, leon_core::AgentId::CODEX, &path);
+    new_session(&h, leon_core::AgentId::CODEX, "only-one", &path, 6);
+    h.settle(cx);
+    let learned: Vec<_> = h.shell(cx, |s| {
+        s.live.all().iter().map(|l| l.learned.clone()).collect()
+    });
+    assert_eq!(learned, [None, None], "either could own it: nobody does");
+}
+
+#[gpui_kit::test]
+fn an_agent_started_in_leon_is_imported_without_a_refresh(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let (_dir, path) = real_worktree(&h, cx);
+    // Claude's transcript for the folder, written after the terminal started.
+    let home = tempfile::tempdir().unwrap();
+    let projects = home.path().join("projects");
+    std::fs::create_dir_all(projects.join("p")).unwrap();
+    let mut prefs = h.engine.prefs();
+    prefs.roots.claude_projects = Some(projects.clone());
+    h.engine.set_prefs(prefs);
+    let line = serde_json::json!({"type": "user", "cwd": path,
+        "timestamp": "2026-10-04T12:06:00Z",
+        "message": {"role": "user", "content": "hello"}});
+    std::fs::write(projects.join("p/claude-new.jsonl"), line.to_string()).unwrap();
+
+    start_fresh(&h, cx, leon_core::AgentId::CLAUDE, &path);
+    h.settle(cx);
+    let sessions = h
+        .store
+        .recent_sessions(&leon_core::SessionFilter::default(), 50)
+        .unwrap();
+    assert!(
+        sessions.iter().any(|s| s.external_id == "claude-new"),
+        "starting the agent asked for an import: {:?}",
+        sessions.iter().map(|s| &s.external_id).collect::<Vec<_>>()
+    );
+    // And a session written later shows up when an agent goes quiet or the
+    // window asks again.
+    let later = serde_json::json!({"type": "user", "cwd": path,
+        "timestamp": "2026-10-04T12:07:00Z",
+        "message": {"role": "user", "content": "again"}});
+    std::fs::write(projects.join("p/claude-later.jsonl"), later.to_string()).unwrap();
+    cx.update(|cx| h.shell.update(cx, |s, cx| s.request_import(cx)));
+    h.settle(cx);
+    assert!(h
+        .store
+        .recent_sessions(&leon_core::SessionFilter::default(), 50)
+        .unwrap()
+        .iter()
+        .any(|s| s.external_id == "claude-later"));
+}
