@@ -722,9 +722,17 @@ fn survey_database(survey: &mut Survey, origin: &str, path: &Path, ids: &mut Has
             survey.skip(SkipReason::Unreadable);
         }
         Ok(schema) => {
-            place
-                .details
-                .push("layout: SQLite (session, message, part)".to_owned());
+            place.details.push(format!(
+                "layout: SQLite, {}",
+                match schema.readable().as_slice() {
+                    [] => "no generation Leon can read".to_owned(),
+                    list => list
+                        .iter()
+                        .map(|generation| generation.label())
+                        .collect::<Vec<_>>()
+                        .join(" and "),
+                }
+            ));
             place
                 .details
                 .push(format!("tables: {}", schema.tables.join(", ")));
@@ -732,6 +740,12 @@ fn survey_database(survey: &mut Survey, origin: &str, path: &Path, ids: &mut Has
                 "session columns: {}",
                 schema.session_columns.join(", ")
             ));
+            if !schema.v2_session_columns.is_empty() {
+                place.details.push(format!(
+                    "session_v2 columns: {}",
+                    schema.v2_session_columns.join(", ")
+                ));
+            }
             place
                 .details
                 .push(format!("user_version: {}", schema.user_version));
@@ -745,7 +759,13 @@ fn survey_database(survey: &mut Survey, origin: &str, path: &Path, ids: &mut Has
                 survey.skip(SkipReason::UnsupportedSchema);
             } else {
                 ids.extend(opencode::all_ids(&connection).unwrap_or_default());
-                if let Ok((_, children)) = opencode::count_sessions(&connection) {
+                for generation in schema.readable() {
+                    let (total, children) =
+                        opencode::count_generation(&connection, generation).unwrap_or((0, 0));
+                    place.details.push(format!(
+                        "generation {}: {total} sessions, {children} of them children",
+                        generation.label()
+                    ));
                     for _ in 0..children {
                         survey.skip(SkipReason::ChildSession);
                     }
@@ -960,6 +980,21 @@ mod tests {
     }
 
     #[test]
+    fn opencode_v2_sessions_are_listed_and_loaded_from_the_database_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        opencode::fixture::populate_v2(&Connection::open(&path).unwrap());
+
+        let source = OpencodeDb::new(&path);
+        let items = source.list().unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(items[0].key.ends_with("#ses_1"));
+        let session = source.load(&items[0]).unwrap().unwrap();
+        assert_eq!(session.external_id, "ses_1");
+        assert_eq!(session.title, "Tidy the config loader");
+    }
+
+    #[test]
     fn a_file_that_is_not_a_database_is_reported_as_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("opencode.db");
@@ -1127,5 +1162,52 @@ mod tests {
         opencode::fixture::message(&writer, "m9", "ses_1", 9_500, r#"{"role":"user"}"#);
         assert_eq!(fs::metadata(&path).unwrap().len(), main_before);
         assert_ne!(source.stamp().unwrap(), before);
+    }
+
+    #[test]
+    fn the_survey_names_each_generation_and_counts_its_sessions_and_a_2x_only_file_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        let connection = Connection::open(&path).unwrap();
+        opencode::fixture::populate(&connection);
+        opencode::fixture::create_v2_only(&connection);
+        opencode::fixture::session_v2(&connection, "ses_v2", None, "Two", 3, 4);
+        opencode::fixture::turn(
+            &connection,
+            "t",
+            "ses_v2",
+            "user",
+            1,
+            3,
+            serde_json::json!({"time": {"created": 3}, "text": "hello"}),
+        );
+        opencode::fixture::session_v2(&connection, "ses_v2_child", Some("ses_v2"), "Kid", 3, 4);
+        drop(connection);
+
+        let source = OpencodeData::new(&path);
+        let ids: Vec<String> = source
+            .list()
+            .unwrap()
+            .iter()
+            .map(|item| source.load(item).unwrap().unwrap().external_id)
+            .collect();
+        assert_eq!(ids.len(), 2, "one session of each generation: {ids:?}");
+        let survey = source.survey();
+        assert_eq!(survey.found, 2);
+        assert_eq!(
+            survey.skipped[&SkipReason::ChildSession],
+            2,
+            "one per generation"
+        );
+        let details = survey.places[0].details.join("\n");
+        assert!(
+            details.contains("generation v1 (session, message, part): 2 sessions"),
+            "{details}"
+        );
+        assert!(
+            details.contains("generation v2 (session_v2, session_message): 2 sessions"),
+            "{details}"
+        );
+        assert!(details.contains("layout: SQLite, v2"), "{details}");
     }
 }

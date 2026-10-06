@@ -39,6 +39,10 @@
   columns, `user_version`, journal mode, the `-wal` file), how many sessions
   the source holds against how many Leon imported, why the rest are skipped,
   and when the last import ran. Counts, paths and times only.
+* opencode 2.x: sessions live in `session_v2` and `session_message`, and the
+  old tables stay behind, empty. Leon reads every generation a database holds
+  (and both, with different sessions in each), counts each in the history report
+  and imports a session held by both only once.
 * opencode: databases of other channels (`opencode-<channel>.db`) and
   `OPENCODE_DB` are found, the older JSON `storage/` layout is read too, an
   unknown database layout is reported instead of looking like "no sessions",
@@ -200,6 +204,21 @@
   `leon host`, and a failure while setting up TLS is reported as "The secure
   connection could not be set up" and retried instead of hanging. Tests now run
   the whole path (pairing, a command, a terminal) over TLS.
+
+### Changed
+
+* The worktree screen is a dashboard now: a hero with the project's logo, the
+  branch and the state of its terminals; buttons to start a session (the flow,
+  or one agent directly) or a shell there, to copy its path or branch, to
+  reveal it, to add a worktree to its project and to remove it; and the
+  sessions that ran in it with their agent, model, size and age, each opening
+  its stored transcript with a click.
+
+### Fixed
+
+* opencode 2.x sessions appear in the history again: the database moved its
+  sessions to `session_v2` and `session_message`, and Leon now reads that
+  layout as well as the older `session`/`message`/`part` one.
 
 ### Not yet
 

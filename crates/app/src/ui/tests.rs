@@ -1087,6 +1087,47 @@ fn a_worktree_shows_the_sessions_that_ran_inside_it(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_worktree_screen_offers_its_actions_and_opens_a_session_from_its_list(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    let linked = h
+        .row_of(NodeId::Worktree(worktree_id(&h, "feature/login")), cx)
+        .unwrap();
+    h.shell.update(cx, |shell, _| shell.move_cursor_to(linked));
+    h.press("enter", cx);
+    assert_eq!(h.main_kind(cx), "worktree:feature/login");
+    for selector in [
+        "worktree-hero",
+        "worktree-actions",
+        "worktree-new-session",
+        "worktree-new-claude",
+        "worktree-new-codex",
+        "worktree-new-opencode",
+        "worktree-shell",
+        "worktree-copy-path",
+        "worktree-copy-branch",
+        "worktree-reveal",
+        "worktree-new-worktree",
+        "worktree-remove",
+        "worktree-sessions",
+        "worktree-session-0",
+    ] {
+        assert!(h.shows(selector, cx), "{selector} is drawn");
+    }
+    // Copying the path works on the worktree on screen, not on the cursor.
+    h.mouse_on("worktree-copy-path".into(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(
+        cx.read_from_clipboard()
+            .and_then(|item| item.text())
+            .as_deref(),
+        Some("/srv/api-worktrees/feature-login")
+    );
+    // A session of the list opens its stored transcript.
+    h.mouse_on("worktree-session-0".into(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(h.main_kind(cx), "session:add oauth");
+    assert!(h.shows("transcript", cx));
+}
+
+#[gpui_kit::test]
 fn the_cursor_stays_on_its_node_when_rows_appear_above_it(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
     h.press("end", cx);

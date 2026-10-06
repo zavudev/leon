@@ -2,23 +2,33 @@
 //! transcript, or the detail of the open project or worktree, and the status
 //! line of the engine.
 
+use super::activity::Activity;
 use super::lines::{empty_frame, frame_ticks};
 use super::shell::{Main, Pane, Shell, Transcript};
 use super::tree::worktree_label;
-use super::widgets::{focus_rule, key_cap, mono, section_label};
+use super::widgets::{activity_dot, focus_rule, key_cap, led, mono, section_label};
 use crate::format;
 use crate::icons::agent_icon;
 use crate::keys::{self, Command};
-use crate::theme::{fonts, metrics, px, Palette};
+use crate::launch::Launch;
+use crate::theme::{fonts, hairline, metrics, px, Palette};
+use chrono::{DateTime, Utc};
 use gpui_kit::component::scroll::Scrollbar;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::*;
-use gpui_kit::{div, list, AnyElement, App, Context, Div, FontWeight};
-use leon_core::{AgentId, Message, Role};
+use gpui_kit::{
+    div, list, AnyElement, App, Context, Div, FontWeight, SharedString, Stateful, Window,
+};
+use leon_core::{AgentId, MachineId, Message, ProjectId, Role, WorktreeId};
 
 /// The most characters of one message drawn: a transcript can hold a whole
 /// file pasted by a tool, and laying that out every frame would cost more
 /// than reading it is worth.
 const MAX_MESSAGE_CHARS: usize = 6_000;
+
+/// How many sessions the worktree screen lists; past this the sidebar holds
+/// the rest, and the screen says how many.
+const WORKTREE_SESSIONS: usize = 12;
 
 impl Shell {
     pub(super) fn render_main_pane(&self, colours: &Palette, cx: &mut Context<Self>) -> Div {
@@ -27,7 +37,9 @@ impl Shell {
         let body = match &self.main {
             Main::Empty => self.render_empty(colours).into_any_element(),
             Main::Project(id) => self.render_project(id, colours),
-            Main::Worktree(project, worktree) => self.render_worktree(project, worktree, colours),
+            Main::Worktree(project, worktree) => {
+                self.render_worktree(project, worktree, colours, cx)
+            }
             Main::Session(transcript) => self.render_transcript(transcript, colours, cx),
             Main::Live(id) => self.render_live(*id, colours, cx),
         };
@@ -382,6 +394,7 @@ impl Shell {
                     .debug_selector(move || format!("field-{label}"))
                     .flex_1()
                     .min_w_0()
+                    .truncate()
                     .child(value),
             )
     }
@@ -422,11 +435,15 @@ impl Shell {
             .into_any_element()
     }
 
+    /// The worktree screen: who it is, what can be done with it, the sessions
+    /// that ran here and the details. Every action works on the worktree on
+    /// screen, not on the tree's cursor.
     fn render_worktree(
         &self,
         project: &leon_core::ProjectId,
         worktree: &leon_core::WorktreeId,
         colours: &Palette,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(entry) = self.snapshot.project(project) else {
             return div().into_any_element();
@@ -435,51 +452,294 @@ impl Shell {
             return div().into_any_element();
         };
         let now = self.now();
-        let mut sessions = div().flex().flex_col();
-        let mut shown = 0;
-        for place in self.placement.of_worktree(&wt.id).iter().take(8) {
-            let session = &self.snapshot.sessions[*place];
-            shown += 1;
-            sessions = sessions.child(
+        let machine = self
+            .snapshot
+            .machine(&entry.project.machine_id)
+            .map_or_else(String::new, |machine| machine.name.to_uppercase());
+        let activity = self.worktree_activity(&wt.id);
+        let places = self.placement.of_worktree(&wt.id);
+        let live = places
+            .iter()
+            .filter(|place| self.running_here(&self.snapshot.sessions[**place].id))
+            .count();
+        let local = entry.project.machine_id.is_local();
+
+        // ----- the hero: the project, the branch and how the terminals are.
+        let hero = div()
+            .debug_selector(|| "worktree-hero".into())
+            .flex_none()
+            .px_4()
+            .py_3()
+            .border_b_1()
+            .border_color(colours.border)
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(self.logo(project, px(24.), "worktree", colours))
+            .child(
                 div()
-                    .h(px(28.))
+                    .flex_1()
+                    .min_w_0()
                     .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(div().flex_none().w(px(64.)).child(
-                        mono(format::agent_tag(session.agent)).text_color(colours.text_muted),
-                    ))
+                    .flex_col()
+                    .gap(px(2.))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(session.title.clone()),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(self.project_label(&entry.project)),
+                            )
+                            .child(
+                                mono(worktree_label(wt))
+                                    .px(px(6.))
+                                    .py(px(1.))
+                                    .rounded(metrics::RADIUS())
+                                    .border_1()
+                                    .border_color(colours.elevated_border)
+                                    .text_color(colours.text),
+                            )
+                            .child(
+                                mono(if wt.is_main { "MAIN" } else { "LINKED" })
+                                    .text_color(colours.text_faint),
+                            ),
                     )
                     .child(
-                        mono(format::age(now, session.updated_at)).text_color(colours.text_faint),
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(metrics::TEXT_SMALL())
+                            .text_color(colours.text_faint)
+                            .child(format!("{machine} \u{b7} {}", wt.path)),
                     ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(activity_dot(activity, colours))
+                    .child(mono(activity_word(activity)).text_color(colours.text_faint)),
             );
+
+        // ----- the actions: one accent call to action, then the rest.
+        let mut actions = div()
+            .debug_selector(|| "worktree-actions".into())
+            .flex_none()
+            .px_4()
+            .py_2()
+            .border_b_1()
+            .border_color(colours.border)
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(worktree_button(
+                "worktree-new-session",
+                super::sidebar::tooltip_text(Command::NewSession),
+                colours,
+                cx,
+                mono("NEW SESSION")
+                    .text_color(colours.on_primary)
+                    .into_any_element(),
+                true,
+                |this, window, cx| {
+                    // The flow reads its target from what is open.
+                    this.pane = Pane::Main;
+                    this.run_command(Command::NewSession, window, cx);
+                },
+            ));
+        // The agents this machine has (the catalogue's, not a fixed three);
+        // a machine nobody probed yet shows the built-in ones.
+        for agent in self.agents_for_buttons(&entry.project.machine_id) {
+            let id = format!("worktree-new-{}", agent.as_str());
+            let tip = format!("New {} session here", format::agent_name(agent));
+            actions = actions.child(worktree_button(
+                id,
+                tip,
+                colours,
+                cx,
+                agent_icon(agent, px(16.), colours).into_any_element(),
+                false,
+                move |this, window, cx| {
+                    this.start_in_open_worktree(
+                        Launch::Agent {
+                            kind: agent,
+                            resume: None,
+                        },
+                        window,
+                        cx,
+                    );
+                },
+            ));
         }
-        if shown == 0 {
-            sessions = sessions.child(empty_frame(
+        actions = actions
+            .child(worktree_divider(colours))
+            .child(worktree_button(
+                "worktree-shell",
+                super::sidebar::tooltip_text(Command::OpenShell),
+                colours,
+                cx,
+                mono("OPEN SHELL")
+                    .text_color(colours.text_muted)
+                    .into_any_element(),
+                false,
+                |this, window, cx| this.start_in_open_worktree(Launch::Shell, window, cx),
+            ))
+            .child(worktree_divider(colours))
+            .child(worktree_button(
+                "worktree-copy-path",
+                super::sidebar::tooltip_text(Command::CopyPath),
+                colours,
+                cx,
+                mono("COPY PATH")
+                    .text_color(colours.text_muted)
+                    .into_any_element(),
+                false,
+                |this, _, cx| this.copy_open_worktree_path(cx),
+            ))
+            .child(worktree_button(
+                "worktree-copy-branch",
+                super::sidebar::tooltip_text(Command::CopyBranch),
+                colours,
+                cx,
+                mono("COPY BRANCH")
+                    .text_color(colours.text_muted)
+                    .into_any_element(),
+                false,
+                |this, _, cx| this.copy_open_worktree_branch(cx),
+            ));
+        if local {
+            actions = actions.child(worktree_button(
+                "worktree-reveal",
+                super::sidebar::tooltip_text(Command::Reveal),
+                colours,
+                cx,
+                mono("REVEAL")
+                    .text_color(colours.text_muted)
+                    .into_any_element(),
+                false,
+                |this, _, cx| this.reveal_open_worktree(cx),
+            ));
+        }
+        actions = actions
+            .child(worktree_divider(colours))
+            .child(worktree_button(
+                "worktree-new-worktree",
+                super::sidebar::tooltip_text(Command::NewWorktree),
+                colours,
+                cx,
+                mono("NEW WORKTREE")
+                    .text_color(colours.text_muted)
+                    .into_any_element(),
+                false,
+                |this, window, cx| this.new_worktree_in_open_project(window, cx),
+            ));
+        if !wt.is_main {
+            actions = actions.child(worktree_button(
+                "worktree-remove",
+                super::sidebar::tooltip_text(Command::RemoveWorktree),
+                colours,
+                cx,
+                mono("REMOVE WORKTREE")
+                    .text_color(colours.error)
+                    .into_any_element(),
+                false,
+                |this, window, cx| this.remove_open_worktree(window, cx),
+            ));
+        }
+
+        // ----- the sessions that ran here, newest first.
+        let mut list = div().flex().flex_col();
+        if places.is_empty() {
+            list = list.child(empty_frame(
                 "worktree-empty",
                 div()
-                    .debug_selector(|| "worktree-no-sessions".into())
-                    .text_size(metrics::TEXT_SMALL())
-                    .text_color(colours.text_faint)
-                    .child("No sessions ran here yet."),
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .debug_selector(|| "worktree-no-sessions".into())
+                            .text_color(colours.text_muted)
+                            .child("No sessions ran in this worktree yet."),
+                    )
+                    .child(
+                        div()
+                            .text_size(metrics::TEXT_SMALL())
+                            .text_color(colours.text_faint)
+                            .child("Start one with the buttons above, or open a shell here."),
+                    ),
                 Some("0 SESSIONS".to_owned()),
                 colours,
             ));
+        } else {
+            for (index, place) in places.iter().take(WORKTREE_SESSIONS).enumerate() {
+                list = list.child(self.worktree_session_row(
+                    index,
+                    &self.snapshot.sessions[*place],
+                    now,
+                    colours,
+                    cx,
+                ));
+            }
+            if places.len() > WORKTREE_SESSIONS {
+                list = list.child(
+                    div()
+                        .debug_selector(|| "worktree-more-sessions".into())
+                        .px_2()
+                        .py(px(6.))
+                        .child(
+                            mono(format!(
+                                "{} MORE IN THE SIDEBAR",
+                                places.len() - WORKTREE_SESSIONS
+                            ))
+                            .text_color(colours.text_faint),
+                        ),
+                );
+            }
         }
-        div()
-            .debug_selector(|| "worktree-detail".into())
+        let sessions = self
+            .card("worktree-sessions", colours)
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(section_label("Sessions", colours))
+                    .child(mono(places.len().to_string()).text_color(colours.text_faint))
+                    .child(div().flex_1())
+                    .children(
+                        (live > 0)
+                            .then(|| mono(format!("{live} LIVE")).text_color(colours.success)),
+                    ),
+            )
+            .child(list);
+
+        // ----- the details: where it is and what it is.
+        let details = self
+            .card("worktree-fields", colours)
             .p_4()
             .flex()
             .flex_col()
             .gap_3()
-            .child(Self::field("PROJECT", entry.project.name.clone(), colours))
+            .child(section_label("Details", colours))
+            .child(Self::field(
+                "PROJECT",
+                self.project_label(&entry.project),
+                colours,
+            ))
+            .child(Self::field("MACHINE", machine, colours))
             .child(Self::field("PATH", wt.path.clone(), colours))
             .child(Self::field("BRANCH", worktree_label(wt), colours))
             .child(Self::field(
@@ -494,10 +754,214 @@ impl Shell {
                 "KIND",
                 if wt.is_main { "MAIN" } else { "LINKED" }.to_owned(),
                 colours,
-            ))
-            .child(div().pt_2().child(section_label("Sessions", colours)))
-            .child(sessions)
+            ));
+
+        div()
+            .debug_selector(|| "worktree-detail".into())
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(hero)
+            .child(actions)
+            .child(
+                div()
+                    .id("worktree-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_4()
+                    .py_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(sessions)
+                    .child(details),
+            )
             .into_any_element()
+    }
+
+    /// The agents offered as buttons on the worktree screen: those installed on
+    /// the machine, else (nothing is known of it) the built-in three.
+    fn agents_for_buttons(&self, machine: &MachineId) -> Vec<AgentId> {
+        self.installed_agents()
+            .into_iter()
+            .find(|(id, _)| id == machine)
+            .map(|(_, agents)| agents)
+            .unwrap_or_else(|| vec![AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE])
+    }
+
+    /// Whether a terminal of Leon runs this history session in its own
+    /// folder: what the sidebar marks with a green light.
+    fn running_here(&self, id: &leon_core::SessionId) -> bool {
+        self.live.of_history(id).is_some() && self.placement.merged.contains(id)
+    }
+
+    /// One session of the worktree screen: its agent, title, model, size and
+    /// age. A click opens the stored transcript; nothing is started.
+    fn worktree_session_row(
+        &self,
+        index: usize,
+        session: &leon_core::Session,
+        now: DateTime<Utc>,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let running = self.running_here(&session.id);
+        // Held by a terminal outside Leon: the row says so rather than offer
+        // it as free; a session restored but not resumed yet says it waits.
+        let elsewhere = !running && self.elsewhere_of(session).is_some();
+        let paused = self
+            .live
+            .of_history(&session.id)
+            .is_some_and(|live| live.is_paused());
+        let hover = colours.surface_2;
+        let session = session.clone();
+        let opened = session.clone();
+        div()
+            .id(("worktree-session", index))
+            .debug_selector(move || format!("worktree-session-{index}"))
+            .h(px(34.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_3()
+            .rounded(metrics::RADIUS())
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_session(opened.clone(), None, cx);
+            }))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(18.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(agent_icon(session.agent, px(14.), colours)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(session.title.clone()),
+            )
+            .children(session.model.as_ref().map(|model| {
+                div()
+                    .flex_none()
+                    .max_w(px(160.))
+                    .truncate()
+                    .child(mono(model.clone()).text_color(colours.text_faint))
+            }))
+            .child(
+                mono(format!("{} MESSAGES", session.message_count)).text_color(colours.text_faint),
+            )
+            .when(paused, |this| {
+                this.child(mono("PAUSED").text_color(colours.warning))
+            })
+            .when(elsewhere, |this| {
+                this.child(
+                    mono("ELSEWHERE")
+                        .debug_selector(move || format!("worktree-session-elsewhere-{index}"))
+                        .text_color(colours.elsewhere),
+                )
+            })
+            .when(running && !paused, |this| this.child(led(colours.success)))
+            .child(mono(format::age(now, session.updated_at)).text_color(colours.text_faint))
+    }
+
+    /// The worktree the main pane is showing.
+    fn shown_worktree(&self) -> Option<OpenWorktree> {
+        let Main::Worktree(project, worktree) = &self.main else {
+            return None;
+        };
+        let entry = self.snapshot.project(project)?;
+        let found = entry.worktrees.iter().find(|found| &found.id == worktree)?;
+        Some(OpenWorktree {
+            machine: entry.project.machine_id.clone(),
+            project: project.clone(),
+            worktree: worktree.clone(),
+            path: found.path.clone(),
+            branch: found.branch.clone(),
+        })
+    }
+
+    /// Starts a shell or an agent in the worktree on screen.
+    fn start_in_open_worktree(
+        &mut self,
+        launch: Launch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(open) = self.shown_worktree() else {
+            return;
+        };
+        self.start_live(
+            launch,
+            &open.machine,
+            &open.path,
+            super::terminals::Place::Tab,
+            None,
+            window,
+            cx,
+        );
+    }
+
+    fn copy_open_worktree_path(&mut self, cx: &mut Context<Self>) {
+        if let Some(open) = self.shown_worktree() {
+            self.copy_text("path", open.path, cx);
+        }
+    }
+
+    fn copy_open_worktree_branch(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = self.shown_worktree() else {
+            return;
+        };
+        match open.branch {
+            Some(branch) => self.copy_text("branch name", branch, cx),
+            None => self.engine.report(
+                crate::engine::StatusKind::Info,
+                "This worktree has no branch: its head is detached.",
+            ),
+        }
+    }
+
+    fn reveal_open_worktree(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = self.shown_worktree() else {
+            return;
+        };
+        if open.machine.is_local() {
+            let reveal = self.options.reveal.clone();
+            reveal(cx, std::path::Path::new(&open.path));
+        } else {
+            self.engine.report(
+                crate::engine::StatusKind::Info,
+                "Showing a folder in the file manager only works on this computer.",
+            );
+        }
+    }
+
+    fn new_worktree_in_open_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(open) = self.shown_worktree() {
+            self.begin_flow_with(
+                Command::NewWorktree,
+                vec![open.project.as_str().to_owned()],
+                window,
+                cx,
+            );
+        }
+    }
+
+    fn remove_open_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(open) = self.shown_worktree() {
+            self.begin_flow_with(
+                Command::RemoveWorktree,
+                vec![format!("{}|{}", open.project, open.worktree)],
+                window,
+                cx,
+            );
+        }
     }
 
     /// The stored transcript, under a line that says how to resume the
@@ -652,6 +1116,78 @@ impl Shell {
             )
             .child(Scrollbar::vertical(&transcript.list))
             .into_any_element()
+    }
+}
+
+/// The worktree the main pane shows, and the little its actions need from it.
+struct OpenWorktree {
+    machine: MachineId,
+    project: ProjectId,
+    worktree: WorktreeId,
+    path: String,
+    branch: Option<String>,
+}
+
+/// A button of the worktree screen: a hairline frame, a mono label or an
+/// agent's mark, and its shortcut in the tooltip. `primary` fills it with the
+/// accent, for the one call to action of the screen.
+fn worktree_button(
+    id: impl Into<SharedString>,
+    tip: String,
+    colours: &Palette,
+    cx: &mut Context<Shell>,
+    content: AnyElement,
+    primary: bool,
+    run: impl Fn(&mut Shell, &mut Window, &mut Context<Shell>) + 'static,
+) -> Stateful<Div> {
+    let hover = colours.surface_2;
+    let tip: SharedString = tip.into();
+    let id: SharedString = id.into();
+    let selector = id.to_string();
+    let button = div()
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .h(metrics::CONTROL())
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(6.))
+        .rounded(metrics::RADIUS())
+        .cursor_pointer()
+        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+        .on_click(cx.listener(move |this, _, window, cx| run(this, window, cx)))
+        .child(content);
+    if primary {
+        button
+            .bg(colours.primary_fill)
+            .text_color(colours.on_primary)
+    } else {
+        button
+            .border_1()
+            .border_color(colours.border)
+            .hover(move |style| style.bg(hover))
+    }
+}
+
+/// The thin rule between two groups of the worktree screen's actions.
+fn worktree_divider(colours: &Palette) -> Div {
+    div()
+        .flex_none()
+        .w(hairline())
+        .h(px(18.))
+        .bg(colours.border)
+}
+
+/// The word next to a worktree's activity dot.
+fn activity_word(activity: Activity) -> &'static str {
+    match activity {
+        Activity::Off => "NO LIVE SESSION",
+        Activity::Idle => "IDLE",
+        Activity::Working => "WORKING",
+        Activity::Waiting => "WAITING",
+        Activity::Failed => "FAILED",
     }
 }
 
