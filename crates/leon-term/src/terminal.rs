@@ -35,6 +35,7 @@ use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Processor, Rgb};
 use parking_lot::{Mutex, RwLock};
@@ -699,6 +700,12 @@ impl Terminal {
             .filter(|text| !text.is_empty())
     }
 
+    /// The OSC 8 or HTTP(S) hyperlink under a viewport cell, across wraps.
+    pub fn link_at(&self, col: usize, row: usize) -> Option<String> {
+        let term = self.term.lock();
+        link_at(&term, col, row)
+    }
+
     /// The text of the visible screen, one line per row, trailing blanks
     /// trimmed. For tests and diagnostics.
     pub fn screen_text(&self) -> String {
@@ -784,6 +791,167 @@ fn viewport_point(term: &Term<EventProxy>, col: usize, row: usize) -> Point {
     let col = col.min(grid.columns().saturating_sub(1));
     let row = row.min(grid.screen_lines().saturating_sub(1));
     Point::new(Line(row as i32 - grid.display_offset() as i32), Column(col))
+}
+
+fn link_at(term: &Term<EventProxy>, col: usize, row: usize) -> Option<String> {
+    let point = viewport_point(term, col, row);
+    let grid = term.grid();
+    if let Some(link) = grid[point].hyperlink() {
+        return (!link.uri().is_empty()).then(|| link.uri().to_owned());
+    }
+
+    let (columns, first, final_line) = logical_line_bounds(term, point);
+    if columns == 0 {
+        return None;
+    }
+    let mut text = Vec::new();
+    let mut clicked = None;
+    for line in first..=final_line {
+        for column in 0..columns {
+            let cell = &grid[Point::new(Line(line), Column(column))];
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                if line == point.line.0 && column == point.column.0 {
+                    clicked = text.len().checked_sub(1);
+                }
+                continue;
+            }
+            if line == point.line.0 && column == point.column.0 {
+                clicked = Some(text.len());
+            }
+            text.push(if cell.c == '\0' { ' ' } else { cell.c });
+        }
+    }
+    plain_link_at(&text, clicked?)
+}
+
+fn plain_link_at(text: &[char], clicked: usize) -> Option<String> {
+    plain_links(text)
+        .into_iter()
+        .find(|(range, _)| range.contains(&clicked))
+        .map(|(_, uri)| uri)
+}
+
+pub(crate) fn plain_links(text: &[char]) -> Vec<(std::ops::Range<usize>, String)> {
+    let mut links = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let scheme_len = if starts_with(text, start, "https://") {
+            8
+        } else if starts_with(text, start, "http://") {
+            7
+        } else {
+            start += 1;
+            continue;
+        };
+        let mut end = (start + scheme_len..text.len())
+            .find(|&index| link_separator(text[index]))
+            .unwrap_or(text.len());
+        while end > start + scheme_len && matches!(text[end - 1], '.' | ',' | ';' | ':' | '!') {
+            end -= 1;
+        }
+        for (open, close) in [('(', ')'), ('[', ']'), ('{', '}')] {
+            while end > start + scheme_len
+                && text[end - 1] == close
+                && text[start..end].iter().filter(|&&ch| ch == close).count()
+                    > text[start..end].iter().filter(|&&ch| ch == open).count()
+            {
+                end -= 1;
+            }
+        }
+        if end > start + scheme_len {
+            links.push((start..end, text[start..end].iter().collect()));
+        }
+        start = end.max(start + 1);
+    }
+    links
+}
+
+pub(crate) fn visible_links(term: &Term<EventProxy>) -> Vec<Option<String>> {
+    let grid = term.grid();
+    let columns = grid.columns();
+    let rows = grid.screen_lines();
+    let offset = grid.display_offset() as i32;
+    let mut links = vec![None; columns * rows];
+    let mut logical_start = None;
+
+    for viewport_row in 0..rows {
+        let point = Point::new(Line(viewport_row as i32 - offset), Column(0));
+        let (_, first, final_line) = logical_line_bounds(term, point);
+        if logical_start == Some(first) {
+            continue;
+        }
+        logical_start = Some(first);
+
+        let mut text = Vec::new();
+        let mut points = Vec::new();
+        for line in first..=final_line {
+            for column in 0..columns {
+                let point = Point::new(Line(line), Column(column));
+                let cell = &grid[point];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                text.push(if cell.c == '\0' { ' ' } else { cell.c });
+                points.push(point);
+            }
+        }
+        for (range, uri) in plain_links(&text) {
+            for point in &points[range] {
+                let row = point.line.0 + offset;
+                if row >= 0 && row < rows as i32 {
+                    links[row as usize * columns + point.column.0] = Some(uri.clone());
+                }
+            }
+        }
+    }
+
+    for row in 0..rows {
+        for column in 0..columns {
+            let point = Point::new(Line(row as i32 - offset), Column(column));
+            if let Some(link) = grid[point].hyperlink() {
+                if !link.uri().is_empty() {
+                    links[row * columns + column] = Some(link.uri().to_owned());
+                }
+            }
+        }
+    }
+    links
+}
+
+fn logical_line_bounds(term: &Term<EventProxy>, point: Point) -> (usize, i32, i32) {
+    let grid = term.grid();
+    let columns = grid.columns();
+    let last = Column(columns.saturating_sub(1));
+    let top = -(grid.total_lines().saturating_sub(grid.screen_lines()) as i32);
+    let bottom = grid.screen_lines().saturating_sub(1) as i32;
+    let mut first = point.line.0;
+    while columns > 0
+        && first > top
+        && grid[Point::new(Line(first - 1), last)]
+            .flags
+            .contains(Flags::WRAPLINE)
+    {
+        first -= 1;
+    }
+    let mut final_line = point.line.0;
+    while columns > 0
+        && final_line < bottom
+        && grid[Point::new(Line(final_line), last)]
+            .flags
+            .contains(Flags::WRAPLINE)
+    {
+        final_line += 1;
+    }
+    (columns, first, final_line)
+}
+
+fn starts_with(text: &[char], at: usize, prefix: &str) -> bool {
+    text.get(at..at + prefix.len())
+        .is_some_and(|candidate| candidate.iter().copied().eq(prefix.chars()))
+}
+
+fn link_separator(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '<' | '>' | '\'' | '"' | '`')
 }
 
 fn spawn_thread(name: &str, work: impl FnOnce() + Send + 'static) {
@@ -948,6 +1116,40 @@ mod tests {
         let mut headless = Headless::new(20, 4, theme());
         headless.feed(b"hello\r\nworld");
         assert_eq!(headless.text(), "hello\nworld");
+    }
+
+    #[test]
+    fn http_links_are_found_at_the_clicked_cell_and_trim_sentence_punctuation() {
+        let mut headless = Headless::new(80, 4, theme());
+        headless.feed(b"See (https://example.com/a_(b)). Next");
+        assert_eq!(
+            link_at(headless.term(), 10, 0).as_deref(),
+            Some("https://example.com/a_(b)")
+        );
+        assert_eq!(link_at(headless.term(), 31, 0), None);
+    }
+
+    #[test]
+    fn a_plain_link_is_found_across_wrapped_rows() {
+        let mut headless = Headless::new(12, 4, theme());
+        headless.feed(b"https://example.com/docs");
+        assert_eq!(
+            link_at(headless.term(), 3, 1).as_deref(),
+            Some("https://example.com/docs")
+        );
+        let links = visible_links(headless.term());
+        assert_eq!(links[3].as_deref(), Some("https://example.com/docs"));
+        assert_eq!(links[12 + 3].as_deref(), Some("https://example.com/docs"));
+    }
+
+    #[test]
+    fn an_osc_8_label_opens_its_declared_uri() {
+        let mut headless = Headless::new(40, 4, theme());
+        headless.feed(b"\x1b]8;;https://example.com/target\x1b\\read me\x1b]8;;\x1b\\");
+        assert_eq!(
+            link_at(headless.term(), 3, 0).as_deref(),
+            Some("https://example.com/target")
+        );
     }
 
     #[test]
