@@ -430,6 +430,21 @@ mod tests {
     }
 
     #[test]
+    fn opencode_v2_sessions_are_listed_and_loaded_from_the_database_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        opencode::fixture::populate_v2(&Connection::open(&path).unwrap());
+
+        let source = OpencodeDb::new(&path);
+        let items = source.list().unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(items[0].key.ends_with("#ses_1"));
+        let session = source.load(&items[0]).unwrap().unwrap();
+        assert_eq!(session.external_id, "ses_1");
+        assert_eq!(session.title, "Tidy the config loader");
+    }
+
+    #[test]
     fn a_file_that_is_not_a_database_is_reported_as_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("opencode.db");
