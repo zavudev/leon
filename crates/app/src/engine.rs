@@ -1456,7 +1456,7 @@ impl Engine {
             .store
             .projects(Some(machine_id))?
             .into_iter()
-            .find(|project| project.root == root);
+            .find(|project| leon_core::path::key(&project.root) == leon_core::path::key(&root));
         let is_new = existing.is_none();
         let project = match existing {
             Some(project) => project,
@@ -1516,27 +1516,35 @@ impl Engine {
             );
         }
         // Several folders lead to one repository: the first listing is kept.
-        let mut repositories: BTreeMap<String, Vec<NewWorktree>> = BTreeMap::new();
+        // Keyed by path identity, so that two spellings of one repository are
+        // one entry; the first spelling seen is the one stored.
+        let mut repositories: BTreeMap<String, (String, Vec<NewWorktree>)> = BTreeMap::new();
         while let Some(done) = jobs.join_next().await {
             if let Some((root, worktrees)) =
                 done.map_err(|error| EngineError::Job(error.to_string()))?
             {
-                repositories.entry(root).or_insert(worktrees);
+                repositories
+                    .entry(leon_core::path::key(&root))
+                    .or_insert((root, worktrees));
             }
         }
 
         let store = &self.inner.store;
-        let dismissed: HashSet<String> = store.dismissed_roots(&machine.id)?;
+        let dismissed: HashSet<String> = store
+            .dismissed_roots(&machine.id)?
+            .iter()
+            .map(|root| leon_core::path::key(root))
+            .collect();
         let mut known: HashMap<String, ProjectId> = store
             .projects(Some(&machine.id))?
             .into_iter()
-            .map(|project| (project.root, project.id))
+            .map(|project| (leon_core::path::key(&project.root), project.id))
             .collect();
         let mut found = Discovery::default();
-        for (root, worktrees) in repositories {
-            let id = match known.get(&root) {
+        for (key, (root, worktrees)) in repositories {
+            let id = match known.get(&key) {
                 Some(id) => id.clone(),
-                None if dismissed.contains(&root) => continue,
+                None if dismissed.contains(&key) => continue,
                 None => match store.add_project(
                     &machine.id,
                     &address::default_project_name(&root),
@@ -1544,7 +1552,7 @@ impl Engine {
                 ) {
                     Ok(project) => {
                         found.added += 1;
-                        known.insert(root.clone(), project.id.clone());
+                        known.insert(key.clone(), project.id.clone());
                         project.id
                     }
                     Err(error) => {

@@ -215,6 +215,11 @@ fn trim_separators(path: &str) -> &str {
     }
 }
 
+/// Whether two spellings name one folder (see `leon_core::path`).
+pub fn same_folder(a: &str, b: &str) -> bool {
+    leon_core::path::key(a) == leon_core::path::key(b)
+}
+
 /// A folder of unsorted sessions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Folder {
@@ -257,8 +262,8 @@ enum Owner<'a> {
 }
 
 /// For each machine, which project or worktree owns each root path.
-fn owner_tables(snapshot: &Snapshot) -> HashMap<&MachineId, HashMap<&str, Owner<'_>>> {
-    let mut owners: HashMap<&MachineId, HashMap<&str, Owner>> = snapshot
+fn owner_tables(snapshot: &Snapshot) -> HashMap<&MachineId, HashMap<String, Owner<'_>>> {
+    let mut owners: HashMap<&MachineId, HashMap<String, Owner>> = snapshot
         .machines
         .iter()
         .map(|machine| (&machine.id, HashMap::new()))
@@ -267,7 +272,7 @@ fn owner_tables(snapshot: &Snapshot) -> HashMap<&MachineId, HashMap<&str, Owner<
     for entry in &snapshot.projects {
         if let Some(table) = owners.get_mut(&entry.project.machine_id) {
             table.insert(
-                trim_separators(&entry.project.root),
+                leon_core::path::key(&entry.project.root),
                 Owner::Project(&entry.project.id),
             );
         }
@@ -276,7 +281,7 @@ fn owner_tables(snapshot: &Snapshot) -> HashMap<&MachineId, HashMap<&str, Owner<
         if let Some(table) = owners.get_mut(&entry.project.machine_id) {
             for worktree in &entry.worktrees {
                 table.insert(
-                    trim_separators(&worktree.path),
+                    leon_core::path::key(&worktree.path),
                     Owner::Worktree(&worktree.id),
                 );
             }
@@ -301,16 +306,18 @@ impl Placement {
             let same_place = snapshot.sessions.iter().any(|session| {
                 &session.id == history
                     && session.machine_id == entry.machine
-                    && trim_separators(&session.cwd) == trim_separators(&entry.cwd)
+                    && leon_core::path::key(&session.cwd) == leon_core::path::key(&entry.cwd)
             });
             if same_place {
                 self.merged.insert(history.clone());
             }
         }
         for (index, entry) in live.iter().enumerate() {
-            let owner = owners
-                .get(&entry.machine)
-                .and_then(|table| ancestors(&entry.cwd).find_map(|folder| table.get(folder)));
+            let owner = owners.get(&entry.machine).and_then(|table| {
+                leon_core::path::ancestor_keys(&entry.cwd)
+                    .iter()
+                    .find_map(|folder| table.get(folder))
+            });
             match owner {
                 Some(Owner::Worktree(id)) => self
                     .live_in_worktree
@@ -343,12 +350,15 @@ impl Placement {
     pub fn compute(snapshot: &Snapshot) -> Self {
         let owners = owner_tables(snapshot);
         let mut placement = Self::default();
-        let mut folders: HashMap<(&MachineId, &str), usize> = HashMap::new();
+        let mut folders: HashMap<(&MachineId, String), usize> = HashMap::new();
         for (index, session) in snapshot.sessions.iter().enumerate() {
             let Some(table) = owners.get(&session.machine_id) else {
                 continue;
             };
-            match ancestors(&session.cwd).find_map(|folder| table.get(folder)) {
+            let owner = leon_core::path::ancestor_keys(&session.cwd)
+                .iter()
+                .find_map(|folder| table.get(folder));
+            match owner {
                 Some(Owner::Worktree(id)) => {
                     placement
                         .in_worktree
@@ -369,7 +379,7 @@ impl Placement {
                         .entry(session.machine_id.clone())
                         .or_default();
                     let place = *folders
-                        .entry((&session.machine_id, session.cwd.as_str()))
+                        .entry((&session.machine_id, leon_core::path::key(&session.cwd)))
                         .or_insert_with(|| {
                             list.push(Folder {
                                 cwd: session.cwd.clone(),
@@ -394,7 +404,8 @@ impl Placement {
 /// worktree or project root of the machine that contains it, else `cwd`
 /// itself. Terminals of one folder share a workspace.
 pub fn workspace_root(snapshot: &Snapshot, machine: &MachineId, cwd: &str) -> String {
-    let mut best: Option<&str> = None;
+    let above = leon_core::path::ancestor_keys(cwd);
+    let mut best: Option<(&str, usize)> = None;
     for entry in snapshot
         .projects
         .iter()
@@ -406,15 +417,14 @@ pub fn workspace_root(snapshot: &Snapshot, machine: &MachineId, cwd: &str) -> St
             .map(|worktree| worktree.path.as_str())
             .chain([entry.project.root.as_str()]);
         for path in paths {
-            let path = trim_separators(path);
-            if ancestors(cwd).any(|folder| folder == path)
-                && best.is_none_or(|current| path.len() > current.len())
-            {
-                best = Some(path);
+            let key = leon_core::path::key(path);
+            if above.contains(&key) && best.is_none_or(|(_, longest)| key.len() > longest) {
+                best = Some((path, key.len()));
             }
         }
     }
-    best.unwrap_or_else(|| trim_separators(cwd)).to_owned()
+    best.map_or_else(|| trim_separators(cwd), |(path, _)| trim_separators(path))
+        .to_owned()
 }
 
 /// The project, and its worktree when a worktree has this exact folder, that
@@ -432,11 +442,11 @@ pub fn detail_of_root(
         if let Some(worktree) = entry
             .worktrees
             .iter()
-            .find(|worktree| trim_separators(&worktree.path) == root)
+            .find(|worktree| same_folder(&worktree.path, root))
         {
             return Some((entry.project.id.clone(), Some(worktree.id.clone())));
         }
-        if trim_separators(&entry.project.root) == root {
+        if same_folder(&entry.project.root, root) {
             return Some((entry.project.id.clone(), None));
         }
     }
@@ -1636,5 +1646,16 @@ mod tests {
             ("api", "api-x")
         );
         assert!(detail_of_root(&snapshot, &local, "/tmp/scratch").is_none());
+    }
+
+    #[test]
+    fn folders_are_compared_by_identity_not_by_spelling() {
+        assert!(same_folder(
+            "C:/Users/me/code/api",
+            r"c:\users\me\code\api\"
+        ));
+        assert!(same_folder(r"\\?\C:\a", "C:/a"));
+        assert!(!same_folder("/srv/Api", "/srv/api"));
+        assert!(!same_folder(r"/srv/a\b", "/srv/a/b"));
     }
 }

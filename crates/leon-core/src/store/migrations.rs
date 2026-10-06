@@ -25,7 +25,7 @@ use crate::error::{Result, StoreError};
 /// branches that both wanted "version 4". Neither was ever released: the only
 /// public schema is version 3, so version 4 never existed in the wild and this
 /// order (usage, then relay) is the one every database goes through.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
 
 const V1: &str = r#"
 CREATE TABLE machine (
@@ -197,6 +197,11 @@ ALTER TABLE machine ADD COLUMN relay_url TEXT;
 ALTER TABLE machine ADD COLUMN relay_name TEXT;
 "#;
 
+/// Version 6: no schema change. Its step (in Rust, below) merges the projects
+/// and worktrees that differ only by how their path is spelled (`C:/code/api`
+/// from git, `c:\code\api` from an agent) and links the sessions again.
+const V6: &str = "SELECT 1;";
+
 /// Brings the database up to the latest schema version.
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     let supported = MIGRATIONS.len() as u32;
@@ -208,6 +213,9 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
         let version = index as u32 + 1;
         let transaction = connection.transaction()?;
         transaction.execute_batch(sql)?;
+        if version == 6 {
+            super::projects::heal_path_spellings(&transaction)?;
+        }
         transaction.pragma_update(None, "user_version", version)?;
         transaction.commit()?;
         tracing::debug!(version, "applied store migration");
@@ -241,7 +249,7 @@ mod tests {
             )
             .unwrap();
         migrate(&mut connection).unwrap();
-        assert_eq!(version(&connection), 5);
+        assert_eq!(version(&connection), 6);
         let (host, key): (String, Option<String>) = connection
             .query_row(
                 "SELECT host, relay_host_key FROM machine WHERE id = 'm1'",
@@ -336,7 +344,7 @@ mod tests {
     fn a_fresh_database_has_both_the_usage_tables_and_the_relay_columns() {
         let mut connection = Connection::open_in_memory().unwrap();
         migrate(&mut connection).unwrap();
-        assert_eq!(version(&connection), 5);
+        assert_eq!(version(&connection), 6);
         connection
             .execute(
                 "INSERT INTO usage_history (machine_id, agent, account, window, observed_at, used_percent)

@@ -2725,6 +2725,71 @@ fn projects_with_one_name_are_told_apart_in_the_tree(cx: &mut TestAppContext) {
     assert_eq!(labels, ["acme.io/monorepo", "zavu/monorepo"]);
 }
 
+/// The bug of a Windows PC: git reports the worktree with `/`, the agent
+/// recorded its folder with `\`, and the session fell out of its worktree
+/// into `[ UNSORTED ]`. Both spellings are one folder.
+#[gpui_kit::test]
+fn a_session_with_a_backslash_folder_appears_under_the_worktree_git_spelled_with_slashes(
+    cx: &mut TestAppContext,
+) {
+    let h = open(cx, ScriptedRunner::new());
+    let project = h
+        .store
+        .add_project(&MachineId::local(), "winapi", "C:/Users/me/code/winapi")
+        .unwrap();
+    let worktrees = h
+        .store
+        .replace_worktrees(
+            &project.id,
+            vec![NewWorktree {
+                path: "C:/Users/me/code/winapi".into(),
+                branch: Some("main".into()),
+                head: None,
+                is_main: true,
+            }],
+        )
+        .unwrap();
+    let at = fixed_now() - chrono::Duration::minutes(5);
+    for (n, cwd) in [
+        r"C:\Users\me\code\winapi",
+        r"c:\users\me\code\winapi\src\",
+        r"\\?\C:\Users\me\code\winapi",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        h.store
+            .upsert_session(
+                &NewSession {
+                    agent: AgentId::CLAUDE,
+                    external_id: format!("win-{n}"),
+                    machine_id: MachineId::local(),
+                    cwd: cwd.to_owned(),
+                    title: format!("windows session {n}"),
+                    model: None,
+                    started_at: at,
+                    updated_at: at,
+                },
+                &[],
+            )
+            .unwrap();
+    }
+    h.settle(cx);
+    let (placed, loose) = h.shell(cx, |s| {
+        (
+            s.placement.of_worktree(&worktrees[0].id).len(),
+            s.placement
+                .unsorted
+                .get(&MachineId::local())
+                .map_or(0, |folders| {
+                    folders.iter().map(|f| f.sessions.len()).sum::<usize>()
+                }),
+        )
+    });
+    assert_eq!(placed, 3, "every spelling lands under the worktree");
+    assert_eq!(loose, 0, "nothing falls into the unsorted folders");
+}
+
 // ----- project logos ---------------------------------------------------------------------
 
 fn png_logo() -> leon_core::IconImage {

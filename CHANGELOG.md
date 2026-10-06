@@ -4,6 +4,21 @@
 
 ### Fixed
 
+* **Windows: a session appears under its worktree again.** Sessions were
+  matched to projects and worktrees by comparing paths as raw text, and on
+  Windows the same folder is spelled `C:/Users/me/code/api` by git and
+  `C:\Users\me\code\api` by the agent (also `c:` for `C:`, a `\\?\` prefix, a
+  trailing separator, any case), so no session matched and it fell into the
+  collapsed Unsorted node. Paths are now compared by one identity function
+  (`leon_core::path::key`: the style follows the path, Windows paths are
+  case-insensitive, POSIX paths unchanged) in the store, the tree, discovery,
+  dismissed roots, workspaces and "sessions elsewhere". Store version 6 merges
+  projects and worktrees that differ only by spelling and links the sessions
+  again, so an existing database heals on the next start. History import was
+  checked on Windows: a transcript cut mid-line by a power loss is imported up
+  to its last complete line and again when it grows; the opencode database is
+  also looked for under `%APPDATA%` when it is not under `~/.local/share`.
+
 * **`wss://` relays work.** The first connection to a TLS relay panicked in the
   TLS library (no process-level crypto provider was installed), leaving the
   host and the Connect screens at "connecting" for ever; this shipped in 0.1.0,

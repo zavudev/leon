@@ -43,7 +43,14 @@ impl HistoryRoots {
 /// determined.
 pub fn default_roots() -> HistoryRoots {
     let variable = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-    match variable("HOME").or_else(|| variable("USERPROFILE")) {
+    // On Windows the profile folder is `USERPROFILE`; `HOME` may be set by a
+    // POSIX shell (Git Bash) to a path the agents do not use.
+    let home = if cfg!(windows) {
+        variable("USERPROFILE").or_else(|| variable("HOME"))
+    } else {
+        variable("HOME").or_else(|| variable("USERPROFILE"))
+    };
+    match home {
         Some(home) => default_roots_in(Path::new(&home), variable),
         None => HistoryRoots::default(),
     }
@@ -54,7 +61,8 @@ pub fn default_roots() -> HistoryRoots {
 /// `variable` looks up an environment variable. The overrides the agents
 /// document are honoured: `CLAUDE_CONFIG_DIR` (default `<home>/.claude`),
 /// `CODEX_HOME` (default `<home>/.codex`) and `XDG_DATA_HOME` (default
-/// `<home>/.local/share`, which opencode uses on every operating system).
+/// `<home>/.local/share`, which opencode uses on every operating system,
+/// Windows included; see below for its fallbacks).
 pub fn default_roots_in(home: &Path, variable: impl Fn(&str) -> Option<String>) -> HistoryRoots {
     let directory = |name: &str, fallback: PathBuf| {
         variable(name)
@@ -63,7 +71,21 @@ pub fn default_roots_in(home: &Path, variable: impl Fn(&str) -> Option<String>) 
     };
     let claude = directory("CLAUDE_CONFIG_DIR", home.join(".claude"));
     let codex = directory("CODEX_HOME", home.join(".codex"));
-    let data = directory("XDG_DATA_HOME", home.join(".local").join("share"));
+    // opencode takes its data folder from `xdg-basedir`, which on Windows is
+    // still `~/.local/share`; `%APPDATA%` and `%LOCALAPPDATA%` are looked at
+    // only when the database is already there and the XDG one is not.
+    let xdg = directory("XDG_DATA_HOME", home.join(".local").join("share"));
+    let db = |base: &Path| base.join("opencode").join("opencode.db");
+    let data = if db(&xdg).exists() {
+        xdg
+    } else {
+        ["APPDATA", "LOCALAPPDATA"]
+            .iter()
+            .filter_map(|name| variable(name))
+            .map(PathBuf::from)
+            .find(|base| db(base).exists())
+            .unwrap_or(xdg)
+    };
     HistoryRoots {
         claude_projects: Some(claude.join("projects")),
         codex_sessions: Some(codex.join("sessions")),
@@ -116,6 +138,36 @@ mod tests {
             .collect();
         catalogued.sort_unstable();
         assert_eq!(imported, catalogued);
+    }
+
+    #[test]
+    fn on_windows_the_profile_folder_is_the_home_and_opencode_is_found_where_its_database_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("Users").join("me");
+        let appdata = dir.path().join("AppData").join("Roaming");
+        std::fs::create_dir_all(appdata.join("opencode")).unwrap();
+        std::fs::write(appdata.join("opencode").join("opencode.db"), b"").unwrap();
+        let appdata_text = appdata.to_string_lossy().into_owned();
+        let found = default_roots_in(&profile, |name| {
+            (name == "APPDATA").then(|| appdata_text.clone())
+        });
+        assert_eq!(
+            found.opencode_db,
+            Some(appdata.join("opencode").join("opencode.db"))
+        );
+        // The Claude and Codex folders hang off the profile.
+        assert_eq!(
+            found.claude_projects,
+            Some(profile.join(".claude").join("projects"))
+        );
+        // With the XDG database present, it wins.
+        let xdg = profile.join(".local").join("share").join("opencode");
+        std::fs::create_dir_all(&xdg).unwrap();
+        std::fs::write(xdg.join("opencode.db"), b"").unwrap();
+        let both = default_roots_in(&profile, |name| {
+            (name == "APPDATA").then(|| appdata_text.clone())
+        });
+        assert_eq!(both.opencode_db, Some(xdg.join("opencode.db")));
     }
 
     #[test]

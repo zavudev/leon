@@ -18,6 +18,7 @@ mod error;
 pub mod icon;
 mod ids;
 mod model;
+pub mod path;
 pub mod store;
 
 pub use agent::{AgentSpec, CustomAgent};

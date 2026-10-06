@@ -497,4 +497,65 @@ mod tests {
         Importer::run(&store, &MachineId::local(), &roots);
         assert_eq!(fs::read(&path).unwrap(), before);
     }
+
+    fn one_claude_file(dir: &Path) -> (HistoryRoots, std::path::PathBuf) {
+        let roots = HistoryRoots {
+            claude_projects: Some(dir.join("claude")),
+            codex_sessions: None,
+            opencode_db: None,
+        };
+        (roots, dir.join("claude/project/cut-session.jsonl"))
+    }
+
+    fn count_messages(store: &Store) -> usize {
+        let sessions = store
+            .recent_sessions(&SessionFilter::default(), 10)
+            .unwrap();
+        sessions.first().map_or(0, |s| s.message_count as usize)
+    }
+
+    #[test]
+    fn a_file_cut_mid_line_by_a_power_loss_is_imported_up_to_its_last_complete_line_and_again_when_it_grows(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (roots, file) = one_claude_file(dir.path());
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let first = claude_line("user", "first question", 0);
+        let second = claude_line("assistant", "first answer", 1);
+        let third = claude_line("user", "second question", 2);
+        // The third line is cut in the middle of its JSON, and the cut may
+        // even end in zero bytes, as a file system leaves after a power cut.
+        let cut = &third[..third.len() / 2];
+        fs::write(&file, format!("{first}\n{second}\n{cut}\0\0\0")).unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let report = Importer::run(&store, &MachineId::local(), &roots);
+        assert_eq!(report.imported, 1, "{report:?}");
+        assert_eq!(count_messages(&store), 2);
+        // Nothing changed: not read again.
+        let again = Importer::run(&store, &MachineId::local(), &roots);
+        assert_eq!(again.skipped_unchanged, 1);
+        // The file later grows (the agent resumed and wrote on): re-imported.
+        fs::write(&file, format!("{first}\n{second}\n{third}\n")).unwrap();
+        let grown = Importer::run(&store, &MachineId::local(), &roots);
+        assert_eq!(grown.imported, 1, "{grown:?}");
+        assert_eq!(count_messages(&store), 3);
+    }
+
+    #[test]
+    fn a_zero_length_file_is_empty_not_a_failure_and_is_imported_when_it_gets_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let (roots, file) = one_claude_file(dir.path());
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, b"").unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let report = Importer::run(&store, &MachineId::local(), &roots);
+        assert_eq!(
+            (report.empty, report.failed, report.imported),
+            (1, 0, 0),
+            "{report:?}"
+        );
+        fs::write(&file, claude_line("user", "hello", 0) + "\n").unwrap();
+        let later = Importer::run(&store, &MachineId::local(), &roots);
+        assert_eq!(later.imported, 1, "{later:?}");
+    }
 }

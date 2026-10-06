@@ -60,6 +60,20 @@ impl Store {
             if !machine_exists {
                 return Err(StoreError::NotFound("machine"));
             }
+            // The same folder under another spelling is the same project.
+            let wanted = crate::path::key(&project.root);
+            let existing: Vec<String> = tx
+                .prepare_cached("SELECT root FROM project WHERE machine_id = ?1")?
+                .query_map([machine_id.as_str()], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            if existing
+                .iter()
+                .any(|known| crate::path::key(known) == wanted)
+            {
+                return Err(StoreError::Invalid(format!(
+                    "a project rooted at {root} already exists on this machine"
+                )));
+            }
             let inserted = tx
                 .prepare_cached(
                     "INSERT INTO project (id, machine_id, name, root) VALUES (?1, ?2, ?3, ?4)
@@ -76,8 +90,7 @@ impl Store {
                     "a project rooted at {root} already exists on this machine"
                 )));
             }
-            tx.prepare_cached("DELETE FROM dismissed_root WHERE machine_id = ?1 AND root = ?2")?
-                .execute(params![machine_id.as_str(), project.root])?;
+            forget_dismissed(tx, machine_id, &project.root)?;
             relink_sessions(tx, machine_id)
         })?;
         self.notify(StoreChange::Projects);
@@ -158,11 +171,7 @@ impl Store {
     /// Forgets that a project root was removed, so that discovery may adopt
     /// it again. `true` when it was dismissed.
     pub fn restore_dismissed_root(&self, machine_id: &MachineId, root: &str) -> Result<bool> {
-        let removed = self.transact(|tx| {
-            Ok(tx
-                .prepare_cached("DELETE FROM dismissed_root WHERE machine_id = ?1 AND root = ?2")?
-                .execute(params![machine_id.as_str(), root])?)
-        })?;
+        let removed = self.transact(|tx| forget_dismissed(tx, machine_id, root))?;
         if removed > 0 {
             self.notify(StoreChange::Projects);
         }
@@ -182,29 +191,63 @@ impl Store {
     ) -> Result<Vec<Worktree>> {
         let (worktrees, relinked) = self.transact(|tx| {
             let project = find_project(tx, project_id)?;
-            let mut stale: HashMap<String, String> = tx
+            // Matched by path identity: a worktree git now spells with `/` is
+            // the one stored with `\`, and keeps its id.
+            let mut stale: HashMap<String, String> = HashMap::new();
+            let mut by_key: HashMap<String, String> = HashMap::new();
+            for (path, id) in tx
                 .prepare_cached("SELECT path, id FROM worktree WHERE project_id = ?1")?
-                .query_map([project_id.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
+                .query_map([project_id.as_str()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            {
+                by_key.insert(crate::path::key(&path), id.clone());
+                stale.insert(id.clone(), id);
+            }
 
             for worktree in &reported {
                 let path = trim_trailing_separators(&worktree.path);
-                stale.remove(path);
-                tx.prepare_cached(
-                    "INSERT INTO worktree (id, project_id, path, branch, head, is_main)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                     ON CONFLICT (project_id, path) DO UPDATE
-                     SET branch = excluded.branch, head = excluded.head,
-                         is_main = excluded.is_main",
-                )?
-                .execute(params![
-                    WorktreeId::generate().as_str(),
-                    project_id.as_str(),
-                    path,
-                    worktree.branch,
-                    worktree.head,
-                    worktree.is_main
-                ])?;
+                let key = crate::path::key(path);
+                match by_key.get(&key) {
+                    Some(id) => {
+                        stale.remove(id);
+                        // A spelling that is already another row's is left to
+                        // that row (the unique index); the path is refreshed.
+                        let _ = tx
+                            .prepare_cached(
+                                "UPDATE OR IGNORE worktree
+                                 SET path = ?2, branch = ?3, head = ?4, is_main = ?5
+                                 WHERE id = ?1",
+                            )?
+                            .execute(params![
+                                id,
+                                path,
+                                worktree.branch,
+                                worktree.head,
+                                worktree.is_main
+                            ])?;
+                    }
+                    None => {
+                        let id = WorktreeId::generate();
+                        tx.prepare_cached(
+                            "INSERT INTO worktree (id, project_id, path, branch, head, is_main)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                             ON CONFLICT (project_id, path) DO UPDATE
+                             SET branch = excluded.branch, head = excluded.head,
+                                 is_main = excluded.is_main",
+                        )?
+                        .execute(params![
+                            id.as_str(),
+                            project_id.as_str(),
+                            path,
+                            worktree.branch,
+                            worktree.head,
+                            worktree.is_main
+                        ])?;
+                        by_key.insert(key, id.as_str().to_owned());
+                    }
+                }
             }
             for id in stale.values() {
                 tx.prepare_cached("DELETE FROM worktree WHERE id = ?1")?
@@ -291,11 +334,15 @@ pub(crate) fn project_roots(
 
 /// The project owning the deepest directory that contains `cwd`, if any.
 pub(crate) fn owning_project(roots: &ProjectRoots, cwd: &str) -> Option<ProjectId> {
+    // Compared by identity (`path::key`): `C:/code/api` and `c:\code\api\src`
+    // are the same folder and one inside the other.
+    let cwd = crate::path::key(cwd);
     roots
         .iter()
-        .filter(|(root, _)| is_within(cwd, root))
+        .map(|(root, id)| (crate::path::key(root), id))
+        .filter(|(root, _)| crate::path::within_keys(&cwd, root))
         .max_by_key(|(root, _)| root.len())
-        .map(|(_, project_id)| project_id.clone())
+        .map(|(_, project_id)| (*project_id).clone())
 }
 
 /// Recomputes the project of every session on a machine. Returns how many
@@ -323,14 +370,105 @@ pub(crate) fn relink_sessions(tx: &Transaction<'_>, machine_id: &MachineId) -> R
     Ok(changed)
 }
 
-/// Whether `path` is `root` itself or lies below it. Both `/` and `\` count
-/// as separators because the paths may come from a machine running another
-/// operating system. The comparison is case-sensitive.
-fn is_within(path: &str, root: &str) -> bool {
-    let Some(rest) = path.strip_prefix(root) else {
-        return false;
-    };
-    rest.is_empty() || rest.starts_with(['/', '\\']) || root.ends_with(['/', '\\'])
+#[cfg(test)]
+use crate::path::is_within;
+
+/// Forgets a dismissed root under any spelling. Returns how many rows went.
+fn forget_dismissed(tx: &Transaction<'_>, machine_id: &MachineId, root: &str) -> Result<usize> {
+    let wanted = crate::path::key(root);
+    let rows: Vec<String> = tx
+        .prepare_cached("SELECT root FROM dismissed_root WHERE machine_id = ?1")?
+        .query_map([machine_id.as_str()], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut removed = 0;
+    for row in rows
+        .into_iter()
+        .filter(|row| crate::path::key(row) == wanted)
+    {
+        removed += tx
+            .prepare_cached("DELETE FROM dismissed_root WHERE machine_id = ?1 AND root = ?2")?
+            .execute(params![machine_id.as_str(), row])?;
+    }
+    Ok(removed)
+}
+
+/// The migration of version 6: projects and worktrees that differ only by how
+/// their path is spelled are merged (the oldest by id order keeps its id; the
+/// worktrees of the others move to it), the sessions are linked again, and
+/// the dismissed roots that name one folder are one. Idempotent: on a database
+/// with nothing to merge it changes nothing.
+pub(crate) fn heal_path_spellings(tx: &Transaction<'_>) -> Result<()> {
+    let projects: Vec<(String, String, String)> = tx
+        .prepare_cached("SELECT id, machine_id, root FROM project ORDER BY machine_id, id")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut keepers: HashMap<(String, String), String> = HashMap::new();
+    for (id, machine, root) in &projects {
+        let key = (machine.clone(), crate::path::key(root));
+        match keepers.get(&key) {
+            None => {
+                keepers.insert(key, id.clone());
+            }
+            Some(keeper) => {
+                // Move what the duplicate holds, then drop it.
+                let rows: Vec<(String, String)> = tx
+                    .prepare_cached("SELECT id, path FROM worktree WHERE project_id = ?1")?
+                    .query_map([id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
+                let held: Vec<String> = tx
+                    .prepare_cached("SELECT path FROM worktree WHERE project_id = ?1")?
+                    .query_map([keeper], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                let held: std::collections::HashSet<String> =
+                    held.iter().map(|path| crate::path::key(path)).collect();
+                for (worktree, path) in rows {
+                    if !held.contains(&crate::path::key(&path)) {
+                        tx.prepare_cached(
+                            "UPDATE OR IGNORE worktree SET project_id = ?1 WHERE id = ?2",
+                        )?
+                        .execute(params![keeper, worktree])?;
+                    }
+                }
+                tx.prepare_cached("DELETE FROM project WHERE id = ?1")?
+                    .execute([id])?;
+            }
+        }
+    }
+    // Worktrees of one project that are one folder.
+    let worktrees: Vec<(String, String, String)> = tx
+        .prepare_cached(
+            "SELECT id, project_id, path FROM worktree ORDER BY project_id, is_main DESC, id",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut seen = std::collections::HashSet::new();
+    for (id, project, path) in worktrees {
+        if !seen.insert((project, crate::path::key(&path))) {
+            tx.prepare_cached("DELETE FROM worktree WHERE id = ?1")?
+                .execute([id])?;
+        }
+    }
+    // Dismissed roots that are one folder.
+    let dismissed: Vec<(String, String)> = tx
+        .prepare_cached("SELECT machine_id, root FROM dismissed_root ORDER BY machine_id, root")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut seen = std::collections::HashSet::new();
+    for (machine, root) in dismissed {
+        if !seen.insert((machine.clone(), crate::path::key(&root))) {
+            tx.prepare_cached("DELETE FROM dismissed_root WHERE machine_id = ?1 AND root = ?2")?
+                .execute(params![machine, root])?;
+        }
+    }
+    // Every session, linked again.
+    let machines: Vec<String> = tx
+        .prepare_cached("SELECT id FROM machine")?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for machine in machines {
+        relink_sessions(tx, &MachineId::from_string(machine))?;
+    }
+    Ok(())
 }
 
 /// Drops trailing separators so that `/srv/api/` and `/srv/api` are the same
@@ -688,5 +826,140 @@ mod tests {
         assert!(is_within("C:\\code\\api\\src", "C:\\code\\api"));
         assert!(is_within("/srv", "/"));
         assert!(!is_within("/srv", "/srv/api"));
+    }
+
+    // ----- path spellings ---------------------------------------------------
+
+    #[test]
+    fn a_session_with_a_backslash_cwd_links_to_a_worktree_git_reported_with_slashes() {
+        let store = Store::open_in_memory().unwrap();
+        let project = store
+            .add_project(&local(), "api", "C:/Users/me/code/api")
+            .unwrap();
+        let worktrees = store
+            .replace_worktrees(
+                &project.id,
+                vec![worktree("C:/Users/me/code/api", Some("main"), true)],
+            )
+            .unwrap();
+        for (n, cwd) in [
+            r"C:\Users\me\code\api",
+            r"c:\users\me\code\api\src",
+            r"\\?\C:\Users\me\code\api\",
+            "C:/Users/me/code/api/src/",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = store
+                .upsert_session(&session_in(cwd, &format!("s{n}")), &[])
+                .unwrap();
+            assert_eq!(
+                store.session(&id).unwrap().project_id,
+                Some(project.id.clone()),
+                "{cwd}"
+            );
+        }
+        // Not a session of this project: another folder with the same prefix.
+        let other = store
+            .upsert_session(&session_in(r"C:\Users\me\code\api-old", "x"), &[])
+            .unwrap();
+        assert_eq!(store.session(&other).unwrap().project_id, None);
+        assert_eq!(worktrees.len(), 1);
+    }
+
+    #[test]
+    fn a_folder_that_differs_only_by_spelling_is_the_same_project_and_worktree() {
+        let store = Store::open_in_memory().unwrap();
+        let project = store.add_project(&local(), "api", r"C:\code\api").unwrap();
+        assert!(store
+            .add_project(&local(), "again", "c:/code/api/")
+            .is_err());
+        let first = store
+            .replace_worktrees(
+                &project.id,
+                vec![worktree(r"C:\code\api", Some("main"), true)],
+            )
+            .unwrap();
+        let second = store
+            .replace_worktrees(
+                &project.id,
+                vec![worktree("C:/code/api", Some("dev"), true)],
+            )
+            .unwrap();
+        assert_eq!(second.len(), 1, "no duplicate worktree");
+        assert_eq!(second[0].id, first[0].id, "the id is kept");
+        assert_eq!(second[0].branch.as_deref(), Some("dev"));
+        // POSIX paths that differ by case are different folders.
+        store.add_project(&local(), "a", "/srv/Api").unwrap();
+        store.add_project(&local(), "b", "/srv/api").unwrap();
+    }
+
+    #[test]
+    fn a_dismissed_root_is_found_under_any_spelling() {
+        let store = Store::open_in_memory().unwrap();
+        let project = store.add_project(&local(), "api", r"C:\code\api").unwrap();
+        store.remove_project(&project.id).unwrap();
+        assert!(store
+            .restore_dismissed_root(&local(), "c:/code/api/")
+            .unwrap());
+        assert!(store.dismissed_roots(&local()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_migration_merges_both_spellings_and_relinks_sessions_and_is_idempotent() {
+        let store = Store::open_in_memory().unwrap();
+        let (kept, dup) = store
+            .transact(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO project (id, machine_id, name, root) VALUES
+                       ('p1', 'local', 'api', 'C:/code/api'),
+                       ('p2', 'local', 'api', 'c:\\code\\api\\');
+                     INSERT INTO worktree (id, project_id, path, branch, head, is_main) VALUES
+                       ('w1', 'p1', 'C:/code/api', 'main', NULL, 1),
+                       ('w2', 'p2', 'c:\\code\\api', 'main', NULL, 1),
+                       ('w3', 'p2', 'c:\\code\\api-x', 'x', NULL, 0);
+                     INSERT INTO dismissed_root (machine_id, root) VALUES
+                       ('local', 'D:/a'), ('local', 'd:\\a');",
+                )?;
+                Ok(("p1", "p2"))
+            })
+            .unwrap();
+        let id = store
+            .upsert_session(&session_in(r"C:\code\api\src", "s"), &[])
+            .unwrap();
+        store
+            .transact(|tx| {
+                tx.execute("UPDATE session SET project_id = NULL", [])?;
+                heal_path_spellings(tx)?;
+                heal_path_spellings(tx)?;
+                Ok(())
+            })
+            .unwrap();
+        let projects = store.projects(Some(&local())).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id.as_str(), kept);
+        let paths: Vec<String> = store
+            .worktrees(&projects[0].id)
+            .unwrap()
+            .into_iter()
+            .map(|w| w.path)
+            .collect();
+        assert_eq!(
+            paths.len(),
+            2,
+            "the duplicate worktree is gone, the other moved: {paths:?}"
+        );
+        assert_eq!(
+            store
+                .session(&id)
+                .unwrap()
+                .project_id
+                .as_ref()
+                .map(ProjectId::as_str),
+            Some(kept)
+        );
+        assert_eq!(store.dismissed_roots(&local()).unwrap().len(), 1);
+        assert_ne!(dup, kept);
     }
 }

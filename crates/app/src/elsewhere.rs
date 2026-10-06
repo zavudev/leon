@@ -119,7 +119,7 @@ impl Found {
 }
 
 fn same_folder(a: &str, b: &str) -> bool {
-    a.trim_end_matches(['/', '\\']) == b.trim_end_matches(['/', '\\'])
+    leon_core::path::key(a) == leon_core::path::key(b)
 }
 
 /// Maps the agent processes of `scan` to `sessions` (those of the machine
