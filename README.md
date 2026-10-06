@@ -416,8 +416,8 @@ platform (see below).
 | Go to terminal tab 8 | `⌥⌘8` | `Ctrl+Shift+8` |
 | Go to terminal tab 9 | `⌥⌘9` | `Ctrl+Shift+9` |
 | Close the pane | `⌘W` | `Ctrl+Shift+W` |
-| Copy the selection | `⌘C` `⇧⌘C` | `Ctrl+Shift+C` |
-| Paste | `⌘V` `⇧⌘V` `⇧Insert` | `Ctrl+Shift+V` `Shift+Insert` |
+| Copy the selection | `⌘C` `⇧⌘C` | `Ctrl+C` `Ctrl+Shift+C` |
+| Paste | `⌘V` `⇧⌘V` `⇧Insert` | `Ctrl+V` `Ctrl+Shift+V` `Shift+Insert` |
 | Scroll the terminal back a page | `⇧PgUp` | `Shift+PgUp` |
 | Scroll the terminal forward a page | `⇧PgDn` | `Shift+PgDn` |
 | **Data** | | |
@@ -467,10 +467,12 @@ always reach the program.
   uses `Cmd`; this includes the `Ctrl+Cmd` chords that resize panes), and
   `Cmd+C` and `Cmd+V` copy and paste. A `Ctrl` chord on its own always goes
   to the program.
-* **Linux and Windows**: only chords that also hold `Shift` stay Leon's,
-  because a terminal cannot tell `Ctrl+Shift+X` from `Ctrl+X` and so no
-  program uses it; `Shift+Insert`, `Shift+PgUp` and `Shift+PgDn` too.
-  `Ctrl+P`, `Ctrl+N`, `Ctrl+W`, `Ctrl+D`, `Ctrl+1` and so on go to the program.
+* **Linux and Windows**: the operating system's ordinary `Ctrl+C` and `Ctrl+V`
+  copy and paste; the `Ctrl+Shift` aliases continue to work. Other Leon chords
+  must also hold `Shift`, because a terminal cannot tell `Ctrl+Shift+X` from
+  `Ctrl+X` and so no program uses it; `Shift+Insert`, `Shift+PgUp` and
+  `Shift+PgDn` work too. `Ctrl+P`, `Ctrl+N`, `Ctrl+W`, `Ctrl+D`, `Ctrl+1` and
+  so on go to the program.
 * Bare keys are never Leon's in a terminal.
 
 The chords that stay Leon's, in full:
@@ -587,7 +589,9 @@ Linux and Windows:
 * Go to terminal tab 8 `Ctrl+Shift+8`
 * Go to terminal tab 9 `Ctrl+Shift+9`
 * Close the pane `Ctrl+Shift+W`
+* Copy the selection `Ctrl+C`
 * Copy the selection `Ctrl+Shift+C`
+* Paste `Ctrl+V`
 * Paste `Ctrl+Shift+V`
 * Paste `Shift+Insert`
 * Scroll the terminal back a page `Shift+PgUp`
@@ -714,7 +718,7 @@ which Leon does not read) and logging to a file as output arrives.
 
 ### Paste: text, images and files
 
-`Cmd+V` (`Ctrl+Shift+V` on Linux and Windows) pastes by what the clipboard
+`Cmd+V` (`Ctrl+V` on Linux and Windows) pastes by what the clipboard
 holds. **An image** (a screenshot, a copied picture) sends `Ctrl+V` to the
 program, which is how Claude Code, Codex and opencode read an image from the
 clipboard themselves; Leon never inlines image bytes. **Text** is pasted,

@@ -24,12 +24,12 @@
 //!   program uses `Cmd`), and nothing else does. `Cmd+C` and `Cmd+V` copy and
 //!   paste. `Ctrl` is entirely the program's.
 //! * **Linux and Windows**: `secondary` is `Ctrl`, which programs use
-//!   (`ctrl-c` interrupts, `ctrl-d` ends input, `ctrl-r` searches history).
-//!   Only chords that also hold `Shift` stay Leon's, because a terminal cannot
-//!   tell `ctrl-shift-x` from `ctrl-x` and so no program uses it. Every command
-//!   that matters from inside a terminal has such a chord. `Ctrl+Shift+C` and
-//!   `Ctrl+Shift+V` copy and paste. A chord without `Shift` (`ctrl-p`,
-//!   `ctrl-1`, `ctrl-w` ...) goes to the program there.
+//!   (`ctrl-d` ends input, `ctrl-r` searches history). The operating system's
+//!   ordinary `Ctrl+C` and `Ctrl+V` copy and paste; their `Ctrl+Shift` aliases
+//!   remain available. Other Leon chords must also hold `Shift`, because a
+//!   terminal cannot tell `ctrl-shift-x` from `ctrl-x` and so no program uses
+//!   it. A chord without `Shift` (`ctrl-p`, `ctrl-1`, `ctrl-w` ...) goes to the
+//!   program there.
 //! * Bare keys (`escape`, `tab`, `j`, `?`, `enter`...) are never Leon's; the
 //!   exceptions are the scrollback keys `shift-pageup` and `shift-pagedown`,
 //!   which only exist while a terminal has the keyboard ([`When::Terminal`]).
@@ -1882,9 +1882,14 @@ pub fn kept_in_terminal(binding: &Binding, chord: &Chord, mac: bool) -> bool {
         When::Panes => false,
         // Cmd on macOS, Ctrl+Shift elsewhere.
         When::Anywhere => chord.secondary && (mac || chord.shift),
-        // Scrollback keys, copy and paste: bare chords are fine, and a
-        // secondary chord follows the same rule as above.
-        When::Terminal => !chord.secondary || mac || chord.shift,
+        // Scrollback keys are bare. Copy and paste also keep the operating
+        // system's ordinary primary-modifier chord on every platform.
+        When::Terminal => {
+            !chord.secondary
+                || mac
+                || chord.shift
+                || matches!(binding.command, Command::Copy | Command::Paste)
+        }
     }
 }
 
@@ -2505,12 +2510,11 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_program_receives_ctrl_c_ctrl_d_escape_tab_and_the_arrows_everywhere() {
+    fn a_terminal_program_receives_non_editing_ctrl_chords_escape_tab_and_the_arrows() {
         for mac in [true, false] {
             // Ctrl is the program's on both: Cmd, not Ctrl, is macOS's secondary.
             let held = "ctrl";
             for key in [
-                &format!("{held}-c"),
                 &format!("{held}-d"),
                 &format!("{held}-r"),
                 &format!("{held}-l"),
@@ -2564,10 +2568,10 @@ mod tests {
     }
 
     #[test]
-    fn off_macos_only_ctrl_shift_chords_stay_leons_in_a_terminal() {
+    fn off_macos_native_copy_paste_and_ctrl_shift_chords_stay_leons_in_a_terminal() {
         for (command, chord) in terminal_chords(false) {
             assert!(
-                chord.shift || !chord.secondary,
+                chord.shift || !chord.secondary || matches!(command, C::Copy | C::Paste),
                 "{command:?} {} would steal a Ctrl chord from the program",
                 chord.label_for(false)
             );
@@ -2600,7 +2604,9 @@ mod tests {
             ("ctrl-shift-enter", C::ToggleZoom),
             ("ctrl-shift-g", C::EqualizeSplits),
             ("ctrl-shift-3", C::Tab(3)),
+            ("ctrl-c", C::Copy),
             ("ctrl-shift-c", C::Copy),
+            ("ctrl-v", C::Paste),
             ("ctrl-shift-v", C::Paste),
             ("shift-pageup", C::ScrollPageUp),
             ("shift-pagedown", C::ScrollPageDown),
@@ -2876,7 +2882,6 @@ mod tests {
         for key in [
             "ctrl-d",
             "ctrl-w",
-            "ctrl-c",
             "ctrl-t",
             "ctrl-]",
             "ctrl-left",

@@ -233,7 +233,7 @@ fn the_paste_setting_decides_what_a_mixed_clipboard_pastes(cx: &mut TestAppConte
     });
     let pasted = |h: &Harness, cx: &mut TestAppContext| {
         let sent = script_of(h, 1).written();
-        h.press_chord("cmd-v", "ctrl-shift-v", cx);
+        h.press_chord("cmd-v", "ctrl-v", cx);
         script_of(h, 1).written()[sent.len()..].to_vec()
     };
     // The shell is in front: automatic pastes the text.
