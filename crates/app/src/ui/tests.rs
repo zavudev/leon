@@ -2330,6 +2330,47 @@ fn confirming_removes_the_worktree_through_git_and_the_list_updates(cx: &mut Tes
 }
 
 #[gpui_kit::test]
+fn a_worktree_git_refuses_for_its_files_asks_before_forcing_them_away(cx: &mut TestAppContext) {
+    let h = open(
+        cx,
+        ScriptedRunner::new()
+            .reply(Output::failed(
+                128,
+                "fatal: '/srv/api-worktrees/feature-login' contains modified or untracked files, use --force to delete it",
+            ))
+            .reply(Output::ok("?? notes.txt\n"))
+            .reply(Output::ok(""))
+            .reply(Output::ok(MAIN_ONLY)),
+    );
+    h.press("ctrl-shift-p", cx);
+    h.type_text("remove a work", cx);
+    h.press("enter", cx);
+    h.press("enter", cx); // the linked worktree
+    h.press("enter", cx); // Remove: git refuses it for its files
+    assert_eq!(
+        h.palette_titles(cx),
+        ["Force remove feature/login", "Cancel"].map(str::to_owned),
+        "the worktree is left whole and the person is asked"
+    );
+    h.press("enter", cx); // Force remove
+    h.settle(cx);
+    let calls = h.runner.calls();
+    assert!(
+        calls.iter().any(|call| call.args
+            == [
+                "worktree",
+                "remove",
+                "--force",
+                "/srv/api-worktrees/feature-login"
+            ]),
+        "only the answer to the force question passes --force: {calls:?}"
+    );
+    assert!(!h
+        .outline(cx)
+        .contains(&"    worktree:feature/login".to_owned()));
+}
+
+#[gpui_kit::test]
 fn escape_and_backspace_go_back_one_question_at_a_time(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
     h.press("ctrl-shift-p", cx);

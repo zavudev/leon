@@ -225,13 +225,6 @@ pub enum Op {
         /// What the branch starts from; `HEAD` when absent.
         base: Option<String>,
     },
-    /// Remove a worktree, then sync.
-    RemoveWorktree {
-        /// The project the worktree belongs to.
-        project: ProjectId,
-        /// The worktree to remove.
-        worktree: WorktreeId,
-    },
     /// Look for the project's logo again (a file of the repository, else the
     /// owner's avatar).
     DetectIcon(ProjectId),
@@ -337,6 +330,17 @@ pub enum EngineError {
     /// A background job did not finish.
     #[error("A background job failed: {0}")]
     Job(String),
+}
+
+/// What removing a worktree came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Removal {
+    /// It is gone; the words for the status line.
+    Removed(String),
+    /// git refused it because it holds modified or untracked files: only
+    /// `--force` removes it, which deletes them, so the person is asked
+    /// first. Nothing has been removed.
+    NeedsForce,
 }
 
 /// What a scan of one machine found: its agent processes, and which stored
@@ -1232,9 +1236,6 @@ impl Engine {
                 .add_worktree(&project, &branch, base.as_deref())
                 .await
                 .map(Some),
-            Op::RemoveWorktree { project, worktree } => {
-                self.remove_worktree(&project, &worktree).await.map(Some)
-            }
             Op::DetectIcon(project) => self.detect_icon_reported(&project).await.map(Some),
             Op::SetIcon { project, path } => self.set_icon(&project, path).await.map(Some),
             Op::ResetIcon(project) => self.reset_icon(&project).map(Some),
@@ -1545,11 +1546,28 @@ impl Engine {
         Ok(format!("Added worktree {branch} at {path}."))
     }
 
-    async fn remove_worktree(
+    /// Removes a worktree on the machine that holds it, in the background.
+    /// With `force`, the files it holds are deleted with it; without it, a
+    /// worktree that git refuses for them answers [`Removal::NeedsForce`]
+    /// and is left whole, so the person can be asked first.
+    pub fn remove_worktree(
+        &self,
+        project: ProjectId,
+        worktree: WorktreeId,
+        force: bool,
+    ) -> JoinHandle<Result<Removal, EngineError>> {
+        let engine = self.clone();
+        self.inner
+            .handle
+            .spawn(async move { engine.remove_worktree_now(&project, &worktree, force).await })
+    }
+
+    async fn remove_worktree_now(
         &self,
         project_id: &ProjectId,
         worktree_id: &WorktreeId,
-    ) -> Result<String, EngineError> {
+        force: bool,
+    ) -> Result<Removal, EngineError> {
         let project = self.inner.store.project(project_id)?;
         let machine = self.inner.store.machine(&project.machine_id)?;
         let worktree = self
@@ -1565,11 +1583,27 @@ impl Engine {
             ));
         }
         let runner = SharedRunner(self.inner.runner.clone());
-        Git::new(&runner, &machine, &self.ssh())
-            .remove_worktree(&project, &worktree.path, false)
-            .await?;
+        let ssh = self.ssh();
+        let git = Git::new(&runner, &machine, &ssh);
+        if let Err(error) = git.remove_worktree(&project, &worktree.path, force).await {
+            // git refuses a worktree with modified or untracked files
+            // without `--force`: that is the one to ask about. Anything
+            // else (a locked worktree, a path gone) is the error itself.
+            if !force
+                && git
+                    .worktree_has_changes(&worktree.path)
+                    .await
+                    .unwrap_or(false)
+            {
+                return Ok(Removal::NeedsForce);
+            }
+            return Err(error.into());
+        }
         self.sync_worktrees(project_id).await?;
-        Ok(format!("Removed worktree {}.", worktree.path))
+        Ok(Removal::Removed(format!(
+            "Removed worktree {}.",
+            worktree.path
+        )))
     }
 
     // ----- machines and projects ------------------------------------------
@@ -2953,14 +2987,14 @@ branch refs/heads/feature/login
         rig.engine.run(Op::SyncWorktrees(project.id.clone())).await;
         let main = rig.store.worktrees(&project.id).unwrap()[0].clone();
         let before = rig.runner.calls().len();
-        rig.engine
-            .run(Op::RemoveWorktree {
-                project: project.id,
-                worktree: main.id,
-            })
-            .await;
+        let error = rig
+            .engine
+            .remove_worktree(project.id.clone(), main.id, false)
+            .await
+            .expect("the job runs")
+            .expect_err("the main worktree cannot be removed");
         assert_eq!(rig.runner.calls().len(), before, "nothing else ran");
-        assert!(status(&rig.engine).text.contains("main worktree"));
+        assert!(error.to_string().contains("main worktree"));
     }
 
     #[tokio::test]
@@ -2975,16 +3009,68 @@ branch refs/heads/feature/login
         let project = local_project(&rig.store);
         rig.engine.run(Op::SyncWorktrees(project.id.clone())).await;
         let extra = rig.store.worktrees(&project.id).unwrap()[1].clone();
-        rig.engine
-            .run(Op::RemoveWorktree {
-                project: project.id.clone(),
-                worktree: extra.id,
-            })
-            .await;
+        let outcome = rig
+            .engine
+            .remove_worktree(project.id.clone(), extra.id, false)
+            .await
+            .expect("the job runs")
+            .expect("the worktree is removed");
+        assert!(matches!(outcome, Removal::Removed(_)));
         assert!(
             rig.runner.calls().iter().any(|call| call.args
                 == ["worktree", "remove", "/srv/api-worktrees/feature-login"]),
             "the worktree was removed: {:?}",
+            rig.runner.calls()
+        );
+        assert_eq!(rig.store.worktrees(&project.id).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_worktree_git_refuses_for_its_files_is_asked_about_and_removed_with_force() {
+        let after = "worktree /srv/api\nHEAD abc\nbranch refs/heads/main\n";
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok(LISTING))
+            .reply(Output::ok(""))
+            .reply(Output::failed(
+                128,
+                "fatal: '/srv/api-worktrees/feature-login' contains modified or untracked files, use --force to delete it",
+            ))
+            .reply(Output::ok("?? opencode.json\n"))
+            .reply(Output::ok(""))
+            .reply(Output::ok(after)));
+        let project = local_project(&rig.store);
+        rig.engine.run(Op::SyncWorktrees(project.id.clone())).await;
+        let extra = rig.store.worktrees(&project.id).unwrap()[1].clone();
+        // Without force, git's refusal is turned into the question.
+        let outcome = rig
+            .engine
+            .remove_worktree(project.id.clone(), extra.id.clone(), false)
+            .await
+            .expect("the job runs")
+            .expect("the refusal is an answer");
+        assert_eq!(outcome, Removal::NeedsForce, "nothing was removed");
+        assert_eq!(
+            rig.store.worktrees(&project.id).unwrap().len(),
+            2,
+            "it is left whole while the person is asked"
+        );
+        // With force, the untracked file goes with it.
+        let outcome = rig
+            .engine
+            .remove_worktree(project.id.clone(), extra.id, true)
+            .await
+            .expect("the job runs")
+            .expect("the worktree is removed");
+        assert!(matches!(outcome, Removal::Removed(_)));
+        assert!(
+            rig.runner.calls().iter().any(|call| call.args
+                == [
+                    "worktree",
+                    "remove",
+                    "--force",
+                    "/srv/api-worktrees/feature-login"
+                ]),
+            "the force removal ran: {:?}",
             rig.runner.calls()
         );
         assert_eq!(rig.store.worktrees(&project.id).unwrap().len(), 1);
@@ -4565,12 +4651,13 @@ branch refs/heads/feature/login
         rig.engine.run(Op::Refresh).await;
         let project = rig.store.projects(Some(&local)).unwrap().remove(0);
         let extra = rig.store.worktrees(&project.id).unwrap()[1].clone();
-        rig.engine
-            .run(Op::RemoveWorktree {
-                project: project.id.clone(),
-                worktree: extra.id,
-            })
-            .await;
+        let outcome = rig
+            .engine
+            .remove_worktree(project.id.clone(), extra.id, false)
+            .await
+            .expect("the job runs")
+            .expect("the worktree is removed");
+        assert!(matches!(outcome, Removal::Removed(_)));
         for _ in 0..2 {
             rig.engine.run(Op::Refresh).await;
             assert_eq!(rig.store.worktrees(&project.id).unwrap().len(), 1);

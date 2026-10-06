@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+* Removing a worktree that git refuses because it holds modified or untracked
+  files leaves it whole and asks before they are deleted with it: only that
+  answer passes `--force`.
+
 ## [0.3.0] - 2026-10-06
 
 ### Added

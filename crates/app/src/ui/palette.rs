@@ -1008,6 +1008,11 @@ impl Shell {
             Action::Engine(op) => self.engine.submit(op),
             Action::StartSession(intent) => self.start_intent(intent, window, cx),
             Action::CloseLive(id) => self.close_live(id, window, cx),
+            Action::RemoveWorktree {
+                project,
+                worktree,
+                force,
+            } => self.remove_worktree(project, worktree, force, window, cx),
             Action::ResumeIn(session, cwd) => {
                 let found = self
                     .snapshot
