@@ -14,6 +14,7 @@
 //!   machine.
 //! * [`runner`]: the [`Runner`] trait, the real process-based implementation
 //!   and a scripted fake for tests.
+//! * [`files`]: reading, writing and listing text files, one command each.
 //! * [`git`]: git worktree operations expressed through a runner, so they
 //!   behave identically on local and remote machines.
 //! * [`agent`]: how each coding agent is started and resumed.
@@ -30,6 +31,7 @@ pub mod agent;
 pub mod command;
 pub mod connect;
 pub mod diagnosis;
+pub mod files;
 pub mod git;
 pub mod icon;
 pub mod probe;

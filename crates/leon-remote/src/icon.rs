@@ -31,6 +31,8 @@ use thiserror::Error;
 use crate::command::{run_on, CommandSpec, SshOptions};
 use crate::runner::{RunError, Runner};
 
+pub use crate::files::base64_decode;
+
 /// How many package directories (`apps/*`, `packages/*`) are looked into, the
 /// root not counted.
 pub const MAX_PACKAGES: usize = 16;
@@ -723,32 +725,6 @@ fn parse_output(output: &str, scan: &mut Scan) -> bool {
         }
     }
     true
-}
-
-/// Standard base64, whitespace ignored; `None` for anything else.
-pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(text.len() / 4 * 3);
-    let (mut buffer, mut bits) = (0u32, 0u32);
-    for byte in text.bytes() {
-        let value = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            b'=' => break,
-            b' ' | b'\t' => continue,
-            _ => return None,
-        };
-        buffer = (buffer << 6) | u32::from(value);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buffer >> bits) as u8);
-            buffer &= (1 << bits) - 1;
-        }
-    }
-    Some(out)
 }
 
 // ----- reading the files the rules point at -------------------------------------------------
