@@ -196,7 +196,11 @@ nothing it does not know.
    workspace already has panes (a session of no project gets a workspace of
    its folder), and has the keyboard. Open the same session again and you land
    on the terminal that already runs it; close that terminal and the next open
-   resumes it again.
+   resumes it again. An agent that moves to another session inside one
+   terminal (opencode's session list, for one) is followed by the title it
+   puts on the terminal: the session on screen becomes that terminal's row,
+   and opening it lands on the terminal already showing it, never on a second
+   process of the same session.
    `Open transcript` (`⇧⌘L` / `Ctrl+Shift+L`, also from the terminal that
    resumed it, and in the menu and palette) shows the stored messages
    read-only and starts nothing; `Enter` in that view resumes. A search hit on

@@ -88,22 +88,6 @@ impl AgentPhase {
     }
 }
 
-/// An OSC title without the decorative glyph a program puts before it (Claude
-/// Code's `✳`, a braille spinner) and the space after it. A title that starts
-/// with a letter, a digit or ASCII punctuation is left as it is, and the result
-/// is never empty: a title made of nothing but glyphs stays whole.
-pub fn plain_title(title: &str) -> String {
-    let trimmed = title.trim();
-    let rest = trimmed
-        .trim_start_matches(|c: char| c.is_whitespace() || (!c.is_ascii() && !c.is_alphanumeric()))
-        .trim_start();
-    if rest.is_empty() {
-        trimmed.to_owned()
-    } else {
-        rest.to_owned()
-    }
-}
-
 /// What a live session is.
 pub struct LiveSession {
     /// Its identity.
@@ -217,7 +201,7 @@ impl LiveSession {
         }
         match (&self.title, self.shown_agent()) {
             // The agent's logo is shown beside the title: its own glyph is not.
-            (Some(title), Some(_)) if !title.trim().is_empty() => plain_title(title),
+            (Some(title), Some(_)) if !title.trim().is_empty() => crate::format::plain_title(title),
             (Some(title), None) if !title.trim().is_empty() => title.clone(),
             (_, Some(agent)) => crate::format::agent_name(agent).to_owned(),
             (_, None) => "Shell".to_owned(),
@@ -328,38 +312,6 @@ mod tests {
         // next command the user runs.
         assert_eq!(P::Shell.observe(Some(false)), P::Shell);
         assert_eq!(P::Returned.observe(Some(false)), P::Returned);
-    }
-
-    #[test]
-    fn a_leading_decorative_glyph_is_stripped_from_a_title() {
-        assert_eq!(
-            plain_title("\u{2733} Google Ads análisis"),
-            "Google Ads análisis"
-        );
-        assert_eq!(plain_title("\u{2802}  working"), "working");
-        assert_eq!(plain_title("  \u{2733}\u{2733}   x "), "x");
-    }
-
-    #[test]
-    fn a_title_that_starts_with_a_letter_a_digit_or_punctuation_is_untouched() {
-        for title in [
-            "Fix the bug",
-            "3 files",
-            "Ñandú",
-            "~/code",
-            "[wip] x",
-            "$ ls",
-            "日本語",
-        ] {
-            assert_eq!(plain_title(title), title);
-        }
-    }
-
-    #[test]
-    fn a_title_of_nothing_but_glyphs_is_never_made_empty() {
-        assert_eq!(plain_title("\u{2733}"), "\u{2733}");
-        assert_eq!(plain_title(" \u{2802}\u{2810} "), "\u{2802}\u{2810}");
-        assert_eq!(plain_title(""), "");
     }
 
     #[test]
