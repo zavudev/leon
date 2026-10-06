@@ -17,6 +17,7 @@
 
 use super::activity::Activity;
 use super::live::{AgentPhase, LiveId, LiveSession, LiveState};
+use super::notify;
 use super::panes::{Axis, Dir, Layout, MinSize, Path, Rect, RESIZE_STEP};
 use super::shell::{ElsewhereNote, Main, Notice, Overlay, Pane, Shell};
 use super::steps::SessionIntent;
@@ -39,6 +40,10 @@ use std::time::{Duration, Instant};
 /// and resizes it.
 const START_COLS: u16 = 120;
 const START_ROWS: u16 = 32;
+
+/// How many notification banners are on screen at once; the oldest goes
+/// first.
+const MAX_BANNERS: usize = 4;
 
 /// When a freshly started shell is ready for the agent's command line to be
 /// typed into it.
@@ -380,29 +385,84 @@ impl Shell {
         }
     }
 
-    /// Reads a session's activity again. `true` when it changed.
+    /// Reads a session's activity again. `true` when it changed. A change to
+    /// waiting is said the ways the settings ask for.
     fn set_activity(
         &mut self,
         id: LiveId,
         thresholds: &super::activity::Thresholds,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> bool {
         let Some(session) = self.live.get_mut(id) else {
             return false;
         };
         let now = session.read_activity(cx, thresholds);
-        std::mem::replace(&mut session.activity, now) != now
+        let before = std::mem::replace(&mut session.activity, now);
+        if before != now && now == Activity::Waiting {
+            self.raise(notify::Event::Waiting, id, cx);
+        }
+        before != now
     }
 
     /// Reads every session's activity again, for the coarse timer and for
     /// tests that move a threshold. `true` when any changed.
-    pub(super) fn refresh_activity(&mut self, cx: &App) -> bool {
+    pub(super) fn refresh_activity(&mut self, cx: &mut Context<Self>) -> bool {
         let thresholds = self.options.activity;
         let mut any = false;
         for id in self.live.ids() {
             any |= self.set_activity(id, &thresholds, cx);
         }
         any
+    }
+
+    /// Says what a session just did, in the ways the settings ask for: the
+    /// geek banner over the window and the desktop notification. The session
+    /// the user is looking at says it itself.
+    fn raise(&mut self, event: notify::Event, id: LiveId, cx: &mut Context<Self>) {
+        let prefs = crate::settings::notifications(cx);
+        if !prefs.enabled || !prefs.allows(event) {
+            return;
+        }
+        let Some(session) = self.live.get(id) else {
+            return;
+        };
+        if self.window_active && matches!(self.main, Main::Live(open) if open == id) {
+            return;
+        }
+        let note = notify::note(event, id, session);
+        if prefs.banner {
+            let until = cx.background_executor().now() + self.options.banner_duration;
+            // A newer note of the same session refreshes its banner instead of
+            // stacking another one, as the notification centre does by tag.
+            let existing = note.session.and_then(|session| {
+                self.banners
+                    .iter_mut()
+                    .find(|banner| banner.note.session == Some(session))
+            });
+            match existing {
+                Some(banner) => {
+                    banner.note = note.clone();
+                    banner.until = until;
+                }
+                None => {
+                    let banner_id = self.next_banner;
+                    self.next_banner += 1;
+                    self.banners.push(notify::Banner {
+                        id: banner_id,
+                        note: note.clone(),
+                        until,
+                    });
+                    if self.banners.len() > MAX_BANNERS {
+                        self.banners.remove(0);
+                    }
+                }
+            }
+            self.keep_banners(cx);
+            cx.notify();
+        }
+        if prefs.desktop && (!prefs.only_unfocused || !self.window_active) {
+            (self.options.notify)(&note, cx);
+        }
     }
 
     /// Starts the coarse timer when a terminal is live and none runs. It
@@ -484,6 +544,8 @@ impl Shell {
                         self.flash_error(cx);
                     }
                 }
+                // The end of a session is said the ways the settings ask for.
+                self.raise(notify::Event::of_exit(info.code), id, cx);
             }
             ViewEvent::ContextMenu(at) => self.open_terminal_menu(id, *at, window, cx),
             ViewEvent::Clicked => {

@@ -258,6 +258,8 @@ fn main() {
         .with_assets(icons::Assets)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
+            // The name and identity the system shows on a notification.
+            cx.set_app_identity(product::APP_ID, product::PRODUCT_NAME);
             theme::install_fonts(cx);
             // The families of the system, for the fonts a theme file asks for.
             theme::user::set_installed_fonts(cx.text_system().all_font_names());

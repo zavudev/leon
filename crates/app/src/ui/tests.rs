@@ -278,6 +278,8 @@ struct Harness {
     revealed_apps: Rc<std::cell::RefCell<Vec<String>>>,
     /// The files the system's editor was asked to open.
     opened: Rc<std::cell::RefCell<Vec<std::path::PathBuf>>>,
+    /// The desktop notifications the shell asked for.
+    notes: Rc<std::cell::RefCell<Vec<crate::ui::notify::Note>>>,
     /// How many times the system's folder dialog was asked for.
     folder_dialogs: Rc<std::cell::Cell<usize>>,
     /// The terminals the shell started, and what they were sent.
@@ -359,6 +361,8 @@ fn open_core(
     let computer = Rc::new(computer());
     let opened = Rc::new(std::cell::RefCell::new(Vec::new()));
     let opened_in = opened.clone();
+    let notes = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let notes_in = notes.clone();
     let ssh = Arc::new(tests_connect::FakeSsh::default());
     let key_answer = Rc::new(std::cell::RefCell::new(Picked::Cancelled));
     let key_answer_in = key_answer.clone();
@@ -379,6 +383,8 @@ fn open_core(
         reveal: Rc::new(move |_, path| revealed_in.borrow_mut().push(path.to_path_buf())),
         activity: Thresholds::default(),
         error_flash: std::time::Duration::from_secs(4),
+        notify: Rc::new(move |note, _| notes_in.borrow_mut().push(note.clone())),
+        banner_duration: std::time::Duration::from_secs(30),
         pick_image: Rc::new(|_| Task::ready(Picked::Cancelled)),
         save_file: Rc::new(|_, _| Task::ready(Picked::Cancelled)),
         read_clipboard: Rc::new(|_| None),
@@ -421,6 +427,7 @@ fn open_core(
         revealed,
         revealed_apps,
         opened,
+        notes,
         folder_dialogs: dialogs,
         computer,
         ssh,
@@ -4716,7 +4723,12 @@ mod live {
         h.settle(cx);
     }
 
-    fn show_worktree_detail(h: &Harness, cx: &mut TestAppContext, project: &str, label: &str) {
+    pub(super) fn show_worktree_detail(
+        h: &Harness,
+        cx: &mut TestAppContext,
+        project: &str,
+        label: &str,
+    ) {
         cx.update(|cx| {
             h.shell.update(cx, |shell, cx| {
                 let entry = shell
@@ -5872,6 +5884,10 @@ mod tests_screen;
 #[cfg(unix)]
 #[path = "tests_usage.rs"]
 mod tests_usage;
+
+#[cfg(unix)]
+#[path = "tests_notify.rs"]
+mod tests_notify;
 
 #[cfg(test)]
 #[path = "tests_connect.rs"]

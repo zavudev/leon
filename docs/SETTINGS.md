@@ -276,6 +276,19 @@ How much of each agent's limits is left, and where the numbers come from.
 | Read Kimi's limits from Moonshot | `usage_kimi_network` | on, off | `on` | Leon reads the sign-in Kimi Code holds (~/.kimi-code/credentials/kimi-code.json, read only) and sends it over HTTPS to api.kimi.com only to ask for your usage; it is never stored, logged or shown, and an expired sign-in is reported, not refreshed. On by default. Implemented from Orca's reference; not verified against the live service. |
 | Forget stored usage history |  | button |  | Delete the percentages and times kept for the trend lines and the burn-rate estimate. The latest readings stay. |
 
+## Notifications
+
+What Leon says when a session wants you or finishes, and how it says it.
+
+| Setting | Key | Values | Default | Description |
+| --- | --- | --- | --- | --- |
+| Notify | `notify` | on, off | `on` | Say when a session wants you or finishes. |
+| When an agent wants you | `notify_waiting` | on, off | `on` | An agent finished its turn, went quiet or rang the bell. |
+| When a session ends | `notify_finished` | on, off | `on` | A program ended with exit code zero. |
+| When a session fails | `notify_failed` | on, off | `on` | A program ended with an error. |
+| How to say it | `notify_how` | `both`, `banner`, `system` | `both` | The geek banner in the window, the desktop notification, or both. |
+| Desktop only without focus | `notify_only_unfocused` | on, off | `on` | Show the desktop notification only while the Leon window does not have the focus. The banner still appears for a session that is not on screen. |
+
 ## Sidebar & window
 
 The sidebar and what quitting asks.

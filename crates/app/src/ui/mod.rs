@@ -26,6 +26,7 @@ mod logos;
 mod main_pane;
 mod menu;
 mod model;
+pub(crate) mod notify;
 mod pair;
 mod palette;
 mod panes;

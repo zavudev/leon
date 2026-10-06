@@ -643,6 +643,50 @@ pub fn usage_agents(cx: &App) -> Vec<leon_core::AgentId> {
         .collect()
 }
 
+/// What the notification settings ask for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Notifications {
+    /// The master switch.
+    pub enabled: bool,
+    /// Say when a session wants the user.
+    pub waiting: bool,
+    /// Say when a session ends cleanly.
+    pub finished: bool,
+    /// Say when a session fails.
+    pub failed: bool,
+    /// The geek banner in the window.
+    pub banner: bool,
+    /// The desktop notification.
+    pub desktop: bool,
+    /// The desktop only while the window does not have the focus.
+    pub only_unfocused: bool,
+}
+
+impl Notifications {
+    /// Whether an event is said at all.
+    pub fn allows(&self, event: crate::ui::notify::Event) -> bool {
+        match event {
+            crate::ui::notify::Event::Waiting => self.waiting,
+            crate::ui::notify::Event::Finished { .. } => self.finished,
+            crate::ui::notify::Event::Failed { .. } => self.failed,
+        }
+    }
+}
+
+/// The notification settings in force.
+pub fn notifications(cx: &App) -> Notifications {
+    let how = text(cx, "notify_how");
+    Notifications {
+        enabled: flag(cx, "notify"),
+        waiting: flag(cx, "notify_waiting"),
+        finished: flag(cx, "notify_finished"),
+        failed: flag(cx, "notify_failed"),
+        banner: how != "system",
+        desktop: how != "banner",
+        only_unfocused: flag(cx, "notify_only_unfocused"),
+    }
+}
+
 /// Tells the engine what the settings ask and, unless they say not to, brings
 /// the store up to date: what happens when the application starts.
 pub fn start_engine(cx: &App, engine: &crate::engine::Engine) {

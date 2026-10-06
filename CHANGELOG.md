@@ -82,6 +82,10 @@
   **This machine's agents** and **Not installed / no data**. `leon --diagnose
   usage` lists every provider with its source and state.
 
+* Notifications: a geek banner over the window and a desktop notification when
+  an agent finishes its turn and waits, when a session ends, or when it fails.
+  The Notifications settings choose the events, the banner, the desktop note,
+  and whether the desktop is only told while Leon is not in front.
 * Usage limits: a footer with each agent's primary window (five-hour, weekly,
   per-model) for the machine in context, a usage view (`Show usage`) with
   Detailed and Compact modes, per-machine readings, a burn-rate estimate, a
