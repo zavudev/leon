@@ -214,9 +214,21 @@ pub enum Op {
     },
     /// Remove an SSH machine with its projects and sessions.
     RemoveMachine(MachineId),
+    /// Give a history session a name of Leon's own; it shows over the agent's
+    /// title and survives imports (the agent's own file is left alone).
+    RenameSession {
+        /// The session.
+        session: leon_core::SessionId,
+        /// Its new name; blank gives the agent's own title back.
+        name: String,
+    },
     /// Remove one session from the history (the agent's own file is left
     /// alone).
     RemoveSession(leon_core::SessionId),
+    /// Takes sessions out of the history without a word: they went with
+    /// something that was closed, which says so itself. Ones the history no
+    /// longer has are skipped.
+    ForgetSessions(Vec<leon_core::SessionId>),
     /// Let discovery adopt a project root that was removed.
     RestoreRoot {
         /// The machine the root is on.
@@ -1260,7 +1272,25 @@ impl Engine {
             }
             Op::RenameMachine { machine, name } => self.rename_machine(&machine, &name).map(Some),
             Op::RemoveMachine(machine) => self.remove_machine(&machine).map(Some),
+            Op::RenameSession { session, name } => {
+                let name = name.trim();
+                self.inner.store.rename_session(&session, Some(name))?;
+                Ok(Some(if name.is_empty() {
+                    "Gave the session its own title back.".to_owned()
+                } else {
+                    format!("Renamed the session to {name}.")
+                }))
+            }
             Op::RemoveSession(session) => self.remove_session(&session).map(Some),
+            Op::ForgetSessions(sessions) => {
+                for id in &sessions {
+                    match self.inner.store.remove_session(id) {
+                        Ok(()) | Err(StoreError::NotFound(_)) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                Ok(None)
+            }
             Op::RestoreRoot { machine, root } => self.restore_root(&machine, &root).map(Some),
             Op::AddWorktree {
                 project,

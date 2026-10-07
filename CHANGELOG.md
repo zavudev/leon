@@ -1,5 +1,71 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+* Rename works on every session row (running, asleep or history only, also from
+  `F2` and the palette) and asks first, showing the old and the new name. The
+  name is Leon's own: it is stored apart from the agent's title, so importing
+  the history again never overwrites it, and a resumed session shows it. When
+  the session runs in a terminal and the agent has a verified rename command
+  (Claude Code: `/rename <name>`), Leon types it only while the agent waits at
+  its prompt; a busy agent keeps its name and the status line says so. Other
+  agents get Leon's name only.
+* **Active only** no longer forces the tree open: projects and worktrees fold and open
+  as in the normal view, and only a text filter opens everything on its own.
+* Take over: a session running in another terminal or another Leon offers
+  `Take over` (in its menu, in the question a click asks and on the
+  transcript's notice). It asks the process that holds the session to end
+  (SIGTERM, never forced), waits up to five seconds, and only then resumes the
+  session in Leon; a process that does not end leaves the session alone and
+  says so. Only for processes of this computer, and not on Windows.
+* Show only active sessions: a toggle beside the sidebar's filter (also in the
+  palette and the settings, `sidebar_active_only`) lists only the live
+  terminals and the sessions running elsewhere, with the nodes above them, and
+  says `No active sessions` when there is none.
+* Sleep: a terminal, or a session that runs in one, can be put to sleep from
+  its menu, the File menu or the palette. Its program is stopped and its
+  terminal ended, and the session stays in the sidebar to be resumed.
+
+### Fixed
+
+* The `/` key did not focus the sidebar's filter on keyboards that type the
+  slash with Shift (Spanish, German, Italian...): it only worked where `/` has
+  a key of its own.
+
+### Changed
+
+* The sidebar says where it is: with a single machine its header row is left
+  out and the projects sit at the top level (a second machine brings the
+  headers back); a hairline and some room set each project apart, and the
+  rows nested in it are told by their indentation alone.
+* A worktree row separates two things: a git mark at its start (branch, main,
+  merged pull request or detached head, with a tooltip in words) and the
+  agents' light at its end, which draws nothing when no terminal is live and
+  says `WAITING` or `FAILED` in a word. The bare grey squares are gone.
+* A session that runs somewhere else is a state of its own: it keeps the
+  agent's colour and wears a badge, `ELSEWHERE` for a plain terminal and
+  `OTHER LEON` for a process below another Leon (a `leon` or, over SSH,
+  `leon-host` ancestor). A click on it asks `Open transcript` (the default),
+  `Resume anyway` or `Cancel`, and its menu starts with Open transcript and
+  Resume here anyway… instead of Resume.
+* A click (or `Enter`) on a history session no longer starts anything at
+  once: it asks first (`Resume` or `Cancel`). A session that already has a
+  terminal is only brought forward, and the transcript mode of the settings
+  never asks.
+* A session row tells its state at a glance: running (the agent's colour, a
+  bold title and a light), asleep (dimmed, with a moon and `SLEEP`) and
+  history only (grey, its age alone). Its menu starts with what that state
+  does: Focus, Rename, Sleep and Close; Wake and Close; or Resume and Remove
+  from history. `Open` of the menu is now `Resume`.
+* Close now closes for good. Closing a terminal or a session also takes its
+  history row out of the sidebar, so nothing is left dimmed behind; what Close
+  used to do, keeping the row, is now Sleep. Closing a worktree (the menu's
+  `Remove worktree` is now `Close`) also removes the sessions of the history
+  that ran inside it. The agent's own session files are never touched, and a
+  program still running, or a worktree with modified files, asks first as before.
+
 ## [0.4.0] - 2026-10-07
 
 ### Added

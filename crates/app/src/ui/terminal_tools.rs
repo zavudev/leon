@@ -89,6 +89,7 @@ pub fn terminal_items() -> Vec<Item> {
         ("Save output to file…", C::SaveOutput),
         ("Split right", C::SplitRight),
         ("Split down", C::SplitDown),
+        ("Sleep", C::SleepSession),
         ("Close", C::CloseSession),
     ]
     .into_iter()
@@ -325,6 +326,7 @@ mod tests {
                 "Save output to file…",
                 "Split right",
                 "Split down",
+                "Sleep",
                 "Close"
             ]
         );

@@ -183,6 +183,29 @@ impl LiveSession {
         self.pending.is_some()
     }
 
+    /// Takes the agent seen in front of the shell as the session's own, when
+    /// it is not the one shown: the user quit one agent and started another
+    /// by hand. What belonged to the old agent (its session id, the history
+    /// row, the title it set) is dropped; a name the user gave stays.
+    /// `true` when the session changed.
+    pub fn follow_foreground(&mut self, program: Option<&str>) -> bool {
+        let Some(seen) = program.and_then(leon_core::agent::by_program) else {
+            return false;
+        };
+        if self.shown_agent() == Some(seen) {
+            return false;
+        }
+        if self.agent != Some(seen) {
+            self.resumed = None;
+            self.learned = None;
+            self.history = None;
+            self.title = None;
+        }
+        self.agent = Some(seen);
+        self.phase = AgentPhase::Running;
+        true
+    }
+
     /// The agent to show for this session: the one that was started in its
     /// shell, until the shell is seen to have the terminal back.
     pub fn shown_agent(&self) -> Option<AgentId> {

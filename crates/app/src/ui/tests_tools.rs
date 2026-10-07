@@ -624,6 +624,56 @@ fn the_filter_key_opens_a_hidden_sidebar_and_focuses_the_field(cx: &mut TestAppC
 }
 
 #[gpui_kit::test]
+fn the_filter_key_works_on_a_layout_that_types_the_slash_with_shift(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    // Spanish: `/` is Shift+7, so the key is `7`, Shift is held and the
+    // character typed is `/`.
+    let mut stroke = gpui_kit::Keystroke::parse("shift-7").unwrap();
+    stroke.key_char = Some("/".to_owned());
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.dispatch_keystroke(stroke, cx)
+    })
+    .unwrap();
+    h.settle(cx);
+    let filtering = cx
+        .update_window(h.window.into(), |_, window, cx| {
+            h.shell.read(cx).filter_focused(window, cx)
+        })
+        .unwrap();
+    assert!(filtering, "the slash focused the filter");
+    assert!(
+        h.shell(cx, |s| s.filter_query.is_empty()),
+        "and was not typed into it"
+    );
+}
+
+#[gpui_kit::test]
+fn typing_filters_the_tree_and_escape_clears_then_leaves(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    let rows = |h: &Harness, cx: &mut TestAppContext| h.shell(cx, |s| s.rows.len());
+    let all = rows(&h, cx);
+    h.press("/", cx);
+    h.type_text("web", cx);
+    let filtered = rows(&h, cx);
+    assert!(filtered < all, "{filtered} < {all}");
+    assert!(h.shell(cx, |s| s.filter.is_some()));
+    // Escape clears the text first, with the keyboard still in the field...
+    h.press("escape", cx);
+    assert_eq!(rows(&h, cx), all);
+    assert!(h.shell(cx, |s| s.filter_query.is_empty()));
+    let in_field = |h: &Harness, cx: &mut TestAppContext| {
+        cx.update_window(h.window.into(), |_, window, cx| {
+            h.shell.read(cx).filter_focused(window, cx)
+        })
+        .unwrap()
+    };
+    assert!(in_field(&h, cx));
+    // ...and a second one leaves it.
+    h.press("escape", cx);
+    assert!(!in_field(&h, cx));
+}
+
+#[gpui_kit::test]
 fn jumping_to_a_machine_opens_a_hidden_sidebar(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
     h.press_chord("cmd-b", "ctrl-shift-b", cx);

@@ -12,12 +12,13 @@ use super::live::LiveState;
 use super::shell::{Pane, RowDrag, Shell};
 use super::tree::{folder_name, worktree_label, Kind, Row};
 use super::widgets::{
-    activity_dot, elsewhere_mark, focus_rule, key_cap, led, mark, mono, section_label, Lion,
+    activity_light, elsewhere_mark, focus_rule, key_cap, led, mark, mono, section_label, Lion,
 };
+use crate::elsewhere::Holder;
 use crate::engine::MachineState;
 use crate::format;
 use crate::fuzzy::matched_chars;
-use crate::icons::{agent_icon, icon, IconName};
+use crate::icons::{agent_icon, agent_icon_in, icon, IconName, Tone};
 use crate::keys::{self, Command};
 use crate::product;
 use crate::theme::{fonts, metrics, px, Appearance, Palette};
@@ -304,6 +305,8 @@ impl Shell {
                         .map(|text| key_cap(text, colours)),
                 )
             })
+            // "Active only": the sessions that are running, and nothing else.
+            .child(self.render_active_toggle(colours, cx))
             // The same "+" as the header's: add a project without knowing the
             // chord.
             .child(
@@ -330,6 +333,49 @@ impl Shell {
                     }))
                     .child(icon(IconName::Plus, px(14.), colours.text_muted)),
             )
+    }
+
+    /// The toggle beside the filter: only the active sessions (live terminals
+    /// and agents running elsewhere) are listed while it is on.
+    fn render_active_toggle(&self, colours: &Palette, cx: &mut Context<Self>) -> Stateful<Div> {
+        let on = self.active_only;
+        let hover = colours.surface;
+        let tip: SharedString = if on {
+            "Showing only active sessions \u{b7} click to show all".into()
+        } else {
+            "Show only active sessions".into()
+        };
+        div()
+            .id("filter-active-only")
+            .debug_selector(move || {
+                if on {
+                    "filter-active-only-on".to_owned()
+                } else {
+                    "filter-active-only".to_owned()
+                }
+            })
+            .flex_none()
+            .size(metrics::CONTROL())
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(metrics::RADIUS())
+            .cursor_pointer()
+            .when(on, |this| this.bg(colours.surface_2))
+            .when(!on, |this| this.hover(move |style| style.bg(hover)))
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.run_command(Command::ToggleActiveOnly, window, cx);
+            }))
+            .child(icon(
+                IconName::CircleDot,
+                px(14.),
+                if on {
+                    colours.signal
+                } else {
+                    colours.text_muted
+                },
+            ))
     }
 
     /// The tools at the foot of the sidebar, each with its shortcut in its
@@ -400,7 +446,7 @@ impl Shell {
             .pr(px(12.))
             .flex()
             .items_center()
-            .gap(px(6.))
+            .gap(px(8.))
             .overflow_hidden()
             .cursor_pointer()
             .when(on, |this| this.bg(colours.surface_2))
@@ -416,6 +462,21 @@ impl Shell {
                         .bottom_0()
                         .w(px(2.))
                         .bg(colours.signal),
+                )
+            })
+            // Levels, apart: a hairline above every project but the first of
+            // its machine, and room above its row so the blocks breathe.
+            .when(self.starts_a_project_group(index), |this| this.pt(px(8.)))
+            .when(self.starts_a_project_group(index), |this| {
+                this.child(
+                    div()
+                        .debug_selector(move || format!("tree-divider-{index}"))
+                        .absolute()
+                        .top_0()
+                        .left(px(12.))
+                        .right(px(12.))
+                        .h(px(1.))
+                        .bg(colours.border),
                 )
             })
             .on_mouse_down(
@@ -434,6 +495,16 @@ impl Shell {
                 cx.notify();
             }));
         Some(self.render_row_content(index, row, base, colours, cx))
+    }
+
+    /// Whether a hairline goes above this row: a project that follows another
+    /// row of its machine, so the projects read as blocks.
+    pub(super) fn starts_a_project_group(&self, index: usize) -> bool {
+        matches!(
+            self.rows.get(index).map(|row| &row.kind),
+            Some(Kind::Project { .. })
+        ) && index > 0
+            && !matches!(self.rows[index - 1].kind, Kind::Machine(_))
     }
 
     /// How a movable row (`Order::Project`, `Worktree` or `Session`) drags:
@@ -547,7 +618,7 @@ impl Shell {
                 .when(sessions == 0, |this| this.invisible())
                 .text_color(colours.text_faint)
         };
-        let label = || div().flex_1().min_w_0().truncate();
+        let label = || div().flex_1().min_w_0().pr(px(6.)).truncate();
         match &row.kind {
             Kind::Machine(machine) => {
                 let state = self.engine.machine_state(&machine.id);
@@ -583,7 +654,7 @@ impl Shell {
                     .child(
                         label()
                             .debug_selector(move || format!("tree-label-{index}"))
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(FontWeight::SEMIBOLD)
                             .child(self.emphasised(&self.project_label(project), colours)),
                     )
                     .when(deleting, |this| {
@@ -605,9 +676,11 @@ impl Shell {
                     .deleting
                     .as_ref()
                     .is_some_and(|(_, id)| id == &worktree.id);
+                // Two things, apart: the git mark leads (what the branch is)
+                // and the agents' light closes the row (what is running in
+                // it, with a word when it needs the person).
                 base.child(chevron)
-                    .child(self.dot(index, activity, colours))
-                    .child(self.merged_mark(index, worktree, colours))
+                    .child(self.git_mark(index, worktree, colours))
                     .child(
                         label()
                             .debug_selector(move || format!("tree-label-{index}"))
@@ -623,6 +696,15 @@ impl Shell {
                                 .text_color(colours.text_faint),
                         )
                     })
+                    .children(activity_word(activity).map(|word| {
+                        mono(word)
+                            .debug_selector(move || format!("tree-activity-word-{index}"))
+                            .text_color(match activity {
+                                Activity::Failed => colours.error,
+                                _ => colours.warning,
+                            })
+                    }))
+                    .child(self.dot(index, activity, colours))
                     .into_any_element()
             }
             Kind::Session(session) => {
@@ -635,6 +717,35 @@ impl Shell {
                     .of_history(&session.id)
                     .filter(|_| self.placement.merged.contains(&session.id))
                     .map(|live| (live.id, live.state(cx)));
+                // Four states, told apart at a glance: running here (the
+                // agent's colour, a light), running elsewhere (the agent's
+                // colour, a badge that says where), asleep (dimmed, a moon)
+                // and history only (grey, its age alone).
+                let held = if running.is_none() {
+                    self.elsewhere_of(session)
+                } else {
+                    None
+                };
+                let asleep =
+                    running.is_none() && held.is_none() && self.slept.contains(&session.id);
+                let tone = match (running.is_some() || held.is_some(), asleep) {
+                    (true, _) => Tone::Full,
+                    (false, true) => Tone::Asleep,
+                    (false, false) => Tone::Faded,
+                };
+                let text_colour = match tone {
+                    Tone::Full => colours.text,
+                    Tone::Asleep => colours.text_muted,
+                    Tone::Faded => colours.text_faint,
+                };
+                let name: SharedString = match (&held, tone) {
+                    (Some(found), _) => {
+                        format!("{name} · {}", self.holder_tip(found, session)).into()
+                    }
+                    (None, Tone::Full) => name,
+                    (None, Tone::Asleep) => format!("{name} · asleep").into(),
+                    (None, Tone::Faded) => format!("{name} · history").into(),
+                };
                 base.tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
                     .child(chevron)
                     .child(
@@ -645,17 +756,50 @@ impl Shell {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(agent_icon(session.agent, px(14.), colours)),
+                            .child(agent_icon_in(session.agent, px(14.), colours, tone)),
                     )
                     .child(
                         label()
                             .debug_selector(move || format!("tree-label-{index}"))
-                            .when(running.is_some(), |this| {
+                            .text_color(text_colour)
+                            .when(running.is_some() || held.is_some(), |this| {
                                 this.font_weight(FontWeight::MEDIUM)
                             })
                             .child(session.title.clone()),
                     )
-                    .children(self.elsewhere_light(index, session, running.is_some(), colours))
+                    .when(asleep, |this| {
+                        this.child(
+                            div()
+                                .debug_selector(move || format!("tree-asleep-{index}"))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .child(icon(IconName::Moon, px(11.), colours.text_faint))
+                                .child(mono("SLEEP").text_color(colours.text_faint)),
+                        )
+                    })
+                    .children(held.as_ref().map(|found| {
+                        let key = session.id.to_string();
+                        let other_leon = matches!(found.holder, Holder::OtherLeon(_));
+                        div()
+                            .debug_selector(move || format!("tree-held-{key}"))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(icon(IconName::ExternalLink, px(11.), colours.elsewhere))
+                            .child(
+                                mono(if other_leon {
+                                    format!("OTHER {}", crate::product::PRODUCT_NAME.to_uppercase())
+                                } else {
+                                    "ELSEWHERE".to_owned()
+                                })
+                                .text_color(colours.elsewhere),
+                            )
+                            .into_any_element()
+                    }))
+                    .children(self.elsewhere_light(index, session, held.as_ref(), colours))
                     .children(match running {
                         Some((id, state)) => {
                             let light = live_light(state, colours);
@@ -744,6 +888,15 @@ impl Shell {
                         .debug_selector(|| "tree-no-match".into())
                         .text_color(colours.text_muted)
                         .child("No projects match"),
+                )
+                .into_any_element(),
+            Kind::NoActive => base
+                .child(chevron)
+                .child(
+                    label()
+                        .debug_selector(|| "tree-no-active".into())
+                        .text_color(colours.text_muted)
+                        .child("No active sessions"),
                 )
                 .into_any_element(),
             Kind::Open => base
@@ -847,21 +1000,29 @@ impl Shell {
         &self,
         index: usize,
         session: &leon_core::Session,
-        live_here: bool,
+        held: Option<&crate::elsewhere::Found>,
         colours: &Palette,
     ) -> Option<AnyElement> {
-        let found = self.elsewhere_of(session)?;
+        let found = match held {
+            Some(found) => found.clone(),
+            // Running here and held elsewhere too.
+            None => self
+                .live
+                .of_history(&session.id)
+                .and_then(|_| self.elsewhere_of(session))?,
+        };
         let certain = found.is_certain();
-        let tip: SharedString = match (live_here, certain) {
-            (false, true) => format!("Running in another terminal \u{b7} pid {}", found.pid),
-            (false, false) => "Probably running in another terminal".to_owned(),
-            (true, true) => format!(
+        let tip: SharedString = if held.is_some() {
+            self.holder_tip(&found, session).into()
+        } else if certain {
+            format!(
                 "Another process holds this session too \u{b7} pid {}",
                 found.pid
-            ),
-            (true, false) => "Another process probably holds this session too".to_owned(),
-        }
-        .into();
+            )
+            .into()
+        } else {
+            "Another process probably holds this session too".into()
+        };
         let key = session.id.to_string();
         Some(
             div()
@@ -874,42 +1035,136 @@ impl Shell {
         )
     }
 
-    /// The mark before a worktree's name: its branch, and GitHub's icon in the
-    /// accent — which no activity dot wears, so a merged worktree never reads
-    /// as a running one — when its pull request is merged.
+    /// What a session held elsewhere says on hover: where it runs.
+    fn holder_tip(&self, found: &crate::elsewhere::Found, session: &leon_core::Session) -> String {
+        let probably = if found.is_certain() { "" } else { "probably " };
+        match found.holder {
+            Holder::OtherLeon(_) => {
+                let machine = self
+                    .snapshot
+                    .machine(&session.machine_id)
+                    .map_or("this machine", |machine| machine.name.as_str());
+                format!(
+                    "{probably}running in another Leon on {machine} \u{b7} pid {}",
+                    found.pid
+                )
+            }
+            Holder::Terminal => format!(
+                "{probably}running in another terminal \u{b7} pid {}",
+                found.pid
+            ),
+        }
+    }
+
+    /// The mark before a worktree's name: what its branch is. A branch icon
+    /// for a branch (stronger for the main worktree), GitHub's merge icon in
+    /// the accent — which no activity light wears, so a merged worktree never
+    /// reads as a running one — when its pull request is merged, and a commit
+    /// icon for a detached head. Its tooltip says it in words.
     ///
-    /// Git alone cannot say: a branch inside the base looks the same whether
-    /// its work landed there or it never had any. So nothing is drawn for a
-    /// worktree whose pull request is not merged, or for one nobody could ask
-    /// about: the quiet branch icon the row has always had.
-    fn merged_mark(
+    /// Git alone cannot say a branch landed: a branch inside the base looks
+    /// the same whether its work merged or it never had any. So "merged" comes
+    /// from GitHub's record or from nowhere, and nothing is claimed for a
+    /// worktree nobody could ask about. What the model does not hold (commits
+    /// ahead or behind, uncommitted files, an open or draft pull request) is
+    /// not drawn.
+    fn git_mark(
         &self,
         index: usize,
         worktree: &leon_core::Worktree,
         colours: &Palette,
     ) -> AnyElement {
-        if worktree.merged_pull_request != Some(true) {
-            return icon(IconName::GitBranch, px(13.), colours.text_muted).into_any_element();
-        }
-        let tip: SharedString = "Pull request merged".into();
+        let mark = GitMark::of(worktree);
+        let (name, colour) = match mark {
+            GitMark::Main => (IconName::GitBranch, colours.text),
+            GitMark::Branch => (IconName::GitBranch, colours.text_muted),
+            GitMark::Merged => (IconName::GitMerge, colours.signal),
+            GitMark::Detached => (IconName::GitCommitHorizontal, colours.text_muted),
+        };
+        let tip: SharedString = mark.tip(worktree).into();
         div()
             .flex_none()
+            .size(px(16.))
             .flex()
             .items_center()
-            .id(("merged-mark", index))
-            .debug_selector(move || format!("tree-merged-{index}"))
+            .justify_center()
+            .id(("git-mark", index))
+            .debug_selector(move || format!("tree-git-{index}"))
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-            .child(icon(IconName::Github, px(13.), colours.signal))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .when(mark == GitMark::Merged, |this| {
+                        this.debug_selector(move || format!("tree-merged-{index}"))
+                    })
+                    .child(icon(name, px(13.), colour)),
+            )
             .into_any_element()
     }
 
     fn dot(&self, index: usize, activity: Activity, colours: &Palette) -> AnyElement {
         let tip: SharedString = activity.tooltip().into();
-        activity_dot(activity, colours)
+        activity_light(activity, colours)
             .id(("activity", index))
             .debug_selector(move || format!("tree-activity-{index}"))
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             .into_any_element()
+    }
+}
+
+/// What a worktree's branch is, for the mark that leads its row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GitMark {
+    /// The repository's main worktree.
+    Main,
+    /// A branch, nothing known of its pull request or it is not merged.
+    Branch,
+    /// A branch whose pull request GitHub says is merged.
+    Merged,
+    /// A head that is on no branch.
+    Detached,
+}
+
+impl GitMark {
+    pub(super) fn of(worktree: &leon_core::Worktree) -> Self {
+        if worktree.merged_pull_request == Some(true) {
+            Self::Merged
+        } else if worktree.is_main {
+            Self::Main
+        } else if worktree.branch.is_none() {
+            Self::Detached
+        } else {
+            Self::Branch
+        }
+    }
+
+    /// The tooltip: plain words about the branch.
+    pub(super) fn tip(self, worktree: &leon_core::Worktree) -> String {
+        let branch = worktree.branch.as_deref().unwrap_or("(no branch)");
+        match self {
+            Self::Main => format!("Main worktree \u{b7} {branch}"),
+            Self::Branch => format!("Branch {branch}"),
+            Self::Merged => format!("Branch {branch} \u{b7} pull request merged"),
+            Self::Detached => match worktree.head.as_deref() {
+                Some(head) => format!(
+                    "Detached head at {}",
+                    head.chars().take(7).collect::<String>()
+                ),
+                None => "Detached head".to_owned(),
+            },
+        }
+    }
+}
+
+/// The word a row says beside its light when the agents in it need the person
+/// or failed; the quiet states are the light alone.
+pub(super) fn activity_word(activity: Activity) -> Option<&'static str> {
+    match activity {
+        Activity::Waiting => Some("WAITING"),
+        Activity::Failed => Some("FAILED"),
+        _ => None,
     }
 }
 
@@ -959,5 +1214,57 @@ mod tests {
             tooltip_text(Command::RemoveWorktree),
             keys::label(Command::RemoveWorktree)
         );
+    }
+
+    fn worktree(branch: Option<&str>, is_main: bool, merged: Option<bool>) -> leon_core::Worktree {
+        leon_core::Worktree {
+            id: leon_core::WorktreeId::from_string("w"),
+            project_id: leon_core::ProjectId::from_string("p"),
+            path: "/srv/api".into(),
+            branch: branch.map(str::to_owned),
+            head: Some("0123456789abcdef".into()),
+            is_main,
+            merged_pull_request: merged,
+        }
+    }
+
+    #[test]
+    fn a_worktrees_git_mark_says_what_its_branch_is() {
+        let of = |worktree| GitMark::of(&worktree);
+        assert_eq!(of(worktree(Some("main"), true, None)), GitMark::Main);
+        assert_eq!(of(worktree(Some("feat/x"), false, None)), GitMark::Branch);
+        assert_eq!(
+            of(worktree(Some("feat/x"), false, Some(false))),
+            GitMark::Branch
+        );
+        assert_eq!(
+            of(worktree(Some("feat/x"), false, Some(true))),
+            GitMark::Merged
+        );
+        assert_eq!(of(worktree(None, false, None)), GitMark::Detached);
+    }
+
+    #[test]
+    fn the_git_mark_tooltip_is_plain_words() {
+        let tip = |w: leon_core::Worktree| GitMark::of(&w).tip(&w);
+        assert_eq!(
+            tip(worktree(Some("main"), true, None)),
+            "Main worktree \u{b7} main"
+        );
+        assert_eq!(tip(worktree(Some("feat/x"), false, None)), "Branch feat/x");
+        assert_eq!(
+            tip(worktree(Some("feat/x"), false, Some(true))),
+            "Branch feat/x \u{b7} pull request merged"
+        );
+        assert_eq!(tip(worktree(None, false, None)), "Detached head at 0123456");
+    }
+
+    #[test]
+    fn only_the_states_that_need_the_person_say_a_word() {
+        assert_eq!(activity_word(Activity::Waiting), Some("WAITING"));
+        assert_eq!(activity_word(Activity::Failed), Some("FAILED"));
+        for quiet in [Activity::Off, Activity::Idle, Activity::Working] {
+            assert_eq!(activity_word(quiet), None);
+        }
     }
 }

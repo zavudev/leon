@@ -31,6 +31,7 @@ use crate::settings::AppearanceChoice;
 use crate::theme::{metrics, px, Palette as Colours, ThemeId};
 use crate::usage::{Target, Usage};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::{Sizable, Size};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     div, Context, Div, Entity, FontWeight, HighlightStyle, Keystroke, SharedString, Stateful,
@@ -1007,12 +1008,25 @@ impl Shell {
             Action::PickProjectParent { name } => self.pick_project_parent(name, window, cx),
             Action::Engine(op) => self.engine.submit(op),
             Action::StartSession(intent) => self.start_intent(intent, window, cx),
-            Action::CloseLive(id) => self.close_live(id, window, cx),
+            Action::CloseLive(id) => self.forget_live(id, window, cx),
+            Action::SleepLive(id) => self.sleep_live(id, window, cx),
             Action::RemoveWorktree {
                 project,
                 worktree,
                 force,
             } => self.remove_worktree(project, worktree, force, window, cx),
+            Action::ResumeSession(session) => {
+                let found = self
+                    .snapshot
+                    .sessions
+                    .iter()
+                    .find(|candidate| candidate.id == session)
+                    .cloned();
+                if let Some(found) = found {
+                    self.open_history(found, window, cx);
+                }
+            }
+            Action::OpenTranscript => self.open_transcript_noting_holder(cx),
             Action::ResumeIn(session, cwd) => {
                 let found = self
                     .snapshot
@@ -1035,9 +1049,27 @@ impl Shell {
                     self.resume_anyway(found, window, cx);
                 }
             }
+            Action::TakeOver(session) => {
+                let found = self
+                    .snapshot
+                    .sessions
+                    .iter()
+                    .find(|candidate| candidate.id == session)
+                    .cloned();
+                if let Some(found) = found {
+                    self.take_over(found, window, cx);
+                }
+            }
             Action::RenameLive(id, name) => {
-                if let Some(session) = self.live.get_mut(id) {
-                    session.name = Some(name.trim().to_owned());
+                self.rename_live(id, &name, cx);
+            }
+            Action::RenameSession(session, live, name) => {
+                self.engine.submit(crate::engine::Op::RenameSession {
+                    session,
+                    name: name.clone(),
+                });
+                if let Some(id) = live {
+                    self.rename_live(id, &name, cx);
                 }
             }
             Action::SetAppearance(choice) => crate::settings::set_appearance(cx, choice),
@@ -1447,7 +1479,15 @@ impl Shell {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(Input::new(&self.palette.input).appearance(false)),
+                            // Small: its 24 px box holds the 20 px line with 2 px
+                            // above and below. The default Medium box (32 px
+                            // with 8 px above and below) leaves 16 px for the
+                            // same line and cuts the letters.
+                            .child(
+                                Input::new(&self.palette.input)
+                                    .with_size(Size::Small)
+                                    .appearance(false),
+                            ),
                     )
                     .child(key_cap(keys::key_label("escape"), colours)),
             )

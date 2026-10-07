@@ -331,6 +331,7 @@ mod tests {
             leon_child: true,
             ancestors: vec![parent, 1],
             app: None,
+            holder: crate::elsewhere::Holder::Terminal,
         }
     }
 

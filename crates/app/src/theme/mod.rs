@@ -574,7 +574,7 @@ pub mod metrics {
     }
     /// Height of one row of the sidebar tree, whatever it shows.
     pub fn ROW_HEIGHT() -> Pixels {
-        token(32.0)
+        token(38.0)
     }
     /// Height of the status strip under the main pane.
     pub fn STATUS_HEIGHT() -> Pixels {

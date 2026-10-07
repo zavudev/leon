@@ -500,6 +500,31 @@ impl Terminal {
         }
     }
 
+    /// The name of the program in front of the shell (the `comm` of the
+    /// terminal's foreground process group leader), `None` when the shell
+    /// itself is in front, the terminal is on another computer or the system
+    /// cannot say.
+    pub fn foreground_command(&self) -> Option<String> {
+        if let Some(script) = &self.script {
+            return script.foreground_command();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let pid = self.pid?;
+            let leader = self.master.lock().as_ref()?.process_group_leader()?;
+            if leader as u32 == pid {
+                return None;
+            }
+            let name = std::fs::read_to_string(format!("/proc/{leader}/comm")).ok()?;
+            let name = name.trim();
+            (!name.is_empty()).then(|| name.to_owned())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
     /// Asks the program running in front of the shell to end: SIGTERM to the
     /// terminal's foreground process group. `false` when nothing was sent:
     /// the shell itself is in front, the terminal is on another computer, the
@@ -1582,6 +1607,22 @@ mod foreground_tests {
         assert!(terminal.exit_info().is_none());
         terminal.write(&b"echo STILL-HERE\n"[..]);
         wait_for("the echo", || terminal.screen_text().contains("STILL-HERE"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_program_in_front_of_the_shell_is_named() {
+        let terminal = shell();
+        wait_for("the prompt", || terminal.screen_text().contains("READY>"));
+        assert_eq!(terminal.foreground_command(), None);
+        terminal.write(&b"cat\n"[..]);
+        wait_for("cat to take the terminal", || {
+            terminal.foreground_command().as_deref() == Some("cat")
+        });
+        terminal.write(&b"\x04"[..]);
+        wait_for("the shell to get it back", || {
+            terminal.foreground_command().is_none()
+        });
     }
 
     #[test]

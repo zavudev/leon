@@ -30,6 +30,10 @@ switching to one never restarts it.
   listed above the history of their worktree with a status light; exited ones
   show their exit code until you close them. A history session you opened is
   one row, not two: while its terminal lives that row carries the light.
+  With one machine its header is left out and the projects sit at the top;
+  with two or more each machine has its header. The levels are told apart: a
+  hairline and some room above each project, the rows nested in it told by
+  their indentation, the project's name in bold and the worktree as a branch row.
 * **Main pane**: the terminals of the worktree you select, in tabs of split
   panes, or the stored transcript of a history session, or the detail of a
   project or worktree.
@@ -221,7 +225,8 @@ Leon can tell whether a program is running in front of the shell, so it
 labels a terminal with the agent while one is, and asks before closing a
 pane with a program running in it; over SSH it cannot tell, and it says
 nothing it does not know.
-4. `Enter` (or a click) on a history session **opens it in a terminal that
+4. `Enter` (or a click) on a history session **asks first** (`Resume` or
+   `Cancel`, the first answer resumes), and then **opens it in a terminal that
    resumes it**: the base shell of that session's machine in that session's
    folder, then `claude --resume <id>` (`codex resume <id>`,
    `opencode --session <id>`) typed into it. The terminal belongs to the
@@ -250,13 +255,22 @@ nothing it does not know.
    history session: a session id in the process's arguments, or, for Claude
    Code, its own `~/.claude/sessions/<pid>.json`, is a certain match; for a bare
    `claude`, `codex` or `opencode` the best fit in the process's folder is
-   marked as likely. Such a session wears a violet mark in the tree ("Running in
-   another terminal · pid 70645"), is not counted as a live session of Leon
-   and is never resumed by `Enter`: that shows the stored transcript with a
-   notice and the choices `Open transcript`, `Resume here anyway…` (asks first,
+   marked as likely. Such a session keeps the agent's colour and wears a violet
+   mark and a badge in the tree: `ELSEWHERE` when a plain terminal runs it
+   ("Running in another terminal · pid 70645"), `OTHER LEON` when a `leon` (or,
+   over SSH, `leon-host`) process is above it ("Running in another Leon on
+   <machine>"). It is not counted as a live session of Leon and a click (or
+   `Enter`) never resumes it: it asks "Running in another terminal. Resume
+   anyway?" with `Open transcript` (the default), `Take over`, `Resume anyway` and `Cancel`.
+   The transcript shows a notice and the choices `Open transcript`, `Resume here anyway…` (asks first,
    because two processes on one session can corrupt its history) and, on macOS
    when the process tree names the terminal application, `Reveal`. For a
-   likely match `Enter` on the notice resumes. The check runs every few
+   likely match `Enter` on the notice resumes. **Take over** asks the process
+   that holds the session to end (SIGTERM, never forced), waits up to five
+   seconds for it to be gone, and only then resumes the session in Leon; if it
+   does not end, nothing is resumed and Leon says so. It only exists on this
+   computer (a process on another machine cannot be signalled from here) and not
+   on Windows. The check runs every few
    seconds while the window is focused, when it regains focus, on `Refresh`
    (over SSH too, as one more command on the shared connection) and just
    before a session is opened. `leon --diagnose sessions-elsewhere` runs it
@@ -375,6 +389,7 @@ platform (see below).
 | Jump to machine 1 to 9 | `⌘1` | `Ctrl+1` |
 | Focus the sidebar | `⌘L` `⇧⌘B` | `Ctrl+L` `Ctrl+Shift+S` |
 | Show or hide the sidebar | `⌘B` | `Ctrl+Shift+B` |
+| Show only active sessions | palette only | palette only |
 | Make the sidebar wider | palette only | palette only |
 | Make the sidebar narrower | palette only | palette only |
 | Reset the sidebar's width | palette only | palette only |
@@ -396,8 +411,10 @@ platform (see below).
 | New agent session | `⌘N` `⇧⌘A` | `Ctrl+N` `Ctrl+Shift+A` |
 | Add a custom agent… | palette only | palette only |
 | Remove a custom agent… | palette only | palette only |
+| Resume the session… (asks first) | palette only | palette only |
 | Resume the session in another worktree… | palette only | palette only |
 | Resume here anyway… (a session running in another terminal) | palette only | palette only |
+| Take over the session running elsewhere… | palette only | palette only |
 | Reveal the terminal it runs in | palette only | palette only |
 | Open a shell here | `⌘T` `⇧⌘T` | `Ctrl+T` `Ctrl+Shift+T` |
 | New worktree | `⇧⌘N` | `Ctrl+Shift+N` |
@@ -466,6 +483,7 @@ platform (see below).
 | Go to terminal tab 8 | `⌥⌘8` | `Ctrl+Shift+8` |
 | Go to terminal tab 9 | `⌥⌘9` | `Ctrl+Shift+9` |
 | Close the pane | `⌘W` | `Ctrl+Shift+W` |
+| Sleep the pane | palette only | palette only |
 | Copy the selection | `⌘C` `⇧⌘C` | `Ctrl+C` `Ctrl+Shift+C` |
 | Paste | `⌘V` `⇧⌘V` `⇧Insert` | `Ctrl+V` `Ctrl+Shift+V` `Shift+Insert` |
 | Scroll the terminal back a page | `⇧PgUp` | `Shift+PgUp` |
@@ -693,11 +711,36 @@ typing selects an item. Every item shows the shortcut it has.
 | --- | --- |
 | Machine | Open project…, New shell, Probe, Why is it offline? and Edit machine… (SSH machines), Rename, Connect a machine…, Remove machine (not for this computer) |
 | Project | New worktree…, New agent session ▸ (Claude Code, Codex, opencode and your own agents; the palette lists the whole catalogue), Open shell here, Copy path, Rename, Move up, Move down, Reveal in file manager (this computer), Refresh icon, Choose icon…, Reset icon, Remove project |
-| Worktree | New agent session ▸, Open shell here, Copy path, Copy branch name, Move up, Move down, Reveal in file manager (this computer), Remove worktree (not the main one) |
-| History session | Open (resumes it in a terminal), Open transcript, Pin or Unpin, Move up, Move down, Copy session id, Remove from history |
-| Live terminal | Focus, Split right, Split down, Rename, Close |
+| Worktree | New agent session ▸, Open shell here, Copy path, Copy branch name, Move up, Move down, Reveal in file manager (this computer), Close (not the main one: removes the worktree, its terminals and the sessions that ran in it) |
+| History session | By state. **Running** (it has a terminal): Focus, Rename, Sleep, Close. **Asleep**: Wake (asks first), Close. **History only**: Resume (asks first), Remove from history. Every state also has Rename. **Running elsewhere** (another terminal or another Leon): Open transcript, Take over…, Resume here anyway…, Reveal the terminal, Remove from history. All of them then: Open transcript, Pin or Unpin, Move up, Move down, Copy session id |
+| Live terminal | Focus, Split right, Split down, Rename, Sleep, Close |
 
-Removals and closing a terminal with a program running in it ask first. A
+A worktree row says two separate things. At its start, what the branch is
+(its tooltip says it in words): a branch icon (stronger for the main worktree,
+which also has a `MAIN` tag), a merge icon in the accent when GitHub says its
+pull request is merged, and a commit icon for a detached head. At its end, how
+the agents in it are doing, the same light as a session's: nothing when none is
+live, green when idle, a ring when working, and `WAITING` or `FAILED` in a
+word when they need you. Leon does not read commits ahead or behind,
+uncommitted files or open pull requests, so none of those is drawn.
+
+The toggle beside the filter (also `Show only active sessions` in the palette
+and in the settings) lists only the active sessions: live terminals and
+agents running elsewhere. Sleeping and history-only sessions, and the projects
+and worktrees left without any, are hidden, and the tree says `No active
+sessions` when none is. `/` focuses the filter on every keyboard layout (on
+Spanish, German or Italian ones it is Shift+7); `Esc` clears it and a second
+`Esc` leaves it.
+
+A session row tells its state at a glance: **running** has the agent's colour,
+a bold title and a light; **asleep** is dimmed, with a moon and `SLEEP`;
+**history only** is grey, with its age alone.
+
+**Close** is final: it ends the terminal and takes its row out of the sidebar
+with the history session that belongs to it (the agent's own file stays).
+**Sleep** stops the terminal's program but keeps the session in the sidebar to
+resume later. Removals, and closing or sleeping a terminal with a program
+running in it, ask first. A
 worktree git refuses for the modified or untracked files it holds is left
 whole and asks once more: only that answer passes `--force`, which deletes
 those files with it.
@@ -1248,7 +1291,15 @@ themselves by recency until you move one: a dragged or moved session is
 *pinned* where you put it, on top of its list ("Pin" also does that;
 "Unpin" sends it back to recency). Sessions can only move inside their own
 list; projects inside their machine; worktrees inside their project. `F2` or
-"Rename" renames the project under the cursor.
+"Rename" renames the project, machine, session or terminal under the cursor.
+A session is renamed in any state (running, asleep or history only): Leon
+shows old and new names and asks first. The name is Leon's own, kept in its
+store, shown over the agent's title and never lost when the history is
+imported again; the agent's own files are not edited. When the session runs
+in a terminal and its agent has a verified rename command (Claude Code:
+`/rename <name>`), Leon types it for you, but only while the agent waits at
+its prompt; if it is working, only Leon's name changes and the status line
+says so. Other agents (opencode, Codex, …) only get Leon's name.
 
 ### A logo per project
 

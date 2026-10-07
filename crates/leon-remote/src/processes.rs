@@ -173,6 +173,15 @@ impl Scan {
         pids
     }
 
+    /// The nearest process above `pid` whose program is one of `names`.
+    pub fn ancestor_named(&self, pid: u32, names: &[&str]) -> Option<u32> {
+        self.ancestors(pid).into_iter().find(|ancestor| {
+            self.parents
+                .get(ancestor)
+                .is_some_and(|(_, exe)| names.contains(&base_name(exe)))
+        })
+    }
+
     /// The application bundle nearest above `pid` (macOS), if one is known.
     pub fn owning_app(&self, pid: u32) -> Option<AppBundle> {
         let mut at = pid;

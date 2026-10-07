@@ -979,6 +979,15 @@ const BASE: &[Def] = &[
         D::Bool(true),
     ),
     def(
+        "sidebar_active_only",
+        S::Window,
+        "Show only active sessions",
+        "The sidebar lists only the sessions that are active: a live terminal, or an agent running in another terminal or Leon. Sleeping and history-only sessions, and the projects and worktrees without any active one, are hidden.",
+        "tree filter active live running hide sleeping history",
+        K::Toggle,
+        D::Bool(false),
+    ),
+    def(
         "sidebar_width",
         S::Window,
         "Sidebar width",

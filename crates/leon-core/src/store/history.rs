@@ -28,7 +28,7 @@ use crate::model::{AgentId, Message, NewMessage, NewSession, Role, Session};
 /// The session columns, in the order [`session_from_row`] expects them, for a
 /// `session` table aliased as `s`.
 pub(crate) const SESSION_COLUMNS: &str = "s.id, s.agent, s.external_id, s.machine_id, s.cwd, \
-     s.project_id, s.title, s.model, s.started_at, s.updated_at, s.message_count, s.sort_order";
+     s.project_id, COALESCE(s.custom_title, s.title), s.model, s.started_at, s.updated_at, s.message_count, s.sort_order";
 
 /// How many columns [`SESSION_COLUMNS`] selects.
 pub(crate) const SESSION_COLUMN_COUNT: usize = 12;
@@ -159,6 +159,21 @@ impl Store {
                 })?
                 .collect::<rusqlite::Result<_>>()?;
             Ok(messages)
+        })
+    }
+
+    /// Gives a session the name a person chose (`None` or blank takes it back
+    /// to the agent's own title). Imports never overwrite it.
+    pub fn rename_session(&self, id: &SessionId, name: Option<&str>) -> Result<()> {
+        let name = name.map(str::trim).filter(|name| !name.is_empty());
+        self.write(StoreChange::Sessions, |tx| {
+            let changed = tx
+                .prepare_cached("UPDATE session SET custom_title = ?2 WHERE id = ?1")?
+                .execute(params![id.as_str(), name])?;
+            if changed == 0 {
+                return Err(StoreError::NotFound("session"));
+            }
+            Ok(())
         })
     }
 
@@ -581,6 +596,25 @@ mod tests {
                 Ok(ids)
             })
             .unwrap()
+    }
+
+    #[test]
+    fn a_name_a_person_gave_survives_the_next_import_and_can_be_taken_back() {
+        let store = Store::open_in_memory().unwrap();
+        let id = store.upsert_session(&session("s1"), &transcript()).unwrap();
+        store.rename_session(&id, Some("  Login  ")).unwrap();
+        assert_eq!(store.session(&id).unwrap().title, "Login");
+        // The agent's file changes its title and the import runs again.
+        let mut again = session("s1");
+        again.title = "Fresh heading".into();
+        store.upsert_session(&again, &transcript()).unwrap();
+        assert_eq!(store.session(&id).unwrap().title, "Login");
+        // A blank name gives the agent's own title back.
+        store.rename_session(&id, Some("  ")).unwrap();
+        assert_eq!(store.session(&id).unwrap().title, "Fresh heading");
+        assert!(store
+            .rename_session(&SessionId::from_string("nope"), Some("x"))
+            .is_err());
     }
 
     #[test]

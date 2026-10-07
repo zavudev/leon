@@ -95,6 +95,11 @@ pub struct ElsewhereTarget {
     pub pid: u32,
     /// Whether that is only the best fit.
     pub likely: bool,
+    /// Whether another Leon runs it (else a plain terminal does).
+    pub other_leon: bool,
+    /// Whether Leon can ask that process to end: on this computer, on a
+    /// system with signals.
+    pub can_take_over: bool,
 }
 
 /// What a rename would rename.
@@ -106,13 +111,19 @@ pub enum RenameTarget {
     Project(ProjectId, String),
     /// A live terminal, with its label now.
     Live(LiveId, String),
+    /// A session of the history, with its title now, and the live terminal
+    /// that runs it when there is one.
+    Session(SessionId, String, Option<LiveId>),
 }
 
 impl RenameTarget {
     /// The name it has now.
     pub fn current(&self) -> &str {
         match self {
-            Self::Machine(_, name) | Self::Project(_, name) | Self::Live(_, name) => name,
+            Self::Machine(_, name)
+            | Self::Project(_, name)
+            | Self::Live(_, name)
+            | Self::Session(_, name, _) => name,
         }
     }
 }
@@ -524,8 +535,15 @@ pub enum Action {
     StartSession(SessionIntent),
     /// Give a live terminal a name.
     RenameLive(LiveId, String),
-    /// Close a live session.
+    /// Give a session a name of Leon's own, and its live terminal too (which
+    /// also renames the session inside an agent that can be asked to).
+    RenameSession(SessionId, Option<LiveId>, String),
+    /// Close a live session for good: its terminal ends and its row leaves
+    /// the sidebar, with the history session that belongs to it.
     CloseLive(LiveId),
+    /// Put a live session to sleep: its terminal ends, and the session stays
+    /// in the sidebar to be resumed.
+    SleepLive(LiveId),
     /// Remove a worktree, its confirmation already answered. `force` passes
     /// `--force` to git, which deletes its uncommitted and untracked files:
     /// the window asks for it when git refused the worktree for them.
@@ -537,10 +555,17 @@ pub enum Action {
         /// Whether its local changes may be deleted with it.
         force: bool,
     },
+    /// Resume a history session where it ran, once confirmed.
+    ResumeSession(SessionId),
+    /// Open the transcript of the session the keyboard is on.
+    OpenTranscript,
     /// Resume a history session in another folder of its machine.
     ResumeIn(SessionId, String),
     /// Resume, in a terminal of Leon, a session that runs in another terminal.
     ResumeAnyway(SessionId),
+    /// Ask the process that holds a session in another terminal to end, then
+    /// resume the session in a terminal of Leon.
+    TakeOver(SessionId),
     /// Change the appearance: light, dark or the desktop's.
     SetAppearance(AppearanceChoice),
     /// Change the theme.
@@ -610,11 +635,14 @@ pub fn is_flow(command: Command) -> bool {
             | Command::AddAgent
             | Command::RemoveAgent
             | Command::CloseSession
+            | Command::SleepSession
             | Command::Rename
             | Command::RemoveMachine
             | Command::RemoveFromHistory
+            | Command::ResumeSession
             | Command::ResumeIn
             | Command::ResumeAnyway
+            | Command::TakeOver
             | Command::NewWorktree
             | Command::AddProject
             | Command::CloneProject
@@ -653,11 +681,14 @@ pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
         Command::AddAgent => add_agent(answers),
         Command::RemoveAgent => remove_agent(answers),
         Command::CloseSession => close_session(answers, world),
+        Command::SleepSession => sleep_session(answers, world),
         Command::Rename => rename(answers, world),
         Command::RemoveMachine => remove_machine(answers, world),
         Command::RemoveFromHistory => remove_from_history(answers, world),
+        Command::ResumeSession => resume_session(answers, world),
         Command::ResumeIn => resume_in(answers, world),
         Command::ResumeAnyway => resume_anyway(answers, world),
+        Command::TakeOver => take_over(answers, world),
         Command::NewWorktree => new_worktree(answers, world),
         Command::AddProject => add_project(answers, world),
         Command::CloneProject => clone_project(answers, world),
@@ -862,12 +893,31 @@ fn worktree_choices(world: &World) -> Outcome {
 fn rename(answers: &[String], world: &World) -> Outcome {
     let Some(target) = &world.rename else {
         return Outcome::Refuse(
-            "Select a project, a machine or a live terminal to rename.".to_owned(),
+            "Select a project, a machine, a session or a live terminal to rename.".to_owned(),
         );
     };
     match answers {
         [] => text("New name", target.current().to_owned(), Validate::Required),
+        [name] if matches!(target, RenameTarget::Session(..)) => choices(
+            "Confirm",
+            vec![
+                Choice::new(
+                    format!("Rename to \"{}\"", name.trim()),
+                    format!("from \"{}\"", target.current()),
+                    "yes",
+                ),
+                Choice::new("Cancel", "keep the name", "no"),
+            ],
+            Custom::No,
+        ),
+        [name, confirmed, ..] if matches!(target, RenameTarget::Session(..)) => match target {
+            RenameTarget::Session(id, _, live) if confirmed == "yes" => {
+                Outcome::Run(Action::RenameSession(id.clone(), *live, name.clone()))
+            }
+            _ => Outcome::Run(Action::Nothing),
+        },
         [name, ..] => match target {
+            RenameTarget::Session(..) => Outcome::Run(Action::Nothing),
             RenameTarget::Machine(machine, _) => Outcome::Run(Action::Engine(Op::RenameMachine {
                 machine: machine.clone(),
                 name: name.clone(),
@@ -931,6 +981,77 @@ fn remove_from_history(answers: &[String], world: &World) -> Outcome {
         [confirmed, ..] if confirmed == "yes" => {
             Outcome::Run(Action::Engine(Op::RemoveSession(id.clone())))
         }
+        _ => Outcome::Run(Action::Nothing),
+    }
+}
+
+/// Resuming a history session starts its agent, so a click on its row asks
+/// first; `Enter` takes the first answer, which resumes it.
+fn resume_session(answers: &[String], world: &World) -> Outcome {
+    let Some((id, title)) = &world.here_session else {
+        return Outcome::Refuse("Select a history session to resume.".to_owned());
+    };
+    if let Some(held) = &world.elsewhere {
+        let probably = if held.likely { "probably " } else { "" };
+        return match answers {
+            [] => choices(
+                if held.other_leon {
+                    "This session is running in another Leon. Resume anyway?"
+                } else {
+                    "This session is running in another terminal. Resume anyway?"
+                },
+                vec![
+                    Choice::new(
+                        "Open transcript",
+                        format!(
+                            "read it without starting anything; {probably}held by pid {}",
+                            held.pid
+                        ),
+                        "transcript",
+                    ),
+                    Choice::new(
+                        format!("Resume \"{title}\" anyway"),
+                        "two processes on one session can corrupt its history",
+                        "yes",
+                    ),
+                ]
+                .into_iter()
+                .chain(held.can_take_over.then(|| {
+                    Choice::new(
+                        format!("Take over \"{title}\""),
+                        format!(
+                            "asks pid {} to end (SIGTERM, never forced), then resumes it here",
+                            held.pid
+                        ),
+                        "takeover",
+                    )
+                }))
+                .chain([Choice::new("Cancel", "leave it to the other one", "no")])
+                .collect(),
+                Custom::No,
+            ),
+            [chosen, ..] if chosen == "transcript" => Outcome::Run(Action::OpenTranscript),
+            [chosen, ..] if chosen == "takeover" && held.can_take_over => {
+                Outcome::Run(Action::TakeOver(id.clone()))
+            }
+            [chosen, ..] if chosen == "yes" => Outcome::Run(Action::ResumeAnyway(id.clone())),
+            _ => Outcome::Run(Action::Nothing),
+        };
+    }
+    match answers {
+        [] => choices(
+            "Resume this session?",
+            vec![
+                Choice::new(
+                    format!("Resume \"{title}\""),
+                    "starts its agent in a terminal, where it ran",
+                    "yes",
+                ),
+                Choice::new("Cancel", "leave it in the history", "no"),
+            ],
+            Custom::No,
+        ),
+        [confirmed, ..] if confirmed == "yes" => Outcome::Run(Action::ResumeSession(id.clone())),
         _ => Outcome::Run(Action::Nothing),
     }
 }
@@ -1018,13 +1139,45 @@ fn resume_anyway(answers: &[String], world: &World) -> Outcome {
     }
 }
 
+/// Taking over a session that another terminal or Leon runs: the process is
+/// asked to end, and the session resumes here once it has. Always asks, the
+/// first answer, which `Enter` takes, is to leave it alone.
+fn take_over(answers: &[String], world: &World) -> Outcome {
+    let Some(target) = &world.elsewhere else {
+        return Outcome::Refuse("Select a session that is running in another terminal.".to_owned());
+    };
+    if !target.can_take_over {
+        return Outcome::Refuse(
+            "Leon can only end a process on this computer: close it where it runs.".to_owned(),
+        );
+    }
+    match answers {
+        [] => choices(
+            if target.other_leon {
+                "Take over: the other Leon's agent will be ended"
+            } else {
+                "Take over: the other terminal's agent will be ended"
+            },
+            vec![
+                Choice::new("Cancel", "leave it to the other one", "no"),
+                Choice::new(
+                    format!("End pid {} and resume \"{}\" here", target.pid, target.title),
+                    "SIGTERM, never forced: the agent saves its session and quits; if it does not, nothing is resumed",
+                    "yes",
+                ),
+            ],
+            Custom::No,
+        ),
+        [chosen, ..] if chosen == "yes" => Outcome::Run(Action::TakeOver(target.session.clone())),
+        _ => Outcome::Run(Action::Nothing),
+    }
+}
+
 fn close_session(answers: &[String], world: &World) -> Outcome {
-    let Some(id) = world.here_live else {
+    let Some(info) = live_here(world) else {
         return Outcome::Refuse("There is no live session to close.".to_owned());
     };
-    let Some(info) = world.live.iter().find(|info| info.id == id) else {
-        return Outcome::Refuse("There is no live session to close.".to_owned());
-    };
+    let id = info.id;
     if !info.busy || !world.prefs.confirm_close {
         return Outcome::Run(Action::CloseLive(id));
     }
@@ -1034,7 +1187,7 @@ fn close_session(answers: &[String], world: &World) -> Outcome {
             vec![
                 Choice::new(
                     format!("Close {}", info.label),
-                    "stops the program that is running in it",
+                    "stops the program that is running in it and removes it from the sidebar",
                     "yes",
                 ),
                 Choice::new("Cancel", "keep it running", "no"),
@@ -1044,6 +1197,40 @@ fn close_session(answers: &[String], world: &World) -> Outcome {
         [confirmed, ..] if confirmed == "yes" => Outcome::Run(Action::CloseLive(id)),
         _ => Outcome::Run(Action::Nothing),
     }
+}
+
+/// Sleeping asks like closing does while a program runs, though what it ends
+/// stays in the sidebar.
+fn sleep_session(answers: &[String], world: &World) -> Outcome {
+    let Some(info) = live_here(world) else {
+        return Outcome::Refuse("There is no live session to put to sleep.".to_owned());
+    };
+    let id = info.id;
+    if !info.busy || !world.prefs.confirm_close {
+        return Outcome::Run(Action::SleepLive(id));
+    }
+    match answers {
+        [] => choices(
+            "Confirm",
+            vec![
+                Choice::new(
+                    format!("Sleep {}", info.label),
+                    "stops the program that is running in it; the session stays in the sidebar",
+                    "yes",
+                ),
+                Choice::new("Cancel", "keep it running", "no"),
+            ],
+            Custom::No,
+        ),
+        [confirmed, ..] if confirmed == "yes" => Outcome::Run(Action::SleepLive(id)),
+        _ => Outcome::Run(Action::Nothing),
+    }
+}
+
+/// The live session the keyboard or the menu is on.
+fn live_here(world: &World) -> Option<&LiveInfo> {
+    let id = world.here_live?;
+    world.live.iter().find(|info| info.id == id)
 }
 
 fn new_worktree(answers: &[String], world: &World) -> Outcome {
@@ -1883,6 +2070,26 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn resuming_a_history_session_asks_first_and_the_first_answer_resumes() {
+        let mut world = world();
+        world.here_session = Some((SessionId::from_string("s1"), "fix it".to_owned()));
+        let ask = advance(Command::ResumeSession, &[], &world);
+        assert_eq!(labels(&ask), ["Resume \"fix it\"", "Cancel"]);
+        assert_eq!(
+            advance(Command::ResumeSession, &strings(&["yes"]), &world),
+            Outcome::Run(Action::ResumeSession(SessionId::from_string("s1")))
+        );
+        assert_eq!(
+            advance(Command::ResumeSession, &strings(&["no"]), &world),
+            Outcome::Run(Action::Nothing)
+        );
+        assert!(matches!(
+            advance(Command::ResumeSession, &[], &self::world()),
+            Outcome::Refuse(_)
+        ));
+    }
+
     fn labels(outcome: &Outcome) -> Vec<String> {
         match outcome {
             Outcome::Ask(Step {
@@ -2097,6 +2304,29 @@ mod tests {
             }],
             Some(LiveId(7)),
         )
+    }
+
+    #[test]
+    fn sleeping_a_running_session_asks_first_and_keeps_it_in_the_sidebar() {
+        let world = with_live(true);
+        let ask = advance(Command::SleepSession, &[], &world);
+        assert_eq!(labels(&ask), ["Sleep Claude Code", "Cancel"]);
+        assert_eq!(
+            advance(Command::SleepSession, &strings(&["yes"]), &world),
+            Outcome::Run(Action::SleepLive(LiveId(7)))
+        );
+        assert_eq!(
+            advance(Command::SleepSession, &strings(&["no"]), &world),
+            Outcome::Run(Action::Nothing)
+        );
+        assert_eq!(
+            advance(Command::SleepSession, &[], &with_live(false)),
+            Outcome::Run(Action::SleepLive(LiveId(7)))
+        );
+        assert!(matches!(
+            advance(Command::SleepSession, &[], &self::world()),
+            Outcome::Refuse(_)
+        ));
     }
 
     #[test]
@@ -2836,6 +3066,42 @@ mod tests {
     }
 
     #[test]
+    fn renaming_a_session_shows_old_and_new_and_asks_before_it_does() {
+        let mut world = world();
+        let id = SessionId::from_string("s1");
+        world.rename = Some(RenameTarget::Session(
+            id.clone(),
+            "old name".into(),
+            Some(LiveId(2)),
+        ));
+        assert!(matches!(
+            advance(Command::Rename, &[], &world),
+            Outcome::Ask(Step {
+                kind: StepKind::Text { .. },
+                ..
+            })
+        ));
+        let confirm = advance(Command::Rename, &strings(&["new name"]), &world);
+        assert_eq!(
+            labels(&confirm),
+            ["Rename to \"new name\"", "Cancel"],
+            "{confirm:?}"
+        );
+        assert_eq!(
+            advance(Command::Rename, &strings(&["new name", "yes"]), &world),
+            Outcome::Run(Action::RenameSession(
+                id,
+                Some(LiveId(2)),
+                "new name".into()
+            ))
+        );
+        assert_eq!(
+            advance(Command::Rename, &strings(&["new name", "no"]), &world),
+            Outcome::Run(Action::Nothing)
+        );
+    }
+
+    #[test]
     fn removing_a_machine_asks_to_confirm_and_never_offers_the_local_one() {
         let mut world = world();
         world.machine_row = Some(MachineId::from_string("m2"));
@@ -2893,8 +3159,46 @@ mod tests {
                 title: "Fix the build".into(),
                 pid: 70645,
                 likely,
+                other_leon: false,
+                can_take_over: true,
             }),
+            here_session: Some((SessionId::from_string("s1"), "Fix the build".into())),
             ..world()
+        }
+    }
+
+    #[test]
+    fn resuming_a_session_held_elsewhere_offers_the_transcript_first() {
+        for other_leon in [false, true] {
+            let mut world = elsewhere_world(false);
+            world.elsewhere.as_mut().unwrap().other_leon = other_leon;
+            world.elsewhere.as_mut().unwrap().can_take_over = false;
+            let Outcome::Ask(step) = advance(Command::ResumeSession, &[], &world) else {
+                panic!("a question")
+            };
+            assert!(step.prompt.contains(if other_leon {
+                "another Leon"
+            } else {
+                "another terminal"
+            }));
+            let StepKind::Choices { choices, .. } = step.kind else {
+                panic!("choices")
+            };
+            assert_eq!(choices[0].label, "Open transcript");
+            assert!(choices[1].label.contains("anyway"));
+            assert_eq!(choices[2].label, "Cancel");
+            assert_eq!(
+                advance(Command::ResumeSession, &strings(&["transcript"]), &world),
+                Outcome::Run(Action::OpenTranscript)
+            );
+            assert_eq!(
+                advance(Command::ResumeSession, &strings(&["yes"]), &world),
+                Outcome::Run(Action::ResumeAnyway(SessionId::from_string("s1")))
+            );
+            assert_eq!(
+                advance(Command::ResumeSession, &strings(&["no"]), &world),
+                Outcome::Run(Action::Nothing)
+            );
         }
     }
 
@@ -2934,6 +3238,74 @@ mod tests {
         assert_eq!(
             advance(Command::ResumeAnyway, &[], &elsewhere_world(true)),
             Outcome::Run(Action::ResumeAnyway(SessionId::from_string("s1")))
+        );
+    }
+
+    fn take_over_world(can_take_over: bool) -> World {
+        let mut world = elsewhere_world(false);
+        let held = world.elsewhere.as_mut().unwrap();
+        held.other_leon = true;
+        held.can_take_over = can_take_over;
+        world
+    }
+
+    #[test]
+    fn the_resume_question_offers_to_take_over_only_where_leon_can_signal() {
+        let values = |can| {
+            let Outcome::Ask(step) = advance(Command::ResumeSession, &[], &take_over_world(can))
+            else {
+                panic!("a question")
+            };
+            let StepKind::Choices { choices, .. } = step.kind else {
+                panic!("choices")
+            };
+            choices.into_iter().map(|c| c.value).collect::<Vec<_>>()
+        };
+        assert_eq!(values(true), ["transcript", "yes", "takeover", "no"]);
+        assert_eq!(values(false), ["transcript", "yes", "no"]);
+    }
+
+    #[test]
+    fn taking_over_asks_first_and_the_first_answer_leaves_it_alone() {
+        let world = take_over_world(true);
+        let Outcome::Ask(step) = advance(Command::TakeOver, &[], &world) else {
+            panic!("a question")
+        };
+        assert!(step.prompt.contains("other Leon"), "{}", step.prompt);
+        let StepKind::Choices { choices, .. } = step.kind else {
+            panic!("choices")
+        };
+        assert_eq!(choices[0].value, "no", "Enter leaves it alone");
+        assert_eq!(
+            advance(Command::TakeOver, &strings(&["no"]), &world),
+            Outcome::Run(Action::Nothing)
+        );
+        let take = Outcome::Run(Action::TakeOver(SessionId::from_string("s1")));
+        assert_eq!(advance(Command::TakeOver, &strings(&["yes"]), &world), take);
+        assert_eq!(
+            advance(Command::ResumeSession, &strings(&["takeover"]), &world),
+            take
+        );
+    }
+
+    #[test]
+    fn taking_over_is_refused_when_leon_cannot_end_the_process() {
+        assert!(matches!(
+            advance(Command::TakeOver, &[], &take_over_world(false)),
+            Outcome::Refuse(_)
+        ));
+        assert!(matches!(
+            advance(Command::TakeOver, &[], &world()),
+            Outcome::Refuse(_)
+        ));
+        // A forged answer does not slip past the check.
+        assert_eq!(
+            advance(
+                Command::ResumeSession,
+                &strings(&["takeover"]),
+                &take_over_world(false)
+            ),
+            Outcome::Run(Action::Nothing)
         );
     }
 

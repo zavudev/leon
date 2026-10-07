@@ -509,6 +509,7 @@ fn extra_resume_arguments_are_typed_into_the_shell(cx: &mut TestAppContext) {
     );
     put_cursor_on(&h, cx, NodeId::Session(id));
     h.press("enter", cx);
+    h.press("enter", cx); // Resume
     wait_until(&h, cx, "the resumed agent", |h, cx| {
         screen(h, cx, 1).contains("FAKE-CLAUDE --resume alpha-3 --model opus")
     });
@@ -522,6 +523,7 @@ fn open_transcript_mode_makes_enter_show_the_transcript(cx: &mut TestAppContext)
     set(&h, cx, "history_open", Value::Text("transcript".into()));
     put_cursor_on(&h, cx, NodeId::Session(id));
     h.press("enter", cx);
+    h.press("enter", cx); // Resume
     assert_eq!(h.main_kind(cx), "session:alpha");
     assert_eq!(
         h.shell(cx, |s| s.live.ids().len()),

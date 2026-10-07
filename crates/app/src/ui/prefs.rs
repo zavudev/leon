@@ -248,7 +248,9 @@ impl Shell {
         for session in self.live.all() {
             apply_terminal_prefs(&session.view, cx);
         }
-        // The length of the lists of sessions.
+        // The length of the lists of sessions, and whether only the active
+        // ones are listed.
+        self.active_only = settings::flag(cx, "sidebar_active_only");
         self.rebuild_rows();
         cx.notify();
     }

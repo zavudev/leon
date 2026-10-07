@@ -68,6 +68,9 @@ pub enum NodeId {
     Open(MachineId),
     /// The line that says no project matches the filter.
     NoMatch,
+    /// The line that says no session is active, with only the active ones
+    /// shown.
+    NoActive,
 }
 
 impl NodeId {
@@ -85,6 +88,7 @@ impl NodeId {
             NodeId::More(parent) => format!("more:{}", parent.key()),
             NodeId::Open(id) => format!("open:{id}"),
             NodeId::NoMatch => "no-match".to_owned(),
+            NodeId::NoActive => "no-active".to_owned(),
         }
     }
 }
@@ -149,6 +153,9 @@ pub enum Kind {
     Open,
     /// "No projects match": what the filtered tree says when nothing is left.
     NoMatch,
+    /// "No active sessions": what the tree says when only the active ones
+    /// are shown and none is.
+    NoActive,
 }
 
 /// One row of the sidebar.
@@ -533,9 +540,11 @@ pub fn build_rows_filtered(
         merged: &placement.merged,
         rows: Vec::new(),
     };
+    let headers = machine_headers(snapshot);
     for machine in &snapshot.machines {
         let id = NodeId::Machine(machine.id.clone());
-        let open = expansion.is_open(&id.key(), true);
+        // Without its header a machine cannot be folded, so it is open.
+        let open = !headers || expansion.is_open(&id.key(), true);
         let projects = by_machine.get(&machine.id).map_or(&[][..], Vec::as_slice);
         if let Some(filter) = filter {
             // A filtered machine is its header, and the projects that match.
@@ -584,7 +593,30 @@ pub fn build_rows_filtered(
             .map_or_else(MachineId::local, |machine| machine.id.clone());
         out.push(NodeId::NoMatch, &home, 1, None, Kind::NoMatch);
     }
+    if headers {
+        return out.rows;
+    }
+    // One machine: its header says nothing the window does not, so it is left
+    // out and its projects sit at the top level.
     out.rows
+        .into_iter()
+        .filter(|row| !matches!(row.kind, Kind::Machine(_)))
+        .map(|row| Row {
+            depth: row.depth.saturating_sub(1),
+            ..row
+        })
+        .collect()
+}
+
+/// Whether the machines get a header row: only when there is more than one
+/// to tell apart. The depth of a project is 1 under a header and 0 without.
+pub fn machine_headers(snapshot: &Snapshot) -> bool {
+    snapshot.machines.len() > 1
+}
+
+/// The depth of the project rows (the first level that is not a machine).
+pub fn project_depth(snapshot: &Snapshot) -> u8 {
+    u8::from(machine_headers(snapshot))
 }
 
 struct Rows<'a> {
@@ -1072,10 +1104,45 @@ mod tests {
                     Kind::More { hidden } => format!("more {hidden}"),
                     Kind::Open => "open".to_owned(),
                     Kind::NoMatch => "no match".to_owned(),
+                    Kind::NoActive => "no active".to_owned(),
                 };
                 format!("{}{what}", "  ".repeat(usize::from(row.depth)))
             })
             .collect()
+    }
+
+    #[test]
+    fn with_one_machine_the_header_is_left_out_and_the_projects_sit_at_the_top() {
+        let mut snapshot = fixture(vec![]);
+        snapshot.machines.truncate(1);
+        let rows = rows_of(&snapshot, &Expansion::default());
+        assert!(
+            !rows.iter().any(|row| matches!(row.kind, Kind::Machine(_))),
+            "{:?}",
+            outline(&rows)
+        );
+        assert_eq!(
+            outline(&rows)[..3],
+            ["project api (0)", "  worktree main (0)", "  worktree x (0)"]
+        );
+        assert_eq!(project_depth(&snapshot), 0);
+        // Folding the machine is not possible without its header: whatever the
+        // expansion says, the projects are there.
+        let mut folded = Expansion::default();
+        folded.set_open(
+            &NodeId::Machine(MachineId::from_string("local")).key(),
+            false,
+        );
+        assert_eq!(outline(&rows_of(&snapshot, &folded)), outline(&rows));
+    }
+
+    #[test]
+    fn with_two_machines_each_has_its_header_and_the_projects_sit_one_level_in() {
+        let snapshot = fixture(vec![]);
+        let rows = rows_of(&snapshot, &Expansion::default());
+        assert!(matches!(rows[0].kind, Kind::Machine(_)));
+        assert_eq!(outline(&rows)[1], "  project api (0)");
+        assert_eq!(project_depth(&snapshot), 1);
     }
 
     #[test]

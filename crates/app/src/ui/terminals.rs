@@ -20,6 +20,8 @@ use super::live::{AgentPhase, LiveId, LiveSession, LiveState};
 use super::notify;
 use super::panes::{Axis, Dir, Layout, MinSize, Path, Rect, RESIZE_STEP};
 use super::restore;
+const TAKE_OVER_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
 use super::shell::{ElsewhereNote, Main, Notice, Overlay, Pane, Shell};
 use super::steps::SessionIntent;
 use super::tree::{self, NodeId};
@@ -447,6 +449,42 @@ impl Shell {
         );
     }
 
+    /// Gives a live terminal a name of Leon's own, and asks its agent to take
+    /// the name too when the agent has a rename command (see
+    /// `AgentSpec::rename`). The command is typed only while the agent waits
+    /// at its prompt: typed into a busy agent it would be read as part of
+    /// what it is working on, so then only Leon's label changes, and the
+    /// status line says so. Agents without a verified command only get the
+    /// label.
+    pub(super) fn rename_live(&mut self, id: LiveId, name: &str, cx: &mut Context<Self>) {
+        let name = name.trim();
+        let Some(session) = self.live.get_mut(id) else {
+            return;
+        };
+        session.name = (!name.is_empty()).then(|| name.to_owned());
+        let Some(spec) = session.shown_agent().and_then(|agent| agent.spec()) else {
+            return;
+        };
+        let Some(line) = spec.rename_line(name) else {
+            return;
+        };
+        if session.activity == Activity::Waiting && !session.is_paused() {
+            session
+                .view
+                .read(cx)
+                .terminal()
+                .write(format!("{line}\r").into_bytes());
+        } else {
+            self.engine.report(
+                StatusKind::Info,
+                format!(
+                    "Renamed in Leon; {} was busy, so it was not asked to rename the session.",
+                    spec.name
+                ),
+            );
+        }
+    }
+
     /// What changed in a terminal's state or output: the agent phase, the
     /// state the sidebar shows.
     fn live_changed(&mut self, id: LiveId, cx: &mut Context<Self>) {
@@ -464,9 +502,14 @@ impl Shell {
         } else {
             session.phase
         };
-        let moved = state != session.shown || phase != session.phase;
+        let mut moved = state != session.shown || phase != session.phase;
         session.shown = state;
         session.phase = phase;
+        // An agent started by hand in the shell replaces the one shown.
+        if session.can_detect {
+            let program = session.view.read(cx).terminal().foreground_command();
+            moved |= session.follow_foreground(program.as_deref());
+        }
         // Only a change of what the dot says repaints the sidebar.
         let activity = self.options.activity;
         let changed = self.set_activity(id, &activity, cx);
@@ -775,6 +818,49 @@ impl Shell {
         cx.notify();
     }
 
+    /// Closes a live session for good: it is ended as [`Self::close_live`]
+    /// does, and the history session that belongs to it leaves the history
+    /// with it, so no dimmed row is left in the sidebar. Putting it to sleep
+    /// is what keeps that row. The agent's own file is not touched.
+    pub(super) fn forget_live(&mut self, id: LiveId, window: &mut Window, cx: &mut Context<Self>) {
+        let belonging = self.history_of_live(id);
+        self.close_live(id, window, cx);
+        if let Some(history) = belonging {
+            self.slept.remove(&history);
+            self.engine.submit(Op::ForgetSessions(vec![history]));
+        }
+    }
+
+    /// Puts a live session to sleep: it is ended as [`Self::close_live`]
+    /// does, and the history session that belongs to it stays in the sidebar,
+    /// marked as asleep, to be resumed.
+    pub(super) fn sleep_live(&mut self, id: LiveId, window: &mut Window, cx: &mut Context<Self>) {
+        let belonging = self.history_of_live(id);
+        self.close_live(id, window, cx);
+        if let Some(history) = belonging {
+            self.slept.insert(history);
+        }
+    }
+
+    /// The history session that belongs to a live one: the link the terminal
+    /// holds, else the session its learned id names, as the history knows it.
+    fn history_of_live(&self, id: LiveId) -> Option<SessionId> {
+        let session = self.live.get(id)?;
+        session.history.clone().or_else(|| {
+            let (external, _) = session.learned.as_ref()?;
+            let agent = session.agent?;
+            self.snapshot
+                .sessions
+                .iter()
+                .find(|stored| {
+                    stored.machine_id == session.machine
+                        && stored.agent == agent
+                        && &stored.external_id == external
+                })
+                .map(|stored| stored.id.clone())
+        })
+    }
+
     /// Ends a live session: its program is hung up and the terminal dropped,
     /// and its pane closes. The pane's sibling takes the room; the last pane
     /// of the workspace returns the main pane to what the folder shows
@@ -878,6 +964,8 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Waking it ends its sleep.
+        self.slept.remove(&session.id);
         // One terminal per history session: look at the one that has it.
         if let Some(running) = self.live.of_history(&session.id).map(|live| live.id) {
             self.open_live(running, window, cx);
@@ -946,6 +1034,18 @@ impl Shell {
         }
     }
 
+    /// "Open transcript" of the session the keyboard is on: with the notice of
+    /// who holds it when something does.
+    pub(super) fn open_transcript_noting_holder(&mut self, cx: &mut Context<Self>) {
+        let held = self
+            .here_session()
+            .and_then(|session| Some((self.elsewhere_of(&session)?, session)));
+        match held {
+            Some((found, session)) => self.show_elsewhere(session, &found, cx),
+            None => self.open_transcript_here(cx),
+        }
+    }
+
     /// Shows the stored transcript of a session that another terminal runs,
     /// with who holds it and the ways on.
     fn show_elsewhere(
@@ -974,7 +1074,8 @@ impl Shell {
                 if likely { "probably runs" } else { "runs" }
             ),
         );
-        let can_reveal = session.machine_id.is_local() && found.app.is_some();
+        let session_local = session.machine_id.is_local();
+        let can_reveal = session_local && found.app.is_some();
         self.open_transcript(
             session,
             None,
@@ -985,6 +1086,7 @@ impl Shell {
                     pid: found.pid,
                     likely,
                     can_reveal,
+                    can_take_over: crate::elsewhere::can_take_over(session_local),
                 }),
             }),
             cx,
@@ -1021,6 +1123,98 @@ impl Shell {
         }
         let cwd = session.cwd.clone();
         self.resume_unchecked(session, cwd, window, cx);
+    }
+
+    /// "Take over": asks the process that holds the session to end (SIGTERM,
+    /// never forced), waits for it to be gone, and only then resumes the
+    /// session here. The pid is checked against a fresh scan first, so a pid
+    /// that was reused is never signalled; a process that does not end in time
+    /// leaves the session alone and says so.
+    pub(super) fn take_over(
+        &mut self,
+        session: Session,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !crate::elsewhere::can_take_over(session.machine_id.is_local()) {
+            self.engine.report(
+                StatusKind::Error,
+                "Leon can only end a process on this computer: close it where it runs.",
+            );
+            return;
+        }
+        if let Some(running) = self.live.of_history(&session.id).map(|live| live.id) {
+            self.open_live(running, window, cx);
+            return;
+        }
+        let title = session.title.clone();
+        let Some(held) = self.elsewhere_of(&session) else {
+            let cwd = session.cwd.clone();
+            self.resume_unchecked(session, cwd, window, cx);
+            return;
+        };
+        let pid = held.pid;
+        self.engine.report(
+            StatusKind::Info,
+            format!("Asking pid {pid} to end so \"{title}\" can resume here…"),
+        );
+        let engine = self.engine.clone();
+        let terminate = self.options.terminate_process.clone();
+        let settle = self.options.take_over_wait;
+        let machine = session.machine_id.clone();
+        self.checking = Some(cx.spawn_in(window, async move |this, cx| {
+            // The process must still be the one the person was shown.
+            let still = |report: Option<std::sync::Arc<crate::engine::Elsewhere>>| {
+                report.is_some_and(|report| {
+                    report.found.iter().any(|found| {
+                        found.pid == pid && found.session.as_ref() == Some(&session.id)
+                    })
+                })
+            };
+            let fresh = engine.scan_elsewhere(machine.clone()).await.ok().flatten();
+            let gone = if !still(fresh) {
+                true
+            } else if !this.update(cx, |_, _| terminate(pid)).unwrap_or(false) {
+                this.update(cx, |this, cx| {
+                    this.engine.report(
+                        StatusKind::Error,
+                        format!("Could not signal pid {pid}: close it where it runs."),
+                    );
+                    cx.notify();
+                })
+                .ok();
+                return;
+            } else {
+                let mut left = settle;
+                loop {
+                    cx.background_executor().timer(TAKE_OVER_POLL).await;
+                    left = left.saturating_sub(TAKE_OVER_POLL);
+                    let report = engine.scan_elsewhere(machine.clone()).await.ok().flatten();
+                    if !still(report) {
+                        break true;
+                    }
+                    if left.is_zero() {
+                        break false;
+                    }
+                }
+            };
+            this.update_in(cx, |this, window, cx| {
+                if gone {
+                    let cwd = session.cwd.clone();
+                    this.resume_unchecked(session, cwd, window, cx);
+                } else {
+                    this.engine.report(
+                        StatusKind::Error,
+                        format!(
+                            "pid {pid} did not end within {} s, so \"{title}\" was not resumed. Close it where it runs; Leon does not force it.",
+                            settle.as_secs()
+                        ),
+                    );
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
     }
 
     /// Brings forward the terminal application the session of the keyboard
