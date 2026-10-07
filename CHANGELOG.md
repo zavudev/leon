@@ -12,7 +12,8 @@
 
 * Removing a worktree closes the sessions that were running in it: the folder
   goes with the worktree, so they no longer stay in the tree under an unsorted
-  folder (their programs are hung up with it).
+  folder (their programs are hung up with it). The project's row says
+  `DELETING` while the removal runs, so a slow forced removal is visible.
 * `Ctrl+C` in a terminal copies only when there is a selection; without one it
   reaches the program again, so a running command can be interrupted.
 * A terminal whose agent moves to another session inside it (opencode's session

@@ -2330,6 +2330,52 @@ fn confirming_removes_the_worktree_through_git_and_the_list_updates(cx: &mut Tes
 }
 
 #[gpui_kit::test]
+fn a_project_says_deleting_while_a_worktree_removal_runs(cx: &mut TestAppContext) {
+    let h = open(
+        cx,
+        ScriptedRunner::new()
+            .reply(Output::ok(""))
+            .reply(Output::ok(MAIN_ONLY)),
+    );
+    let project = h
+        .store
+        .projects(Some(&MachineId::local()))
+        .unwrap()
+        .into_iter()
+        .find(|project| project.name == "api")
+        .unwrap()
+        .id;
+    let worktree = worktree_id(&h, "feature/login");
+    let row = h.row_of(NodeId::Project(project.clone()), cx).unwrap();
+    assert!(
+        !h.shows_dynamic(format!("tree-deleting-{row}"), cx),
+        "nothing is being deleted yet"
+    );
+    // Start the removal without letting the engine run: while it is in
+    // flight the project's row says so.
+    cx.update_window(h.window.into(), |_, window, cx| {
+        h.shell.update(cx, |shell, cx| {
+            shell.remove_worktree(project.clone(), worktree.clone(), false, window, cx)
+        })
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(
+        h.shows_dynamic(format!("tree-deleting-{row}"), cx),
+        "the project row says DELETING while git works"
+    );
+    h.settle(cx);
+    let row = h.row_of(NodeId::Project(project), cx).unwrap();
+    assert!(
+        !h.shows_dynamic(format!("tree-deleting-{row}"), cx),
+        "the mark goes when the worktree is gone"
+    );
+    assert!(!h
+        .outline(cx)
+        .contains(&"    worktree:feature/login".to_owned()));
+}
+
+#[gpui_kit::test]
 fn a_worktree_git_refuses_for_its_files_asks_before_forcing_them_away(cx: &mut TestAppContext) {
     let h = open(
         cx,
