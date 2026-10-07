@@ -17,7 +17,8 @@
 //!   asked for the mouse, or becomes arrow keys on the alternate screen.
 //!   Click and drag select (double click a word, triple click a line); with
 //!   Shift held, or when the program did not ask for the mouse, selection is
-//!   always available. Ctrl+click opens links (Command+click on macOS).
+//!   always available. Clicking a link offers to open it, even under a program that
+//!   captures the mouse; Ctrl+click (Command+click on macOS) opens it at once.
 
 use crate::colors::{mix, TerminalTheme};
 use crate::keys::{self, MouseAction, MouseEvent};
@@ -383,11 +384,10 @@ impl TerminalView {
     ) {
         window.focus(&self.focus, cx);
         cx.emit(ViewEvent::Clicked);
-        // A program that captures the mouse owns plain clicks, links or not;
-        // the secondary key (Cmd or Ctrl) is what opens a link then. Shift is
-        // the usual way past the program, as for selecting.
-        let captured = keys::mouse_reporting(self.terminal.mode()) && !event.modifiers.shift;
-        if event.button == MouseButton::Left && (!captured || event.modifiers.secondary()) {
+        // A click on a link offers to open it even where a program captures
+        // the mouse (Claude Code does, and prints links); the secondary key
+        // (Cmd or Ctrl) opens it at once.
+        if event.button == MouseButton::Left {
             let (col, row, _) = self.cell_at(event.position);
             if let Some(link) = self.terminal.link_at(col, row) {
                 if event.modifiers.secondary() {
@@ -1165,7 +1165,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn a_program_that_captures_the_mouse_keeps_plain_clicks_and_ctrl_click_opens_the_link(
+    fn a_program_that_captures_the_mouse_still_offers_the_link_and_ctrl_click_opens_it(
         cx: &mut TestAppContext,
     ) {
         let (view, terminal) = show(
@@ -1185,8 +1185,13 @@ mod tests {
         visual.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
         visual.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
         drop(visual);
-        assert_eq!(cx.opened_url(), None, "the click belongs to the program");
-        assert_eq!(cx.update(|cx| view.read(cx).link_prompt.clone()), None);
+        assert_eq!(cx.opened_url(), None, "the offer does not open it yet");
+        assert_eq!(
+            cx.update(|cx| view.read(cx).link_prompt.clone())
+                .map(|prompt| prompt.uri),
+            Some("https://one.example".to_owned()),
+            "a plain click on a link offers it even under mouse capture"
+        );
 
         let mut visual = VisualTestContext::from_window(window, cx);
         visual.simulate_mouse_down(at, MouseButton::Left, Modifiers::secondary_key());
