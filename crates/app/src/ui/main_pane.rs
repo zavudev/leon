@@ -75,6 +75,7 @@ impl Shell {
                             .items_center()
                             .gap_2()
                             .child(self.sidebar_toggle_button("sidebar-toggle-main", colours, cx))
+                            .child(self.files_toggle_button(colours, cx))
                             // With the sidebar away the product's mark stays.
                             .when(!crate::settings::get(cx).sidebar_visible, |this| {
                                 this.child(super::widgets::mark(
@@ -165,7 +166,10 @@ impl Shell {
                     .find(|w| &w.id == worktree)
                     .map(|w| w.path.clone())
             }),
-            Main::Live(id) => self.live.get(*id).map(|session| session.cwd.clone()),
+            Main::Live(id) => match self.files.get(id) {
+                Some(doc) => Some(doc.path.clone()),
+                None => self.live.get(*id).map(|session| session.cwd.clone()),
+            },
             Main::Session(transcript) => Some(transcript.session.cwd.clone()),
             Main::Empty => None,
         };
@@ -243,6 +247,7 @@ impl Shell {
                     None => ("Worktree", "Gone".to_owned(), String::new()),
                 }
             }
+            Main::Live(id) if self.files.contains_key(id) => self.file_heading(&self.files[id]),
             Main::Live(id) => match self.live.get(*id) {
                 Some(session) => {
                     let who = session.agent.map_or("SHELL", format::agent_tag);

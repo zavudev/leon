@@ -91,11 +91,13 @@ pub struct RowDropTarget {
     pub after: bool,
 }
 
-/// The two panes the keyboard moves between.
+/// The panes the keyboard moves between.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pane {
     /// The tree of machines, projects, worktrees and sessions.
     Sidebar,
+    /// The tree of files of the project in view, when it is showing.
+    Files,
     /// What was opened.
     Main,
 }
@@ -212,6 +214,13 @@ pub struct Options {
     pub banner_duration: Duration,
     /// How long a change of the open terminals waits before it is written.
     pub save_debounce: Duration,
+    /// How long after the last change of a file's text it is looked at
+    /// whether it still differs from what was saved.
+    pub editor_debounce: Duration,
+    /// How long after the last change of a file's text its draft is written.
+    pub draft_debounce: Duration,
+    /// How often the file tree is listed again while it shows; zero is never.
+    pub files_interval: Duration,
     /// How long a request for an incremental history import waits, so a
     /// burst of them is one import.
     pub import_debounce: Duration,
@@ -307,6 +316,9 @@ impl Default for Options {
             notify: Rc::new(notify::system),
             banner_duration: Duration::from_secs(8),
             save_debounce: Duration::from_millis(500),
+            editor_debounce: Duration::from_millis(150),
+            draft_debounce: Duration::from_millis(1000),
+            files_interval: Duration::from_secs(5),
             import_debounce: Duration::from_secs(2),
             import_interval: Duration::from_secs(60),
             quit_gesture_wait: Duration::from_millis(1_200),
@@ -437,6 +449,11 @@ pub struct Shell {
     pub(super) main: Main,
     /// The terminals that are running.
     pub(super) live: Sessions,
+    /// The files open in leaves, by the id of their leaf (allocated with the
+    /// terminals' counter). A leaf that has an entry here is not a terminal.
+    pub(super) files: std::collections::HashMap<LiveId, super::editor::EditorDoc>,
+    /// The file tree panel: a tree for each folder it showed.
+    pub(super) file_tree: super::editor::FileTreeUi,
     /// How the terminals are laid out: workspaces of tabs of split panes.
     pub(super) workspaces: Workspaces,
     pub(super) palette: PaletteState,
@@ -467,6 +484,17 @@ pub struct Shell {
     pub(super) history_scroll: ScrollHandle,
     /// What is remembered and offered back (see `restore_view.rs`).
     pub(super) restore: super::restore_view::RestoreUi,
+    /// Quit once the saves that are on their way are done ("Save all and
+    /// quit").
+    pub(super) quit_after_saves: bool,
+    /// The generation of the settings the open editors wear.
+    pub(super) applied_editor_settings: u64,
+    /// Where the open files are kept; `None` when the settings live in memory.
+    pub(super) open_files_file: Option<PathBuf>,
+    /// What was last written there, and the trees of folders not shown yet.
+    pub(super) saved_open: super::editor::SavedFiles,
+    /// The files of the last run are being opened again.
+    pub(super) restoring_files: bool,
     /// Prompt history imports (see `history_sync.rs`).
     pub(super) sync: super::history_sync::SyncUi,
     /// Closing sessions gently on the way out (see `quit_gently.rs`).
@@ -633,6 +661,9 @@ impl Shell {
                     // away: the tree is read again, so a worktree removed
                     // elsewhere does not stay on screen.
                     this.reload(cx);
+                    // The files may have changed while another program ran.
+                    this.files_refresh(cx);
+                    this.check_external_changes(window, cx);
                 }
                 cx.notify();
             }),
@@ -714,6 +745,8 @@ impl Shell {
             tree_scroll: UniformListScrollHandle::new(),
             main: Main::Empty,
             live: Sessions::default(),
+            files: std::collections::HashMap::new(),
+            file_tree: Default::default(),
             workspaces: Workspaces::default(),
             palette,
             applied_settings: 0,
@@ -730,6 +763,11 @@ impl Shell {
             logos: Logos::default(),
             history_scroll: ScrollHandle::new(),
             restore: Default::default(),
+            quit_after_saves: false,
+            applied_editor_settings: 0,
+            open_files_file: settings::sibling(super::editor::OPEN_FILES_FILE, cx),
+            saved_open: Default::default(),
+            restoring_files: false,
             sync: Default::default(),
             closing: Default::default(),
             ticker: None,
@@ -776,6 +814,7 @@ impl Shell {
         shell.watch_usage(window, cx);
         shell.watch_updates(window, cx);
         shell.begin_session_restore(window, cx);
+        shell.restore_open_files(window, cx);
         shell.watch_history(window, cx);
         // Values of settings.json that could not be used were read as defaults.
         let problems = settings::take_problems(cx);
@@ -905,7 +944,7 @@ impl Shell {
                 .snapshot
                 .project(project)
                 .is_some_and(|entry| entry.worktrees.iter().any(|w| &w.id == worktree)),
-            Main::Live(id) => self.live.get(*id).is_none(),
+            Main::Live(id) => self.live.get(*id).is_none() && !self.files.contains_key(id),
             Main::Empty | Main::Session(_) => false,
         };
         if gone {
@@ -1115,6 +1154,7 @@ impl Shell {
                 .collect(),
         )
         .with_live(self.live_infos(cx), self.here_live())
+        .with_files(self.file_info(), self.unsaved_files())
         .with_targets(
             self.machine_row(),
             self.here_session()
@@ -1739,7 +1779,11 @@ impl Shell {
                 .project(id)
                 .map(|entry| entry.project.machine_id.clone()),
             Main::Session(transcript) => Some(transcript.session.machine_id.clone()),
-            Main::Live(id) => self.live.get(*id).map(|session| session.machine.clone()),
+            Main::Live(id) => self
+                .live
+                .get(*id)
+                .map(|session| session.machine.clone())
+                .or_else(|| self.files.get(id).map(|doc| doc.machine.clone())),
             Main::Empty => None,
         };
         let found = if self.pane == Pane::Sidebar {
@@ -1805,10 +1849,13 @@ impl Shell {
                     transcript.session.project_id.clone(),
                     transcript.session.cwd.clone(),
                 )),
-                Main::Live(id) => {
-                    let session = self.live.get(*id)?;
-                    Some((session.machine.clone(), None, session.cwd.clone()))
-                }
+                Main::Live(id) => match self.files.get(id) {
+                    Some(doc) => Some((doc.machine.clone(), None, doc.folder.clone())),
+                    None => {
+                        let session = self.live.get(*id)?;
+                        Some((session.machine.clone(), None, session.cwd.clone()))
+                    }
+                },
                 Main::Empty => None,
             }
         };
@@ -2315,6 +2362,11 @@ impl Shell {
         if self.overlay == Overlay::Share && self.share_key(stroke, window, cx) {
             return true;
         }
+        // Escape closes the search bar of the editor, which has the keyboard
+        // while it is open: it is not "go back to the sidebar".
+        if stroke.key == "escape" && self.editor_search_has_keyboard(window, cx) {
+            return false;
+        }
         let filtering = self.overlay == Overlay::None && self.filter_focused(window, cx);
         if filtering && self.filter_key(stroke, window, cx) {
             return true;
@@ -2332,7 +2384,8 @@ impl Shell {
                 | Overlay::AddProject
                 | Overlay::NewWorktree
         ) || filtering
-            || finding;
+            || finding
+            || self.file_has_keyboard();
         if self.overlay == Overlay::Palette && self.palette_key(stroke, window, cx) {
             return true;
         }
@@ -2342,6 +2395,7 @@ impl Shell {
         let context = keys::Context {
             typing,
             terminal: terminal || finding,
+            file: self.file_has_keyboard(),
         };
         let Some(command) = keys::resolve(stroke, context) else {
             // Every key that is not Leon's goes to the terminal that has the
@@ -2399,10 +2453,8 @@ impl Shell {
             C::FocusMain => self.focus_pane(Pane::Main, window, cx),
             C::NextPane | C::PreviousPane => {
                 if self.overlay == Overlay::None {
-                    self.pane = match self.pane {
-                        Pane::Sidebar => Pane::Main,
-                        Pane::Main => Pane::Sidebar,
-                    };
+                    let files = self.files_shown(cx);
+                    self.pane = super::editor::next_pane(self.pane, files, command == C::NextPane);
                 }
             }
             C::Down | C::Up | C::Top | C::Bottom | C::PageDown | C::PageUp => {
@@ -2411,11 +2463,15 @@ impl Shell {
             C::Expand => {
                 if self.overlay == Overlay::None && self.pane == Pane::Sidebar {
                     self.expand(window, cx);
+                } else if self.overlay == Overlay::None && self.pane == Pane::Files {
+                    self.files_expand(cx);
                 }
             }
             C::Collapse => {
                 if self.overlay == Overlay::None && self.pane == Pane::Sidebar {
                     self.collapse();
+                } else if self.overlay == Overlay::None && self.pane == Pane::Files {
+                    self.files_collapse(cx);
                 }
             }
             C::Open => self.open_here(window, cx),
@@ -2426,6 +2482,16 @@ impl Shell {
             C::CloneProject | C::NewProject => self.begin_flow(command, window, cx),
             C::NewWorktree => self.open_new_worktree(window, cx),
             C::OpenShell => self.open_shell_here(window, cx),
+            C::OpenFile => self.begin_flow(command, window, cx),
+            C::SaveFile => self.save_file_here(window, cx),
+            C::CloseFile => self.close_file_here(window, cx),
+            C::TogglePreview => self.toggle_preview(window, cx),
+            C::RevealInTree => self.reveal_in_tree(window, cx),
+            C::QuickOpen => self.open_palette("~", window, cx),
+            C::SearchProject => self.open_palette("%", window, cx),
+            C::FindInFile => self.find_in_file(false, window, cx),
+            C::ReplaceInFile => self.find_in_file(true, window, cx),
+            C::CloseSession if self.focused_file().is_some() => self.close_file_here(window, cx),
             C::ContextMenu => self.open_menu_here(window, cx),
             C::Rename
             | C::RemoveMachine
@@ -2548,6 +2614,7 @@ impl Shell {
             C::ReloadThemes => self.reload_themes(cx, true),
             C::ShowThemeProblems => self.show_theme_problems(window, cx),
             C::ToggleSidebar => self.toggle_sidebar(window, cx),
+            C::ToggleFiles => self.toggle_files(window, cx),
             C::WidenSidebar => self.step_sidebar(1, cx),
             C::NarrowSidebar => self.step_sidebar(-1, cx),
             C::ResetSidebarWidth => self.reset_sidebar_width(window, cx),
@@ -2591,7 +2658,9 @@ impl Shell {
                 | Overlay::NewWorktree
                 | Overlay::Settings => self.close_overlay(window, cx),
                 Overlay::None => {
-                    if self.pane == Pane::Sidebar {
+                    if self.pane == Pane::Files {
+                        self.pane = Pane::Main;
+                    } else if self.pane == Pane::Sidebar {
                         // The first Escape puts the whole tree back.
                         if self.filter.is_none() {
                             return false;
@@ -2665,6 +2734,7 @@ impl Shell {
             return;
         }
         match self.pane {
+            Pane::Files => self.files_move(command),
             Pane::Sidebar => {
                 let from = self.cursor.unwrap_or(0);
                 let next = match command {
@@ -2718,6 +2788,7 @@ impl Shell {
                     self.activate(index, window, cx);
                 }
             }
+            (Pane::Files, _) => self.files_open_selected(window, cx),
             (Pane::Main, Main::Session(transcript)) => {
                 let session = transcript.session.clone();
                 // On the notice of a session that runs elsewhere, `Enter`
@@ -2983,6 +3054,7 @@ impl Shell {
         crate::menus::Availability {
             terminal: matches!(self.main, Main::Live(id) if self.live.get(id).is_some()),
             sidebar: settings::get(cx).sidebar_visible,
+            file: self.focused_file().is_some(),
         }
     }
 
@@ -3098,6 +3170,9 @@ impl Shell {
                 }
             }
         }
+        // Text not saved is kept for the next start, and so is what is open.
+        self.flush_drafts(cx);
+        self.flush_open_files(cx);
         if let Some(path) = &self.expansion_file {
             if let Err(error) = self.expansion.save(path) {
                 tracing::warn!(%error, "the tree's open rows could not be saved");
@@ -3141,7 +3216,8 @@ impl Shell {
                 window.viewport_size().width.as_f32(),
                 window.viewport_size().height.as_f32(),
             ),
-            sidebar: metrics::SIDEBAR_WIDTH().as_f32(),
+            // The file tree column is part of what lies left of the main pane.
+            sidebar: metrics::SIDEBAR_WIDTH().as_f32() + metrics::FILES_WIDTH().as_f32(),
             header: metrics::HEADER_HEIGHT().as_f32(),
             status: metrics::FOOTER_HEIGHT().as_f32(),
             tools: metrics::TOOLS_HEIGHT().as_f32(),
@@ -3351,8 +3427,13 @@ impl Render for Shell {
         }
         // What is open is remembered after every change.
         self.watch_workspace(cx);
+        self.watch_open_files(cx);
         // Terminals wear the theme and the interface size in use.
         self.sync_settings(cx);
+        self.sync_editor_prefs(window, cx);
+        // The file tree follows the folder in view.
+        self.files_sync(cx);
+        let files_shown = self.files_shown(cx);
         let (terminal_theme, terminal_font) = (colours.terminal, Self::terminal_font(cx));
         for session in self.live.all() {
             session.view.update(cx, |view, cx| {
@@ -3409,6 +3490,9 @@ impl Render for Shell {
             .child(self.row_drop_listeners(cx))
             .when(settings::get(cx).sidebar_visible, |this| {
                 this.child(self.render_sidebar(&colours, cx))
+            })
+            .when(files_shown, |this| {
+                this.child(self.render_files_panel(&colours, cx))
             })
             .child(self.render_main_pane(&colours, cx))
             // The crosshairs, where the rules of the window meet.
