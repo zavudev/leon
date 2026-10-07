@@ -828,9 +828,10 @@ fn paint_grid(
     let mut cursor: Option<(usize, usize, CursorShape)> = None;
     // The matches of the find bar, none while it is closed.
     let highlights = terminal.highlights();
+    let reference_base = terminal.reference_base();
     let mut next_match = 0usize;
     let (cols, rows) = terminal.with_term(|term| {
-        let links = visible_links(term);
+        let links = visible_links(term, reference_base.as_deref());
         let columns = term.grid().columns();
         let content = term.renderable_content();
         let offset = content.display_offset as i32;

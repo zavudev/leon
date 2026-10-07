@@ -207,6 +207,33 @@ impl Shell {
         self.warn_before_session(agent, machine, cx);
     }
 
+    /// Makes a `#123` printed in a local terminal a link to that pull request
+    /// when its folder is a git checkout of a GitHub repository. Asking git
+    /// takes a moment, so a thread of its own does it; a folder that is not
+    /// a checkout, or has another host, leaves `#123` plain text.
+    fn link_pull_requests(terminal: std::sync::Arc<leon_term::Terminal>, cwd: String) {
+        let spawned = std::thread::Builder::new()
+            .name("leon-remote-url".to_owned())
+            .spawn(move || {
+                let output = std::process::Command::new("git")
+                    .args(["-C", &cwd, "remote", "get-url", "origin"])
+                    .stdin(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .output();
+                let base = output
+                    .ok()
+                    .filter(|output| output.status.success())
+                    .and_then(|output| String::from_utf8(output.stdout).ok())
+                    .and_then(|url| crate::address::github_pull_base(&url));
+                if base.is_some() {
+                    terminal.set_reference_base(base);
+                }
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "could not look up the git remote of a terminal");
+        }
+    }
+
     /// Starts the terminal of `launch` without placing it in any tab: the
     /// caller puts it in a layout. With `deferred` the agent's line is held
     /// back (the session is "paused") until [`Shell::resume_paused`]; `title`
@@ -274,6 +301,9 @@ impl Shell {
         };
         view.update(cx, |view, _| view.set_padding(metrics::TERMINAL_PADDING()));
         super::prefs::apply_terminal_prefs(&view, cx);
+        if !remote {
+            Self::link_pull_requests(view.read(cx).terminal().clone(), cwd.to_owned());
+        }
 
         let id = self.live.next_id();
         let (agent, resumed) = match &launch {

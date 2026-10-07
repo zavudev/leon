@@ -180,6 +180,9 @@ struct Shared {
     highlights: Mutex<Option<Arc<Highlights>>>,
     /// The scrollback and the cursor the emulator was last configured with.
     options: Mutex<(usize, CursorShape)>,
+    /// Where a `#123` printed in the terminal points to (see
+    /// [`Terminal::set_reference_base`]).
+    reference_base: Mutex<Option<Arc<str>>>,
 }
 
 impl Shared {
@@ -200,6 +203,7 @@ impl Shared {
             generation: AtomicU64::new(0),
             highlights: Mutex::new(None),
             options: Mutex::new((SCROLLBACK_LINES, CursorShape::Block)),
+            reference_base: Mutex::new(None),
         })
     }
 
@@ -757,10 +761,25 @@ impl Terminal {
             .filter(|text| !text.is_empty())
     }
 
-    /// The OSC 8 or HTTP(S) hyperlink under a viewport cell, across wraps.
+    /// The OSC 8 or HTTP(S) hyperlink under a viewport cell, across wraps. A
+    /// `#123` is one too when a [reference base](Self::set_reference_base) is set.
     pub fn link_at(&self, col: usize, row: usize) -> Option<String> {
+        let base = self.reference_base();
         let term = self.term.lock();
-        link_at(&term, col, row)
+        link_at(&term, col, row, base.as_deref())
+    }
+
+    /// Makes `#123` in the output a link to `{base}123`: the pull request
+    /// page of the repository the terminal works in (GitHub sends an issue
+    /// number to its issue). `None` turns it off.
+    pub fn set_reference_base(&self, base: Option<String>) {
+        *self.shared.reference_base.lock() = base.map(Arc::from);
+        self.shared.wake_once();
+    }
+
+    /// What [`Self::set_reference_base`] set.
+    pub fn reference_base(&self) -> Option<Arc<str>> {
+        self.shared.reference_base.lock().clone()
     }
 
     /// The text of the visible screen, one line per row, trailing blanks
@@ -860,7 +879,7 @@ pub(crate) fn openable(uri: &str) -> bool {
         && !uri.chars().any(char::is_control)
 }
 
-fn link_at(term: &Term<EventProxy>, col: usize, row: usize) -> Option<String> {
+fn link_at(term: &Term<EventProxy>, col: usize, row: usize, base: Option<&str>) -> Option<String> {
     let point = viewport_point(term, col, row);
     let grid = term.grid();
     if let Some(link) = grid[point].hyperlink() {
@@ -888,17 +907,22 @@ fn link_at(term: &Term<EventProxy>, col: usize, row: usize) -> Option<String> {
             text.push(if cell.c == '\0' { ' ' } else { cell.c });
         }
     }
-    plain_link_at(&text, clicked?)
+    plain_link_at(&text, clicked?, base)
 }
 
-fn plain_link_at(text: &[char], clicked: usize) -> Option<String> {
-    plain_links(text)
+fn plain_link_at(text: &[char], clicked: usize, base: Option<&str>) -> Option<String> {
+    plain_links(text, base)
         .into_iter()
         .find(|(range, _)| range.contains(&clicked))
         .map(|(_, uri)| uri)
 }
 
-pub(crate) fn plain_links(text: &[char]) -> Vec<(std::ops::Range<usize>, String)> {
+/// The HTTP(S) links in `text`, and with a `base` the `#123` references too,
+/// as character ranges and the address each opens.
+pub(crate) fn plain_links(
+    text: &[char],
+    base: Option<&str>,
+) -> Vec<(std::ops::Range<usize>, String)> {
     let mut links = Vec::new();
     let mut start = 0;
     while start < text.len() {
@@ -930,10 +954,58 @@ pub(crate) fn plain_links(text: &[char]) -> Vec<(std::ops::Range<usize>, String)
         }
         start = end.max(start + 1);
     }
+    if let Some(base) = base {
+        let mut references = references(text)
+            .into_iter()
+            .filter(|(range, _)| {
+                !links
+                    .iter()
+                    .any(|(link, _): &(std::ops::Range<usize>, String)| {
+                        link.start < range.end && range.start < link.end
+                    })
+            })
+            .map(|(range, number)| (range, format!("{base}{number}")))
+            .collect::<Vec<_>>();
+        links.append(&mut references);
+        links.sort_by_key(|(range, _)| range.start);
+    }
     links
 }
 
-pub(crate) fn visible_links(term: &Term<EventProxy>) -> Vec<Option<String>> {
+/// The `#123` references in `text` with their numbers: a `#` that starts a
+/// word, followed by one to five digits that end it. That leaves out colours
+/// (`#123456`), anchors (`page#12`, `/#12`) and headings (`# 3`).
+fn references(text: &[char]) -> Vec<(std::ops::Range<usize>, String)> {
+    let mut found = Vec::new();
+    for (start, &ch) in text.iter().enumerate() {
+        if ch != '#' {
+            continue;
+        }
+        let starts_word = start == 0
+            || text[start - 1].is_whitespace()
+            || matches!(
+                text[start - 1],
+                '(' | '[' | '{' | ',' | ';' | ':' | '"' | '\'' | '`'
+            );
+        if !starts_word {
+            continue;
+        }
+        let digits = text[start + 1..]
+            .iter()
+            .take_while(|ch| ch.is_ascii_digit())
+            .count();
+        let end = start + 1 + digits;
+        let ends_word = text
+            .get(end)
+            .is_none_or(|ch| !ch.is_alphanumeric() && !matches!(ch, '_' | '-' | '#'));
+        if (1..=5).contains(&digits) && ends_word {
+            found.push((start..end, text[start + 1..end].iter().collect()));
+        }
+    }
+    found
+}
+
+pub(crate) fn visible_links(term: &Term<EventProxy>, base: Option<&str>) -> Vec<Option<String>> {
     let grid = term.grid();
     let columns = grid.columns();
     let rows = grid.screen_lines();
@@ -962,7 +1034,7 @@ pub(crate) fn visible_links(term: &Term<EventProxy>) -> Vec<Option<String>> {
                 points.push(point);
             }
         }
-        for (range, uri) in plain_links(&text) {
+        for (range, uri) in plain_links(&text, base) {
             for point in &points[range] {
                 let row = point.line.0 + offset;
                 if row >= 0 && row < rows as i32 {
@@ -1190,10 +1262,10 @@ mod tests {
         let mut headless = Headless::new(80, 4, theme());
         headless.feed(b"See (https://example.com/a_(b)). Next");
         assert_eq!(
-            link_at(headless.term(), 10, 0).as_deref(),
+            link_at(headless.term(), 10, 0, None).as_deref(),
             Some("https://example.com/a_(b)")
         );
-        assert_eq!(link_at(headless.term(), 31, 0), None);
+        assert_eq!(link_at(headless.term(), 31, 0, None), None);
     }
 
     #[test]
@@ -1201,12 +1273,42 @@ mod tests {
         let mut headless = Headless::new(12, 4, theme());
         headless.feed(b"https://example.com/docs");
         assert_eq!(
-            link_at(headless.term(), 3, 1).as_deref(),
+            link_at(headless.term(), 3, 1, None).as_deref(),
             Some("https://example.com/docs")
         );
-        let links = visible_links(headless.term());
+        let links = visible_links(headless.term(), None);
         assert_eq!(links[3].as_deref(), Some("https://example.com/docs"));
         assert_eq!(links[12 + 3].as_deref(), Some("https://example.com/docs"));
+    }
+
+    #[test]
+    fn a_pull_request_number_is_a_link_only_with_a_reference_base() {
+        let mut headless = Headless::new(60, 4, theme());
+        headless.feed(b"created PR #29 (see #7, not #123456 or a/#5 or c#4)");
+        let base = Some("https://github.com/o/r/pull/");
+        assert_eq!(link_at(headless.term(), 12, 0, None), None);
+        assert_eq!(
+            link_at(headless.term(), 12, 0, base).as_deref(),
+            Some("https://github.com/o/r/pull/29")
+        );
+        assert_eq!(
+            link_at(headless.term(), 21, 0, base).as_deref(),
+            Some("https://github.com/o/r/pull/7")
+        );
+        let numbers = visible_links(headless.term(), base)
+            .into_iter()
+            .flatten()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(numbers.len(), 2, "{numbers:?}");
+    }
+
+    #[test]
+    fn a_reference_inside_a_url_stays_part_of_the_url() {
+        let text: Vec<char> = "https://example.com/x #12".chars().collect();
+        let links = plain_links(&text, Some("https://example.com/pull/"));
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].1, "https://example.com/x");
+        assert_eq!(links[1].1, "https://example.com/pull/12");
     }
 
     #[test]
@@ -1214,7 +1316,7 @@ mod tests {
         let mut headless = Headless::new(40, 4, theme());
         headless.feed(b"\x1b]8;;https://example.com/target\x1b\\read me\x1b]8;;\x1b\\");
         assert_eq!(
-            link_at(headless.term(), 3, 0).as_deref(),
+            link_at(headless.term(), 3, 0, None).as_deref(),
             Some("https://example.com/target")
         );
     }

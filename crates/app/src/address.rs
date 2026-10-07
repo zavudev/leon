@@ -200,9 +200,60 @@ pub fn worktree_path(root: &str, branch: &str) -> String {
     format!("{trimmed}-worktrees{separator}{folder}")
 }
 
+/// The address a `#123` in a terminal opens for a git remote on GitHub: the
+/// pull request page, where GitHub sends an issue number to its issue. `None`
+/// for any other host.
+pub fn github_pull_base(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    let path = remote
+        .strip_prefix("git@github.com:")
+        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| remote.strip_prefix("https://github.com/"))
+        .or_else(|| remote.strip_prefix("http://github.com/"))
+        .or_else(|| {
+            // `https://user@github.com/...` and `https://user:token@github.com/...`.
+            let rest = remote.strip_prefix("https://")?;
+            let (_, after) = rest.split_once('@')?;
+            after.strip_prefix("github.com/")
+        })?;
+    let path = path.trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, repo) = path.split_once('/')?;
+    let valid = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    };
+    (valid(owner) && valid(repo)).then(|| format!("https://github.com/{owner}/{repo}/pull/"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_github_remote_gives_its_pull_request_base() {
+        let base = Some("https://github.com/zavudev/leon/pull/".to_owned());
+        for remote in [
+            "git@github.com:zavudev/leon.git",
+            "https://github.com/zavudev/leon",
+            "https://github.com/zavudev/leon.git\n",
+            "ssh://git@github.com/zavudev/leon.git",
+            "https://me:token@github.com/zavudev/leon.git",
+        ] {
+            assert_eq!(github_pull_base(remote), base, "{remote:?}");
+        }
+        for remote in [
+            "git@gitlab.com:zavudev/leon.git",
+            "https://github.com/zavudev",
+            "https://github.com/a b/c",
+            "/srv/git/leon.git",
+            "",
+        ] {
+            assert_eq!(github_pull_base(remote), None, "{remote:?}");
+        }
+    }
 
     fn destination(user: Option<&str>, host: &str, port: Option<u16>) -> Destination {
         Destination {

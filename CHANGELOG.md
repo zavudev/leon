@@ -4,6 +4,10 @@
 
 ### Added
 
+* A `#123` printed in a local terminal (a pull request Claude Code just
+  opened, say) is a link to that pull request when the terminal's folder is a
+  checkout of a GitHub repository; colours (`#123456`), anchors (`page#12`) and
+  headings stay plain text. Clicking offers **Open link** like any other link.
 * Rename works on every session row (running, asleep or history only, also from
   `F2` and the palette) and asks first, showing the old and the new name. The
   name is Leon's own: it is stored apart from the agent's title, so importing
