@@ -196,7 +196,11 @@ nothing it does not know.
    workspace already has panes (a session of no project gets a workspace of
    its folder), and has the keyboard. Open the same session again and you land
    on the terminal that already runs it; close that terminal and the next open
-   resumes it again.
+   resumes it again. An agent that moves to another session inside one
+   terminal (opencode's session list, for one) is followed by the title it
+   puts on the terminal: the session on screen becomes that terminal's row,
+   and opening it lands on the terminal already showing it, never on a second
+   process of the same session.
    `Open transcript` (`⇧⌘L` / `Ctrl+Shift+L`, also from the terminal that
    resumed it, and in the menu and palette) shows the stored messages
    read-only and starts nothing; `Enter` in that view resumes. A search hit on
@@ -473,19 +477,20 @@ platform (see below).
 ### While a terminal has the keyboard
 
 A terminal program must receive its keys, so most of Leon's chords step aside
-while one has the keyboard. `Ctrl+C`, `Ctrl+D`, `Esc`, `Tab` and the arrows
-always reach the program.
+while one has the keyboard. `Ctrl+D`, `Esc`, `Tab` and the arrows always reach
+the program; `Ctrl+C` does too unless there is a selection to copy.
 
 * **macOS**: every `Cmd` chord of the table stays Leon's (no terminal program
   uses `Cmd`; this includes the `Ctrl+Cmd` chords that resize panes), and
   `Cmd+C` and `Cmd+V` copy and paste. A `Ctrl` chord on its own always goes
   to the program.
-* **Linux and Windows**: the operating system's ordinary `Ctrl+C` and `Ctrl+V`
-  copy and paste; the `Ctrl+Shift` aliases continue to work. Other Leon chords
-  must also hold `Shift`, because a terminal cannot tell `Ctrl+Shift+X` from
-  `Ctrl+X` and so no program uses it; `Shift+Insert`, `Shift+PgUp` and
-  `Shift+PgDn` work too. `Ctrl+P`, `Ctrl+N`, `Ctrl+W`, `Ctrl+D`, `Ctrl+1` and
-  so on go to the program.
+* **Linux and Windows**: `Ctrl+C` copies the selection when there is one and
+  goes to the program when there is not, so a running command is still
+  interrupted; `Ctrl+Shift+C` always copies. `Ctrl+V` pastes; the `Ctrl+Shift`
+  aliases continue to work. Other Leon chords must also hold `Shift`, because
+  a terminal cannot tell `Ctrl+Shift+X` from `Ctrl+X` and so no program uses
+  it; `Shift+Insert`, `Shift+PgUp` and `Shift+PgDn` work too. `Ctrl+P`,
+  `Ctrl+N`, `Ctrl+W`, `Ctrl+D`, `Ctrl+1` and so on go to the program.
 * Bare keys are never Leon's in a terminal.
 
 The chords that stay Leon's, in full:
@@ -602,7 +607,7 @@ Linux and Windows:
 * Go to terminal tab 8 `Ctrl+Shift+8`
 * Go to terminal tab 9 `Ctrl+Shift+9`
 * Close the pane `Ctrl+Shift+W`
-* Copy the selection `Ctrl+C`
+* Copy the selection `Ctrl+C` (the key is the program's when there is none)
 * Copy the selection `Ctrl+Shift+C`
 * Paste `Ctrl+V`
 * Paste `Ctrl+Shift+V`
@@ -742,9 +747,10 @@ bracketed when the program asked for it. **Copied files** paste their paths,
 shell-quoted and separated by spaces. With both an image and text, the image
 goes to an agent that is in front of the shell and the text to anything else;
 `Paste as text` and `Paste image (send Ctrl+V)` (palette, the pane's menu and
-Edit) force either. A plain `Ctrl+V` you type always reaches the program as
-byte `0x16`. Files dropped from the file manager onto a pane paste their quoted
-paths too.
+Edit) force either. A plain `Ctrl+V` typed on macOS still reaches the program
+as byte `0x16`; off macOS `Ctrl+V` is the native paste chord, and pasting an
+image is what sends that byte. Files dropped from the file manager onto a pane
+paste their quoted paths too.
 
 What can be told apart on the clipboard depends on the toolkit: text, images
 and file lists on macOS and Windows; on Linux only text and file lists, so an

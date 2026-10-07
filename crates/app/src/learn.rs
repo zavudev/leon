@@ -13,13 +13,17 @@
 //!    terminal of that agent in the folder, its newest one; with several, a
 //!    session is only linked when exactly one of them could own it, because
 //!    guessing would put two terminals on one session. Likely, not certain.
+//! 3. **The title** ([`by_title`]) for a terminal that already has a link:
+//!    the title the program puts on the terminal is its session's own
+//!    (opencode's `OC | <title>`), so when the agent moves to another session
+//!    inside one terminal the link follows it, where the folder alone cannot.
 //!
-//! A session is never linked to two terminals. Both functions are pure; the
-//! window feeds them and applies what they return.
+//! A session is never linked to two terminals. All three functions are pure;
+//! the window feeds them and applies what they return.
 
 use crate::elsewhere::{Found, Signal};
 use chrono::{DateTime, Duration, Utc};
-use leon_core::{AgentId, Session, SessionId};
+use leon_core::{AgentId, MachineId, Session, SessionId};
 use std::collections::{HashMap, HashSet};
 
 /// How early a session may start before its terminal and still be its.
@@ -40,6 +44,21 @@ pub struct Fresh {
     pub shell_pid: Option<u32>,
 }
 
+/// A terminal whose program set a title, for [`by_title`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Titled {
+    /// The live session's id.
+    pub id: u64,
+    /// The machine it runs on.
+    pub machine: MachineId,
+    /// Its agent.
+    pub agent: AgentId,
+    /// Its folder.
+    pub cwd: String,
+    /// The title the program set.
+    pub title: String,
+}
+
 /// What was learned for one terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Learned {
@@ -49,7 +68,7 @@ pub struct Learned {
     pub external: String,
     /// The history row, when the importer already stored it.
     pub history: Option<SessionId>,
-    /// How sure: `state-file`, `arguments` or `newest-in-folder`.
+    /// How sure: `state-file`, `arguments`, `newest-in-folder` or `title`.
     pub how: &'static str,
 }
 
@@ -153,6 +172,70 @@ pub fn by_folder(fresh: &[Fresh], sessions: &[Session], taken: &Taken) -> Vec<Le
         }
     }
     learned
+}
+
+/// Matches terminals to the stored session their title names.
+///
+/// The title a program puts on its terminal is its session's own (opencode
+/// writes `OC | <title>`, Claude Code `✳ <title>`), so when an agent moves to
+/// another session inside one terminal — or resumes an old one — this is what
+/// says so, where the folder alone could not. Titles are truncated by some
+/// agents (`…`), so one being a prefix of the other counts. Only an
+/// unambiguous match links, and a session is never given to two terminals.
+pub fn by_title(titled: &[Titled], sessions: &[Session], taken: &Taken) -> Vec<Learned> {
+    let mut claimed = taken.clone();
+    let mut learned = Vec::new();
+    for terminal in titled {
+        if normalize_title(&terminal.title).is_empty() {
+            continue;
+        }
+        let candidates: Vec<&Session> = sessions
+            .iter()
+            .filter(|session| {
+                session.machine_id == terminal.machine
+                    && session.agent == terminal.agent
+                    && leon_core::path::key(&session.cwd) == leon_core::path::key(&terminal.cwd)
+                    && !claimed.contains(&(session.agent, session.external_id.clone()))
+                    && title_names(&terminal.title, &session.title)
+            })
+            .collect();
+        // Two sessions the title could name: leave it alone rather than
+        // guess, as the folder does.
+        let [session] = candidates[..] else {
+            continue;
+        };
+        claimed.insert((session.agent, session.external_id.clone()));
+        learned.push(Learned {
+            id: terminal.id,
+            external: session.external_id.clone(),
+            history: Some(session.id.clone()),
+            how: "title",
+        });
+    }
+    learned
+}
+
+/// Whether a terminal's title names the session titled `session_title`: the
+/// program's decoration and prefix are taken off (`OC | <title>`), a
+/// truncated title loses its ellipsis, and one title being a prefix of the
+/// other counts.
+pub fn title_names(terminal_title: &str, session_title: &str) -> bool {
+    let terminal = normalize_title(terminal_title);
+    let session = normalize_title(session_title);
+    !terminal.is_empty()
+        && !session.is_empty()
+        && (terminal.starts_with(&session) || session.starts_with(&terminal))
+}
+
+/// A program's title as the session's own text: `OC | x…` is `x`.
+fn normalize_title(title: &str) -> String {
+    let title = crate::format::plain_title(title);
+    // Anything after the last bar is the title itself (opencode's `OC | `).
+    let title = title.rsplit('|').next().unwrap_or(&title).trim();
+    // A truncated title ends in an ellipsis, which the full one has not.
+    let title = title.strip_suffix('…').unwrap_or(title).trim_end();
+    let title = title.strip_suffix("...").unwrap_or(title).trim_end();
+    title.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -306,5 +389,90 @@ mod tests {
         // Held by another terminal already: nothing is left to give.
         let taken: Taken = [(AgentId::CODEX, "x".to_owned())].into();
         assert!(by_folder(&terminals, &sessions, &taken).is_empty());
+    }
+
+    fn titled(id: u64, agent: AgentId, cwd: &str, title: &str) -> Titled {
+        Titled {
+            id,
+            machine: MachineId::local(),
+            agent,
+            cwd: cwd.to_owned(),
+            title: title.to_owned(),
+        }
+    }
+
+    fn titled_session(agent: AgentId, external: &str, cwd: &str, title: &str) -> Session {
+        let mut session = session(agent, external, cwd, at(0, 0));
+        session.title = title.to_owned();
+        session
+    }
+
+    #[test]
+    fn the_title_a_program_sets_names_the_session_it_moved_to() {
+        // Opencode writes `OC | ` and truncates: what the terminal says is a
+        // prefix of the stored title.
+        let terminals = [titled(
+            1,
+            AgentId::OPENCODE,
+            "/srv/web",
+            "OC | Aumentar el espacio entre secciones p…",
+        )];
+        let sessions = [
+            titled_session(
+                AgentId::OPENCODE,
+                "old",
+                "/srv/web",
+                "Problema al interrumpir comandos",
+            ),
+            titled_session(
+                AgentId::OPENCODE,
+                "new",
+                "/srv/web",
+                "Aumentar el espacio entre secciones para mejorar la lectura",
+            ),
+        ];
+        let learned = by_title(&terminals, &sessions, &Taken::new());
+        assert_eq!(learned.len(), 1);
+        assert_eq!(learned[0].id, 1);
+        assert_eq!(learned[0].external, "new");
+        assert_eq!(learned[0].how, "title");
+        assert_eq!(learned[0].history, Some(SessionId::from_string("row-new")));
+    }
+
+    #[test]
+    fn a_title_two_sessions_could_answer_is_not_guessed() {
+        let terminals = [titled(1, AgentId::CODEX, "/srv/api", "Fix the bug")];
+        let sessions = [
+            titled_session(AgentId::CODEX, "one", "/srv/api", "Fix the bug"),
+            titled_session(
+                AgentId::CODEX,
+                "two",
+                "/srv/api",
+                "Fix the bug in the parser",
+            ),
+        ];
+        assert!(by_title(&terminals, &sessions, &Taken::new()).is_empty());
+    }
+
+    #[test]
+    fn the_title_does_not_cross_agents_folders_or_held_sessions() {
+        let terminals = [titled(1, AgentId::OPENCODE, "/srv/api", "OC | deploy")];
+        let sessions = [
+            titled_session(AgentId::CODEX, "other-agent", "/srv/api", "deploy"),
+            titled_session(AgentId::OPENCODE, "other-folder", "/srv/web", "deploy"),
+        ];
+        assert!(by_title(&terminals, &sessions, &Taken::new()).is_empty());
+        let mine = titled_session(AgentId::OPENCODE, "mine", "/srv/api", "deploy");
+        let taken: Taken = [(AgentId::OPENCODE, "mine".to_owned())].into();
+        assert!(by_title(&terminals, &[mine], &taken).is_empty());
+    }
+
+    #[test]
+    fn a_title_of_nothing_but_decoration_names_nothing() {
+        assert!(!title_names("OC | ", "deploy"));
+        assert!(!title_names("✳", "deploy"));
+        assert!(!title_names("", "deploy"));
+        assert!(title_names("✳ deploy", "deploy"));
+        assert!(title_names("OC | deploy…", "deploy now"));
     }
 }

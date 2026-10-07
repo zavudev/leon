@@ -276,12 +276,18 @@ A session started fresh in Leon has no id. `learn.rs` (pure) matches it without
 reading the screen: **by process** (the process scan names the session a live
 agent holds, from Claude Code's own `~/.claude/sessions/<pid>.json` or the
 agent's arguments, and the terminal's shell is an ancestor of that agent; stored
-as `state-file` / `arguments`) and **by folder** (Codex, opencode and the rest:
+as `state-file` / `arguments`), **by folder** (Codex, opencode and the rest:
 the sessions of that folder created after the terminal started; with one
 terminal the newest, with several only a session that exactly one of them could
-own, never two terminals on one session; stored as `newest-in-folder`). The link
-also sets the terminal's history row, so the tree shows one row, live now and
-history later. `history_sync.rs` keeps the history fresh: `Op::SyncHistory` (an
+own, never two terminals on one session; stored as `newest-in-folder`) and
+**by title** (`by_title`, for a terminal that already has a link: the title a
+program sets is its session's own — opencode's `OC | <title>` — so a terminal
+whose agent moved to another session inside it, or resumed an old one, follows
+it; stored as `title`). The link also sets the terminal's history row, so the
+tree shows one row, live now and history later, and opening the session lands
+on that terminal — `resume_in` also checks the title directly, for the seconds
+before the relink.
+`history_sync.rs` keeps the history fresh: `Op::SyncHistory` (an
 incremental import, quiet unless a source is unreadable, skipping sources whose
 `stamp` did not move, `-wal` file included) is asked for, after a 2 s pause that
 merges bursts, when an agent starts, goes quiet after output, or ends, when the
@@ -801,7 +807,10 @@ no overlay) the shell's key interceptor first asks the registry
 (`keys::resolve` with `Context { terminal: true }`) and only chords that
 `keys::kept_in_terminal` allows can match: on macOS every `Cmd` chord; on
 Linux and Windows the native `Ctrl+C` / `Ctrl+V` editing chords and chords
-that also hold `Shift`, plus the scrollback keys. Chords are per platform
+that also hold `Shift`, plus the scrollback keys. A copy chord is taken only
+when the terminal has a selection: `handle_key` gives it back to the program
+when there is none, so plain `Ctrl+C` keeps interrupting. Chords are per
+platform
 (`mac(..)` and `other(..)` in the registry,
 and `alt` / `control` modifiers), which is how the iTerm2 chords coexist with
 `Ctrl+Shift` equivalents. Every other key goes to `TerminalView`, which turns

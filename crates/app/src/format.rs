@@ -62,6 +62,22 @@ pub fn truncate_chars(text: &str, max: usize) -> (&str, usize) {
     }
 }
 
+/// An OSC title without the decorative glyph a program puts before it (Claude
+/// Code's `✳`, a braille spinner) and the space after it. A title that starts
+/// with a letter, a digit or ASCII punctuation is left as it is, and the result
+/// is never empty: a title made of nothing but glyphs stays whole.
+pub fn plain_title(title: &str) -> String {
+    let trimmed = title.trim();
+    let rest = trimmed
+        .trim_start_matches(|c: char| c.is_whitespace() || (!c.is_ascii() && !c.is_alphanumeric()))
+        .trim_start();
+    if rest.is_empty() {
+        trimmed.to_owned()
+    } else {
+        rest.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +139,37 @@ mod tests {
         for role in [Role::User, Role::Assistant, Role::Tool, Role::System] {
             assert_eq!(role_tag(role), role.as_str().to_uppercase());
         }
+    }
+
+    #[test]
+    fn a_leading_decorative_glyph_is_stripped_from_a_title() {
+        assert_eq!(
+            plain_title("\u{2733} Google Ads análisis"),
+            "Google Ads análisis"
+        );
+        assert_eq!(plain_title("\u{2802}  working"), "working");
+        assert_eq!(plain_title("  \u{2733}\u{2733}   x "), "x");
+    }
+
+    #[test]
+    fn a_title_that_starts_with_a_letter_a_digit_or_punctuation_is_untouched() {
+        for title in [
+            "Fix the bug",
+            "3 files",
+            "Ñandú",
+            "~/code",
+            "[wip] x",
+            "$ ls",
+            "日本語",
+        ] {
+            assert_eq!(plain_title(title), title);
+        }
+    }
+
+    #[test]
+    fn a_title_of_nothing_but_glyphs_is_never_made_empty() {
+        assert_eq!(plain_title("\u{2733}"), "\u{2733}");
+        assert_eq!(plain_title(" \u{2802}\u{2810} "), "\u{2802}\u{2810}");
+        assert_eq!(plain_title(""), "");
     }
 }
