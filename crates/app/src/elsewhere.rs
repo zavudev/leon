@@ -55,6 +55,16 @@ impl Signal {
     }
 }
 
+/// Who owns the terminal an agent process runs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Holder {
+    /// A plain terminal: nothing of Leon is above the process.
+    Terminal,
+    /// Another Leon: a `leon` (or, on a remote machine, `leon-host`) process
+    /// is above it. Leon's own terminals are left out before this is asked.
+    OtherLeon(u32),
+}
+
 /// A process matched to a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Link {
@@ -91,6 +101,8 @@ pub struct Found {
     pub ancestors: Vec<u32>,
     /// The terminal application it runs in, when the process tree says.
     pub app: Option<AppBundle>,
+    /// Whether another Leon runs it or a plain terminal does.
+    pub holder: Holder,
 }
 
 impl Found {
@@ -149,6 +161,10 @@ pub fn resolve(scan: &Scan, sessions: &[Session], leon_pid: Option<u32>) -> Vec<
             leon_child: leon_pid.is_some_and(|root| scan.descends_from(process.pid, root)),
             ancestors: scan.ancestors(process.pid),
             app: scan.owning_app(process.pid),
+            holder: scan
+                .ancestor_named(process.pid, &["leon", "leon-host"])
+                .filter(|pid| Some(*pid) != leon_pid)
+                .map_or(Holder::Terminal, Holder::OtherLeon),
         })
         .collect();
 
@@ -218,6 +234,34 @@ pub fn resolve(scan: &Scan, sessions: &[Session], leon_pid: Option<u32>) -> Vec<
         }
     }
     found
+}
+
+/// Whether Leon can ask the process that holds a session to end: only a
+/// process of this computer, on a system with signals.
+pub fn can_take_over(local: bool) -> bool {
+    cfg!(unix) && local
+}
+
+/// Asks a process to end: SIGTERM, never a forced kill. `false` when the
+/// signal was not sent (no such process, not ours, or no signals here).
+pub fn terminate(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(pid) = i32::try_from(pid) else {
+            return false;
+        };
+        if pid <= 1 {
+            return false;
+        }
+        // SAFETY: plain signal delivery to one process that the last scan
+        // named as an agent holding a session, checked again just before.
+        unsafe { libc::kill(pid, libc::SIGTERM) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 /// One of Leon's own terminals on a machine: an agent started in Leon.
@@ -459,6 +503,37 @@ mod tests {
         // A second Leon's session is elsewhere for this one.
         let away: Vec<u32> = foreign(&found, true, &[]).iter().map(|f| f.pid).collect();
         assert_eq!(away, [201, 301]);
+    }
+
+    #[test]
+    fn a_leon_above_the_process_makes_it_another_leons_and_a_shell_makes_it_a_terminals() {
+        let scan = scan(&[
+            "T 100 1 leon",
+            "T 101 100 /bin/zsh",
+            "T 102 101 claude",
+            "T 200 1 -zsh",
+            "T 201 200 claude",
+            "T 300 1 /opt/leon/leon",
+            "T 301 300 claude",
+            "T 400 1 leon-host",
+            "T 401 400 claude",
+            "A 102 101 ttys1 00:30 claude",
+            "A 201 200 ttys2 00:30 claude",
+            "A 301 300 ttys3 00:30 claude",
+            "A 401 400 ttys4 00:30 claude",
+        ]);
+        let found = resolve(&scan, &[], Some(100));
+        let holders: Vec<(u32, Holder)> = found.iter().map(|f| (f.pid, f.holder)).collect();
+        assert_eq!(
+            holders,
+            [
+                // This Leon's own pid is not "another" Leon.
+                (102, Holder::Terminal),
+                (201, Holder::Terminal),
+                (301, Holder::OtherLeon(300)),
+                (401, Holder::OtherLeon(400)),
+            ]
+        );
     }
 
     #[test]

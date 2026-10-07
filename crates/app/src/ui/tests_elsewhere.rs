@@ -17,14 +17,26 @@ use std::sync::Mutex;
 const LEON: u32 = 100;
 
 /// What listing the processes answers; the test changes it between scans.
-struct Processes(Mutex<Option<String>>, std::sync::atomic::AtomicUsize);
+struct Processes(
+    Mutex<Option<String>>,
+    std::sync::atomic::AtomicUsize,
+    /// When set, the listing is empty once this list of pids has an entry:
+    /// the process ended when it was asked to.
+    Mutex<Option<Arc<Mutex<Vec<u32>>>>>,
+);
 
 impl Processes {
     fn new() -> Arc<Self> {
         Arc::new(Self(
             Mutex::new(Some("now=1000000\n".to_owned())),
             std::sync::atomic::AtomicUsize::new(0),
+            Mutex::new(None),
         ))
+    }
+
+    /// Everything listed ends as soon as a pid is asked to end.
+    fn ends_when_asked(&self, asked: Arc<Mutex<Vec<u32>>>) {
+        *self.2.lock().unwrap() = Some(asked);
     }
 
     /// The listing now says exactly this.
@@ -41,6 +53,15 @@ impl Processes {
 impl Runner for Processes {
     async fn run(&self, _: &CommandSpec) -> Result<Output, RunError> {
         self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let ended = self
+            .2
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|asked| !asked.lock().unwrap().is_empty());
+        if ended {
+            return Ok(Output::ok("now=1000000\n".to_owned()));
+        }
         Ok(match self.0.lock().unwrap().clone() {
             Some(text) => Output::ok(text),
             None => Output::failed(3, "ps: not found"),
@@ -139,6 +160,7 @@ fn opening_a_session_running_elsewhere_shows_its_transcript_and_does_not_start_a
     let (h, processes, _dir, _path, id) = rig(cx);
     show(&processes, &strange_claude("alpha-3"));
     h.press("enter", cx);
+    h.press("enter", cx); // Resume
     h.settle(cx);
     assert_eq!(h.main_kind(cx), "session:alpha");
     assert_eq!(live_count(&h, cx), 0);
@@ -177,6 +199,7 @@ fn resume_here_anyway_asks_for_confirmation_then_resumes(cx: &mut TestAppContext
     let (h, processes, _dir, path, _id) = rig(cx);
     show(&processes, &strange_claude("alpha-3"));
     h.press("enter", cx);
+    h.press("enter", cx); // Resume
     h.settle(cx);
     h.mouse_on(
         "transcript-resume-anyway".to_owned(),
@@ -217,6 +240,7 @@ fn resume_here_anyway_asks_for_confirmation_then_resumes(cx: &mut TestAppContext
 fn a_session_resumed_inside_leon_is_never_reported_as_elsewhere(cx: &mut TestAppContext) {
     let (h, processes, _dir, _path, id) = rig(cx);
     h.press("enter", cx);
+    h.press("enter", cx); // Resume
     wait_until(&h, cx, "the resumed agent", |h, cx| {
         screen(h, cx, 1).contains("FAKE-CLAUDE --resume alpha-3")
     });
@@ -281,6 +305,7 @@ fn the_mark_clears_when_the_other_process_exits(cx: &mut TestAppContext) {
     assert!(!marked(&h, &id, cx));
     // And the session opens and resumes normally again.
     h.press("enter", cx);
+    h.press("enter", cx); // Resume
     wait_until(&h, cx, "the resumed agent", |h, cx| {
         screen(h, cx, 1).contains("FAKE-CLAUDE --resume alpha-3")
     });
@@ -300,6 +325,7 @@ fn a_likely_match_is_worded_as_likely(cx: &mut TestAppContext) {
     scan(&h, cx);
     assert!(marked(&h, &id, cx));
     h.press("enter", cx);
+    h.press("enter", cx); // Resume
     h.settle(cx);
     let notice = notice(&h, cx).expect("a notice");
     assert!(
@@ -332,6 +358,8 @@ fn a_check_that_cannot_be_made_opens_the_session_as_ever(cx: &mut TestAppContext
     assert!(marked(&h, &id, cx));
     processes.fail();
     h.press("enter", cx);
+    h.press("down", cx);
+    h.press("enter", cx); // Resume anyway
     wait_until(&h, cx, "the resumed agent", |h, cx| {
         screen(h, cx, 1).contains("FAKE-CLAUDE --resume alpha-3")
     });
@@ -346,6 +374,7 @@ fn reveal_brings_the_terminal_application_forward_when_the_tree_names_it(cx: &mu
     let (h, processes, _dir, _path, _id) = rig(cx);
     show(&processes, &strange_claude("alpha-3"));
     h.press("enter", cx);
+    h.press("enter", cx); // Resume
     h.settle(cx);
     h.mouse_on(
         "transcript-reveal".to_owned(),
@@ -368,6 +397,7 @@ fn without_a_known_application_reveal_says_so_and_offers_no_button(cx: &mut Test
         "S {\"pid\":70645,\"sessionId\":\"alpha-3\"}",
     ]);
     h.press("enter", cx);
+    h.press("enter", cx); // Resume
     h.settle(cx);
     assert!(h.shows("transcript-resume-anyway", cx));
     assert!(!h.shows("transcript-reveal", cx));
@@ -504,4 +534,293 @@ fn a_session_running_in_another_terminal_is_not_resumed_a_second_time_by_a_resto
         "{failures:?}"
     );
     assert_eq!(live_count(&h, cx), 0, "no second agent was started");
+}
+
+fn badge_shown(h: &Harness, id: &leon_core::SessionId, cx: &mut TestAppContext) -> bool {
+    h.shows_dynamic(format!("tree-held-{id}"), cx)
+}
+
+#[gpui_kit::test]
+fn a_session_held_elsewhere_wears_a_badge_that_says_where(cx: &mut TestAppContext) {
+    let (h, processes, _dir, _path, id) = rig(cx);
+    assert!(!badge_shown(&h, &id, cx));
+    // In a plain terminal.
+    show(&processes, &strange_claude("alpha-3"));
+    scan(&h, cx);
+    assert!(badge_shown(&h, &id, cx));
+    h.shell(cx, |s| {
+        let session = s.snapshot.sessions.iter().find(|x| x.id == id).unwrap();
+        let found = s.elsewhere_of(session).unwrap();
+        assert_eq!(found.holder, crate::elsewhere::Holder::Terminal);
+    });
+    // Below another Leon.
+    processes.show(&[
+        "T 300 1 leon",
+        "T 301 300 claude",
+        "A 301 300 ttys3 00:30 claude",
+        "S {\"pid\":301,\"sessionId\":\"alpha-3\"}",
+    ]);
+    scan(&h, cx);
+    assert!(badge_shown(&h, &id, cx));
+    h.shell(cx, |s| {
+        let session = s.snapshot.sessions.iter().find(|x| x.id == id).unwrap();
+        let found = s.elsewhere_of(session).unwrap();
+        assert_eq!(found.holder, crate::elsewhere::Holder::OtherLeon(300));
+    });
+    // Nothing runs any more: the badge goes.
+    processes.show(&[]);
+    scan(&h, cx);
+    assert!(!badge_shown(&h, &id, cx));
+}
+
+#[gpui_kit::test]
+fn the_menu_of_a_session_held_elsewhere_starts_with_the_transcript_and_does_not_offer_resume(
+    cx: &mut TestAppContext,
+) {
+    let (h, processes, _dir, _path, id) = rig(cx);
+    show(&processes, &strange_claude("alpha-3"));
+    scan(&h, cx);
+    let labels = h.shell(cx, |s| {
+        let at = s
+            .rows
+            .iter()
+            .position(|r| r.id == NodeId::Session(id.clone()))
+            .unwrap();
+        s.menu_for_test(at)
+    });
+    assert_eq!(labels[0], "Open transcript", "{labels:?}");
+    if cfg!(unix) {
+        assert_eq!(labels[1], "Take over…", "{labels:?}");
+        assert_eq!(labels[2], "Resume here anyway…", "{labels:?}");
+    } else {
+        assert_eq!(labels[1], "Resume here anyway…", "{labels:?}");
+    }
+    assert!(!labels.contains(&"Resume".to_owned()), "{labels:?}");
+    assert!(
+        labels.contains(&"Remove from history".to_owned()),
+        "{labels:?}"
+    );
+    assert!(!labels.contains(&"Sleep".to_owned()), "{labels:?}");
+}
+
+#[gpui_kit::test]
+fn opening_a_session_held_elsewhere_asks_and_the_default_reads_the_transcript(
+    cx: &mut TestAppContext,
+) {
+    let (h, processes, _dir, _path, _id) = rig(cx);
+    show(&processes, &strange_claude("alpha-3"));
+    scan(&h, cx);
+    h.press("enter", cx); // the question
+    h.press("enter", cx); // the default: Open transcript
+    h.settle(cx);
+    let notice = notice(&h, cx).expect("a notice");
+    assert!(
+        notice.text.contains("running in another terminal"),
+        "{}",
+        notice.text
+    );
+    assert_eq!(live_count(&h, cx), 0, "nothing was started");
+}
+
+#[gpui_kit::test]
+fn the_transcript_notice_and_the_menu_offer_to_take_over(cx: &mut TestAppContext) {
+    let (h, processes, _dir, _path, _id) = rig(cx);
+    show(&processes, &strange_claude("alpha-3"));
+    h.press("enter", cx);
+    h.press("enter", cx); // Resume
+    h.settle(cx);
+    let note = notice(&h, cx).and_then(|n| n.elsewhere).expect("held");
+    assert_eq!(note.can_take_over, cfg!(unix));
+    assert_eq!(h.shows("transcript-take-over", cx), cfg!(unix));
+}
+
+#[cfg(unix)]
+#[gpui_kit::test]
+fn taking_over_ends_the_other_process_and_then_resumes_here(cx: &mut TestAppContext) {
+    let (h, processes, _dir, path, _id) = rig(cx);
+    processes.ends_when_asked(h.terminated.clone());
+    show(&processes, &strange_claude("alpha-3"));
+    h.press("enter", cx);
+    h.press("enter", cx); // Resume
+    h.settle(cx);
+    h.mouse_on(
+        "transcript-take-over".to_owned(),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
+    h.settle(cx);
+    // A question first: nothing is signalled and nothing starts.
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Palette);
+    assert!(h.terminated.lock().unwrap().is_empty());
+    h.press("down", cx);
+    h.press("enter", cx);
+    h.settle(cx);
+    for _ in 0..4 {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        h.settle(cx);
+    }
+    wait_until(&h, cx, "the resumed agent", |h, cx| {
+        screen(h, cx, 1).contains("FAKE-CLAUDE --resume alpha-3")
+    });
+    assert_eq!(*h.terminated.lock().unwrap(), vec![70645]);
+    assert_eq!(live_count(&h, cx), 1);
+    let spec = super::live::script_of(&h, 1).spec().clone();
+    assert_eq!(spec.cwd.as_deref(), Some(path.as_str()));
+}
+
+#[cfg(unix)]
+#[gpui_kit::test]
+fn a_process_that_does_not_end_leaves_the_session_alone(cx: &mut TestAppContext) {
+    let (h, processes, _dir, _path, id) = rig(cx);
+    show(&processes, &strange_claude("alpha-3"));
+    h.press("enter", cx);
+    h.press("enter", cx); // Resume
+    h.settle(cx);
+    h.mouse_on(
+        "transcript-take-over".to_owned(),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
+    h.settle(cx);
+    h.press("down", cx);
+    h.press("enter", cx);
+    h.settle(cx);
+    for _ in 0..8 {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        h.settle(cx);
+    }
+    assert_eq!(*h.terminated.lock().unwrap(), vec![70645], "asked once");
+    assert_eq!(live_count(&h, cx), 0, "nothing was resumed");
+    assert!(h.status().contains("did not end"), "{}", h.status());
+    assert!(marked(&h, &id, cx), "it still runs elsewhere");
+}
+
+fn kinds(h: &Harness, cx: &mut TestAppContext) -> Vec<String> {
+    h.shell(cx, |s| {
+        s.rows
+            .iter()
+            .map(|row| match &row.kind {
+                Kind::Project { project, .. } => format!("project:{}", project.name),
+                Kind::Session(session) => format!("session:{}", session.title),
+                Kind::Live(_) => "live".to_owned(),
+                Kind::NoActive => "no-active".to_owned(),
+                Kind::Machine(_) => "machine".to_owned(),
+                Kind::Worktree { .. } => "worktree".to_owned(),
+                _ => "other".to_owned(),
+            })
+            .collect()
+    })
+}
+
+fn toggle_active_only(h: &Harness, cx: &mut TestAppContext) {
+    h.mouse_on(
+        if h.shows("filter-active-only-on", cx) {
+            "filter-active-only-on"
+        } else {
+            "filter-active-only"
+        }
+        .to_owned(),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
+    h.settle(cx);
+}
+
+#[gpui_kit::test]
+fn active_only_says_so_when_nothing_is_active_and_remembers_the_choice(cx: &mut TestAppContext) {
+    let (h, _processes, _dir, _path, _id) = rig(cx);
+    assert!(kinds(&h, cx).iter().any(|k| k.starts_with("session:")));
+    toggle_active_only(&h, cx);
+    assert_eq!(kinds(&h, cx), ["no-active"]);
+    assert!(h.shows("tree-no-active", cx));
+    assert!(h.shows("filter-active-only-on", cx));
+    assert!(cx.update(|cx| crate::settings::flag(cx, "sidebar_active_only")));
+    // Off again: the whole tree is back.
+    toggle_active_only(&h, cx);
+    assert!(kinds(&h, cx).iter().any(|k| k.starts_with("session:")));
+    assert!(!cx.update(|cx| crate::settings::flag(cx, "sidebar_active_only")));
+}
+
+#[gpui_kit::test]
+fn active_only_keeps_a_session_running_elsewhere_and_what_holds_it(cx: &mut TestAppContext) {
+    let (h, processes, _dir, _path, _id) = rig(cx);
+    show(&processes, &strange_claude("alpha-3"));
+    scan(&h, cx);
+    let before = kinds(&h, cx);
+    toggle_active_only(&h, cx);
+    let shown = kinds(&h, cx);
+    assert!(shown.contains(&"session:alpha".to_owned()), "{shown:?}");
+    assert!(shown.len() < before.len(), "{shown:?} < {before:?}");
+    assert!(!shown.contains(&"no-active".to_owned()));
+    // The other projects, and every session that is only history, are gone.
+    assert_eq!(
+        shown.iter().filter(|k| k.starts_with("session:")).count(),
+        1,
+        "{shown:?}"
+    );
+    // When the other process ends, nothing is active.
+    processes.show(&[]);
+    scan(&h, cx);
+    assert_eq!(kinds(&h, cx), ["no-active"]);
+}
+
+#[gpui_kit::test]
+fn active_only_keeps_a_live_terminal_and_the_nodes_above_it(cx: &mut TestAppContext) {
+    let (h, _processes, _dir, _path, id) = rig(cx);
+    toggle_active_only(&h, cx);
+    assert_eq!(kinds(&h, cx), ["no-active"]);
+    toggle_active_only(&h, cx);
+    put_cursor_on(&h, cx, NodeId::Session(id));
+    h.press("enter", cx);
+    h.press("enter", cx); // Resume
+    wait_until(&h, cx, "the resumed agent", |h, cx| {
+        screen(h, cx, 1).contains("FAKE-CLAUDE --resume alpha-3")
+    });
+    toggle_active_only(&h, cx);
+    let shown = kinds(&h, cx);
+    assert!(!shown.contains(&"no-active".to_owned()), "{shown:?}");
+    // The terminal's own row and the nodes above it, nothing else: no other
+    // session, no "show more", no hint.
+    assert_eq!(
+        shown.iter().filter(|k| k.starts_with("session:")).count(),
+        1,
+        "{shown:?}"
+    );
+    assert_eq!(shown.last().map(String::as_str), Some("session:alpha"));
+    assert!(shown.len() < 6, "{shown:?}");
+}
+
+#[gpui_kit::test]
+fn active_only_lets_the_person_fold_and_open_nodes(cx: &mut TestAppContext) {
+    let (h, processes, _dir, _path, _id) = rig(cx);
+    show(&processes, &strange_claude("alpha-3"));
+    scan(&h, cx);
+    toggle_active_only(&h, cx);
+    let open = kinds(&h, cx);
+    assert!(open.contains(&"session:alpha".to_owned()), "{open:?}");
+    // Folding the node above it hides what is under it, and its row stays.
+    let project = h.shell(cx, |s| {
+        s.rows
+            .iter()
+            .find(|row| row.open == Some(true) && matches!(row.kind, Kind::Folder { .. }))
+            .map(super::tree::Row::key)
+            .unwrap()
+    });
+    cx.update(|cx| h.shell.update(cx, |s, _| s.set_open(&project, false)));
+    let folded = kinds(&h, cx);
+    assert!(!folded.contains(&"session:alpha".to_owned()), "{folded:?}");
+    assert!(!folded.contains(&"no-active".to_owned()), "{folded:?}");
+    assert_eq!(
+        h.shell(cx, |s| s
+            .rows
+            .iter()
+            .find(|row| row.key() == project)
+            .and_then(|row| row.open)),
+        Some(false)
+    );
+    // Opening it brings the session back.
+    cx.update(|cx| h.shell.update(cx, |s, _| s.set_open(&project, true)));
+    assert_eq!(kinds(&h, cx), open);
 }

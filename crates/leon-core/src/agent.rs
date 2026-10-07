@@ -219,6 +219,19 @@ pub enum Tint {
     Opencode,
 }
 
+/// The agent whose command or detect names include this program name (a
+/// bare name or a path), if any.
+pub fn by_program(program: &str) -> Option<AgentId> {
+    let base = program.rsplit('/').next().unwrap_or(program);
+    if base.is_empty() {
+        return None;
+    }
+    all().into_iter().find_map(|spec| {
+        let command = spec.command.rsplit('/').next().unwrap_or(&spec.command);
+        (command == base || spec.detect.iter().any(|name| name == base)).then_some(spec.id)
+    })
+}
+
 /// One agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSpec {
@@ -254,9 +267,23 @@ pub struct AgentSpec {
     /// session, when that is known: `/exit` for Claude Code (its own command)
     /// and opencode (its `/exit`). Absent where it could not be verified.
     pub exit: Option<String>,
+    /// The line typed (then Enter) to rename the session inside the agent,
+    /// with `{name}` where the new name goes: `/rename {name}` for Claude
+    /// Code. Absent where it could not be verified; those agents only get
+    /// Leon's own label.
+    pub rename: Option<String>,
 }
 
 impl AgentSpec {
+    /// The line that renames the session inside the agent, when that is known.
+    pub fn rename_line(&self, name: &str) -> Option<String> {
+        let name: String = name.split_whitespace().collect::<Vec<_>>().join(" ");
+        (!name.is_empty())
+            .then_some(self.rename.as_ref())
+            .flatten()
+            .map(|line| line.replace("{name}", &name))
+    }
+
     /// The program and arguments that start the agent, resuming `resume` when
     /// given and the agent can be resumed. `None` when a resume was asked of
     /// an agent that is launch only.
@@ -308,6 +335,7 @@ struct Row {
     mark: Option<&'static str>,
     docs: &'static str,
     exit: &'static str,
+    rename: &'static str,
 }
 
 const fn row(
@@ -326,6 +354,7 @@ const fn row(
         mark: None,
         docs,
         exit: "",
+        rename: "",
     }
 }
 
@@ -352,6 +381,12 @@ impl Row {
         self.exit = exit;
         self
     }
+    /// What is typed to rename the session inside the agent, `{name}` being
+    /// the new name. Only for agents whose command is verified.
+    const fn rename(mut self, rename: &'static str) -> Self {
+        self.rename = rename;
+        self
+    }
 }
 
 /// The built-in agents, in display order. The commands are Orca's
@@ -368,6 +403,7 @@ const ROWS: &[Row] = &[
     )
     .resume(&["--resume", "{id}"])
     .exit("/exit")
+    .rename("/rename {name}")
     .mark("claude"),
     row("codex", "Codex", "codex", "https://github.com/openai/codex")
         .resume(&["resume", "{id}"])
@@ -647,6 +683,7 @@ fn from_row(row: &Row) -> AgentSpec {
         docs: Some(row.docs.to_owned()),
         custom: false,
         exit: (!row.exit.is_empty()).then(|| row.exit.to_owned()),
+        rename: (!row.rename.is_empty()).then(|| row.rename.to_owned()),
     }
 }
 
@@ -892,6 +929,7 @@ impl CustomAgent {
             docs: None,
             custom: true,
             exit: None,
+            rename: None,
         })
     }
 }
@@ -1052,6 +1090,14 @@ mod tests {
         assert_eq!(get(AgentId::CLAUDE).history, Some(Importer::Claude));
         assert_eq!(get(AgentId::CODEX).usage, Some(UsageProvider::Codex));
         assert_eq!(get(AgentId::OPENCODE).tint, Tint::Opencode);
+    }
+
+    #[test]
+    fn a_program_name_finds_its_agent() {
+        assert_eq!(by_program("claude"), Some(AgentId::CLAUDE));
+        assert_eq!(by_program("/usr/bin/opencode"), Some(AgentId::OPENCODE));
+        assert_eq!(by_program("cat"), None);
+        assert_eq!(by_program(""), None);
     }
 
     #[test]
@@ -1217,5 +1263,24 @@ mod tests {
             .iter()
             .filter_map(|spec| spec.exit.as_deref())
             .all(|line| line == "/exit"));
+    }
+
+    #[test]
+    fn only_claude_code_renames_inside_the_agent() {
+        let with: Vec<&str> = builtin()
+            .iter()
+            .filter(|spec| spec.rename.is_some())
+            .map(|spec| spec.id.as_str())
+            .collect();
+        assert_eq!(with, ["claude"]);
+        let claude = builtin().iter().find(|spec| spec.id == AgentId::CLAUDE);
+        assert_eq!(
+            claude
+                .unwrap()
+                .rename_line("  build   the thing ")
+                .as_deref(),
+            Some("/rename build the thing")
+        );
+        assert_eq!(claude.unwrap().rename_line("   "), None);
     }
 }

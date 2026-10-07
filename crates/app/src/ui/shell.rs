@@ -37,7 +37,7 @@ use super::tree::{
 };
 use super::workspace::Workspaces;
 use crate::elsewhere::{self, Found, OwnTerminal};
-use crate::engine::{Engine, Removal, StatusKind};
+use crate::engine::{Engine, Op, Removal, StatusKind};
 use crate::keys::{self, Command};
 use crate::launch::{self, System};
 use crate::settings::{self, AppearanceChoice};
@@ -242,6 +242,13 @@ pub struct Options {
     /// Brings an application forward: the terminal a session runs in, given
     /// the path of its bundle (macOS).
     pub reveal_app: RevealApp,
+    /// Asks a process of this computer to end (SIGTERM): the agent that a
+    /// session taken over runs in. `false` when the signal was not sent.
+    /// Tests record the pid instead of signalling it.
+    pub terminate_process: Rc<dyn Fn(u32) -> bool>,
+    /// How long a process asked to end is waited for before "Take over" gives
+    /// up and leaves the session alone.
+    pub take_over_wait: Duration,
     /// Opens a file in the system's editor: `settings.json`.
     pub open_file: Reveal,
     /// How a private key file is picked, for the Connect screen.
@@ -321,6 +328,8 @@ impl Default for Options {
             updates: None,
             update_timer: true,
             open_url: Rc::new(|cx, url| cx.open_url(url)),
+            terminate_process: Rc::new(crate::elsewhere::terminate),
+            take_over_wait: Duration::from_secs(5),
             reveal_app: Rc::new(|_, bundle| {
                 // `open` on a running application brings it forward.
                 #[cfg(target_os = "macos")]
@@ -371,6 +380,8 @@ pub struct ElsewhereNote {
     pub likely: bool,
     /// Whether the terminal application can be brought forward.
     pub can_reveal: bool,
+    /// Whether Leon can ask the process to end ("Take over").
+    pub can_take_over: bool,
 }
 
 impl Notice {
@@ -507,6 +518,13 @@ pub struct Shell {
     pub(super) resuming: Option<Task<()>>,
     /// The look for a process that holds a session, before it is opened.
     pub(super) checking: Option<Task<()>>,
+    /// The history sessions that were put to sleep from a terminal and wait
+    /// in the sidebar to be resumed; the tree draws them apart from the
+    /// sessions that only have a history. Kept while the window lives.
+    pub(super) slept: std::collections::HashSet<SessionId>,
+    /// Whether the tree shows only the active sessions (the setting
+    /// `sidebar_active_only`, read when the settings change).
+    pub(super) active_only: bool,
     /// The removal of a worktree, while it runs.
     pub(super) removing: Option<Task<()>>,
     /// The removal of a worktree, while it runs. Its project's row says
@@ -658,6 +676,10 @@ impl Shell {
                 if this
                     .update(cx, |this, cx| {
                         this.learn_session_ids(cx);
+                        // What runs elsewhere changes who is active.
+                        if this.active_only {
+                            this.rebuild_rows();
+                        }
                         cx.notify()
                     })
                     .is_err()
@@ -735,6 +757,8 @@ impl Shell {
             opening: None,
             resuming: None,
             checking: None,
+            slept: std::collections::HashSet::new(),
+            active_only: settings::flag(cx, "sidebar_active_only"),
             removing: None,
             deleting: None,
             elsewhere_ticker: None,
@@ -927,14 +951,98 @@ impl Shell {
             .cursor
             .and_then(|index| self.rows.get(index))
             .map(Row::key);
-        self.rows = build_rows_filtered(
-            &self.snapshot,
-            &self.placement,
-            &self.expansion,
-            self.now(),
-            self.filter.as_ref(),
-        );
+        let build = |expansion: &super::expansion::Expansion| {
+            build_rows_filtered(
+                &self.snapshot,
+                &self.placement,
+                expansion,
+                self.now(),
+                self.filter.as_ref(),
+            )
+        };
+        self.rows = if self.active_only {
+            // Only the active ones: found in the tree with every node open, so
+            // that none hides one, then folded the way the person folded it.
+            let folded: std::collections::HashSet<String> = build(&self.expansion)
+                .iter()
+                .filter(|row| row.open == Some(false))
+                .map(Row::key)
+                .collect();
+            let everything = super::expansion::Expansion::everything();
+            fold_rows(self.only_active(build(&everything)), &folded)
+        } else {
+            build(&self.expansion)
+        };
         self.cursor = tree::follow(&self.rows, key.as_deref(), self.cursor.unwrap_or(0));
+    }
+
+    /// The rows of the tree that are active, and the nodes above them: what a
+    /// live terminal (its row, or the history session it resumed) and a session
+    /// held by another terminal or Leon are. Sleeping and history-only sessions
+    /// go, and with them every project and worktree left without a row; when
+    /// nothing is left the tree says so.
+    pub(super) fn only_active(&self, rows: Vec<Row>) -> Vec<Row> {
+        let leaf = |row: &Row| match &row.kind {
+            Kind::Live(_) | Kind::NoMatch => true,
+            Kind::Session(session) => {
+                self.placement.merged.contains(&session.id)
+                    || self.live.of_history(&session.id).is_some()
+                    || self.elsewhere_of(session).is_some()
+            }
+            _ => false,
+        };
+        let container = |row: &Row| {
+            matches!(
+                row.kind,
+                Kind::Machine(_)
+                    | Kind::Project { .. }
+                    | Kind::Worktree { .. }
+                    | Kind::Unsorted { .. }
+                    | Kind::Folder { .. }
+            )
+        };
+        // From the last row to the first: a node is kept when something under
+        // it was, which `below[d]` says for the rows at depth `d + 1` and more
+        // seen since the last row at depth `d`.
+        let mut keep = vec![false; rows.len()];
+        let mut below = [false; 16];
+        for (at, row) in rows.iter().enumerate().rev() {
+            let depth = usize::from(row.depth).min(below.len() - 1);
+            let kept = if container(row) {
+                below[depth]
+            } else {
+                leaf(row)
+            };
+            for flag in &mut below[depth..] {
+                *flag = false;
+            }
+            if kept {
+                for flag in &mut below[..depth] {
+                    *flag = true;
+                }
+            }
+            keep[at] = kept;
+        }
+        let kept: Vec<Row> = rows
+            .into_iter()
+            .zip(keep)
+            .filter_map(|(row, keep)| keep.then_some(row))
+            .collect();
+        if !kept.is_empty() {
+            return kept;
+        }
+        let home = self
+            .snapshot
+            .machines
+            .first()
+            .map_or_else(MachineId::local, |machine| machine.id.clone());
+        vec![Row {
+            id: NodeId::NoActive,
+            machine: home,
+            depth: tree::project_depth(&self.snapshot),
+            open: None,
+            kind: Kind::NoActive,
+        }]
     }
 
     /// The agents each machine has: this computer's by looking for their
@@ -1020,6 +1128,8 @@ impl Shell {
                 title: session.title,
                 pid: found.pid,
                 likely: !found.is_certain(),
+                other_leon: matches!(found.holder, crate::elsewhere::Holder::OtherLeon(_)),
+                can_take_over: crate::elsewhere::can_take_over(session.machine_id.is_local()),
             })
         }))
         .with_resume(self.here_session().map(|session| {
@@ -1084,12 +1194,30 @@ impl Shell {
             let id = self.here_live()?;
             let session = self.live.get(id)?;
             let _ = cx;
-            Some(RenameTarget::Live(id, session.label()))
+            // A terminal that runs a history session is that session.
+            Some(match &session.history {
+                Some(history) => RenameTarget::Session(history.clone(), session.label(), Some(id)),
+                None => RenameTarget::Live(id, session.label()),
+            })
+        };
+        // A history row (running here, asleep or only history) renames the
+        // session, and its terminal with it when there is one.
+        let session = || {
+            let row = self.rows.get(self.cursor?)?;
+            let Kind::Session(session) = &row.kind else {
+                return None;
+            };
+            let live = self.live.of_history(&session.id);
+            Some(RenameTarget::Session(
+                session.id.clone(),
+                live.map_or_else(|| session.title.clone(), super::live::LiveSession::label),
+                live.map(|live| live.id),
+            ))
         };
         if self.pane == Pane::Sidebar {
-            project().or_else(machine).or_else(live)
+            project().or_else(machine).or_else(session).or_else(live)
         } else {
-            live().or_else(project).or_else(machine)
+            live().or_else(project).or_else(machine).or_else(session)
         }
     }
 
@@ -1649,7 +1777,8 @@ impl Shell {
                 | Kind::Unsorted { .. }
                 | Kind::More { .. }
                 | Kind::Open
-                | Kind::NoMatch => None,
+                | Kind::NoMatch
+                | Kind::NoActive => None,
             }
         };
         let from_main = || -> Option<(MachineId, Option<ProjectId>, String)> {
@@ -1819,7 +1948,18 @@ impl Shell {
             Kind::Worktree { worktree, .. } => {
                 self.open_worktree(&worktree.project_id, &worktree.id, cx)
             }
-            Kind::Session(session) => self.open_history(session.clone(), window, cx),
+            Kind::Session(session) => {
+                // A session with a terminal is only brought forward; one
+                // without starts its agent, so that asks first.
+                // Reading its transcript starts nothing, so it never asks.
+                if self.live.of_history(&session.id).is_some()
+                    || crate::settings::text(cx, "history_open") == "transcript"
+                {
+                    self.open_history(session.clone(), window, cx);
+                } else {
+                    self.run_command(Command::ResumeSession, window, cx);
+                }
+            }
             Kind::Live(entry) => self.open_live(entry.id, window, cx),
             Kind::More { .. } => {
                 if let NodeId::More(parent) = &row.id {
@@ -1828,7 +1968,7 @@ impl Shell {
                 }
             }
             Kind::Open => self.open_project_on(&row.machine, window, cx),
-            Kind::NoMatch => {}
+            Kind::NoMatch | Kind::NoActive => {}
         }
     }
 
@@ -1861,6 +2001,18 @@ impl Shell {
         self.main = Main::Worktree(project.clone(), worktree.clone());
         self.show(&NodeId::Worktree(worktree.clone()));
         cx.notify();
+    }
+
+    /// The history sessions that ran in `root` or inside it on `machine`.
+    fn history_in(&self, machine: &MachineId, root: &str) -> Vec<SessionId> {
+        self.snapshot
+            .sessions
+            .iter()
+            .filter(|session| {
+                &session.machine_id == machine && leon_core::path::is_within(&session.cwd, root)
+            })
+            .map(|session| session.id.clone())
+            .collect()
     }
 
     /// Removes a worktree, off the UI thread. A worktree git refuses for the
@@ -1908,6 +2060,10 @@ impl Shell {
                         this.engine.report(StatusKind::Info, text);
                         if let Some((machine, path)) = folder {
                             this.close_live_in(&machine, &path, window, cx);
+                            // Its folder is gone: so are the sessions of the
+                            // history that ran inside it, not left dimmed.
+                            let gone = this.history_in(&machine, &path);
+                            this.engine.submit(Op::ForgetSessions(gone));
                         }
                     }
                     Ok(Ok(Removal::NeedsForce)) => this.begin_flow_with(
@@ -2223,6 +2379,7 @@ impl Shell {
             C::Commands => self.open_palette(">", window, cx),
             C::SearchHistory => self.open_palette("/", window, cx),
             C::FilterProjects => self.focus_filter(window, cx),
+            C::ToggleActiveOnly => self.toggle_active_only(cx),
             C::RefreshIcon => self.refresh_icon_here(),
             C::ChooseIcon => self.choose_icon_here(window, cx),
             C::ResetIcon => self.reset_icon_here(),
@@ -2270,9 +2427,13 @@ impl Shell {
             C::NewWorktree => self.open_new_worktree(window, cx),
             C::OpenShell => self.open_shell_here(window, cx),
             C::ContextMenu => self.open_menu_here(window, cx),
-            C::Rename | C::RemoveMachine | C::RemoveFromHistory | C::ResumeIn | C::ResumeAnyway => {
-                self.begin_flow(command, window, cx)
-            }
+            C::Rename
+            | C::RemoveMachine
+            | C::RemoveFromHistory
+            | C::ResumeSession
+            | C::ResumeIn
+            | C::ResumeAnyway
+            | C::TakeOver => self.begin_flow(command, window, cx),
             C::MoveRowUp => self.move_row_here(-1),
             C::MoveRowDown => self.move_row_here(1),
             C::PinSession => self.pin_session_here(true),
@@ -2311,6 +2472,7 @@ impl Shell {
             | C::AddAgent
             | C::RemoveAgent
             | C::CloseSession
+            | C::SleepSession
             | C::AddProject
             | C::RemoveProject
             | C::RemoveWorktree
@@ -3279,4 +3441,25 @@ impl Render for Shell {
             .children(self.render_overlay(&colours, cx))
             .children(self.render_menu(&colours, cx))
     }
+}
+
+/// `rows` (a tree with every node open) with the nodes in `folded` closed: their
+/// rows below go, and they show the chevron of a closed node.
+fn fold_rows(rows: Vec<Row>, folded: &std::collections::HashSet<String>) -> Vec<Row> {
+    let mut hidden_below: Option<u8> = None;
+    let mut kept = Vec::with_capacity(rows.len());
+    for mut row in rows {
+        if let Some(depth) = hidden_below {
+            if row.depth > depth {
+                continue;
+            }
+            hidden_below = None;
+        }
+        if row.open == Some(true) && folded.contains(&row.key()) {
+            row.open = Some(false);
+            hidden_below = Some(row.depth);
+        }
+        kept.push(row);
+    }
+    kept
 }

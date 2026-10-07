@@ -131,6 +131,7 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
             Cmd(C::SaveOutput),
             Cmd(C::SaveOutputAnsi),
             Sep,
+            Cmd(C::SleepSession),
             Cmd(C::CloseSession),
             Cmd(C::CloseWindow),
         ],
@@ -273,9 +274,14 @@ pub const NOT_IN_MENUS: &[(Command, &str)] = &[
     (C::Copy, "Edit > Copy, the platform's item"),
     (C::Paste, "Edit > Paste, the platform's item"),
     (C::SelectAll, "Edit > Select All, the platform's item"),
+    (C::ResumeSession, "palette and the tree's menu: needs a row"),
     (C::ResumeIn, "palette and the tree's menu: needs a row"),
     (
         C::ResumeAnyway,
+        "palette and the tree's menu: needs a session running elsewhere",
+    ),
+    (
+        C::TakeOver,
         "palette and the tree's menu: needs a session running elsewhere",
     ),
     (
@@ -315,6 +321,7 @@ pub const NOT_IN_MENUS: &[(Command, &str)] = &[
     ),
     (C::SetAppearance, "palette: a question"),
     (C::SetInterfaceSize, "palette: a question"),
+    (C::ToggleActiveOnly, "palette and the sidebar's toggle"),
     (C::WidenSidebar, "palette: a step of a drag"),
     (C::NarrowSidebar, "palette: a step of a drag"),
     (C::ResetSidebarWidth, "palette: a step of a drag"),
@@ -372,6 +379,7 @@ pub fn needs_terminal(command: Command) -> bool {
             | C::NextTab
             | C::PreviousTab
             | C::CloseSession
+            | C::SleepSession
     )
 }
 

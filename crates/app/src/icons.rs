@@ -22,9 +22,12 @@ icon_assets!(
         CircleAlert,
         CircleDot,
         Command,
+        ExternalLink,
         Folder,
         FolderOpen,
         GitBranch,
+        GitCommitHorizontal,
+        GitMerge,
         Github,
         Hash,
         Info,
@@ -87,8 +90,48 @@ pub fn agent_icon(
     size: Pixels,
     palette: &crate::theme::Palette,
 ) -> gpui_kit::AnyElement {
+    agent_icon_in(agent, size, palette, Tone::Full)
+}
+
+/// How strongly a logo is drawn: the state of the row it leads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    /// The agent's own colour: something runs.
+    Full,
+    /// Dimmed: it was put to sleep and waits to be resumed.
+    Asleep,
+    /// Nearly grey: only its history is kept.
+    Faded,
+}
+
+impl Tone {
+    /// `colour` as this tone draws it.
+    pub fn of(self, colour: Hsla) -> Hsla {
+        match self {
+            Self::Full => colour,
+            Self::Asleep => Hsla {
+                s: colour.s * 0.6,
+                a: colour.a * 0.55,
+                ..colour
+            },
+            Self::Faded => Hsla {
+                s: colour.s * 0.1,
+                a: colour.a * 0.6,
+                ..colour
+            },
+        }
+    }
+}
+
+/// [`agent_icon`] in a tone.
+pub fn agent_icon_in(
+    agent: leon_core::AgentId,
+    size: Pixels,
+    palette: &crate::theme::Palette,
+    tone: Tone,
+) -> gpui_kit::AnyElement {
     use gpui_kit::prelude::*;
-    let colour = palette.agent(agent);
+    let colour = tone.of(palette.agent(agent));
     match crate::brand::agent_mark(agent) {
         Some(path) => gpui_kit::svg()
             .path(path)
@@ -140,7 +183,13 @@ mod tests {
 
     #[test]
     fn the_sidebar_icons_load_through_the_asset_source() {
-        for name in [IconName::GitBranch, IconName::Github, IconName::Check] {
+        for name in [
+            IconName::GitBranch,
+            IconName::GitCommitHorizontal,
+            IconName::GitMerge,
+            IconName::Github,
+            IconName::Check,
+        ] {
             let path = gpui_kit::assets::IconNamed::path(name);
             let loaded = Assets.load(&path).unwrap();
             assert!(

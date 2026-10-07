@@ -27,6 +27,8 @@ struct Inner {
     replies: Mutex<mpsc::Receiver<Vec<u8>>>,
     handler: Mutex<Option<Handler>>,
     foreground: AtomicBool,
+    /// The name of the program in front of the shell, as the system names it.
+    program: Mutex<Option<String>>,
     hung_up: AtomicBool,
     /// Whether the program in front of the shell was sent SIGTERM.
     terminated: AtomicBool,
@@ -78,6 +80,13 @@ impl Script {
     /// the shell in front.
     pub fn set_foreground(&self, shell_in_front: bool) {
         self.0.foreground.store(shell_in_front, Ordering::Release);
+        self.0.shared.wake_once();
+    }
+
+    /// The name of the program in front of the shell, as
+    /// [`Terminal::foreground_command`] reports it while the shell is not.
+    pub fn set_program(&self, program: Option<&str>) {
+        *self.0.program.lock() = program.map(str::to_owned);
         self.0.shared.wake_once();
     }
 
@@ -182,6 +191,13 @@ impl Script {
         true
     }
 
+    pub(super) fn foreground_command(&self) -> Option<String> {
+        if self.is_remote() || self.0.foreground.load(Ordering::Acquire) {
+            return None;
+        }
+        self.0.program.lock().clone()
+    }
+
     pub(super) fn shell_is_foreground(&self) -> bool {
         self.0.foreground.load(Ordering::Acquire)
     }
@@ -234,6 +250,7 @@ impl Terminal {
             replies: Mutex::new(replies_rx),
             handler: Mutex::new(None),
             foreground: AtomicBool::new(true),
+            program: Mutex::new(None),
             hung_up: AtomicBool::new(false),
             terminated: AtomicBool::new(false),
             link: Mutex::new(None),

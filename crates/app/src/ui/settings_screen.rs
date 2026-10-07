@@ -1545,7 +1545,12 @@ mod tests {
             .collect();
         assert_eq!(
             keys,
-            ["sidebar_visible", "sidebar_width", "quit_confirmation"]
+            [
+                "sidebar_visible",
+                "sidebar_active_only",
+                "sidebar_width",
+                "quit_confirmation"
+            ]
         );
     }
 

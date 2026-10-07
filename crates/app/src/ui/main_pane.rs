@@ -1124,6 +1124,14 @@ impl Shell {
                                     }),
                                 ),
                             )
+                            .when(note.can_take_over, |this| {
+                                this.child(button("transcript-take-over", "TAKE OVER").on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.pane = Pane::Main;
+                                        this.run_command(Command::TakeOver, window, cx);
+                                    }),
+                                ))
+                            })
                             .when(note.can_reveal, |this| {
                                 this.child(button("transcript-reveal", "REVEAL").on_click(
                                     cx.listener(|this, _, window, cx| {

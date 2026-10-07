@@ -88,6 +88,9 @@ pub enum Command {
     SearchHistory,
     /// Moves the keyboard to the sidebar's project filter.
     FilterProjects,
+    /// Shows only the sessions that are active: a live terminal, or an agent
+    /// running elsewhere. Turns the setting `sidebar_active_only` on or off.
+    ToggleActiveOnly,
     // ----- panes
     /// Jumps to the machine at this place in the sidebar, from 1.
     Machine(u8),
@@ -125,12 +128,18 @@ pub enum Command {
     AddAgent,
     /// Removes an agent of your own.
     RemoveAgent,
+    /// Resumes the history session the keyboard is on, after asking: a click
+    /// on a row that has no terminal starts nothing before it is confirmed.
+    ResumeSession,
     /// Resumes the history session the keyboard is on in another worktree of
     /// its project, when its own folder is gone.
     ResumeIn,
     /// Resumes, in a terminal of Leon, a history session that runs in another
     /// terminal; asks first when that is certain.
     ResumeAnyway,
+    /// Ends the process that holds a history session in another terminal
+    /// (SIGTERM, never forced), then resumes it in a terminal of Leon.
+    TakeOver,
     /// Brings forward the terminal application a session runs in (macOS, when
     /// the process tree names it).
     RevealTerminal,
@@ -230,8 +239,13 @@ pub enum Command {
     PreviousTab,
     /// Goes to the terminal tab at this place, from 1.
     Tab(u8),
-    /// Closes the focused pane, after asking while a program runs in it.
+    /// Closes the focused pane for good, after asking while a program runs in
+    /// it: its terminal ends and its row leaves the sidebar with the history
+    /// session that belongs to it.
     CloseSession,
+    /// Puts the focused pane to sleep: its program is stopped and its terminal
+    /// dropped, and the session stays in the sidebar to be resumed.
+    SleepSession,
     /// Moves the keyboard into the terminal on screen, or to the last live
     /// session.
     FocusTerminal,
@@ -516,7 +530,7 @@ const fn other(c: Chord) -> Chord {
 /// Characters that are typed with Shift on most layouts: a chord for one of
 /// them matches the character, whatever was held to type it.
 fn typed_with_shift(key: &str) -> bool {
-    matches!(key, "+" | "?" | ":" | "<" | ">" | "_" | "~" | "!")
+    matches!(key, "+" | "?" | ":" | "<" | ">" | "_" | "~" | "!" | "/")
 }
 
 /// What Shift makes of a key on a US layout, for the characters a chord may
@@ -569,8 +583,11 @@ impl Chord {
             Some(typed) if typed_with_shift(self.key) => typed == self.key,
             Some(typed) => typed.to_lowercase() == self.key && held.shift == self.shift,
             // With Cmd or Ctrl held nothing is typed: the key's own name.
+            // A key that Shift turns into another character (`/` into `?`) is
+            // not itself when Shift is held.
             None if typed_with_shift(self.key) => {
-                stroke.key == self.key || (held.shift && shifted(&stroke.key) == Some(self.key))
+                (stroke.key == self.key && (!held.shift || shifted(self.key).is_none()))
+                    || (held.shift && shifted(&stroke.key) == Some(self.key))
             }
             None => stroke.key.to_lowercase() == self.key && held.shift == self.shift,
         }
@@ -819,6 +836,14 @@ pub const BINDINGS: &[Binding] = &[
         S::Search,
         W::Panes,
         &[key("/"), secondary("f")],
+        true,
+    ),
+    bind(
+        C::ToggleActiveOnly,
+        "Show only active sessions",
+        S::Search,
+        W::Anywhere,
+        &[],
         true,
     ),
     // Panes
@@ -1077,8 +1102,24 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::ResumeSession,
+        "Resume the session…",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::ResumeAnyway,
         "Resume here anyway…",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::TakeOver,
+        "Take over the session running elsewhere…",
         S::Create,
         W::Anywhere,
         &[],
@@ -1529,6 +1570,14 @@ pub const BINDINGS: &[Binding] = &[
         S::Terminal,
         W::Anywhere,
         &[mac(secondary("w")), other(secondary_shift("w"))],
+        true,
+    ),
+    bind(
+        C::SleepSession,
+        "Sleep the pane",
+        S::Terminal,
+        W::Anywhere,
+        &[],
         true,
     ),
     bind(
@@ -2024,6 +2073,7 @@ mod tests {
             C::Commands,
             C::SearchHistory,
             C::FilterProjects,
+            C::ToggleActiveOnly,
             C::RefreshIcon,
             C::ChooseIcon,
             C::ResetIcon,
@@ -2044,8 +2094,10 @@ mod tests {
             C::AddAgent,
             C::RemoveAgent,
             C::NewWorktree,
+            C::ResumeSession,
             C::ResumeIn,
             C::ResumeAnyway,
+            C::TakeOver,
             C::RevealTerminal,
             C::OpenShell,
             C::SplitRight,
@@ -2080,6 +2132,7 @@ mod tests {
             C::RemoveFromHistory,
             C::ContextMenu,
             C::CloseSession,
+            C::SleepSession,
             C::FocusTerminal,
             C::Copy,
             C::Paste,
@@ -2151,6 +2204,7 @@ mod tests {
                 | C::Commands
                 | C::SearchHistory
                 | C::FilterProjects
+                | C::ToggleActiveOnly
                 | C::RefreshIcon
                 | C::ChooseIcon
                 | C::ResetIcon
@@ -2172,8 +2226,10 @@ mod tests {
                 | C::AddAgent
                 | C::RemoveAgent
                 | C::NewWorktree
+                | C::ResumeSession
                 | C::ResumeIn
                 | C::ResumeAnyway
+                | C::TakeOver
                 | C::RevealTerminal
                 | C::OpenShell
                 | C::SplitRight
@@ -2209,6 +2265,7 @@ mod tests {
                 | C::RemoveFromHistory
                 | C::ContextMenu
                 | C::CloseSession
+                | C::SleepSession
                 | C::FocusTerminal
                 | C::Copy
                 | C::Paste
@@ -2545,6 +2602,35 @@ mod tests {
             Some(C::FilterProjects)
         );
         assert_eq!(resolve_on(&typed("/", "/", false), TYPING, false), None);
+    }
+
+    #[test]
+    fn the_slash_is_the_filters_key_on_layouts_that_type_it_with_shift() {
+        // Spanish, German, Italian...: `/` is Shift+7, so the key is `7`, Shift
+        // is held, and what was typed is `/`.
+        assert_eq!(
+            resolve_on(&typed("7", "/", true), NOT_TYPING, false),
+            Some(C::FilterProjects)
+        );
+        assert_eq!(
+            resolve_on(&typed("7", "/", true), NOT_TYPING, true),
+            Some(C::FilterProjects)
+        );
+        // Typing in a field or a terminal still gets the character.
+        assert_eq!(resolve_on(&typed("7", "/", true), TYPING, false), None);
+        assert_eq!(resolve_on(&typed("7", "/", true), TERMINAL, false), None);
+        // Shift+/ on a US layout is `?`, not the filter.
+        assert_eq!(
+            resolve_on(&typed("/", "?", true), NOT_TYPING, false),
+            Some(C::Shortcuts)
+        );
+        // Without a typed character the key's name decides, and Shift+/ is `?`.
+        let mut bare = Keystroke::parse("shift-/").unwrap();
+        bare.key_char = None;
+        assert_ne!(
+            resolve_on(&bare, NOT_TYPING, false),
+            Some(C::FilterProjects)
+        );
     }
 
     #[test]

@@ -134,14 +134,16 @@ pub fn items_for_held(kind: &Kind, local: bool, held: Option<bool>) -> Vec<Item>
             Some(Item::new("Move up", C::MoveRowUp)),
             Some(Item::new("Move down", C::MoveRowDown)),
             reveal(),
-            (!worktree.is_main).then(|| Item::new("Remove worktree", C::RemoveWorktree)),
+            (!worktree.is_main).then(|| Item::new("Close", C::RemoveWorktree)),
         ]
         .into_iter()
         .flatten()
         .collect(),
         Kind::Session(session) => [
-            Some(Item::new("Open", C::Open)),
+            Some(Item::new("Resume", C::ResumeSession)),
             Some(Item::new("Open transcript", C::OpenTranscript)),
+            held.filter(|_| local && cfg!(unix))
+                .map(|_| Item::new("Take over…", C::TakeOver)),
             held.map(|_| Item::new("Resume here anyway…", C::ResumeAnyway)),
             held.filter(|can_reveal| *can_reveal)
                 .map(|_| Item::new("Reveal the terminal", C::RevealTerminal)),
@@ -159,6 +161,7 @@ pub fn items_for_held(kind: &Kind, local: bool, held: Option<bool>) -> Vec<Item>
             )),
             Some(Item::new("Move up", C::MoveRowUp)),
             Some(Item::new("Move down", C::MoveRowDown)),
+            Some(Item::new("Rename", C::Rename)),
             Some(Item::new("Copy session id", C::CopySessionId)),
             Some(Item::new("Remove from history", C::RemoveFromHistory)),
         ]
@@ -170,6 +173,7 @@ pub fn items_for_held(kind: &Kind, local: bool, held: Option<bool>) -> Vec<Item>
             Item::new("Split right", C::SplitRight),
             Item::new("Split down", C::SplitDown),
             Item::new("Rename", C::Rename),
+            Item::new("Sleep", C::SleepSession),
             Item::new("Close", C::CloseSession),
         ],
         Kind::Folder { .. } => [
@@ -181,7 +185,7 @@ pub fn items_for_held(kind: &Kind, local: bool, held: Option<bool>) -> Vec<Item>
         .flatten()
         .collect(),
         Kind::Open => vec![Item::new("Open project…", C::OpenProject)],
-        Kind::Unsorted { .. } | Kind::More { .. } | Kind::NoMatch => Vec::new(),
+        Kind::Unsorted { .. } | Kind::More { .. } | Kind::NoMatch | Kind::NoActive => Vec::new(),
     }
 }
 
@@ -357,13 +361,45 @@ impl Shell {
             _ => None,
         };
         let mut items = items_for_held(&row.kind, local, held);
-        // A history session with a terminal is that terminal's row: it closes
-        // from here as a live row does, and removing it from the history would
-        // only bring the terminal back as a live row, so that is not offered.
+        // A session another terminal or Leon holds is not resumed from here
+        // by default: the transcript comes first, and resuming is "Resume
+        // here anyway".
+        if let (Some(_), Kind::Session(session)) = (held, &row.kind) {
+            if self.live.of_history(&session.id).is_none() {
+                items.retain(|item| item.command != Command::ResumeSession);
+            }
+        }
+        // A history session is in one of three states, and its menu starts
+        // with what that state does: running, asleep, or history only (which
+        // `items_for_held` already is).
         if let Kind::Session(session) = &row.kind {
             if self.live.of_history(&session.id).is_some() {
-                items.retain(|item| item.command != Command::RemoveFromHistory);
-                items.push(Item::new("Close", Command::CloseSession));
+                // The terminal's row: it is closed from here as a live row
+                // is, and removing it from the history would only bring the
+                // terminal back as a live row, so that is not offered.
+                items.retain(|item| {
+                    !matches!(
+                        item.command,
+                        Command::RemoveFromHistory | Command::ResumeSession | Command::Rename
+                    )
+                });
+                items.splice(
+                    0..0,
+                    [
+                        Item::new("Focus", Command::Open),
+                        Item::new("Rename", Command::Rename),
+                        Item::new("Sleep", Command::SleepSession),
+                        Item::new("Close", Command::CloseSession),
+                    ],
+                );
+            } else if self.slept.contains(&session.id) {
+                for item in &mut items {
+                    match item.command {
+                        Command::ResumeSession => item.label = "Wake".into(),
+                        Command::RemoveFromHistory => item.label = "Close".into(),
+                        _ => {}
+                    }
+                }
             }
         }
         (!items.is_empty()).then(|| Menu::new(row.id.clone(), items, at))
@@ -911,10 +947,10 @@ mod tests {
                 "Move up",
                 "Move down",
                 "Reveal in file manager",
-                "Remove worktree"
+                "Close"
             ]
         );
-        assert!(!labels(&items_for(&worktree(true), true)).contains(&"Remove worktree"));
+        assert!(!labels(&items_for(&worktree(true), true)).contains(&"Close"));
         assert!(!labels(&items_for(&worktree(false), false)).contains(&"Reveal in file manager"));
     }
 
@@ -937,11 +973,12 @@ mod tests {
         assert_eq!(
             labels(&items_for(&session, true)),
             [
-                "Open",
+                "Resume",
                 "Open transcript",
                 "Pin",
                 "Move up",
                 "Move down",
+                "Rename",
                 "Copy session id",
                 "Remove from history"
             ]
@@ -954,11 +991,12 @@ mod tests {
         assert_eq!(
             labels(&items_for(&Kind::Session(session), true)),
             [
-                "Open",
+                "Resume",
                 "Open transcript",
                 "Unpin",
                 "Move up",
                 "Move down",
+                "Rename",
                 "Copy session id",
                 "Remove from history"
             ]
@@ -976,7 +1014,14 @@ mod tests {
         });
         assert_eq!(
             labels(&items_for(&live, true)),
-            ["Focus", "Split right", "Split down", "Rename", "Close"]
+            [
+                "Focus",
+                "Split right",
+                "Split down",
+                "Rename",
+                "Sleep",
+                "Close"
+            ]
         );
     }
 

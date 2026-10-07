@@ -140,6 +140,16 @@ pub fn focus_rule(palette: &Palette) -> Div {
         .bg(palette.signal)
 }
 
+/// The light of a project or a worktree row: how the agents in it are doing,
+/// the same colours as the light of a session. Nothing live draws nothing (the
+/// slot stays, so the rows line up): an empty grey square told nothing.
+pub fn activity_light(activity: Activity, palette: &Palette) -> Div {
+    match activity {
+        Activity::Off => div().flex_none().size(px(10.)),
+        _ => activity_dot(activity, palette),
+    }
+}
+
 /// The dot of a worktree or a project: how its terminals are doing, in the
 /// state colours (see `activity.rs`). Every state fits the same ten pixel
 /// square so that labels line up: nothing live is a grey outline, idle a solid

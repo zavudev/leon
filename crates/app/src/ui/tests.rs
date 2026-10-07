@@ -276,6 +276,8 @@ struct Harness {
     revealed: Rc<std::cell::RefCell<Vec<std::path::PathBuf>>>,
     /// The application bundles brought forward.
     revealed_apps: Rc<std::cell::RefCell<Vec<String>>>,
+    /// The pids "Take over" asked to end (no signal is sent in a test).
+    terminated: Arc<std::sync::Mutex<Vec<u32>>>,
     /// The files the system's editor was asked to open.
     opened: Rc<std::cell::RefCell<Vec<std::path::PathBuf>>>,
     /// The desktop notifications the shell asked for.
@@ -358,6 +360,8 @@ fn open_core(
     let revealed_in = revealed.clone();
     let revealed_apps = Rc::new(std::cell::RefCell::new(Vec::new()));
     let revealed_apps_in = revealed_apps.clone();
+    let terminated = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let terminated_in = terminated.clone();
     let dialogs = Rc::new(std::cell::Cell::new(0usize));
     let dialogs_in = dialogs.clone();
     let computer = Rc::new(computer());
@@ -401,6 +405,11 @@ fn open_core(
         theme_poll: None,
         elsewhere_poll: None,
         usage_timer: false,
+        terminate_process: Rc::new(move |pid| {
+            terminated_in.lock().unwrap().push(pid);
+            true
+        }),
+        take_over_wait: std::time::Duration::from_secs(1),
         reveal_app: Rc::new(move |_, bundle| revealed_apps_in.borrow_mut().push(bundle.to_owned())),
         open_file: Rc::new(move |_, path| opened_in.borrow_mut().push(path.to_path_buf())),
         pick_key: Rc::new(move |_| Task::ready(key_answer_in.borrow().clone())),
@@ -435,6 +444,7 @@ fn open_core(
         shell,
         revealed,
         revealed_apps,
+        terminated,
         opened,
         notes,
         folder_dialogs: dialogs,
@@ -719,6 +729,7 @@ fn describe(row: &tree::Row) -> String {
         Kind::More { hidden } => format!("more:{hidden}"),
         Kind::Open => "open".to_owned(),
         Kind::NoMatch => "no-match".to_owned(),
+        Kind::NoActive => "no-active".to_owned(),
     }
 }
 
@@ -1082,6 +1093,7 @@ fn enter_toggles_a_project_and_opens_a_worktree_or_a_session_in_the_main_pane(
     assert!(h.shows("worktree-detail", cx));
     h.press("j", cx);
     h.press("enter", cx);
+    h.press("enter", cx); // Resume
     assert_eq!(h.main_kind(cx), "session:fix the login bug");
     h.settle(cx);
     assert!(h.shows("transcript", cx));
@@ -1314,6 +1326,7 @@ fn a_session_row_opens_a_transcript_read_from_the_store(cx: &mut TestAppContext)
         h.press("j", cx);
     }
     h.press("enter", cx);
+    h.press("enter", cx); // Resume
     h.settle(cx);
     h.shell(cx, |shell| match &shell.main {
         Main::Session(transcript) => {
@@ -4467,6 +4480,35 @@ mod live {
     }
 
     #[gpui_kit::test]
+    fn an_agent_started_by_hand_replaces_the_one_the_session_began_with(cx: &mut TestAppContext) {
+        let h = open_live(cx);
+        let (_dir, _) = real_worktree(&h, cx);
+        h.press("ctrl-n", cx);
+        h.press("down", cx);
+        h.press("enter", cx); // Codex
+        wait_until(&h, cx, "the agent to be seen in front", |h, cx| {
+            h.shell(cx, |s| s.live.get(LiveId(1)).unwrap().phase)
+                == crate::ui::live::AgentPhase::Running
+        });
+        let script = script_of(&h, 1);
+        script.set_foreground(true);
+        wait_until(&h, cx, "the return to be noticed", |h, cx| {
+            h.shell(cx, |s| s.live.get(LiveId(1)).unwrap().phase)
+                == crate::ui::live::AgentPhase::Returned
+        });
+        // Claude is typed by hand and takes the terminal.
+        script.set_program(Some("claude"));
+        script.set_foreground(false);
+        wait_until(&h, cx, "the new agent to be seen", |h, cx| {
+            h.shell(cx, |s| s.live.get(LiveId(1)).unwrap().agent) == Some(AgentId::CLAUDE)
+        });
+        assert_eq!(
+            h.shell(cx, |s| s.live.get(LiveId(1)).unwrap().label()),
+            "Claude Code"
+        );
+    }
+
+    #[gpui_kit::test]
     fn an_agent_session_types_its_command_line_into_the_shell(cx: &mut TestAppContext) {
         let h = open_live(cx);
         let (_dir, _) = real_worktree(&h, cx);
@@ -4568,7 +4610,7 @@ mod live {
         )));
         put_cursor_on(&h, cx, NodeId::Worktree(worktree));
         h.press("m", cx);
-        h.type_text("remove", cx);
+        h.type_text("close", cx);
         h.press("enter", cx);
         assert_eq!(
             h.palette_titles(cx),
@@ -5279,7 +5321,7 @@ mod live {
         let linked = worktree_id(&h, "feature/login");
         put_cursor_on(&h, cx, NodeId::Worktree(linked));
         h.press("m", cx);
-        assert!(menu_labels(&h, cx).contains(&"Remove worktree".to_owned()));
+        assert!(menu_labels(&h, cx).contains(&"Close".to_owned()));
         h.type_text("copy b", cx);
         h.press("enter", cx);
         assert_eq!(
@@ -5297,7 +5339,51 @@ mod live {
             .unwrap();
         put_cursor_on(&h, cx, NodeId::Worktree(main.id));
         h.press("m", cx);
-        assert!(!menu_labels(&h, cx).contains(&"Remove worktree".to_owned()));
+        assert!(!menu_labels(&h, cx).contains(&"Close".to_owned()));
+    }
+
+    #[gpui_kit::test]
+    fn a_history_session_is_renamed_after_asking_and_keeps_the_name_over_the_agents_title(
+        cx: &mut TestAppContext,
+    ) {
+        let h = open_live(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        session_at(
+            &h.store,
+            &MachineId::local(),
+            &path,
+            "name me",
+            3,
+            &[(Role::User, "hi")],
+        );
+        h.settle(cx);
+        let id = h
+            .store
+            .recent_sessions(&leon_core::SessionFilter::default(), 50)
+            .unwrap()
+            .into_iter()
+            .find(|session| session.title == "name me")
+            .unwrap()
+            .id;
+        put_cursor_on(&h, cx, NodeId::Session(id.clone()));
+        h.press("f2", cx);
+        h.type_text("Better name", cx);
+        h.press("enter", cx);
+        // It asks first, and cancelling renames nothing.
+        assert_eq!(
+            h.palette_titles(cx).first().map(String::as_str),
+            Some("Rename to \"Better name\"")
+        );
+        assert_eq!(h.store.session(&id).unwrap().title, "name me");
+        h.press("enter", cx); // Rename
+        h.settle(cx);
+        assert_eq!(h.store.session(&id).unwrap().title, "Better name");
     }
 
     #[gpui_kit::test]
@@ -5334,11 +5420,12 @@ mod live {
         assert_eq!(
             menu_labels(&h, cx),
             [
-                "Open",
+                "Resume",
                 "Open transcript",
                 "Pin",
                 "Move up",
                 "Move down",
+                "Rename",
                 "Copy session id",
                 "Remove from history"
             ]
@@ -5359,11 +5446,56 @@ mod live {
         put_cursor_on(&h, cx, NodeId::Session(id.clone()));
         h.press("m", cx);
         h.press("enter", cx); // Open: resumes it in a terminal
+        h.press("enter", cx); // asks first: Resume
         wait_until(&h, cx, "the resumed agent", |h, cx| {
             screen(h, cx, 1).contains("FAKE-CLAUDE --resume menu me-3")
         });
         // While it runs in a terminal, the row is that terminal's: it offers
-        // to close it, not to remove it from the history.
+        // to sleep it or close it, not to remove it from the history.
+        put_cursor_on(&h, cx, NodeId::Session(id.clone()));
+        h.press("m", cx);
+        assert_eq!(
+            menu_labels(&h, cx)[..4],
+            ["Focus", "Rename", "Sleep", "Close"],
+            "a running session leads with what a running session does"
+        );
+        assert!(!menu_labels(&h, cx).contains(&"Remove from history".to_owned()));
+        h.type_text("sleep", cx);
+        h.press("enter", cx);
+        h.settle(cx);
+        if h.palette_titles(cx).get(1).is_some_and(|t| t == "Cancel") {
+            h.press("enter", cx); // confirm: a program is running in it
+            h.settle(cx);
+        }
+        assert!(
+            h.shell(cx, |s| s.live.ids().is_empty()),
+            "sleeping ends the terminal"
+        );
+        assert!(
+            h.store.session(&id).is_ok(),
+            "and keeps its row in the sidebar"
+        );
+        // The row says it sleeps, and its menu wakes it or closes it.
+        put_cursor_on(&h, cx, NodeId::Session(id.clone()));
+        let at = h.row_of(NodeId::Session(id.clone()), cx).unwrap();
+        assert!(
+            h.shows_dynamic(format!("tree-asleep-{at}"), cx),
+            "a moon marks it"
+        );
+        h.press("m", cx);
+        let labels = menu_labels(&h, cx);
+        assert_eq!(labels[0], "Wake");
+        assert!(labels.contains(&"Close".to_owned()));
+        assert!(!labels.contains(&"Remove from history".to_owned()));
+        h.press("escape", cx);
+        // Opened again, then closed: the terminal and its row both go.
+        put_cursor_on(&h, cx, NodeId::Session(id.clone()));
+        h.press("m", cx);
+        h.press("enter", cx); // Open: resumes it in a terminal
+        h.press("enter", cx); // asks first: Resume
+        wait_until(&h, cx, "the resumed agent again", |h, cx| {
+            screen(h, cx, 2).contains("FAKE-CLAUDE --resume menu me-3")
+        });
         put_cursor_on(&h, cx, NodeId::Session(id.clone()));
         h.press("m", cx);
         h.type_text("close", cx);
@@ -5373,14 +5505,11 @@ mod live {
             h.press("enter", cx); // confirm: a program is running in it
             h.settle(cx);
         }
-        put_cursor_on(&h, cx, NodeId::Session(id.clone()));
-        h.press("m", cx);
-        h.type_text("remove", cx);
-        h.press("enter", cx);
-        assert_eq!(h.palette_titles(cx)[1], "Cancel");
-        h.press("enter", cx);
-        h.settle(cx);
-        assert!(h.store.session(&id).is_err());
+        assert!(h.shell(cx, |s| s.live.ids().is_empty()));
+        assert!(
+            h.store.session(&id).is_err(),
+            "closing removes it from the sidebar, not only its terminal"
+        );
     }
 
     #[gpui_kit::test]
@@ -5444,7 +5573,14 @@ mod live {
         h.press("m", cx);
         assert_eq!(
             menu_labels(&h, cx),
-            ["Focus", "Split right", "Split down", "Rename", "Close"]
+            [
+                "Focus",
+                "Split right",
+                "Split down",
+                "Rename",
+                "Sleep",
+                "Close"
+            ]
         );
         h.type_text("split r", cx);
         h.press("enter", cx);
@@ -5785,6 +5921,78 @@ mod live {
     }
 
     #[gpui_kit::test]
+    fn every_worktree_row_has_a_git_mark_and_the_main_one_a_tag_but_no_grey_square(
+        cx: &mut TestAppContext,
+    ) {
+        let h = open_live(cx);
+        let _real = real_worktree(&h, cx);
+        let at = h
+            .row_of(NodeId::Worktree(worktree_id(&h, "trunk")), cx)
+            .unwrap();
+        assert!(
+            h.shows_dynamic(format!("tree-git-{at}"), cx),
+            "the git mark leads"
+        );
+        assert!(!h.shows_dynamic(format!("tree-merged-{at}"), cx));
+        assert!(
+            !h.shows_dynamic(format!("tree-activity-word-{at}"), cx),
+            "nothing live says nothing"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_worktree_waiting_for_you_says_so_in_a_word(cx: &mut TestAppContext) {
+        let h = open_live(cx);
+        let _real = real_worktree(&h, cx);
+        h.press("ctrl-n", cx);
+        h.press("enter", cx); // Claude Code
+        wait_until(&h, cx, "the live row", |h, cx| {
+            h.shows("tree-live-led-1", cx)
+        });
+        set_waiting_after(&h, cx, Duration::ZERO);
+        let at = h
+            .row_of(NodeId::Worktree(worktree_id(&h, "trunk")), cx)
+            .unwrap();
+        assert!(h.shows_dynamic(format!("tree-activity-word-{at}"), cx));
+    }
+
+    #[gpui_kit::test]
+    fn projects_are_set_apart_and_what_is_nested_in_them_is_indented(cx: &mut TestAppContext) {
+        let h = open_live(cx);
+        let _real = real_worktree(&h, cx);
+        let (project_at, worktree_at, depth) = h.shell(cx, |s| {
+            let projects: Vec<usize> = (0..s.rows.len())
+                .filter(|at| matches!(s.rows[*at].kind, Kind::Project { .. }))
+                .collect();
+            let worktree = s
+                .rows
+                .iter()
+                .position(|row| matches!(row.kind, Kind::Worktree { .. }))
+                .unwrap();
+            (projects, worktree, s.rows[worktree].depth)
+        });
+        let top = h.shell(cx, |s| tree::project_depth(&s.snapshot));
+        assert_eq!(
+            depth,
+            top + 1,
+            "worktrees are one level under their project"
+        );
+        // A hairline goes above every project that follows another row, never
+        // above the first one right under a machine's header.
+        for at in &project_at {
+            let (grouped, after_header) = h.shell(cx, |s| {
+                (
+                    s.starts_a_project_group(*at),
+                    *at == 0 || matches!(s.rows[*at - 1].kind, Kind::Machine(_)),
+                )
+            });
+            assert_eq!(grouped, !after_header, "row {at}");
+        }
+        // The tree has no guide lines: the indentation alone nests rows.
+        assert!(!h.shows_dynamic(format!("tree-guide-{worktree_at}-{top}"), cx));
+    }
+
+    #[gpui_kit::test]
     fn the_coarse_timer_runs_only_while_a_terminal_is_live(cx: &mut TestAppContext) {
         let h = open_live(cx);
         let _real = real_worktree(&h, cx);
@@ -5937,6 +6145,7 @@ mod live {
         let (_dir, path, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
+        h.press("enter", cx); // Resume
         wait_until(&h, cx, "the resumed agent", |h, cx| {
             screen(h, cx, 1).contains("FAKE-CLAUDE --resume alpha-3")
         });
@@ -5979,6 +6188,13 @@ mod live {
         h.settle(cx);
         let at = h.row_of(NodeId::Session(id), cx).unwrap();
         h.mouse_on(format!("tree-row-{at}"), gpui_kit::MouseButton::Left, cx);
+        // A click on a history session asks before it starts anything.
+        assert_eq!(live_count(&h, cx), 0, "nothing starts before the answer");
+        assert!(
+            !h.shows_dynamic(format!("tree-asleep-{at}"), cx),
+            "a session that only has a history is not marked as asleep"
+        );
+        h.press("enter", cx); // Resume
         wait_until(&h, cx, "the resumed agent", |h, cx| {
             screen(h, cx, 1).contains("FAKE-CLAUDE --resume alpha-3")
         });
@@ -5992,6 +6208,7 @@ mod live {
         let (_dir, _, id) = local_session(&h, cx, AgentId::CODEX, "beta");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
+        h.press("enter", cx); // Resume
         wait_until(&h, cx, "the codex line", |h, cx| {
             screen(h, cx, 1).contains("FAKE-CODEX")
         });
@@ -6008,6 +6225,7 @@ mod live {
         let (_dir, _, id) = local_session(&h, cx, AgentId::OPENCODE, "gamma");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
+        h.press("enter", cx); // Resume
         wait_until(&h, cx, "the opencode line", |h, cx| {
             screen(h, cx, 1).contains("OPENCODE-RAN")
         });
@@ -6026,6 +6244,7 @@ mod live {
         let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "two words");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
+        h.press("enter", cx); // Resume
         wait_until(&h, cx, "the agent", |h, cx| {
             screen(h, cx, 1).contains("FAKE-CLAUDE --resume two words-3")
         });
@@ -6040,6 +6259,7 @@ mod live {
         let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id.clone()));
         h.press("enter", cx);
+        h.press("enter", cx); // Resume
         wait_until(&h, cx, "the agent", |h, cx| {
             screen(h, cx, 1).contains("FAKE-CLAUDE --resume alpha-3")
         });
@@ -6052,6 +6272,7 @@ mod live {
         assert_eq!(h.main_kind(cx), "session:fix the login bug");
         put_cursor_on(&h, cx, NodeId::Session(id.clone()));
         h.press("enter", cx);
+        h.press("enter", cx); // Resume
         assert_eq!(h.main_kind(cx), "live:1", "the terminal that has it");
         assert_eq!(live_count(&h, cx), 2, "nothing new was started");
         assert!(h.computer.script(2).is_none(), "no third terminal exists");
@@ -6072,19 +6293,24 @@ mod live {
     }
 
     #[gpui_kit::test]
-    fn closing_the_resumed_terminal_lets_the_session_be_resumed_again(cx: &mut TestAppContext) {
+    fn sleeping_the_resumed_terminal_lets_the_session_be_resumed_again(cx: &mut TestAppContext) {
         let h = open_live(cx);
         let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id.clone()));
         h.press("enter", cx);
+        h.press("enter", cx); // Resume
         wait_until(&h, cx, "the agent", |h, cx| {
             screen(h, cx, 1).contains("FAKE-CLAUDE --resume alpha-3")
         });
-        h.press_chord("cmd-w", "ctrl-shift-w", cx);
-        h.press("enter", cx); // Close Claude Code
+        put_cursor_on(&h, cx, NodeId::Session(id.clone()));
+        h.press("m", cx);
+        h.type_text("sleep", cx);
+        h.press("enter", cx);
+        h.press("enter", cx); // Sleep Claude Code
         assert_eq!(live_count(&h, cx), 0);
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
+        h.press("enter", cx); // Resume
         wait_until(&h, cx, "the agent again", |h, cx| {
             screen(h, cx, 2).contains("FAKE-CLAUDE --resume alpha-3")
         });
@@ -6100,6 +6326,7 @@ mod live {
         let before = h.outline(cx);
         assert!(!h.shows("tree-live-led-1", cx));
         h.press("enter", cx);
+        h.press("enter", cx); // asks first: Resume
         wait_until(&h, cx, "the agent", |h, cx| {
             screen(h, cx, 1).contains("FAKE-CLAUDE --resume alpha-3")
         });
@@ -6116,10 +6343,13 @@ mod live {
             "the pane commands find the terminal on the row"
         );
         let _ = at;
-        h.press_chord("cmd-w", "ctrl-shift-w", cx);
+        put_cursor_on(&h, cx, NodeId::Session(id.clone()));
+        h.press("m", cx);
+        h.type_text("sleep", cx);
         h.press("enter", cx);
+        h.press("enter", cx); // Sleep Claude Code
         assert!(!h.shows("tree-live-led-1", cx), "the light goes with it");
-        assert_eq!(h.outline(cx), before);
+        assert_eq!(h.outline(cx), before, "asleep, the row stays");
     }
 
     #[gpui_kit::test]
@@ -6189,6 +6419,7 @@ mod live {
         h.press_chord("cmd-b", "ctrl-shift-b", cx);
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
+        h.press("enter", cx); // Resume
         wait_until(&h, cx, "the agent", |h, cx| {
             screen(h, cx, 2).contains("FAKE-CLAUDE --resume alpha-3")
         });
@@ -6211,6 +6442,7 @@ mod live {
             NodeId::Session(session_titled(&h, "fix the login bug")),
         );
         h.press("enter", cx);
+        h.press("enter", cx); // Resume
         assert_eq!(h.main_kind(cx), "session:fix the login bug");
         assert_eq!(live_count(&h, cx), 0, "no broken shell was opened");
         assert!(h.computer.script(0).is_none());
@@ -6269,6 +6501,7 @@ mod live {
         let id = stored_session(&h, cx, AgentId::CLAUDE, &MachineId::local(), &gone, "omega");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
+        h.press("enter", cx); // Resume
         assert_eq!(h.main_kind(cx), "session:omega");
         assert_eq!(live_count(&h, cx), 0);
         h.mouse_on(
@@ -6303,6 +6536,7 @@ mod live {
         let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
+        h.press("enter", cx); // Resume
         assert_eq!(h.main_kind(cx), "session:alpha");
         assert_eq!(live_count(&h, cx), 0);
         assert!(
@@ -6346,6 +6580,7 @@ mod live {
         let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
         put_cursor_on(&h, cx, NodeId::Session(id));
         h.press("enter", cx);
+        h.press("enter", cx); // Resume
         wait_until(&h, cx, "the agent", |h, cx| {
             screen(h, cx, 1).contains("FAKE-CLAUDE --resume alpha-3")
         });
@@ -6370,16 +6605,18 @@ mod live {
         assert_eq!(
             menu_labels(&h, cx),
             [
-                "Open",
+                "Resume",
                 "Open transcript",
                 "Pin",
                 "Move up",
                 "Move down",
+                "Rename",
                 "Copy session id",
                 "Remove from history"
             ]
         );
-        h.press("enter", cx); // Open
+        h.press("enter", cx); // Resume
+        h.press("enter", cx); // asks first: Resume
         wait_until(&h, cx, "the agent", |h, cx| {
             screen(h, cx, 1).contains("FAKE-CLAUDE --resume alpha-3")
         });
@@ -6449,6 +6686,7 @@ mod live {
             NodeId::Session(session_titled(&h, "rotate the keys")),
         );
         h.press("enter", cx);
+        h.press("enter", cx); // Resume
         wait_until(&h, cx, "the resumed agent", |h, cx| {
             screen(h, cx, 1).contains("FAKE-CLAUDE --resume rotate the keys-120")
         });
@@ -6489,6 +6727,7 @@ mod live {
             NodeId::Session(session_titled(&h, "rotate the keys")),
         );
         h.press("enter", cx);
+        h.press("enter", cx); // Resume
         assert_eq!(h.main_kind(cx), "session:rotate the keys");
         assert_eq!(live_count(&h, cx), 0);
         assert!(
@@ -6512,6 +6751,7 @@ mod live {
             NodeId::Session(session_titled(&h, "rotate the keys")),
         );
         h.press("enter", cx);
+        h.press("enter", cx); // Resume
         assert_eq!(h.main_kind(cx), "session:rotate the keys");
         assert_eq!(live_count(&h, cx), 0);
         assert!(
@@ -6537,6 +6777,7 @@ mod live {
             NodeId::Session(session_titled(&h, "rotate the keys")),
         );
         h.press("enter", cx);
+        h.press("enter", cx); // Resume
         assert_eq!(h.main_kind(cx), "session:rotate the keys");
         assert!(
             h.status()
@@ -6734,6 +6975,7 @@ mod live {
             h.settle(cx);
             put_cursor_on(&h, cx, NodeId::Session(session_titled(&h, "resume me")));
             h.press("enter", cx);
+            h.press("enter", cx); // Resume
             wait_until(&h, cx, "the resumed agent", |h, cx| {
                 screen(h, cx, 1).contains("FAKE-CLAUDE --resume resume me-3")
             });
