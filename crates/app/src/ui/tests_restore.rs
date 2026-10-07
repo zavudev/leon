@@ -5,7 +5,7 @@
 //! The terminals are the scripted computer of the other UI tests (a real
 //! `/bin/sh` with a fake `claude`), nothing touches the user's agents.
 
-use super::live::{open_live, real_worktree, screen, terminal_of, wait_until};
+use super::live::{open_live, real_worktree, screen, script_of, terminal_of, wait_until};
 use super::*;
 use crate::ui::live::LiveId;
 use crate::ui::panes::Layout;
@@ -484,6 +484,17 @@ fn start_fresh(h: &Harness, cx: &mut TestAppContext, agent: leon_core::AgentId, 
 }
 
 fn new_session(h: &Harness, agent: leon_core::AgentId, external: &str, cwd: &str, minute: u32) {
+    new_session_titled(h, agent, external, cwd, "t", minute);
+}
+
+fn new_session_titled(
+    h: &Harness,
+    agent: leon_core::AgentId,
+    external: &str,
+    cwd: &str,
+    title: &str,
+    minute: u32,
+) {
     use chrono::TimeZone;
     let at = chrono::Utc
         .with_ymd_and_hms(2026, 10, 4, 12, minute, 0)
@@ -495,7 +506,7 @@ fn new_session(h: &Harness, agent: leon_core::AgentId, external: &str, cwd: &str
                 external_id: external.to_owned(),
                 machine_id: MachineId::local(),
                 cwd: cwd.to_owned(),
-                title: "t".to_owned(),
+                title: title.to_owned(),
                 model: None,
                 started_at: at,
                 updated_at: at,
@@ -557,6 +568,111 @@ fn two_terminals_of_one_agent_in_one_folder_are_not_guessed_onto_one_session(
         s.live.all().iter().map(|l| l.learned.clone()).collect()
     });
     assert_eq!(learned, [None, None], "either could own it: nobody does");
+}
+
+#[gpui_kit::test]
+fn a_terminal_whose_title_names_another_session_is_relinked_to_it(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let (_dir, path) = real_worktree(&h, cx);
+    start_fresh(&h, cx, leon_core::AgentId::OPENCODE, &path);
+    new_session_titled(
+        &h,
+        leon_core::AgentId::OPENCODE,
+        "ses-old",
+        &path,
+        "Problema al interrumpir comandos",
+        6,
+    );
+    h.settle(cx);
+    let old = h
+        .shell(cx, |s| s.live.get(LiveId(1)).unwrap().history.clone())
+        .expect("the first session was linked");
+    // The agent moves to another session in the same terminal, as opencode
+    // does, and the title it sets says so (truncated, behind its `OC | `).
+    new_session_titled(
+        &h,
+        leon_core::AgentId::OPENCODE,
+        "ses-new",
+        &path,
+        "Aumentar el espacio entre secciones para mejorar la lectura",
+        7,
+    );
+    h.settle(cx);
+    script_of(&h, 1).print("\u{1b}]0;OC | Aumentar el espacio entre secciones p\u{2026}\u{7}");
+    wait_until(&h, cx, "the title", |h, cx| {
+        h.shell(cx, |s| s.live.get(LiveId(1)).unwrap().title.is_some())
+    });
+    cx.update(|cx| {
+        h.shell.update(cx, |s, cx| s.learn_session_ids(cx));
+    });
+    h.settle(cx);
+    let new = h
+        .shell(cx, |s| s.live.get(LiveId(1)).unwrap().history.clone())
+        .expect("the link followed the title");
+    assert_ne!(old, new);
+    assert!(
+        h.shell(cx, |s| s.placement.merged.contains(&new)),
+        "one row: the terminal is the new session's row"
+    );
+    assert!(!h.shell(cx, |s| s.placement.merged.contains(&old)));
+    // A restore resumes the session on screen, not the old one.
+    let state = saved_of(&h, cx);
+    assert_eq!(state.terminals[0].session.as_deref(), Some("ses-new"));
+    assert_eq!(state.terminals[0].confidence.as_deref(), Some("title"));
+}
+
+#[gpui_kit::test]
+fn opening_a_session_a_terminal_already_shows_lands_on_it(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let (_dir, path) = real_worktree(&h, cx);
+    start_fresh(&h, cx, leon_core::AgentId::OPENCODE, &path);
+    new_session_titled(
+        &h,
+        leon_core::AgentId::OPENCODE,
+        "ses-old",
+        &path,
+        "old one",
+        6,
+    );
+    h.settle(cx);
+    new_session_titled(
+        &h,
+        leon_core::AgentId::OPENCODE,
+        "ses-new",
+        &path,
+        "the new one",
+        7,
+    );
+    h.settle(cx);
+    // The title says which session the terminal shows while the learned link
+    // is still the old one: the import that would relink it has not run yet,
+    // which is the race this guards.
+    script_of(&h, 1).print("\u{1b}]0;OC | the new one\u{7}");
+    wait_until(&h, cx, "the title", |h, cx| {
+        h.shell(cx, |s| s.live.get(LiveId(1)).unwrap().title.is_some())
+    });
+    let learned = h.shell(cx, |s| {
+        s.live
+            .get(LiveId(1))
+            .unwrap()
+            .learned
+            .as_ref()
+            .map(|(id, _)| id.clone())
+    });
+    assert_eq!(learned.as_deref(), Some("ses-old"), "the link is behind");
+    let session = h
+        .store
+        .session_by_external(&MachineId::local(), leon_core::AgentId::OPENCODE, "ses-new")
+        .unwrap()
+        .expect("imported");
+    cx.update_window(h.window.into(), |_, window, cx| {
+        h.shell
+            .update(cx, |shell, cx| shell.resume_session(session, window, cx))
+    })
+    .unwrap();
+    h.settle(cx);
+    assert_eq!(live_count(&h, cx), 1, "no second agent on the session");
+    assert_eq!(h.main_kind(cx), "live:1");
 }
 
 #[gpui_kit::test]

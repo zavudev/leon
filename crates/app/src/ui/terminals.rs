@@ -858,6 +858,14 @@ impl Shell {
             self.open_live(running, window, cx);
             return;
         }
+        // The learned link can lag the program by a moment (the history has
+        // to be imported before it can be relinked); a terminal whose title
+        // names this session is already showing it, so land there rather
+        // than start a second agent on the same session.
+        if let Some(running) = self.showing(&session) {
+            self.open_live(running, window, cx);
+            return;
+        }
         // Another terminal may hold the session: look at the processes now,
         // off the UI thread, before a second agent is started on it. A scan
         // that cannot be made says nothing, and the session opens as ever.
@@ -873,6 +881,24 @@ impl Shell {
             return;
         }
         self.resume_unchecked(session, cwd, window, cx);
+    }
+
+    /// The live terminal already showing `session`, as the title its program
+    /// set names it (opencode moves between sessions inside one terminal).
+    fn showing(&self, session: &Session) -> Option<LiveId> {
+        self.live
+            .all()
+            .iter()
+            .find(|live| {
+                live.shown_agent() == Some(session.agent)
+                    && live.machine == session.machine_id
+                    && leon_core::path::key(&live.cwd) == leon_core::path::key(&session.cwd)
+                    && live
+                        .title
+                        .as_deref()
+                        .is_some_and(|title| crate::learn::title_names(title, &session.title))
+            })
+            .map(|live| live.id)
     }
 
     /// What the fresh look at the processes said: a session another terminal

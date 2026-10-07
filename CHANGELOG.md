@@ -12,6 +12,10 @@
 
 * `Ctrl+C` in a terminal copies only when there is a selection; without one it
   reaches the program again, so a running command can be interrupted.
+* A terminal whose agent moves to another session inside it (opencode's session
+  list, for one) follows the title the program sets: the tree keeps one row for
+  the session on screen, and opening it lands on that terminal instead of
+  starting a second process on the same session.
 
 ## [0.3.0] - 2026-10-06
 
