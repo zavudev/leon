@@ -215,7 +215,7 @@ impl Shell {
         let spawned = std::thread::Builder::new()
             .name("leon-remote-url".to_owned())
             .spawn(move || {
-                let output = std::process::Command::new("git")
+                let output = leon_remote::spawn::std_child("git")
                     .args(["-C", &cwd, "remote", "get-url", "origin"])
                     .stdin(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
