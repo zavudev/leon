@@ -4,6 +4,13 @@
 
 ### Added
 
+* Share this machine, mirrored: a computer paired with a code now sees what
+  the host's own Leon holds — its projects and the sessions of its history —
+  in the same places its own are. The other machine's section of the sidebar
+  shows its projects, worktrees and sessions ready to open, resume and search,
+  without typing a path anywhere; reconnecting keeps them up to date. Nothing
+  is shared that the paired device could not read with the terminal it already
+  holds, and a headless `leon host` shares nothing.
 * The README shows what Leon looks like: a gallery of screenshots and four
   short clips under `docs/media/`, and `scripts/media/` regenerates them from
   a demo workspace.

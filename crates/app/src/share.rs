@@ -6,6 +6,13 @@
 //! service) is the next stage and is not built: closing Leon stops sharing and
 //! hangs up the terminals it was serving.
 //!
+//! What this installation's own Leon shares with its paired devices is read
+//! straight from this process's store ([`StoreShare`]): the projects and
+//! history sessions of this machine, so a paired computer's Leon can show
+//! them in its own sidebar. Sharing adds no rights — the device already holds
+//! a full terminal as this user — and the store is read fresh at each ask, so
+//! what is shared is never a stale snapshot.
+//!
 //! The screen reads this service on a timer: the relay's state, the code on
 //! offer with its countdown, the paired devices, and any device waiting for the
 //! person's approval.
@@ -13,13 +20,89 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use leon_host::{Approval, ApprovalRequest, Host, HostConfig, HostStatus, PairingInfo};
+use leon_core::{AgentId, MachineId, SessionFilter, Store};
+use leon_host::{
+    Approval, ApprovalRequest, Host, HostConfig, HostStatus, PairingInfo, ShareSource,
+};
 use leon_link::{DeviceRecord, Identity};
+use leon_wire::{SharedEntry, SharedProject, SharedSession, SharedTranscript};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
 /// What the person is warned of, in the screen and in the docs.
 pub const RISK: &str = "Anyone you pair gets a terminal as you on this computer: they can read, change and delete everything you can. Pair only your own devices, and revoke any you lose.";
+
+/// How many history sessions one [`StoreShare`] offers; the host cuts harder
+/// if it must ([`leon_wire::SHARE_SESSIONS_LIMIT`]) and a client asks for
+/// others' transcripts by their `(agent, external_id)` when it needs to.
+pub const OWN_SESSIONS_OFFERED: usize = 500;
+
+/// What this Leon knows of this machine, as paired devices may read it.
+///
+/// Every read is fresh and every failure shares nothing: the paired device
+/// holds a terminal as this user, so an empty answer changes nothing for it,
+/// and no error it may cause is worth a protocol message.
+struct StoreShare {
+    store: Arc<Store>,
+}
+
+impl ShareSource for StoreShare {
+    fn projects(&self) -> Vec<SharedProject> {
+        self.store
+            .projects(Some(&MachineId::local()))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|project| SharedProject {
+                name: project.name,
+                root: project.root,
+            })
+            .collect()
+    }
+
+    fn sessions(&self) -> Vec<SharedSession> {
+        let filter = SessionFilter {
+            machine_id: Some(MachineId::local()),
+            ..Default::default()
+        };
+        self.store
+            .recent_sessions(&filter, OWN_SESSIONS_OFFERED)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|session| SharedSession {
+                agent: session.agent.as_str().to_owned(),
+                external_id: session.external_id,
+                cwd: session.cwd,
+                title: session.title,
+                model: session.model,
+                started_ms: session.started_at.timestamp_millis(),
+                updated_ms: session.updated_at.timestamp_millis(),
+                messages: session.message_count,
+            })
+            .collect()
+    }
+
+    fn transcript(&self, agent: &str, external_id: &str) -> Option<SharedTranscript> {
+        let agent = AgentId::parse(agent)?;
+        let session = self
+            .store
+            .session_by_external(&MachineId::local(), agent, external_id)
+            .ok()
+            .flatten()?;
+        let messages = self.store.session_messages(&session.id).ok()?;
+        Some(SharedTranscript {
+            agent: agent.as_str().to_owned(),
+            external_id: external_id.to_owned(),
+            messages: messages
+                .into_iter()
+                .map(|message| SharedEntry {
+                    role: message.role.as_str().to_owned(),
+                    text: message.text,
+                    at_ms: message.at.timestamp_millis(),
+                })
+                .collect(),
+        })
+    }
+}
 
 struct Running {
     host: Arc<Host>,
@@ -31,6 +114,8 @@ pub struct ShareService {
     identity: Arc<Identity>,
     handle: Handle,
     devices_file: PathBuf,
+    /// What the paired devices may read of this Leon, while it is running.
+    share: Arc<dyn ShareSource>,
     running: Mutex<Option<Running>>,
 }
 
@@ -44,11 +129,17 @@ impl std::fmt::Debug for ShareService {
 
 impl ShareService {
     /// A service that is off. Device records live in `<data dir>/host`.
-    pub fn new(identity: Arc<Identity>, handle: Handle, data_dir: &std::path::Path) -> Arc<Self> {
+    pub fn new(
+        identity: Arc<Identity>,
+        handle: Handle,
+        data_dir: &std::path::Path,
+        store: Arc<Store>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             identity,
             handle,
             devices_file: data_dir.join("host").join("devices.json"),
+            share: Arc::new(StoreShare { store }),
             running: Mutex::new(None),
         })
     }
@@ -78,6 +169,7 @@ impl ShareService {
         if require_approval {
             config.approval = Approval::Ask(tx);
         }
+        config.share = Some(leon_host::Shared(self.share.clone()));
         let _enter = self.handle.enter();
         let host = Host::start(
             config,
@@ -171,7 +263,13 @@ mod tests {
     }
 
     fn service(dir: &std::path::Path) -> Arc<ShareService> {
-        ShareService::new(Arc::new(Identity::generate()), Handle::current(), dir)
+        let store = leon_core::Store::open_in_memory().unwrap();
+        ShareService::new(
+            Arc::new(Identity::generate()),
+            Handle::current(),
+            dir,
+            store,
+        )
     }
 
     #[tokio::test]
@@ -251,5 +349,95 @@ mod tests {
         assert_eq!(share.devices().len(), 1);
         share.revoke("phone").unwrap();
         assert!(share.devices()[0].revoked);
+    }
+
+    fn shared(dir: &std::path::Path) -> Arc<StoreShare> {
+        Arc::new(StoreShare {
+            store: Store::open(dir.join("leon.db")).unwrap(),
+        })
+    }
+
+    #[tokio::test]
+    async fn what_this_leon_shares_is_what_its_store_says_of_this_machine() {
+        use chrono::{DateTime, Utc};
+        use leon_core::{AgentId, MachineKind, NewMessage, NewSession};
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared(dir.path());
+        let started = DateTime::<Utc>::from_timestamp_millis(1_700_000_000_000).unwrap();
+        let updated = DateTime::<Utc>::from_timestamp_millis(1_700_000_060_000).unwrap();
+        let machine = shared
+            .store
+            .machine(&leon_core::MachineId::local())
+            .unwrap();
+
+        // A project of this machine: offered as the host shows it.
+        shared
+            .store
+            .add_project(&machine.id, "api", "/srv/api")
+            .unwrap();
+        assert_eq!(shared.projects().len(), 1);
+        assert_eq!(
+            (
+                shared.projects()[0].name.as_str(),
+                shared.projects()[0].root.as_str()
+            ),
+            ("api", "/srv/api")
+        );
+
+        // A session of this machine, with a transcript.
+        let session = NewSession {
+            agent: AgentId::CLAUDE,
+            external_id: "one".into(),
+            machine_id: machine.id.clone(),
+            cwd: "/srv/api".into(),
+            title: "fix the login bug".into(),
+            model: None,
+            started_at: started,
+            updated_at: updated,
+        };
+        let messages = [NewMessage {
+            role: leon_core::Role::User,
+            text: "please fix the login".into(),
+            at: started,
+        }];
+        shared.store.upsert_session(&session, &messages).unwrap();
+
+        let listed = shared.sessions();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].external_id == "one");
+        let transcript = shared.transcript("claude", "one").unwrap();
+        assert_eq!(transcript.messages.len(), 1);
+        assert_eq!(transcript.messages[0].text.as_str(), "please fix the login");
+        assert!(shared.transcript("claude", "none").is_none());
+
+        // Another machine's history is nobody else's business: only what
+        // this machine holds is offered.
+        let other = shared
+            .store
+            .add_machine(
+                "elsewhere",
+                MachineKind::Ssh {
+                    host: "box".into(),
+                    user: None,
+                    port: None,
+                    identity_file: None,
+                },
+            )
+            .unwrap();
+        let theirs = NewSession {
+            agent: AgentId::CLAUDE,
+            external_id: "theirs".into(),
+            machine_id: other.id.clone(),
+            cwd: "/opt/other".into(),
+            title: "theirs".into(),
+            model: None,
+            started_at: started,
+            updated_at: updated,
+        };
+        shared.store.upsert_session(&theirs, &messages).unwrap();
+        let listed = shared.sessions();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].external_id == "one");
+        assert!(shared.transcript("claude", "theirs").is_none());
     }
 }

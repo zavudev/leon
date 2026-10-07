@@ -20,17 +20,20 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
+use chrono::DateTime;
 use leon_core::icon::{IconImage, IconKind, NewIcon};
 use leon_core::{
-    AgentId, Machine, MachineId, MachineKind, NewWorktree, Project, ProjectId, SessionFilter,
-    Store, StoreError, WorktreeId,
+    AgentId, Machine, MachineId, MachineKind, NewMessage, NewSession, NewWorktree, Project,
+    ProjectId, SessionFilter, Store, StoreChange, StoreError, WorktreeId,
 };
 use leon_history::{HistoryRoots, ImportReport, Importer};
+use leon_link::client::ConnState;
 use leon_remote::connect::{self, Checklist, Target as Login};
 use leon_remote::{
-    github, probe, CommandSpec, Git, GitError, Github, Output, ProbeError, ProbeReport, RunError,
-    Runner, SshOptions,
+    github, probe, CommandSpec, Git, GitError, Github, Output, ProbeError, ProbeReport, RelayHub,
+    RunError, Runner, SshOptions,
 };
 use thiserror::Error;
 use tokio::runtime::Handle;
@@ -125,6 +128,11 @@ pub enum Op {
     /// after an agent went quiet or ended, when it regains the focus and on
     /// a timer.
     SyncHistory,
+    /// Pull what the paired host shares of its own Leon — its projects and
+    /// the sessions of its history — into the store, so that machine's
+    /// section of the sidebar looks like the host's own. Asked on a refresh,
+    /// on the import timer and after a fresh pairing.
+    SyncHost(MachineId),
     /// Ask git for the worktrees of a project.
     #[allow(dead_code)] // The vocabulary of the engine; the UI asks through `Refresh` for now.
     SyncWorktrees(ProjectId),
@@ -463,6 +471,10 @@ struct Inner {
     fetcher: Mutex<Arc<dyn IconFetcher>>,
     scanner: Mutex<Option<Arc<Scanner>>>,
     usage: Mutex<Option<UsageSetup>>,
+    /// The connections to the computers paired with this one. `None` in the
+    /// parts of the engine's life before the window, and in tests without a
+    /// relay: without it nothing is asked of the hosts.
+    hub: Mutex<Option<Arc<RelayHub>>>,
     /// What each history source looked like at the last incremental import.
     history_stamps: Mutex<HashMap<String, String>>,
     /// Whether the unreadable-layout notice was shown by an incremental import.
@@ -524,6 +536,7 @@ impl Engine {
                 fetcher: Mutex::new(Arc::new(NoFetch)),
                 scanner: Mutex::new(None),
                 usage: Mutex::new(None),
+                hub: Mutex::new(None),
                 history_stamps: Mutex::new(HashMap::new()),
                 unsupported_told: std::sync::atomic::AtomicBool::new(false),
                 history_home: Mutex::new(leon_history::home_dir()),
@@ -589,6 +602,25 @@ impl Engine {
             exec: runner,
             leon_pid,
         }));
+    }
+
+    /// Lets the engine ask the computers paired with this one what they are
+    /// sharing: their projects and history sessions, through `hub`. Without
+    /// one nothing is asked and the mirrors stay as they were.
+    pub fn set_relay_hub(&self, hub: Arc<RelayHub>) {
+        *self
+            .inner
+            .hub
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hub);
+    }
+
+    fn hub(&self) -> Option<Arc<RelayHub>> {
+        self.inner
+            .hub
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Whether processes are listed at all.
@@ -1170,8 +1202,10 @@ impl Engine {
             Op::ImportHistory => self.import_history().await.map(Some),
             Op::SyncHistory => {
                 self.sync_history().await?;
+                self.sync_hosts_quietly().await;
                 Ok(None)
             }
+            Op::SyncHost(machine) => self.report_host_sync(&machine).await,
             Op::DiagnoseHistory => {
                 self.diagnose_history().await?;
                 Ok(None)
@@ -1348,6 +1382,241 @@ impl Engine {
             .history_home
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = home;
+    }
+
+    // ----- a paired host's own Leon ---------------------------------------
+
+    /// How many transcripts one sync fetches at most; the rest wait for a
+    /// later one, so a first connect does not pull a whole history at once.
+    const MAX_TRANSCRIPTS: usize = 40;
+
+    /// Syncs every machine that is a paired host, saying nothing. What a
+    /// timer import does after the local one.
+    async fn sync_hosts_quietly(&self) {
+        let Ok(machines) = self.inner.store.machines() else {
+            return;
+        };
+        for machine in machines {
+            if !matches!(machine.kind, MachineKind::Relay { .. }) {
+                continue;
+            }
+            if let Err(error) = self.sync_host(&machine.id).await {
+                tracing::debug!(machine = %machine.name, %error, "could not sync what it shares");
+            }
+        }
+    }
+
+    /// Syncs one host and tells what it brought.
+    async fn report_host_sync(&self, machine: &MachineId) -> Result<Option<String>, EngineError> {
+        let name = self.inner.store.machine(machine)?.name;
+        let synced = self.sync_host(machine).await?;
+        match synced {
+            _ if synced.is_empty() => Ok(None),
+            _ => Ok(Some(format!("Synced {name}: {}", synced.describe()))),
+        }
+    }
+
+    /// Pulls what `machine`'s host shares of its own Leon into the store. The
+    /// host is asked while it is reachable (a connecting one is waited for,
+    /// any other state is left for a later ask); its projects that are not
+    /// here yet are added — never one this computer dismissed — and its
+    /// history sessions are stored with their transcripts, newest first and
+    /// a few at a time.
+    async fn sync_host(&self, machine: &MachineId) -> Result<HostSync, EngineError> {
+        let Some(hub) = self.hub() else {
+            return Ok(HostSync::default());
+        };
+        let Ok(machine) = self.inner.store.machine(machine) else {
+            return Ok(HostSync::default());
+        };
+        let MachineKind::Relay {
+            host_id,
+            host_key,
+            relay_url,
+            ..
+        } = &machine.kind
+        else {
+            return Err(EngineError::Invalid(format!(
+                "{} is not a machine paired with a code.",
+                machine.name
+            )));
+        };
+        let client = hub
+            .ensure(host_id, host_key, relay_url)
+            .map_err(|error| EngineError::Invalid(error.to_string()))?;
+        match client.state() {
+            ConnState::Online => {}
+            ConnState::Connecting => {
+                if client.wait_online(Duration::from_secs(20)).await.is_err() {
+                    return Ok(HostSync::default());
+                }
+            }
+            ConnState::Offline { .. } | ConnState::Closed => return Ok(HostSync::default()),
+        }
+        let (projects, sessions, _) = client
+            .share_state()
+            .await
+            .map_err(|error| EngineError::Invalid(error.to_string()))?;
+
+        // The projects first: a session is tied to a project by what the
+        // store knows of the machine while it is stored, so the roots have to
+        // be there before the sessions land.
+        let mut added = 0usize;
+        let mut fresh: Vec<ProjectId> = Vec::new();
+        {
+            let dismissed: HashSet<String> = self
+                .inner
+                .store
+                .dismissed_roots(&machine.id)?
+                .into_iter()
+                .map(|root| leon_core::path::key(&root))
+                .collect();
+            let known: HashSet<String> = self
+                .inner
+                .store
+                .projects(Some(&machine.id))?
+                .into_iter()
+                .map(|project| leon_core::path::key(&project.root))
+                .collect();
+            for shared in projects {
+                let key = leon_core::path::key(&shared.root);
+                if known.contains(&key) || dismissed.contains(&key) || shared.root.is_empty() {
+                    continue;
+                }
+                let name = shared.name.trim();
+                let name = if name.is_empty() {
+                    address::default_project_name(&shared.root)
+                } else {
+                    name.to_owned()
+                };
+                match self
+                    .inner
+                    .store
+                    .add_project(&machine.id, &name, &shared.root)
+                {
+                    Ok(project) => {
+                        added += 1;
+                        fresh.push(project.id);
+                    }
+                    Err(error) => {
+                        tracing::warn!(root = %shared.root, %error, "could not mirror a project")
+                    }
+                }
+            }
+        }
+        // A project mirrored into the list wants its worktree rows at once,
+        // like one added by hand would have them. git is asked on the host;
+        // a listing that fails leaves them for the next refresh.
+        for id in &fresh {
+            if let Err(error) = self.sync_worktrees(id).await {
+                tracing::debug!(project = %id, %error, "could not sync the mirrored worktrees");
+            }
+        }
+
+        // The history sessions: each is named by its agent and the agent's
+        // own id, so the import cursors say which of them were already taken
+        // into the store and only what changed since is asked for. A session
+        // that came with a transcript beyond this Leon's reply budget was
+        // taken as the prefix it could carry, and wants asking again only
+        // when the host's own summary moved on.
+        let cursors: HashMap<String, String> = self.inner.store.import_cursors(&machine.id)?;
+        let mut wait: Vec<leon_wire::SharedSession> = Vec::new();
+        for shared in sessions {
+            if AgentId::parse(&shared.agent).is_none() {
+                // An agent this Leon has no name for: its sessions stay
+                // where they are (the host's, not ours).
+                continue;
+            };
+            let key = share_source_key(&shared.agent, &shared.external_id);
+            let taken = cursors
+                .get(&key)
+                .is_some_and(|done| *done == share_fingerprint(&shared));
+            if taken {
+                continue;
+            }
+            wait.push(shared);
+        }
+
+        let mut synced = HostSync {
+            projects: added,
+            ..HostSync::default()
+        };
+        let mut sessions: Vec<(NewSession, Vec<NewMessage>)> = Vec::with_capacity(wait.len());
+        let (machine_id, mut cursors) = (machine.id.clone(), Vec::with_capacity(wait.len()));
+        for shared in wait.iter().take(Self::MAX_TRANSCRIPTS) {
+            let Some(agent) = AgentId::parse(&shared.agent) else {
+                continue;
+            };
+            let fingerprint = share_fingerprint(shared);
+            let transcript = match tokio::time::timeout(
+                Duration::from_secs(30),
+                client.share_transcript(&shared.agent, &shared.external_id),
+            )
+            .await
+            {
+                Ok(Ok(transcript)) => transcript,
+                // The link went down or the answer did not come: what
+                // shifted waits for the next sync. A host that holds no
+                // such session any more answers with nothing; its cursor
+                // advances all the same, so it is never asked again.
+                Ok(Err(error)) => {
+                    tracing::debug!(
+                        external = %shared.external_id,
+                        %error,
+                        "could not read one shared transcript"
+                    );
+                    break;
+                }
+                Err(_) => {
+                    tracing::debug!(
+                        external = %shared.external_id,
+                        "the shared transcript did not come in time"
+                    );
+                    break;
+                }
+            };
+            cursors.push((
+                share_source_key(&shared.agent, &shared.external_id),
+                fingerprint,
+            ));
+            let Some(transcript) = transcript else {
+                continue;
+            };
+            let started = DateTime::from_timestamp_millis(shared.started_ms)
+                .unwrap_or(DateTime::<chrono::Utc>::UNIX_EPOCH);
+            let updated = DateTime::from_timestamp_millis(shared.updated_ms)
+                .unwrap_or(DateTime::<chrono::Utc>::UNIX_EPOCH);
+            sessions.push((
+                NewSession {
+                    agent,
+                    external_id: shared.external_id.clone(),
+                    machine_id: machine_id.clone(),
+                    cwd: shared.cwd.clone(),
+                    title: shared.title.clone(),
+                    model: shared.model.clone(),
+                    started_at: started,
+                    updated_at: updated,
+                },
+                transcript
+                    .messages
+                    .into_iter()
+                    .filter_map(|entry| transcript_message(&entry.role, entry.text, entry.at_ms))
+                    .collect(),
+            ));
+        }
+        if !cursors.is_empty() {
+            self.inner.store.write(StoreChange::Sessions, |tx| {
+                for (session, messages) in &sessions {
+                    leon_core::upsert_session_in(tx, session, messages)?;
+                }
+                for (key, fingerprint) in &cursors {
+                    leon_core::set_import_cursor_in(tx, &machine_id, key, fingerprint)?;
+                }
+                Ok(())
+            })?;
+            synced.sessions = sessions.len() as u32;
+        }
+        Ok(synced)
     }
 
     // ----- worktrees -------------------------------------------------------
@@ -2299,6 +2568,25 @@ impl Engine {
             self.set_elsewhere(&machine.id, None);
             return done;
         }
+        // A computer paired with a code shares what its own Leon knows: its
+        // projects and history sessions, pulled here before anything else
+        // finds out what there is to work on. A host that does not answer is
+        // no failure of its own: its section of the sidebar stays as it was,
+        // and the projects it brought count among those found.
+        if matches!(machine.kind, MachineKind::Relay { .. }) {
+            let shared = match self.sync_host(&machine.id).await {
+                Ok(shared) => shared,
+                Err(error) => {
+                    tracing::debug!(
+                        machine = %machine.name,
+                        %error,
+                        "could not sync what the paired host shares"
+                    );
+                    HostSync::default()
+                }
+            };
+            done.found += shared.projects;
+        }
         // The machine answers: what runs in other terminals, in one command,
         // and how much of each agent's limits is left, in another.
         self.scan_machine(&machine.id).await;
@@ -2559,6 +2847,60 @@ impl MachineRefresh {
         self.failed += other.failed;
         self.offline += other.offline;
     }
+}
+
+/// What one sync of a paired host's own Leon brought into the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct HostSync {
+    /// Projects mirrored that were not there yet.
+    projects: usize,
+    /// History sessions stored with their transcripts.
+    sessions: u32,
+}
+
+impl HostSync {
+    fn is_empty(&self) -> bool {
+        self.projects == 0 && self.sessions == 0
+    }
+
+    /// The words for the status line: every number mentioned, in a list.
+    fn describe(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if self.projects > 0 {
+            parts.push(format!("{} new", plural(self.projects, "project")));
+        }
+        if self.sessions > 0 {
+            parts.push(format!(
+                "{} of history",
+                plural(self.sessions as usize, "session")
+            ));
+        }
+        parts.join(", ")
+    }
+}
+
+/// One transcript entry, in the store's shape. An entry whose role tag or
+/// timestamp cannot be understood is left out of the transcript.
+fn transcript_message(role: &str, text: String, at_ms: i64) -> Option<NewMessage> {
+    Some(NewMessage {
+        role: leon_core::Role::parse(role)?,
+        text,
+        at: DateTime::from_timestamp_millis(at_ms).unwrap_or(DateTime::<chrono::Utc>::UNIX_EPOCH),
+    })
+}
+
+/// The import cursor's source key of one shared session: the same table the
+/// local importer keeps its fingerprints in, this time with the host's own
+/// count for the session.
+fn share_source_key(agent: &str, external_id: &str) -> String {
+    format!("share:{agent}:{external_id}")
+}
+
+/// What a host shared of one session last: its own latest message time and
+/// how many messages it says the session holds. Both together change as soon
+/// as the session does, and only then.
+fn share_fingerprint(shared: &leon_wire::SharedSession) -> String {
+    format!("{}:{}", shared.updated_ms, shared.messages)
 }
 
 /// The worktrees git listed, in the store's shape. Bare entries are left out,
@@ -5329,5 +5671,229 @@ branch refs/heads/feature/login
         assert!(!rig.engine.start_usage());
         rig.engine.run(Op::CollectUsage).await;
         assert_eq!(http.calls().len(), 1);
+    }
+
+    // ----- what a paired host shares of its own Leon -----------------------------------
+
+    use leon_host::{Host, HostConfig, RelayState};
+    use leon_link::relay_client::{dial, Target as DialTarget};
+    use leon_link::test_support::TestRelay;
+    use leon_link::{pair_as_client, Identity, PairingCode};
+    use leon_wire::{SharedEntry, SharedProject, SharedSession, SharedTranscript};
+
+    /// What a test host shares: one project and one Claude session ran at
+    /// it, whose transcript it holds. The knob makes the session grow, the
+    /// way a session does while its agent works: one dummy message more,
+    /// its timestamp later, the count higher.
+    struct SharedBox {
+        extra: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl leon_host::ShareSource for SharedBox {
+        fn projects(&self) -> Vec<SharedProject> {
+            vec![SharedProject {
+                name: "api".into(),
+                root: "/srv/api".into(),
+            }]
+        }
+
+        fn sessions(&self) -> Vec<SharedSession> {
+            let extra = self.extra.load(std::sync::atomic::Ordering::SeqCst) as i64;
+            vec![SharedSession {
+                agent: "claude".into(),
+                external_id: "one".into(),
+                cwd: "/srv/api".into(),
+                title: "fix the login bug".into(),
+                model: Some("gpt".into()),
+                started_ms: 1_700_000_000_000,
+                updated_ms: 1_700_000_060_000 + extra * 1_000,
+                messages: 2 + extra as u32,
+            }]
+        }
+
+        fn transcript(&self, agent: &str, external_id: &str) -> Option<SharedTranscript> {
+            let _ = agent;
+            (external_id == "one").then(|| {
+                let extra = self.extra.load(std::sync::atomic::Ordering::SeqCst);
+                let mut messages = vec![
+                    SharedEntry {
+                        role: "user".into(),
+                        text: "please fix the login".into(),
+                        at_ms: 1_700_000_000_000,
+                    },
+                    SharedEntry {
+                        role: "assistant".into(),
+                        text: "done".into(),
+                        at_ms: 1_700_000_060_000,
+                    },
+                ];
+                for n in 0..extra {
+                    messages.push(SharedEntry {
+                        role: "assistant".into(),
+                        text: format!("turn {n}"),
+                        at_ms: 1_700_000_060_000 + i64::from(n) * 1_000,
+                    });
+                }
+                SharedTranscript {
+                    agent: "claude".into(),
+                    external_id: "one".into(),
+                    messages,
+                }
+            })
+        }
+    }
+
+    /// A relay, a host on it that shares, a client paired with it, and a rig
+    /// whose engine talks to that relay: the mirror's whole world. The host
+    /// lives until the caller drops it; the knob is what makes its shared
+    /// session grow.
+    async fn mirrored_world() -> (
+        Rig,
+        TestRelay,
+        Host,
+        leon_core::Machine,
+        Arc<std::sync::atomic::AtomicU32>,
+    ) {
+        let relay = TestRelay::start().await;
+        let url = relay.url();
+        let host_identity = Arc::new(Identity::generate());
+        let mut config = HostConfig::new(url.clone(), "box");
+        let knob = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        config.share = Some(leon_host::Shared(Arc::new(SharedBox {
+            extra: knob.clone(),
+        })));
+        config.backoff = leon_host::Backoff {
+            initial: Duration::from_millis(20),
+            max: Duration::from_millis(200),
+        };
+        let host = Host::start(config, host_identity.clone(), None).unwrap();
+        let mut state = host.watch_relay();
+        while *state.borrow_and_update() != RelayState::Online {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let me = Arc::new(Identity::generate());
+        let info = host.new_pairing_code().await;
+        let pipe = dial(&url, &DialTarget::Room(info.room), None)
+            .await
+            .unwrap();
+        let paired = pair_as_client(
+            pipe,
+            &me,
+            &PairingCode::parse(&info.code).unwrap(),
+            "Ana's laptop",
+        )
+        .await
+        .unwrap();
+
+        let rig = rig(ScriptedRunner::new());
+        rig.engine.set_relay_hub(leon_remote::RelayHub::new(
+            me,
+            "Ana's laptop",
+            Handle::current(),
+        ));
+        let machine = rig
+            .engine
+            .save_relay_machine(
+                "",
+                &paired.host_id.to_string(),
+                &leon_remote::relay::key_hex(&paired.host_key),
+                &url,
+                "box",
+            )
+            .unwrap();
+        (rig, relay, host, machine, knob)
+    }
+
+    #[tokio::test]
+    async fn a_relay_machine_mirrors_what_its_host_shares() {
+        let (rig, _relay, _host, machine, _) = mirrored_world().await;
+        rig.engine.run(Op::SyncHost(machine.id.clone())).await;
+
+        // The project: named and rooted as the host says.
+        let projects = rig.store.projects(Some(&machine.id)).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(
+            (projects[0].name.as_str(), projects[0].root.as_str()),
+            ("api", "/srv/api")
+        );
+
+        // The session: attributed to this machine, tied to the mirrored
+        // project, and stored complete.
+        let filter = SessionFilter {
+            machine_id: Some(machine.id.clone()),
+            ..Default::default()
+        };
+        let sessions = rig.store.recent_sessions(&filter, 10).unwrap();
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        assert_eq!(session.agent, leon_core::AgentId::CLAUDE);
+        assert_eq!(session.title, "fix the login bug");
+        assert_eq!(session.cwd, "/srv/api");
+        assert_eq!(session.project_id.as_ref(), Some(&projects[0].id));
+        let messages = rig.store.session_messages(&session.id).unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| (m.role, m.text.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (leon_core::Role::User, "please fix the login".to_owned()),
+                (leon_core::Role::Assistant, "done".to_owned())
+            ]
+        );
+
+        // A sync that changes nothing is silent.
+        assert_eq!(
+            rig.engine.sync_host(&machine.id).await.unwrap(),
+            HostSync::default()
+        );
+    }
+
+    /// A project this computer does not want stays out of the mirror: the
+    /// host offers it again on every sync, and the store remembers it was
+    /// dismissed.
+    #[tokio::test]
+    async fn a_dismissed_project_is_not_mirrored_again() {
+        let (rig, _relay, _host, machine, _) = mirrored_world().await;
+        rig.engine.run(Op::SyncHost(machine.id.clone())).await;
+        let project = &rig.store.projects(Some(&machine.id)).unwrap()[0];
+        rig.store.remove_project(&project.id).unwrap();
+
+        assert_eq!(
+            rig.engine.sync_host(&machine.id).await.unwrap(),
+            HostSync::default()
+        );
+        assert!(rig.store.projects(Some(&machine.id)).unwrap().is_empty());
+    }
+
+    /// A session the host's history grew since the last sync is asked for
+    /// again, updated in place, and keeps its id — so links to it (a live
+    /// terminal, a pin) survive.
+    #[tokio::test]
+    async fn a_session_the_host_grew_is_updated_in_place() {
+        let (rig, _relay, _host, machine, knob) = mirrored_world().await;
+        rig.engine.run(Op::SyncHost(machine.id.clone())).await;
+        let stored = rig
+            .store
+            .session_by_external(&machine.id, leon_core::AgentId::CLAUDE, "one")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.message_count, 2);
+
+        // The host's history moved on: one message more, its timestamp later.
+        use std::sync::atomic::Ordering::SeqCst;
+        knob.store(1, SeqCst);
+        let synced = rig.engine.sync_host(&machine.id).await.unwrap();
+        assert_eq!(synced.sessions, 1, "the grown session is stored again");
+
+        let grew = rig.store.session(&stored.id).unwrap();
+        assert_eq!(grew.message_count, 3);
+        assert_eq!(
+            grew.updated_at,
+            DateTime::from_timestamp_millis(1_700_000_061_000).unwrap()
+        );
+        let listed = rig.store.session_messages(&grew.id).unwrap();
+        let texts: Vec<&str> = listed.iter().map(|message| message.text.as_str()).collect();
+        assert_eq!(texts.last().copied(), Some("turn 0"));
     }
 }
