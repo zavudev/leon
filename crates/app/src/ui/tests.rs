@@ -2376,6 +2376,46 @@ fn a_project_says_deleting_while_a_worktree_removal_runs(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+fn removing_a_row_the_store_no_longer_has_says_the_worktree_was_already_gone(
+    cx: &mut TestAppContext,
+) {
+    let h = open(cx, ScriptedRunner::new().reply(Output::ok(MAIN_ONLY)));
+    let project = h
+        .store
+        .projects(Some(&MachineId::local()))
+        .unwrap()
+        .into_iter()
+        .find(|project| project.name == "api")
+        .unwrap()
+        .id;
+    let worktree = worktree_id(&h, "feature/login");
+    // Another window took it and wrote the store: this window's tree still
+    // shows the row.
+    h.store
+        .replace_worktrees(
+            &project,
+            vec![NewWorktree {
+                path: API_ROOT.into(),
+                branch: Some("main".into()),
+                head: None,
+                is_main: true,
+            }],
+        )
+        .unwrap();
+    cx.update_window(h.window.into(), |_, window, cx| {
+        h.shell.update(cx, |shell, cx| {
+            shell.remove_worktree(project.clone(), worktree, false, window, cx)
+        })
+    })
+    .unwrap();
+    h.settle(cx);
+    assert_eq!(h.status(), "The worktree was already gone.");
+    assert!(!h
+        .outline(cx)
+        .contains(&"    worktree:feature/login".to_owned()));
+}
+
+#[gpui_kit::test]
 fn a_worktree_git_refuses_for_its_files_asks_before_forcing_them_away(cx: &mut TestAppContext) {
     let h = open(
         cx,

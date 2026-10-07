@@ -610,6 +610,11 @@ impl Shell {
                     // Back in front: a reading older than the interval is
                     // made once.
                     this.usage_tick(cx);
+                    // Another process (a second window, or the person's own
+                    // tooling) may have written the store while this one was
+                    // away: the tree is read again, so a worktree removed
+                    // elsewhere does not stay on screen.
+                    this.reload(cx);
                 }
                 cx.notify();
             }),
@@ -1912,6 +1917,7 @@ impl Shell {
                         cx,
                     ),
                     Ok(Err(error)) => {
+                        tracing::warn!(%error, "could not remove the worktree");
                         this.engine.report(StatusKind::Error, error.to_string());
                     }
                     // The job was dropped before it finished: nothing to say.
