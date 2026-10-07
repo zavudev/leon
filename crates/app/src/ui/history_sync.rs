@@ -151,6 +151,26 @@ impl Shell {
         if !titled.is_empty() {
             learned.extend(learn::by_title(&titled, &self.snapshot.sessions, &taken));
         }
+        // A terminal that learned its id before the importer stored the
+        // session has no history row: link it now that the row may exist.
+        let unlinked: Vec<learn::Unlinked> = self
+            .live
+            .all()
+            .iter()
+            .filter(|s| s.history.is_none() && !s.is_paused())
+            .filter_map(|s| {
+                Some(learn::Unlinked {
+                    id: s.id.0,
+                    machine: s.machine.clone(),
+                    agent: s.agent?,
+                    external: s.learned.as_ref()?.0.clone(),
+                })
+            })
+            .filter(|t| !learned.iter().any(|l| l.id == t.id))
+            .collect();
+        if !unlinked.is_empty() {
+            learned.extend(learn::by_id(&unlinked, &self.snapshot.sessions));
+        }
         if learned.is_empty() {
             return;
         }
@@ -160,7 +180,10 @@ impl Shell {
                 .history
                 .filter(|row| self.live.of_history(row).is_none());
             if let Some(session) = self.live.get_mut(LiveId(item.id)) {
-                session.learned = Some((item.external, item.how.to_owned()));
+                // An id already learned keeps how it was learned.
+                if item.how != "id" {
+                    session.learned = Some((item.external, item.how.to_owned()));
+                }
                 if let Some(row) = history {
                     // A fresh link fills what was empty; a title follows the
                     // program, which may have moved on from what was linked.

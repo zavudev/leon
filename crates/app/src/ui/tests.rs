@@ -5207,6 +5207,17 @@ mod live {
         wait_until(&h, cx, "the resumed agent", |h, cx| {
             screen(h, cx, 1).contains("FAKE-CLAUDE --resume menu me-3")
         });
+        // While it runs in a terminal, the row is that terminal's: it offers
+        // to close it, not to remove it from the history.
+        put_cursor_on(&h, cx, NodeId::Session(id.clone()));
+        h.press("m", cx);
+        h.type_text("close", cx);
+        h.press("enter", cx);
+        h.settle(cx);
+        if h.palette_titles(cx).get(1).is_some_and(|t| t == "Cancel") {
+            h.press("enter", cx); // confirm: a program is running in it
+            h.settle(cx);
+        }
         put_cursor_on(&h, cx, NodeId::Session(id.clone()));
         h.press("m", cx);
         h.type_text("remove", cx);

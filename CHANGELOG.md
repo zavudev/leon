@@ -24,6 +24,12 @@
 
 ### Fixed
 
+* A session running in a terminal can be closed from its row's menu, and no
+  longer offers "Remove from history", which only brought the terminal back as
+  a live row.
+* A terminal that learned its session's id before the session was stored is
+  linked to its history row once it appears, instead of showing the same
+  session twice.
 * `Ctrl+C` in a terminal copies only when there is a selection; without one it
   reaches the program again, so a running command can be interrupted.
 * A terminal whose agent moves to another session inside it (opencode's session
