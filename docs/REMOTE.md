@@ -35,15 +35,28 @@ The host offers exactly two primitives, over the encrypted channel:
   (`gap`) that the ring no longer reaches that far. Exited terminals stay
   listed for 30 minutes.
 
-Everything above those two (git, probing, history, the process scan) is
-unchanged: a relay machine is just another machine.
+For Leon hosts it adds a third, opt-out-free but read-only primitive:
+
+* **what this Leon knows** (`ShareState`, `ShareTranscript`): the projects of
+  this machine and the sessions of its unified history — the same data this
+  Leon's sidebar shows — plus each session's transcript by its
+  `(agent, external_id)`. The host application answers from its own store;
+  a headless `leon host` shares nothing and answers every request with an
+  empty result. The client imports it as that machine's own state, so this
+  machine's section of the client's sidebar mirrors the host's one: the same
+  projects, the same history, resumable there.
+
+Everything above those (git, probing, agents) is unchanged: a relay machine is
+just another machine.
 
 ## Threat model
 
 **What a paired device can do.** Run any command and open any terminal as the
-user who runs the host, with that user's full rights. That is the feature. There
-is no sandbox. Pair only your own devices. The host refuses to start as root
-unless told `--allow-root`.
+user who runs the host, with that user's full rights, and — when the host is
+Leon — read what that Leon holds of this machine: its projects and the sessions
+of its unified history, all of which the terminal could read too. That is the
+feature. There is no sandbox. Pair only your own devices. The host refuses to
+start as root unless told `--allow-root`.
 
 **What the relay can see.** Metadata: that a host with a given id is online, when
 clients connect and leave, how many bytes flow and when, and the (public) room
@@ -192,6 +205,7 @@ No home-made cryptography: Leon composes audited crates.
 | A session that cannot keep up | detached; the client reconnects and resumes |
 | Reconnection | client and host back off from 1 s to 30 s |
 | Rekey | 2^20 messages, 1 GiB or 1 hour |
+| Shared state | at most 500 history sessions offered; transcripts read individually |
 
 ## Settings
 
@@ -207,6 +221,8 @@ before pairing` (`remote_require_approval`). See [SETTINGS.md](SETTINGS.md).
 * A direct connection upgrade (hole punching) so the relay carries only the
   rendezvous.
 * Accounts and plans on the relay (the opaque `token` field is reserved).
-* Importing the remote computer's agent history.
-* Listing the terminals still alive on a relay machine in the tree after Leon
-  restarts (the protocol and `Client::pty_attach` support it).
+* A terminal still running on a relay machine listed in the tree after Leon
+  restarts, attaching when opened (the protocol and `Client::pty_attach`
+  support it).
+* A live terminal the client keeps attached stays tied to its row while the
+  host's own Leon keeps importing the same session, so no duplicate rows.
