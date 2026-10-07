@@ -1,8 +1,8 @@
 //! The usage bar and the usage view: how much of each agent's limits is left.
 //!
 //! The *model* half is pure and tested without a window: [`bar_model`] says
-//! what the bar shows for the machine in context (one primary number per
-//! agent, the others on hover), [`density`] says how much of it fits, and
+//! what the bar shows for the machine in context (one figure per agent, its
+//! logo and the window closest to its limit, the others on hover),
 //! [`usage_rows`] says what the view lists, with the burn-rate estimate and a
 //! small history line per window. The *drawing* half turns those into GPUI
 //! elements with the theme's tokens only: a level is a colour *and* a marker
@@ -22,7 +22,7 @@ use gpui_kit::{div, Context, Div, FontWeight, Hsla, SharedString, Stateful, Task
 use leon_core::{AgentId, MachineId, UsagePoint};
 use leon_usage::{
     countdown, forecast, series_key, view, AgentUsage, AgentView, Body, Level, Meter,
-    PercentDisplay, Sample, Thresholds, WindowKind,
+    PercentDisplay, Sample, Thresholds,
 };
 
 use super::shell::{Overlay, Shell};
@@ -39,104 +39,19 @@ use crate::theme::{metrics, px, Palette};
 /// How many points of history a sparkline draws.
 pub const SPARK_POINTS: usize = 24;
 
-/// How much of the bar's meters fit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Density {
-    /// Every window of every agent, as Orca's default footer: the logo, a
-    /// meter for the closest window, then `N% used <countdown>` for each
-    /// window, joined by dots.
-    Detailed,
-    /// Logo, meter, label, figure, marker and time to reset: the one window
-    /// closest to its limit.
-    Full,
-    /// Logo, meter, figure and marker.
-    Short,
-    /// Logo and figure.
-    Minimal,
-    /// One indicator: the agent closest to its limit.
-    Single,
-}
-
 /// What is left of the bar for the meters: the window's width minus its
 /// padding, the least the status line may have and the refresh affordance.
 const RESERVED: f32 = 24.0 + 160.0 + 120.0;
 
-/// What one agent takes at each density, in pixels.
-const COST_FULL: f32 = 250.0;
-const COST_SHORT: f32 = 150.0;
-const COST_MINIMAL: f32 = 74.0;
-
-/// What the bar's text takes per character, an item's logo, padding and gap,
-/// and a meter, in pixels.
+/// What the bar's text takes per character, and an item's logo, padding and
+/// gap, in pixels.
 const CHAR: f32 = 7.0;
 const ITEM: f32 = 13.0 + 6.0 + 8.0 + 12.0;
-const METER: f32 = 36.0;
 
 /// The room the bar's meters have at this window width, in pixels.
 fn room(width: f32) -> f32 {
     (width - RESERVED).max(0.0)
 }
-
-/// The densest the bar can be at this window width for this many agents.
-pub fn density(width: f32, agents: usize) -> Density {
-    let room = room(width);
-    let n = agents.max(1) as f32;
-    if n * COST_FULL <= room {
-        Density::Full
-    } else if n * COST_SHORT <= room {
-        Density::Short
-    } else if n * COST_MINIMAL <= room {
-        Density::Minimal
-    } else {
-        Density::Single
-    }
-}
-
-/// How the bar words and draws what it shows: all windows or the worst one,
-/// and used or left.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct BarStyle {
-    /// Every window of each agent (`true`) or only the one closest to its
-    /// limit.
-    pub detailed: bool,
-    /// `N% used` or `N% left`.
-    pub display: PercentDisplay,
-}
-
-impl Default for BarStyle {
-    fn default() -> Self {
-        Self {
-            detailed: true,
-            display: PercentDisplay::Used,
-        }
-    }
-}
-
-/// What a detailed bar says of one window.
-#[derive(Clone, Debug, PartialEq)]
-pub struct BarWindow {
-    /// `10% used 2h 29m`: the figure, then the countdown to the reset (a
-    /// model's name for its own window).
-    pub text: String,
-    /// The marker of the level: empty, `!` or `!!`.
-    pub glyph: &'static str,
-    /// How close to its limit.
-    pub level: Level,
-    /// The used percentage.
-    pub percent: f32,
-}
-
-/// What a window is called in the detailed bar: the live countdown to its
-/// reset for the session, the week and the month, the model's name for a
-/// model's window, the source's own label for any other.
-fn window_label(meter: &Meter) -> String {
-    match &meter.kind {
-        WindowKind::ModelWeekly(name) | WindowKind::Custom(name) => name.clone(),
-        _ if meter.reset_since_seen => countdown(0),
-        kind => meter.resets_in.map_or_else(|| kind.short(), countdown),
-    }
-}
-
 /// One agent in the bar.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BarItem {
@@ -150,16 +65,12 @@ pub struct BarItem {
     pub figure: String,
     /// Whether the figure is what is left, not what is used.
     pub left: bool,
-    /// Every window, for the detailed bar; empty when nothing is known.
-    pub windows: Vec<BarWindow>,
     /// How old the numbers are, in seconds.
     pub age: Option<i64>,
     /// When the numbers are kept after a failed read: how old they are.
     pub stale: Option<String>,
     /// The marker of the level: empty, `!` or `!!`.
     pub glyph: &'static str,
-    /// Time to reset in the compact form (`2h 29m`), when known.
-    pub reset: Option<String>,
     /// How close to its limit.
     pub level: Level,
     /// The used percentage, 0 when unknown.
@@ -173,24 +84,24 @@ pub struct BarItem {
 }
 
 impl BarItem {
-    /// What the detailed bar says: `10% used 2h 29m · 91% used 1d 11h !! · 0%
-    /// used Fable`, each window's marker after its text.
-    pub fn detailed_text(&self) -> String {
-        self.windows
-            .iter()
-            .map(|w| format!("{}{}", w.text, glyph_tail(w.glyph)))
-            .collect::<Vec<_>>()
-            .join(" · ")
+    /// What the chip says of a known agent: ` 91% !!`, or `  9% left !!`.
+    pub fn figure_text(&self) -> String {
+        format!(
+            "{}{}{}",
+            self.figure,
+            if self.left { " left" } else { "" },
+            glyph_tail(self.glyph)
+        )
     }
 
-    /// What this agent takes of the bar in the detailed form, in pixels.
-    fn detailed_cost(&self) -> f32 {
-        let text = if self.known {
-            METER + 6.0 + self.detailed_text().chars().count() as f32 * CHAR
+    /// What this agent takes of the bar, in pixels.
+    fn cost(&self) -> f32 {
+        let chars = if self.known {
+            self.figure_text().chars().count()
         } else {
-            self.label.chars().count() as f32 * CHAR
+            self.label.chars().count()
         };
-        ITEM + text
+        ITEM + chars as f32 * CHAR
     }
 }
 
@@ -202,15 +113,12 @@ pub const BAR_PLAIN: usize = 4;
 /// What the bar shows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BarModel {
-    /// The agents, in display order; an agent that is not installed is absent.
+    /// The agents shown one by one, in display order; an agent that is not
+    /// installed is absent.
     pub items: Vec<BarItem>,
-    /// With many agents, the ones that have no numbers, folded into a `+N`
-    /// that lists them on hover.
+    /// The agents that did not fit, folded into a `+N` that lists them on
+    /// hover.
     pub folded: Vec<BarItem>,
-    /// How much fits at this window width.
-    pub density: Density,
-    /// The index of the item closest to its limit.
-    pub worst: Option<usize>,
     /// When the numbers were last read, as `3 min ago`.
     pub updated: Option<String>,
 }
@@ -234,7 +142,11 @@ fn meter_line(meter: &Meter, display: PercentDisplay) -> String {
     )
 }
 
-/// What the bar shows for the machine in context.
+/// What the bar shows for the machine in context: one figure per agent, its
+/// logo and the window closest to its limit, the rest on hover. With many
+/// agents the ones that have no numbers fold into a count, and when even one
+/// figure per agent does not fit, the agent closest to its limit stays and the
+/// rest fold too.
 #[allow(clippy::too_many_arguments)]
 pub fn bar_model(
     board: &Board,
@@ -243,7 +155,7 @@ pub fn bar_model(
     shown: &[AgentId],
     now: i64,
     thresholds: Thresholds,
-    style: BarStyle,
+    display: PercentDisplay,
     width: f32,
 ) -> BarModel {
     let mut items = Vec::new();
@@ -258,11 +170,9 @@ pub fn bar_model(
                 label: reason.short().to_owned(),
                 figure: String::new(),
                 left: false,
-                windows: Vec::new(),
                 age: None,
                 stale: None,
                 glyph: "",
-                reset: None,
                 level: Level::Normal,
                 percent: 0.0,
                 known: false,
@@ -276,7 +186,7 @@ pub fn bar_model(
                 }
                 for meter in meters {
                     tip.push('\n');
-                    tip.push_str(&meter_line(meter, style.display));
+                    tip.push_str(&meter_line(meter, display));
                 }
                 tip.push('\n');
                 tip.push_str(&v.provenance());
@@ -284,28 +194,11 @@ pub fn bar_model(
                     agent: reading.agent,
                     machine: reading.machine.clone(),
                     label: primary.kind.short(),
-                    figure: style.display.fixed(primary.percent),
-                    left: style.display == PercentDisplay::Remaining,
-                    windows: meters
-                        .iter()
-                        .map(|meter| BarWindow {
-                            text: format!(
-                                "{} {}",
-                                style.display.label(meter.percent),
-                                window_label(meter)
-                            ),
-                            glyph: meter.level.glyph(),
-                            level: meter.level,
-                            percent: meter.percent as f32,
-                        })
-                        .collect(),
+                    figure: display.fixed(primary.percent),
+                    left: display == PercentDisplay::Remaining,
                     age: v.age,
                     stale: None,
                     glyph: primary.level.glyph(),
-                    reset: primary
-                        .resets_in
-                        .filter(|_| !primary.reset_since_seen)
-                        .map(countdown),
                     level: primary.level,
                     percent: primary.percent as f32,
                     known: true,
@@ -316,6 +209,8 @@ pub fn bar_model(
         };
         items.push(item);
     }
+    // With many agents, the ones with numbers come first and the rest (signed
+    // out, switched off, no data yet) fold into a count.
     let mut folded = Vec::new();
     if items.len() > BAR_PLAIN {
         let (known, rest): (Vec<BarItem>, Vec<BarItem>) =
@@ -323,32 +218,31 @@ pub fn bar_model(
         items = known;
         folded = rest;
     }
-    let worst = items
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| item.known)
-        .max_by(|a, b| a.1.percent.total_cmp(&b.1.percent))
-        .map(|(index, _)| index);
-    let detailed_fits = style.detailed
-        && !items.is_empty()
-        && items.iter().map(BarItem::detailed_cost).sum::<f32>() <= room(width);
+    // One figure per agent is small. When even that does not fit, the agent
+    // closest to its limit stays on show and the others fold into the count.
+    if items.iter().map(BarItem::cost).sum::<f32>() > room(width) {
+        let worst = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.known)
+            .max_by(|a, b| a.1.percent.total_cmp(&b.1.percent))
+            .map(|(index, _)| index);
+        let keep = worst.map(|index| items.remove(index));
+        folded = items.drain(..).chain(folded).collect();
+        items = keep.into_iter().collect();
+    }
     BarModel {
         folded,
-        density: if detailed_fits {
-            Density::Detailed
-        } else {
-            density(width, items.len())
-        },
-        worst,
+        items,
         updated: board
             .collected_at()
             .map(|at| leon_usage::ago((now - at).max(0))),
-        items,
     }
 }
 
-/// What the detailed footer says of one reading, as the bar draws it:
-/// `10% used 2h 29m · 91% used 1d 11h !!`. `None` when nothing is known.
+/// What the bar says of one reading, as `--diagnose usage` prints it: the
+/// figure of the window closest to its limit with its marker (`91% !!`).
+/// `None` when nothing is known.
 pub fn footer_text(
     reading: &AgentUsage,
     now: i64,
@@ -364,22 +258,34 @@ pub fn footer_text(
         &[reading.agent],
         now,
         thresholds,
-        BarStyle {
-            detailed: true,
-            display,
-        },
+        display,
         f32::MAX,
     );
     model
         .items
         .first()
         .filter(|item| item.known)
-        .map(BarItem::detailed_text)
+        .map(|item| item.figure_text().trim_start().to_owned())
 }
 
 /// What an agent is called.
 pub fn agent_name(agent: AgentId) -> &'static str {
     agent.name()
+}
+
+/// One line of the tooltip of the folded `+N`: what the item would have shown,
+/// with the word for the figure so a hover needs no colour to be read.
+fn folded_line(item: &BarItem) -> String {
+    if item.known {
+        format!(
+            "{}{}{}",
+            item.figure.trim_start(),
+            if item.left { " left" } else { " used" },
+            glyph_tail(item.glyph)
+        )
+    } else {
+        item.label.clone()
+    }
 }
 
 /// The colour of a level: tokens of the theme only.
@@ -781,10 +687,7 @@ impl Shell {
             &settings::usage_agents(cx),
             self.usage_now(),
             settings::usage_thresholds(cx),
-            BarStyle {
-                detailed: settings::usage_bar_detailed(cx),
-                display: settings::usage_percent_display(cx),
-            },
+            settings::usage_percent_display(cx),
             self.strip_width(cx),
         );
         annotate_bar(&mut model, &self.usage_note(&statuses));
@@ -1078,22 +981,14 @@ impl Shell {
             .flex()
             .items_center()
             .gap_3();
-        let shown: Vec<(usize, &BarItem)> = match model.density {
-            Density::Single => model
-                .worst
-                .and_then(|index| model.items.get(index).map(|item| (index, item)))
-                .into_iter()
-                .collect(),
-            _ => model.items.iter().enumerate().collect(),
-        };
-        for (_, item) in shown {
-            cluster = cluster.child(self.render_bar_item(item, model.density, colours, cx));
+        for item in &model.items {
+            cluster = cluster.child(self.render_bar_item(item, colours, cx));
         }
         if !model.folded.is_empty() {
             let tip = model
                 .folded
                 .iter()
-                .map(|item| format!("{}: {}", agent_name(item.agent), item.label))
+                .map(|item| format!("{}: {}", agent_name(item.agent), folded_line(item)))
                 .collect::<Vec<_>>()
                 .join("\n");
             cluster = cluster.child(
@@ -1180,7 +1075,6 @@ impl Shell {
     fn render_bar_item(
         &self,
         item: &BarItem,
-        density: Density,
         colours: &Palette,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -1218,76 +1112,23 @@ impl Shell {
                     .child(item.label.clone()),
             );
         }
-        if matches!(density, Density::Detailed | Density::Full | Density::Short) {
-            chip = chip.child(meter_bar(item.percent, METER, colour, colours));
-        }
-        if density == Density::Detailed {
-            // Every window: `10% used 2h 29m · 91% used 1d 11h !!`, each in
-            // the colour of its own level, with its marker after it.
-            let mut text = div()
+        // One figure per agent, the window closest to its limit, in the colour
+        // of its level and with its marker; everything else is in the tooltip.
+        chip = chip.child(
+            mono(item.figure_text())
                 .debug_selector({
                     let name = format!("usage-figure-{}", item.agent.as_str());
                     move || name.clone()
                 })
-                .flex()
-                .items_center()
-                .gap(px(5.));
-            for (n, window) in item.windows.iter().enumerate() {
-                if n > 0 {
-                    text = text.child(mono("·").text_color(colours.text_faint));
-                }
-                text = text.child(
-                    mono(format!("{}{}", window.text, glyph_tail(window.glyph)))
-                        .text_size(metrics::TEXT_SMALL())
-                        .text_color(level_colour(window.level, colours)),
-                );
-            }
-            chip = chip.child(text);
-            if let Some(age) = &item.stale {
-                chip = chip.child(
-                    mono(format!("({age})"))
-                        .text_size(metrics::TEXT_SMALL())
-                        .text_color(colours.text_faint),
-                );
-            }
-            return chip;
-        }
-        if density == Density::Full {
+                .text_size(metrics::TEXT_SMALL())
+                .text_color(colour),
+        );
+        if let Some(age) = &item.stale {
             chip = chip.child(
-                mono(item.label.clone())
+                mono(format!("({age})"))
                     .text_size(metrics::TEXT_SMALL())
                     .text_color(colours.text_faint),
             );
-        }
-        chip = chip.child(
-            mono(format!(
-                "{}{}{}",
-                item.figure,
-                if item.left { " left" } else { "" },
-                glyph_tail(item.glyph)
-            ))
-            .debug_selector({
-                let name = format!("usage-figure-{}", item.agent.as_str());
-                move || name.clone()
-            })
-            .text_size(metrics::TEXT_SMALL())
-            .text_color(colour),
-        );
-        if density == Density::Full {
-            if let Some(reset) = &item.reset {
-                chip = chip.child(
-                    mono(reset.clone())
-                        .text_size(metrics::TEXT_SMALL())
-                        .text_color(colours.text_faint),
-                );
-            }
-            if let Some(age) = &item.stale {
-                chip = chip.child(
-                    mono(format!("({age})"))
-                        .text_size(metrics::TEXT_SMALL())
-                        .text_color(colours.text_faint),
-                );
-            }
         }
         chip
     }
@@ -1825,19 +1666,77 @@ mod tests {
             &[AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE],
             NOW,
             Thresholds::default(),
-            BarStyle::default(),
+            PercentDisplay::Used,
             width,
         )
     }
 
     #[test]
-    fn the_density_steps_down_as_the_window_narrows_and_agents_multiply() {
-        assert_eq!(density(1600.0, 3), Density::Full);
-        assert_eq!(density(1000.0, 3), Density::Short);
-        assert_eq!(density(640.0, 3), Density::Minimal);
-        assert_eq!(density(420.0, 3), Density::Single);
-        assert_eq!(density(420.0, 1), Density::Minimal);
-        assert_eq!(density(300.0, 0), Density::Single);
+    fn when_even_one_figure_per_agent_does_not_fit_the_worst_stays_and_the_rest_fold() {
+        let board = Board::new(vec![
+            reading(
+                AgentId::CLAUDE,
+                "local",
+                vec![(WindowKind::Weekly, 91.0, 100)],
+            ),
+            reading(
+                AgentId::CODEX,
+                "local",
+                vec![(WindowKind::Weekly, 16.0, 100)],
+            ),
+            reading(
+                AgentId::OPENCODE,
+                "local",
+                vec![(WindowKind::Weekly, 42.0, 100)],
+            ),
+        ]);
+        let wide = model(&board, 1600.0);
+        assert_eq!(wide.items.len(), 3);
+        assert!(wide.folded.is_empty());
+        // Too narrow for all three: the agent closest to its limit stays.
+        let narrow = model(&board, 420.0);
+        assert_eq!(narrow.items.len(), 1);
+        assert_eq!(narrow.items[0].agent, AgentId::CLAUDE);
+        assert_eq!(narrow.folded.len(), 2);
+        assert!(narrow.folded.iter().all(|item| item.known));
+    }
+
+    #[test]
+    fn ten_agents_fit_one_figure_each_on_a_laptop_window() {
+        let agents: Vec<AgentId> = leon_core::agent::builtin()
+            .iter()
+            .map(|spec| spec.id)
+            .take(10)
+            .collect();
+        assert_eq!(agents.len(), 10, "the catalogue holds at least ten agents");
+        let board = Board::new(
+            agents
+                .iter()
+                .map(|agent| {
+                    reading(
+                        *agent,
+                        "local",
+                        vec![
+                            (WindowKind::FiveHour, 12.0, 4 * 3600),
+                            (WindowKind::Weekly, 34.0, 5 * 86_400),
+                        ],
+                    )
+                })
+                .collect(),
+        );
+        // A 14-inch laptop's window: the whole footer, sidebar shown.
+        let m = bar_model(
+            &board,
+            &MachineId::local(),
+            "This computer",
+            &agents,
+            NOW,
+            Thresholds::default(),
+            PercentDisplay::Used,
+            1512.0,
+        );
+        assert_eq!(m.items.len(), 10, "every agent, one figure each");
+        assert!(m.folded.is_empty());
     }
 
     #[test]
@@ -1867,10 +1766,9 @@ mod tests {
         assert_eq!(m.items[0].figure, " 91%");
         assert_eq!(m.items[0].glyph, "!!");
         assert_eq!(m.items[0].level, Level::Critical);
-        assert_eq!(m.items[0].reset.as_deref(), Some("1d 11h"));
+        assert_eq!(m.items[0].figure_text(), " 91% !!");
         assert_eq!(m.items[1].label, "wk");
         assert_eq!(m.items[1].level, Level::Normal);
-        assert_eq!(m.worst, Some(0));
     }
 
     #[test]
@@ -1909,7 +1807,6 @@ mod tests {
         assert_eq!(m.items[0].label, "source off");
         assert!(!m.items[0].known);
         assert!(m.items[0].tip.contains(Reason::SourceDisabled.sentence()));
-        assert_eq!(m.worst, None);
     }
 
     #[test]
@@ -1948,7 +1845,6 @@ mod tests {
         let item = model(&board, 1600.0).items.remove(0);
         assert_eq!(item.percent, 0.0);
         assert_eq!(item.level, Level::Normal);
-        assert_eq!(item.reset, None);
     }
 
     #[test]
@@ -2121,7 +2017,7 @@ mod tests {
         assert_eq!(step_scope(&s, &machines, &local, -1), Scope::All);
     }
 
-    fn model_styled(board: &Board, width: f32, style: BarStyle) -> BarModel {
+    fn model_display(board: &Board, width: f32, display: PercentDisplay) -> BarModel {
         bar_model(
             board,
             &MachineId::local(),
@@ -2129,7 +2025,7 @@ mod tests {
             &[AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE],
             NOW,
             Thresholds::default(),
-            style,
+            display,
             width,
         )
     }
@@ -2153,17 +2049,21 @@ mod tests {
     const DAY_AND_11H: i64 = 86_400 + 11 * 3600;
 
     #[test]
-    fn the_detailed_bar_is_orcas_text_with_countdowns_and_model_names() {
+    fn the_bar_shows_the_window_closest_to_its_limit_and_the_tip_lists_them_all() {
         let item = model(&orca_like(), 2400.0).items.remove(0);
-        assert_eq!(
-            item.detailed_text(),
-            "10% used 2h 29m · 91% used 1d 11h !! · 0% used Fable"
-        );
-        assert_eq!(model(&orca_like(), 2400.0).density, Density::Detailed);
+        assert_eq!((item.label.as_str(), item.figure.as_str()), ("wk", " 91%"));
+        assert_eq!(item.figure_text(), " 91% !!");
+        for line in [
+            "5-hour window: 10% used · Resets in 2h 29m",
+            "Weekly: 91% used (near the limit) · Resets in 1d 11h",
+            "Weekly, Fable: 0% used · Resets in 6d 7h",
+        ] {
+            assert!(item.tip.contains(line), "{line} missing from {}", item.tip);
+        }
     }
 
     #[test]
-    fn the_countdown_floors_and_a_reset_that_has_passed_says_now() {
+    fn the_tip_floors_countdowns_and_a_reset_that_has_passed_says_so() {
         let board = Board::new(vec![reading(
             AgentId::CLAUDE,
             "local",
@@ -2174,43 +2074,30 @@ mod tests {
             ],
         )]);
         let item = model(&board, 2400.0).items.remove(0);
-        assert_eq!(
-            item.detailed_text(),
-            "20% used 47m · 30% used 6d 7h · 0% used now"
-        );
-    }
-
-    #[test]
-    fn the_compact_bar_is_one_window_per_agent_and_the_detailed_one_gives_way_to_it() {
-        let compact = BarStyle {
-            detailed: false,
-            ..BarStyle::default()
-        };
-        let m = model_styled(&orca_like(), 2400.0, compact);
-        assert_eq!(m.density, Density::Full);
-        let item = &m.items[0];
-        assert_eq!((item.label.as_str(), item.figure.as_str()), ("wk", " 91%"));
-        // Detailed, but the window is too narrow for every window: compact.
-        let m = model(&orca_like(), 600.0);
+        assert_eq!((item.label.as_str(), item.figure.as_str()), ("wk", " 30%"));
         assert!(
-            matches!(m.density, Density::Full | Density::Short),
-            "{:?}",
-            m.density
+            item.tip.contains("5-hour window: 20% used · Resets in 47m"),
+            "{}",
+            item.tip
+        );
+        assert!(
+            item.tip.contains("Weekly: 30% used · Resets in 6d 7h"),
+            "{}",
+            item.tip
+        );
+        assert!(
+            item.tip
+                .contains("Monthly: 0% used · Reset since last seen"),
+            "{}",
+            item.tip
         );
     }
 
     #[test]
     fn percent_left_is_the_complement_of_the_rounded_used_figure_in_every_surface() {
-        let left = BarStyle {
-            display: PercentDisplay::Remaining,
-            ..BarStyle::default()
-        };
-        let m = model_styled(&orca_like(), 2400.0, left);
+        let m = model_display(&orca_like(), 2400.0, PercentDisplay::Remaining);
         let item = &m.items[0];
-        assert_eq!(
-            item.detailed_text(),
-            "90% left 2h 29m · 9% left 1d 11h !! · 100% left Fable"
-        );
+        assert_eq!(item.figure_text(), "  9% left !!");
         assert_eq!((item.figure.as_str(), item.left), ("  9%", true));
         assert!(
             item.tip.contains("Weekly: 9% left (near the limit)"),
@@ -2253,17 +2140,10 @@ mod tests {
         )]);
         let item = model(&board, 2400.0).items.remove(0);
         assert_eq!(item.figure, " 13%");
-        assert_eq!(item.detailed_text(), "13% used 1h");
+        assert_eq!(item.figure_text(), " 13%");
         assert!(item.tip.contains("13% used"), "{}", item.tip);
-        let left = model_styled(
-            &board,
-            2400.0,
-            BarStyle {
-                display: PercentDisplay::Remaining,
-                ..BarStyle::default()
-            },
-        );
-        assert_eq!(left.items[0].detailed_text(), "87% left 1h");
+        let left = model_display(&board, 2400.0, PercentDisplay::Remaining);
+        assert_eq!(left.items[0].figure_text(), " 87% left");
     }
 
     #[test]

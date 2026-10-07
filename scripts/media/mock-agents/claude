@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# A simulated Claude Code, only for Leon's README media.
+# It is not an agent: it draws a plausible frame and waits for a key.
+set -u
+
+if [ "${1:-}" = "--version" ]; then
+    echo "2.1.292 (Claude Code)"
+    exit 0
+fi
+if [ "${1:-}" = "--resume" ]; then
+    shift 2 2>/dev/null || true
+fi
+
+ESC=$'\033'
+DIM="${ESC}[38;5;245m"
+TEXT="${ESC}[38;5;252m"
+ORANGE="${ESC}[38;5;209m"
+GREEN="${ESC}[38;5;114m"
+BLUE="${ESC}[38;5;111m"
+RESET="${ESC}[0m"
+
+# The story matches the worktree this shell sits in.
+case "$PWD" in
+    *login-timeout*)
+        PROMPT="sessions stay open forever; close them after 30 idle minutes"
+        READ="Read(src/session.rs)"
+        READ_SAY="IDLE_TIMEOUT is declared but nothing reads it."
+        WRITE="Update(src/session.rs)"
+        WRITE_SAY="Wired the deadline into the heartbeat sweep."
+        DONE_1="Done. A session closes after 30 idle minutes, and a request"
+        DONE_2="refreshes the deadline before it can expire."
+        ;;
+    *)
+        PROMPT="add rate limiting to the public endpoints"
+        READ="Read(src/routes.rs)"
+        READ_SAY="The public routes have no limiter yet."
+        WRITE="Update(src/routes.rs)"
+        WRITE_SAY="Added a token bucket in front of the public routes."
+        DONE_1="Done. Public endpoints now allow 100 requests a minute per key,"
+        DONE_2="with a 429 and Retry-After when the bucket is empty."
+        ;;
+esac
+
+frame() {
+    clear
+    printf '\033]0;\u2733 Claude Code\007'
+    printf '\n'
+    printf ' %s▐▛███▜▌%s   %sClaude Code v2.1.292%s\n' "$ORANGE" "$RESET" "$TEXT" "$RESET"
+    printf '%s▝▜█████▛▘%s  %sSonnet 4.6 · Pro plan%s\n' "$ORANGE" "$RESET" "$DIM" "$RESET"
+    printf ' %s▘▘ ▝▝%s    %s%s%s\n' "$ORANGE" "$RESET" "$DIM" "$(printf '%s' "$PWD" | sed "s|$HOME|~|")" "$RESET"
+    printf '\n'
+    printf '%s>%s %s%s%s\n' "$GREEN" "$RESET" "$TEXT" "$PROMPT" "$RESET"
+    printf '\n'
+}
+
+steps() {
+    sleep 0.6
+    printf '%s●%s %sLooking at the code first.%s\n' "$ORANGE" "$RESET" "$TEXT" "$RESET"
+    printf '\n'
+    sleep 0.7
+    printf '  %s%s%s\n' "$BLUE" "$READ" "$RESET"
+    printf '  %s⎿  %s%s\n' "$DIM" "$READ_SAY" "$RESET"
+    printf '\n'
+    sleep 0.8
+    printf '  %s%s%s\n' "$BLUE" "$WRITE" "$RESET"
+    printf '  %s⎿  %s%s\n' "$DIM" "$WRITE_SAY" "$RESET"
+    printf '\n'
+    sleep 0.8
+    printf '%s●%s %s%s%s\n' "$ORANGE" "$RESET" "$TEXT" "$DONE_1" "$RESET"
+    printf '  %s%s%s\n' "$TEXT" "$DONE_2" "$RESET"
+    printf '\n'
+    printf '%s>%s \n' "$GREEN" "$RESET"
+}
+
+frame
+stty raw -echo 2>/dev/null
+read -rsn1 _ || true
+stty sane 2>/dev/null
+steps
+while :; do
+    stty raw -echo 2>/dev/null
+    read -rsn1 key || break
+    stty sane 2>/dev/null
+    [ "$key" = $'\003' ] && break
+done

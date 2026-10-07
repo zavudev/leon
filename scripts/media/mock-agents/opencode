@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# A simulated opencode, only for Leon's README media.
+set -u
+
+if [ "${1:-}" = "--version" ]; then
+    echo "opencode v2.0.24"
+    exit 0
+fi
+if [ "${1:-}" = "--session" ]; then
+    shift 2 2>/dev/null || true
+fi
+
+ESC=$'\033'
+DIM="${ESC}[38;5;245m"
+TEXT="${ESC}[38;5;252m"
+MAGENTA="${ESC}[38;5;176m"
+GREEN="${ESC}[38;5;114m"
+BLUE="${ESC}[38;5;111m"
+RESET="${ESC}[0m"
+
+frame() {
+    clear
+    printf '\033]0;opencode\007'
+    printf '\n'
+    printf '  %sopencode%s %sv2.0.24%s            %sclaude-sonnet-4-6%s\n' "$MAGENTA" "$RESET" "$DIM" "$RESET" "$DIM" "$RESET"
+    printf '  %s──────────────────────────────────────────────────────────%s\n' "$DIM" "$RESET"
+    printf '\n'
+    printf '  %s┃%s %sAdd cursor pagination to the entries endpoint%s\n' "$MAGENTA" "$RESET" "$TEXT" "$RESET"
+    printf '\n'
+    printf '  %s⏺%s %sThe entries endpoint returns every row. I will page it with a%s\n' "$GREEN" "$RESET" "$TEXT" "$RESET"
+    printf '    %scursor on (at, id) so the order stays stable.%s\n' "$TEXT" "$RESET"
+    printf '\n'
+    printf '  %s┃%s \n' "$MAGENTA" "$RESET"
+}
+
+steps() {
+    sleep 0.7
+    printf '\n'
+    printf '    %s→ Read(src/entries.ts)%s\n' "$BLUE" "$RESET"
+    sleep 0.7
+    printf '    %s✓ Update(src/entries.ts) (+22 −4)%s\n' "$GREEN" "$RESET"
+    printf '\n'
+    sleep 0.8
+    printf '  %s⏺%s %sDone. GET /entries now takes %s?after=<cursor>&limit=50%s%s and%s\n' "$GREEN" "$RESET" "$TEXT" "$RESET" "$BLUE" "$RESET" "$TEXT"
+    printf '    %sreturns next_cursor. Offset paging still works for old clients.%s\n' "$TEXT" "$RESET"
+    printf '\n'
+    printf '  %s┃%s \n' "$MAGENTA" "$RESET"
+}
+
+frame
+stty raw -echo 2>/dev/null
+read -rsn1 _ || true
+stty sane 2>/dev/null
+steps
+while :; do
+    stty raw -echo 2>/dev/null
+    read -rsn1 key || break
+    stty sane 2>/dev/null
+    [ "$key" = $'\003' ] && break
+done

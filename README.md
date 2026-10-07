@@ -50,7 +50,40 @@ switching to one never restarts it.
 
 ## Screenshots
 
-_No screenshots yet._
+<p align="center">
+  <a href="docs/media/video/hero.mp4">
+    <img src="docs/media/video/hero.webp" alt="The tree, a session started by hand, and the agent working in it" width="100%">
+  </a>
+</p>
+
+_The images and clips are from a demo workspace; the agent output in them is
+simulated. The tree, the terminals, the transcripts and the dialogs are Leon
+itself._
+
+| | |
+| --- | --- |
+| ![The tree](docs/media/01-tree.png) | ![A Claude Code session](docs/media/02-session-working.png) |
+| _Every machine, project and worktree in one tree; live sessions above the history of their worktree._ | _A session started from the tree, in a real terminal, with the agent working in it._ |
+| ![A finished session](docs/media/03-session-done.png) | ![A stored transcript](docs/media/04-transcript.png) |
+| _When the agent waits for you the sidebar says so; the session stays alive in the background._ | _`Ctrl+Shift+L` shows the stored transcript; `Enter` resumes it in a terminal._ |
+| ![The command palette](docs/media/05-palette.png) | ![The history search](docs/media/06-search.png) |
+| _The command palette reaches every command, the themes included._ | _`Ctrl+Shift+I` searches the messages of every imported session._ |
+| ![Connecting a machine](docs/media/07-connect.png) | ![Settings](docs/media/08-settings.png) |
+| _Connecting a machine: with a code, through the relay, or over SSH._ | _Settings, from the appearance to the agents._ |
+| ![The light appearance](docs/media/09-light.png) | ![The keyboard shortcuts](docs/media/10-shortcuts.png) |
+| _The same window in the light appearance._ | _`?` lists every shortcut, searchable._ |
+
+### Clips
+
+Four short recordings of the demo workspace; each plays inline and links to
+the MP4 of the same recording.
+
+| | |
+| --- | --- |
+| [![Starting a session](docs/media/video/hero.webp)](docs/media/video/hero.mp4) | [![Resuming a session](docs/media/video/resume-a-session.webp)](docs/media/video/resume-a-session.mp4) |
+| _Starting a session from the tree, and coming back to it while it runs._ | _Resuming a history session, and opening its stored transcript._ |
+| [![Panes and tabs](docs/media/video/panes-and-tabs.webp)](docs/media/video/panes-and-tabs.mp4) | [![Themes](docs/media/video/themes.webp)](docs/media/video/themes.mp4) |
+| _A shell, a command, a split, and moving between panes._ | _Light and dark, and the two built-in themes._ |
 
 ## Install
 
@@ -1019,25 +1052,23 @@ a test fails when it is stale.
 How much of each agent's limits is left, per machine. The footer under the main
 pane (level with the sidebar's tools, the whole width when the sidebar is
 hidden) shows, for every agent that is installed on the machine in context, its
-logo, a small meter and, by default (**Usage bar: Detailed**), **every window**
-in Orca's wording, `N% used <label>` joined by `·`: the label of the five-hour
-and the weekly window is the live countdown to their reset (`2h 29m`, `1d 11h`,
-floored: `47m`, `6d 7h`, `now`), the label of a per-model window is the model's
-name: `10% used 2h 29m · 91% used 1d 11h !! · 0% used Fable`. **Compact** shows
-the one window closest to its limit (`wk  91% !!  1d 11h`). A level is a colour
-**and** a marker, never a colour alone: `!` from the warning threshold (60% used
-by default), `!!` from the critical one (80%), as Orca's. **Show limits as**
+logo and one figure: the window closest to its limit, `NN%`, in the colour of
+its level and with its marker (` 91% !!`, or ` 9% left !!`). **Hovering** says
+every window the way the usage view does (`5-hour window: 10% used · Resets in
+2h 29m`), so the whole breakdown is one hover away, and a click or `⇧⌘U`
+(`Ctrl+Shift+Alt+U`) opens the view. A level is a colour **and** a marker,
+never a colour alone: `!` from the warning threshold (60% used by default),
+`!!` from the critical one (80%), as Orca's. **Show limits as**
 (`usage_percentage_display`) shows what is left instead (`9% left`); the
 levels, the warnings and the notice always judge what is **used**. Every figure
 is rounded the same way everywhere (half away from zero: 12.5 reads 13, never
 12), between 0 and 100. A window that has already reset since the numbers were
 read shows 0% and says so; one with no usable reading says why (`signed out`,
-`source off`, `too old`, `no data yet`) instead of a number. On a narrow window
-the bar gives up detail in steps: every window of every agent; then the one
-closest to its limit (logo, meter, label, figure, time); then logo, meter and
-figure; then logo and figure; then a single indicator for the agent closest to
-its limit. The refresh button reads the limits again and says when they were
-last read.
+`source off`, `too old`, `no data yet`) instead of a number. With more than
+four agents, the ones that have no numbers fold into a `+N` whose hover lists
+them; on a narrow window the agent closest to its limit stays and the others
+fold into the count. The refresh button reads the limits again and says when
+they were last read.
 
 **When a read fails the numbers stay.** An expired or rejected sign-in (a 401,
 or a 403 that is not a missing scope), a rate limit, being offline and a vendor
@@ -1369,6 +1400,7 @@ exit status: a way to check the terminal against a real agent
 * [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): crates, rules, the terminal.
 * [`docs/SETTINGS.md`](docs/SETTINGS.md) and [`docs/THEMES.md`](docs/THEMES.md): settings and themes.
 * [`docs/RELEASING.md`](docs/RELEASING.md): how a release is cut, signed and published.
+* [`docs/media/`](docs/media) and [`scripts/media/`](scripts/media): the screenshots and clips of this README, and how they are made.
 * [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md) and [`CHANGELOG.md`](CHANGELOG.md).
 * [`NOTICE`](NOTICE): third-party code, assets and trademarks.
 

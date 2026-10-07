@@ -11,9 +11,23 @@
   without typing a path anywhere; reconnecting keeps them up to date. Nothing
   is shared that the paired device could not read with the terminal it already
   holds, and a headless `leon host` shares nothing.
+* The README shows what Leon looks like: a gallery of screenshots and four
+  short clips under `docs/media/`, and `scripts/media/` regenerates them from
+  a demo workspace.
 * Removing a worktree that git refuses because it holds modified or untracked
   files leaves it whole and asks before they are deleted with it: only that
   answer passes `--force`.
+
+### Changed
+
+* The usage bar shows one figure per agent — its logo and the percentage of the
+  window closest to its limit, with the level's marker — instead of every
+  window of every agent; hovering still lists them all and the usage view is
+  unchanged. The `Usage bar: Detailed / Compact` setting is gone. Where the
+  detailed bar held two or three agents, ten now fit; with more than four
+  agents the ones without numbers fold into a `+N` whose hover lists them, and
+  on a narrower window the agent closest to its limit stays and the others fold
+  into the count.
 
 ### Fixed
 

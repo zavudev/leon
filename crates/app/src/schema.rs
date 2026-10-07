@@ -323,7 +323,6 @@ const APPEARANCES: Choices =
 const LINES: Choices = Choices::Fixed(&[("theme", "Theme default"), ("on", "On"), ("off", "Off")]);
 const MOTION: Choices =
     Choices::Fixed(&[("system", "Follow system"), ("on", "On"), ("off", "Off")]);
-const BAR_MODES: Choices = Choices::Fixed(&[("detailed", "Detailed"), ("compact", "Compact")]);
 const PERCENT_DISPLAYS: Choices = Choices::Fixed(&[("used", "Used"), ("remaining", "Left")]);
 const CURSORS: Choices = Choices::Fixed(&[
     ("block", "Block"),
@@ -858,15 +857,6 @@ const BASE: &[Def] = &[
             unit: "s",
         },
         D::Int(600),
-    ),
-    def(
-        "usage_bar_mode",
-        S::Usage,
-        "Usage bar",
-        "Detailed shows every window of each agent (`10% used 2h 29m · 91% used 1d 11h`, the countdown to the reset, a model's name for its own window) and gives way to Compact, one window per agent, as the window narrows. Compact shows only the window closest to its limit.",
-        "footer detailed compact verbose windows chips limits",
-        K::Choice(BAR_MODES),
-        D::Text("detailed"),
     ),
     def(
         "usage_percentage_display",
