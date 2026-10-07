@@ -31,6 +31,12 @@
 
 ### Fixed
 
+* A session running in a terminal can be closed from its row's menu, and no
+  longer offers "Remove from history", which only brought the terminal back as
+  a live row.
+* A terminal that learned its session's id before the session was stored is
+  linked to its history row once it appears, instead of showing the same
+  session twice.
 * A worktree row the store no longer has (taken by another window or by a
   terminal, behind Leon's back) is not an error when it is removed any more:
   the list is read again, the row goes, and the status says the worktree was

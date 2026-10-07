@@ -356,7 +356,16 @@ impl Shell {
                 .map(|found| local && found.app.is_some()),
             _ => None,
         };
-        let items = items_for_held(&row.kind, local, held);
+        let mut items = items_for_held(&row.kind, local, held);
+        // A history session with a terminal is that terminal's row: it closes
+        // from here as a live row does, and removing it from the history would
+        // only bring the terminal back as a live row, so that is not offered.
+        if let Kind::Session(session) = &row.kind {
+            if self.live.of_history(&session.id).is_some() {
+                items.retain(|item| item.command != Command::RemoveFromHistory);
+                items.push(Item::new("Close", Command::CloseSession));
+            }
+        }
         (!items.is_empty()).then(|| Menu::new(row.id.clone(), items, at))
     }
 

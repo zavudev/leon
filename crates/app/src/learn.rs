@@ -59,6 +59,20 @@ pub struct Titled {
     pub title: String,
 }
 
+/// A terminal that knows its session's id but not its history row, for
+/// [`by_id`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unlinked {
+    /// The live session's id.
+    pub id: u64,
+    /// The machine it runs on.
+    pub machine: MachineId,
+    /// Its agent.
+    pub agent: AgentId,
+    /// The agent's own session id it learned.
+    pub external: String,
+}
+
 /// What was learned for one terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Learned {
@@ -68,7 +82,8 @@ pub struct Learned {
     pub external: String,
     /// The history row, when the importer already stored it.
     pub history: Option<SessionId>,
-    /// How sure: `state-file`, `arguments`, `newest-in-folder` or `title`.
+    /// How sure: `state-file`, `arguments`, `newest-in-folder`, `title`, or
+    /// `id` for a history row that only arrived after the id was learned.
     pub how: &'static str,
 }
 
@@ -172,6 +187,29 @@ pub fn by_folder(fresh: &[Fresh], sessions: &[Session], taken: &Taken) -> Vec<Le
         }
     }
     learned
+}
+
+/// Links a terminal that learned its session's id before the importer had
+/// stored the session: once the row exists, the id names it exactly. Without
+/// this the tree shows the terminal and its own history row as two entries,
+/// because nothing else looks at a terminal that already has an id.
+pub fn by_id(unlinked: &[Unlinked], sessions: &[Session]) -> Vec<Learned> {
+    unlinked
+        .iter()
+        .filter_map(|terminal| {
+            let session = sessions.iter().find(|session| {
+                session.machine_id == terminal.machine
+                    && session.agent == terminal.agent
+                    && session.external_id == terminal.external
+            })?;
+            Some(Learned {
+                id: terminal.id,
+                external: terminal.external.clone(),
+                history: Some(session.id.clone()),
+                how: "id",
+            })
+        })
+        .collect()
 }
 
 /// Matches terminals to the stored session their title names.
@@ -437,6 +475,23 @@ mod tests {
         assert_eq!(learned[0].external, "new");
         assert_eq!(learned[0].how, "title");
         assert_eq!(learned[0].history, Some(SessionId::from_string("row-new")));
+    }
+
+    #[test]
+    fn a_learned_id_finds_its_history_row_once_it_exists() {
+        let unlinked = [Unlinked {
+            id: 1,
+            machine: MachineId::local(),
+            agent: AgentId::CLAUDE,
+            external: "mine".to_owned(),
+        }];
+        let mine = titled_session(AgentId::CLAUDE, "mine", "/srv/api", "Fix");
+        let other = titled_session(AgentId::CLAUDE, "other", "/srv/api", "Fix");
+        assert!(by_id(&unlinked, std::slice::from_ref(&other)).is_empty());
+        let learned = by_id(&unlinked, &[other, mine.clone()]);
+        assert_eq!(learned.len(), 1);
+        assert_eq!(learned[0].history, Some(mine.id));
+        assert_eq!(learned[0].how, "id");
     }
 
     #[test]
