@@ -122,9 +122,34 @@ fn select_all_selects_the_whole_buffer_so_the_ordinary_copy_takes_it(cx: &mut Te
     }
     let selected = terminal_of(&h, cx, 1).unwrap().selection_text().unwrap();
     assert!(selected.contains("line 1 of the output") && selected.contains("line 60"));
+    let sent = script_of(&h, 1).written();
     h.press_chord("cmd-c", "ctrl-c", cx);
     let copied = clipboard(cx).expect("the native copy chord copied the selection");
     assert!(copied.contains("line 1 of the output") && copied.contains("line 60"));
+    assert_eq!(
+        script_of(&h, 1).written(),
+        sent,
+        "a copy that took the chord sends the program nothing"
+    );
+}
+
+#[gpui_kit::test]
+fn without_a_selection_the_copy_chord_is_not_taken(cx: &mut TestAppContext) {
+    let (h, _dir, _) = terminal_with(cx, 1);
+    assert!(
+        terminal_of(&h, cx, 1).unwrap().selection_text().is_none(),
+        "nothing is selected"
+    );
+    let sent = script_of(&h, 1).written();
+    h.press_chord("cmd-c", "ctrl-c", cx);
+    let written = &script_of(&h, 1).written()[sent.len()..];
+    if crate::platform::is_mac() {
+        // Cmd+C is the system's copy: with nothing selected it does nothing.
+        assert!(written.is_empty(), "nothing is sent: {written:?}");
+    } else {
+        // Ctrl+C is the program's: 0x03 interrupts a running command.
+        assert_eq!(written, [0x03], "the interrupt byte");
+    }
 }
 
 fn save_to(

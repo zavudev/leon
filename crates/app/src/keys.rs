@@ -17,22 +17,28 @@
 //!
 //! A terminal program must receive every key, so while one has the keyboard
 //! ([`Context::terminal`]) only a few chords are Leon's; all the others go to
-//! the program, `ctrl-c`, `ctrl-d`, `escape`, `tab` and the arrows included.
+//! the program, `ctrl-d`, `escape`, `tab` and the arrows included. `ctrl-c`
+//! is the program's too, unless there is a selection to copy (below).
 //! The rule is the same on every platform and is stated by [`kept_in_terminal`]:
 //!
 //! * **macOS**: every `Cmd` chord of the registry stays Leon's (no terminal
 //!   program uses `Cmd`), and nothing else does. `Cmd+C` and `Cmd+V` copy and
 //!   paste. `Ctrl` is entirely the program's.
 //! * **Linux and Windows**: `secondary` is `Ctrl`, which programs use
-//!   (`ctrl-d` ends input, `ctrl-r` searches history). The operating system's
-//!   ordinary `Ctrl+C` and `Ctrl+V` copy and paste; their `Ctrl+Shift` aliases
-//!   remain available. Other Leon chords must also hold `Shift`, because a
-//!   terminal cannot tell `ctrl-shift-x` from `ctrl-x` and so no program uses
-//!   it. A chord without `Shift` (`ctrl-p`, `ctrl-1`, `ctrl-w` ...) goes to the
-//!   program there.
+//!   (`ctrl-d` ends input, `ctrl-r` searches history). `Ctrl+C` copies when
+//!   there is a selection and is the program's when there is not, so a running
+//!   command is still interrupted; `Ctrl+Shift+C` always copies. `Ctrl+V`
+//!   pastes, and its `Ctrl+Shift` alias remains available. Other Leon chords
+//!   must also hold `Shift`, because a terminal cannot tell `ctrl-shift-x` from
+//!   `ctrl-x` and so no program uses it. A chord without `Shift` (`ctrl-p`,
+//!   `ctrl-1`, `ctrl-w` ...) goes to the program there.
 //! * Bare keys (`escape`, `tab`, `j`, `?`, `enter`...) are never Leon's; the
 //!   exceptions are the scrollback keys `shift-pageup` and `shift-pagedown`,
 //!   which only exist while a terminal has the keyboard ([`When::Terminal`]).
+//!
+//! The copy fallback is not in the table because it needs the terminal's
+//! selection: [`kept_in_terminal`] keeps the chord, and the shell gives a copy
+//! chord that finds no selection back to the program.
 //!
 //! Leave the terminal for the sidebar with `secondary+B` (`Cmd+B`) or, from
 //! anywhere including Linux and Windows terminals, `Ctrl+Shift+B`.
@@ -1931,7 +1937,9 @@ pub fn kept_in_terminal(binding: &Binding, chord: &Chord, mac: bool) -> bool {
         // Cmd on macOS, Ctrl+Shift elsewhere.
         When::Anywhere => chord.secondary && (mac || chord.shift),
         // Scrollback keys are bare. Copy and paste also keep the operating
-        // system's ordinary primary-modifier chord on every platform.
+        // system's ordinary primary-modifier chord on every platform; the
+        // shell takes a copy chord only when there is a selection and gives
+        // it back to the program when there is not (see `ui/shell.rs`).
         When::Terminal => {
             !chord.secondary
                 || mac

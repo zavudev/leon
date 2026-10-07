@@ -8,6 +8,11 @@
   files leaves it whole and asks before they are deleted with it: only that
   answer passes `--force`.
 
+### Fixed
+
+* `Ctrl+C` in a terminal copies only when there is a selection; without one it
+  reaches the program again, so a running command can be interrupted.
+
 ## [0.3.0] - 2026-10-06
 
 ### Added
