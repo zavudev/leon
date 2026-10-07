@@ -2330,6 +2330,98 @@ fn confirming_removes_the_worktree_through_git_and_the_list_updates(cx: &mut Tes
 }
 
 #[gpui_kit::test]
+fn a_worktree_removal_says_deleting_on_the_project_and_on_the_worktree(cx: &mut TestAppContext) {
+    let h = open(
+        cx,
+        ScriptedRunner::new()
+            .reply(Output::ok(""))
+            .reply(Output::ok(MAIN_ONLY)),
+    );
+    let project = h
+        .store
+        .projects(Some(&MachineId::local()))
+        .unwrap()
+        .into_iter()
+        .find(|project| project.name == "api")
+        .unwrap()
+        .id;
+    let worktree = worktree_id(&h, "feature/login");
+    let row = h.row_of(NodeId::Project(project.clone()), cx).unwrap();
+    let worktree_row = h.row_of(NodeId::Worktree(worktree.clone()), cx).unwrap();
+    assert!(
+        !h.shows_dynamic(format!("tree-deleting-{row}"), cx)
+            && !h.shows_dynamic(format!("tree-deleting-{worktree_row}"), cx),
+        "nothing is being deleted yet"
+    );
+    // Start the removal without letting the engine run: while it is in
+    // flight both rows say so.
+    cx.update_window(h.window.into(), |_, window, cx| {
+        h.shell.update(cx, |shell, cx| {
+            shell.remove_worktree(project.clone(), worktree.clone(), false, window, cx)
+        })
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(
+        h.shows_dynamic(format!("tree-deleting-{row}"), cx),
+        "the project row says DELETING while git works"
+    );
+    assert!(
+        h.shows_dynamic(format!("tree-deleting-{worktree_row}"), cx),
+        "and so does the worktree being removed"
+    );
+    h.settle(cx);
+    let row = h.row_of(NodeId::Project(project), cx).unwrap();
+    assert!(
+        !h.shows_dynamic(format!("tree-deleting-{row}"), cx),
+        "the mark goes when the worktree is gone"
+    );
+    assert!(!h
+        .outline(cx)
+        .contains(&"    worktree:feature/login".to_owned()));
+}
+
+#[gpui_kit::test]
+fn removing_a_row_the_store_no_longer_has_says_the_worktree_was_already_gone(
+    cx: &mut TestAppContext,
+) {
+    let h = open(cx, ScriptedRunner::new().reply(Output::ok(MAIN_ONLY)));
+    let project = h
+        .store
+        .projects(Some(&MachineId::local()))
+        .unwrap()
+        .into_iter()
+        .find(|project| project.name == "api")
+        .unwrap()
+        .id;
+    let worktree = worktree_id(&h, "feature/login");
+    // Another window took it and wrote the store: this window's tree still
+    // shows the row.
+    h.store
+        .replace_worktrees(
+            &project,
+            vec![NewWorktree {
+                path: API_ROOT.into(),
+                branch: Some("main".into()),
+                head: None,
+                is_main: true,
+            }],
+        )
+        .unwrap();
+    cx.update_window(h.window.into(), |_, window, cx| {
+        h.shell.update(cx, |shell, cx| {
+            shell.remove_worktree(project.clone(), worktree, false, window, cx)
+        })
+    })
+    .unwrap();
+    h.settle(cx);
+    assert_eq!(h.status(), "The worktree was already gone.");
+    assert!(!h
+        .outline(cx)
+        .contains(&"    worktree:feature/login".to_owned()));
+}
+
+#[gpui_kit::test]
 fn a_worktree_git_refuses_for_its_files_asks_before_forcing_them_away(cx: &mut TestAppContext) {
     let h = open(
         cx,
@@ -4427,6 +4519,69 @@ mod live {
         h.press("enter", cx);
         assert!(h.shell(cx, |s| s.live.ids().is_empty()));
         assert!(script.hung_up(), "the process was told to end");
+    }
+
+    #[gpui_kit::test]
+    fn removing_a_worktree_closes_the_sessions_that_ran_in_it(cx: &mut TestAppContext) {
+        let h = open_live(cx);
+        let (_main, root) = real_worktree(&h, cx);
+        // A linked worktree in a real folder of its own, beside the main one.
+        let linked = tempfile::tempdir().unwrap();
+        let path = linked
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let project = project_id(&h, "real");
+        h.store
+            .replace_worktrees(
+                &project,
+                vec![
+                    NewWorktree {
+                        path: root.clone(),
+                        branch: Some("trunk".into()),
+                        head: None,
+                        is_main: true,
+                    },
+                    NewWorktree {
+                        path: path.clone(),
+                        branch: Some("feature/x".into()),
+                        head: None,
+                        is_main: false,
+                    },
+                ],
+            )
+            .unwrap();
+        h.settle(cx);
+        let worktree = worktree_id(&h, "feature/x");
+        put_cursor_on(&h, cx, NodeId::Worktree(worktree.clone()));
+        h.press("ctrl-t", cx);
+        wait_until(&h, cx, "the shell in the worktree", |h, cx| {
+            screen(h, cx, 1).contains(&format!("FAKE-SHELL in {path}"))
+        });
+        let script = script_of(&h, 1);
+        // git removes the worktree and then lists what is left: its main one.
+        h.runner.queue(Output::ok(""));
+        h.runner.queue(Output::ok(format!(
+            "worktree {root}\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/trunk\n"
+        )));
+        put_cursor_on(&h, cx, NodeId::Worktree(worktree));
+        h.press("m", cx);
+        h.type_text("remove", cx);
+        h.press("enter", cx);
+        assert_eq!(
+            h.palette_titles(cx),
+            ["Remove feature/x", "Cancel"].map(str::to_owned)
+        );
+        h.press("enter", cx); // Remove feature/x
+        h.settle(cx);
+        assert!(
+            h.shell(cx, |s| s.live.ids().is_empty()),
+            "the session running in the worktree was closed with it"
+        );
+        assert!(script.hung_up(), "its program was hung up");
+        assert!(!h.outline(cx).contains(&"worktree:feature/x".to_owned()));
     }
 
     #[gpui_kit::test]

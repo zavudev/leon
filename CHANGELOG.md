@@ -24,6 +24,18 @@
 
 ### Fixed
 
+* A worktree row the store no longer has (taken by another window or by a
+  terminal, behind Leon's back) is not an error when it is removed any more:
+  the list is read again, the row goes, and the status says the worktree was
+  already gone.
+* Back in the window, the tree is read again: what another process (a second
+  window, for one) wrote to the store shows up without waiting for a change
+  of Leon's own.
+* Removing a worktree closes the sessions that were running in it: the folder
+  goes with the worktree, so they no longer stay in the tree under an unsorted
+  folder (their programs are hung up with it). The project's row and the
+  worktree's say `DELETING` while the removal runs, so a slow forced removal
+  is visible.
 * `Ctrl+C` in a terminal copies only when there is a selection; without one it
   reaches the program again, so a running command can be interrupted.
 * A terminal whose agent moves to another session inside it (opencode's session

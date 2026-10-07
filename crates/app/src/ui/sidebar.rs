@@ -569,6 +569,10 @@ impl Shell {
                 let base = self.draggable_row(row, index, base, colours, cx);
                 let sessions = *sessions;
                 let activity = self.project_activity(&project.id);
+                let deleting = self
+                    .deleting
+                    .as_ref()
+                    .is_some_and(|(id, _)| id == &project.id);
                 base.child(chevron)
                     .child(self.logo(
                         &project.id,
@@ -582,6 +586,13 @@ impl Shell {
                             .font_weight(FontWeight::MEDIUM)
                             .child(self.emphasised(&self.project_label(project), colours)),
                     )
+                    .when(deleting, |this| {
+                        this.child(
+                            mono("DELETING")
+                                .debug_selector(move || format!("tree-deleting-{index}"))
+                                .text_color(colours.text_faint),
+                        )
+                    })
                     .child(self.dot(index, activity, colours))
                     .child(count(sessions))
                     .into_any_element()
@@ -590,6 +601,10 @@ impl Shell {
                 let base = self.draggable_row(row, index, base, colours, cx);
                 let _ = sessions;
                 let activity = self.worktree_activity(&worktree.id);
+                let deleting = self
+                    .deleting
+                    .as_ref()
+                    .is_some_and(|(_, id)| id == &worktree.id);
                 base.child(chevron)
                     .child(self.dot(index, activity, colours))
                     .child(self.merged_mark(index, worktree, colours))
@@ -600,6 +615,13 @@ impl Shell {
                     )
                     .when(worktree.is_main, |this| {
                         this.child(mono("MAIN").text_color(colours.text_faint))
+                    })
+                    .when(deleting, |this| {
+                        this.child(
+                            mono("DELETING")
+                                .debug_selector(move || format!("tree-deleting-{index}"))
+                                .text_color(colours.text_faint),
+                        )
                     })
                     .into_any_element()
             }

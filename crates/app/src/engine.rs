@@ -1570,13 +1570,21 @@ impl Engine {
     ) -> Result<Removal, EngineError> {
         let project = self.inner.store.project(project_id)?;
         let machine = self.inner.store.machine(&project.machine_id)?;
-        let worktree = self
+        let Some(worktree) = self
             .inner
             .store
             .worktrees(project_id)?
             .into_iter()
             .find(|worktree| &worktree.id == worktree_id)
-            .ok_or(StoreError::NotFound("worktree"))?;
+        else {
+            // Another window (or a sync) already took it: the row the person
+            // clicked is old. Listing again drops it, and saying it is gone
+            // beats an error they cannot act on.
+            self.sync_worktrees(project_id).await?;
+            return Ok(Removal::Removed(
+                "The worktree was already gone.".to_owned(),
+            ));
+        };
         if worktree.is_main {
             return Err(EngineError::Invalid(
                 "The main worktree cannot be removed.".to_owned(),
@@ -1596,6 +1604,22 @@ impl Engine {
                     .unwrap_or(false)
             {
                 return Ok(Removal::NeedsForce);
+            }
+            // It may not be git's worktree any more (removed from another
+            // window or from a terminal behind Leon's back): then there is
+            // nothing to remove, and listing again takes the row away
+            // instead of keeping an error the person cannot act on.
+            if self.sync_worktrees(project_id).await.is_ok()
+                && self
+                    .inner
+                    .store
+                    .worktrees(project_id)?
+                    .iter()
+                    .all(|stored| &stored.id != worktree_id)
+            {
+                return Ok(Removal::Removed(
+                    "The worktree was already gone.".to_owned(),
+                ));
             }
             return Err(error.into());
         }
@@ -3023,6 +3047,74 @@ branch refs/heads/feature/login
             rig.runner.calls()
         );
         assert_eq!(rig.store.worktrees(&project.id).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn removing_a_worktree_the_store_no_longer_has_lists_again_and_says_it_is_gone() {
+        let after = "worktree /srv/api\nHEAD abc\nbranch refs/heads/main\n";
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok(LISTING))
+            .reply(Output::ok(""))
+            .reply(Output::ok(after)));
+        let project = local_project(&rig.store);
+        rig.engine.run(Op::SyncWorktrees(project.id.clone())).await;
+        let extra = rig.store.worktrees(&project.id).unwrap()[1].clone();
+        // Another window took it and wrote the store: the row this one shows
+        // is old.
+        rig.store
+            .replace_worktrees(
+                &project.id,
+                vec![NewWorktree {
+                    path: PROJECT_ROOT.into(),
+                    branch: Some("main".into()),
+                    head: Some("abc".into()),
+                    is_main: true,
+                }],
+            )
+            .unwrap();
+        let outcome = rig
+            .engine
+            .remove_worktree(project.id.clone(), extra.id, false)
+            .await
+            .expect("the job runs")
+            .expect("an old row is not an error");
+        assert!(
+            matches!(&outcome, Removal::Removed(text) if text.contains("already gone")),
+            "{outcome:?}"
+        );
+        assert_eq!(rig.store.worktrees(&project.id).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn removing_a_worktree_git_no_longer_lists_takes_the_row_away_instead_of_erroring() {
+        let after = "worktree /srv/api\nHEAD abc\nbranch refs/heads/main\n";
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok(LISTING))
+            .reply(Output::ok(""))
+            .reply(Output::failed(
+                128,
+                "fatal: '/srv/api-worktrees/feature-login' is not a working tree",
+            ))
+            .reply(Output::failed(128, "fatal: cannot change to the folder"))
+            .reply(Output::ok(after)));
+        let project = local_project(&rig.store);
+        rig.engine.run(Op::SyncWorktrees(project.id.clone())).await;
+        let extra = rig.store.worktrees(&project.id).unwrap()[1].clone();
+        let outcome = rig
+            .engine
+            .remove_worktree(project.id.clone(), extra.id, false)
+            .await
+            .expect("the job runs")
+            .expect("a worktree git no longer lists is not an error");
+        assert!(
+            matches!(&outcome, Removal::Removed(text) if text.contains("already gone")),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            rig.store.worktrees(&project.id).unwrap().len(),
+            1,
+            "the row is gone with it"
+        );
     }
 
     #[tokio::test]
