@@ -5,8 +5,9 @@
 //! commands, and after them every theme and every appearance as a command of
 //! its own, previewed under the selection. A prefix says what is looked through, and can be typed or
 //! deleted at any time: `>` commands, `@` machines, `#` projects and
-//! worktrees, `/` the full text of the whole session history, `?` the list of
-//! these.
+//! worktrees, `/` the full text of the whole session history, `~` the files
+//! of the project in view (quick open, with `path:line`), `%` the text inside
+//! them, `?` the list of these. The last two are `editor/quick.rs`'s.
 //!
 //! Every command is an entry of the registry (`crate::keys`), so nothing that
 //! is on a key is missing here. A command that needs to be told something
@@ -17,6 +18,7 @@
 //! by title, the full-text search) is read off the UI thread, a moment after
 //! the typing stops; a newer keystroke drops the read that was under way.
 
+use super::editor::{file_items, hit_items, QuickFiles, TextSearch};
 use super::shell::Pane;
 use super::shell::{Overlay, Shell};
 use super::steps::{self, Action, Choice, Custom, Outcome, Step, StepKind, Validate, World};
@@ -46,6 +48,8 @@ use std::time::Duration;
 
 /// How many of each kind the palette lists.
 const PER_KIND: usize = 8;
+/// How many files the plain palette lists beside the places.
+const FILES_IN_ALL: usize = 20;
 /// How many commands it lists.
 const COMMANDS: usize = 120;
 /// How many hits the full-text search asks for.
@@ -70,17 +74,23 @@ pub enum Scope {
     Projects,
     /// `/`: the full text of the session history.
     History,
+    /// `~`: the files of the project in view, to open one.
+    Files,
+    /// `%`: the text inside those files.
+    Text,
     /// `?`: what the prefixes are.
     Help,
 }
 
 /// The prefixes, as `?` lists them.
-pub const MODES: [(&str, &str); 6] = [
-    ("", "Go to a project, worktree, session or machine"),
+pub const MODES: [(&str, &str); 8] = [
+    ("", "Go to a project, session or machine, or open a file"),
     (">", "Run a command"),
     ("@", "Find a machine"),
     ("#", "Find a project or a worktree"),
     ("/", "Search the text of every session"),
+    ("~", "Open a file of the project by name"),
+    ("%", "Search the text of the project's files"),
     ("?", "Show these prefixes"),
 ];
 
@@ -92,6 +102,8 @@ pub fn parse(typed: &str) -> (Scope, &str) {
         Some('@') => (Scope::Machines, typed[1..].trim()),
         Some('#') => (Scope::Projects, typed[1..].trim()),
         Some('/') => (Scope::History, typed[1..].trim()),
+        Some('~') => (Scope::Files, typed[1..].trim()),
+        Some('%') => (Scope::Text, typed[1..].trim()),
         Some('?') => (Scope::Help, typed[1..].trim()),
         _ => (Scope::All, typed.trim()),
     }
@@ -164,6 +176,12 @@ pub enum Item {
     Session(Session),
     /// A match inside a session's text.
     Hit(Box<SearchHit>),
+    /// A file of the project, by its path from the root, to open at a line.
+    File(String, Option<u32>),
+    /// The file the lines that follow are in.
+    FileHeading(String),
+    /// A line of a file that matches the text searched for.
+    Match(Box<crate::search::SearchHit>),
     /// A command to run.
     Command(Command),
     /// A theme or an appearance to wear.
@@ -182,7 +200,10 @@ pub enum Item {
 
 impl Item {
     fn is_row(&self) -> bool {
-        !matches!(self, Item::Section(_) | Item::Line(..))
+        !matches!(
+            self,
+            Item::Section(_) | Item::Line(..) | Item::FileHeading(_)
+        )
     }
 }
 
@@ -222,6 +243,10 @@ pub struct PaletteState {
     found: Found,
     generation: u64,
     search: Option<Task<()>>,
+    /// The files quick open lists.
+    pub files: QuickFiles,
+    /// The text search of the project.
+    pub text: TextSearch,
     usage: Usage,
     usage_file: Option<std::path::PathBuf>,
 }
@@ -243,6 +268,8 @@ impl PaletteState {
             found: Found::default(),
             generation: 0,
             search: None,
+            files: QuickFiles::default(),
+            text: TextSearch::default(),
             usage,
             usage_file,
         }
@@ -289,6 +316,8 @@ impl Shell {
         self.palette.found = Found::default();
         self.palette.search = None;
         self.palette.world = Some(self.world(cx));
+        self.palette.files.reopened();
+        self.palette.text.reset();
         self.overlay = Overlay::Palette;
         let prefix = prefix.to_owned();
         self.palette.input.update(cx, |field, cx| {
@@ -296,6 +325,7 @@ impl Shell {
             field.set_value(prefix, window, cx);
             field.focus(window, cx);
         });
+        self.palette_scope_changed(cx);
         self.fill_palette(cx);
     }
 
@@ -306,6 +336,7 @@ impl Shell {
         self.palette.error = None;
         self.palette.search = None;
         self.palette.found = Found::default();
+        self.cancel_text_search();
         // A theme or appearance that was only being previewed goes back to
         // the one that is kept. A choice that was made is already kept.
         crate::settings::clear_preview(cx);
@@ -555,6 +586,49 @@ impl Shell {
                         .collect(),
                 );
             }
+            Scope::Files => match (self.palette.files.list(), &self.palette.files.failed) {
+                (Some(files), _) => {
+                    let rows = file_items(query, files);
+                    if rows.is_empty() {
+                        items.push(Item::Line("No file matches.".into(), "".into()));
+                    }
+                    section(&mut items, "Files", rows);
+                }
+                (None, Some(why)) => items.push(Item::Line(why.clone().into(), "".into())),
+                (None, None) if self.palette.files.target.is_none() => {
+                    items.push(Item::Line("Open a project first.".into(), "".into()))
+                }
+                (None, None) => {
+                    items.push(Item::Line("Listing the files\u{2026}".into(), "".into()))
+                }
+            },
+            Scope::Text => {
+                let search = &self.palette.text;
+                if query.is_empty() {
+                    items.push(Item::Line(
+                        "Type to search the text of the project's files.".into(),
+                        "".into(),
+                    ));
+                } else if let Some(why) = &search.error {
+                    items.push(Item::Line(why.clone().into(), "".into()));
+                } else if search.running {
+                    items.push(Item::Line("Searching\u{2026}".into(), "".into()));
+                } else if search.hits.is_empty() {
+                    items.push(Item::Line("No matches.".into(), "".into()));
+                }
+                let (rows, more) = hit_items(&search.hits);
+                items.extend(rows);
+                if more || search.truncated {
+                    items.push(Item::Line(
+                        format!(
+                            "Showing the first {} lines: narrow the search to see the rest.",
+                            search.hits.len().min(super::editor::HIT_ROWS)
+                        )
+                        .into(),
+                        "".into(),
+                    ));
+                }
+            }
             Scope::All if query.is_empty() => {
                 section(&mut items, "Recent", self.recent_items(world));
                 section(&mut items, "Machines", machine_items(world, "", PER_KIND));
@@ -587,6 +661,14 @@ impl Shell {
                         .map(Item::Session)
                         .collect(),
                 );
+                // The files of the project in view come last, as in an editor.
+                if let Some(files) = self.palette.files.list() {
+                    let rows: Vec<Item> = file_items(query, files)
+                        .into_iter()
+                        .take(FILES_IN_ALL)
+                        .collect();
+                    section(&mut items, "Files", rows);
+                }
             }
         }
         self.palette.cursor = items.iter().position(Item::is_row).unwrap_or(0);
@@ -655,6 +737,9 @@ impl Shell {
         let mut scored: Vec<(u32, Item)> = BINDINGS
             .iter()
             .filter(|binding| binding.palette)
+            .filter(|binding| {
+                !crate::keys::needs_file(binding.command) || self.focused_file().is_some()
+            })
             .filter_map(|binding| {
                 let base = score(query, binding.label).or_else(|| {
                     let words = crate::keys::keywords(binding.command);
@@ -752,6 +837,11 @@ impl Shell {
         }
         let (scope, query) = parse(&typed);
         let query = query.to_owned();
+        self.palette_scope_changed(cx);
+        if matches!(scope, Scope::Files | Scope::Text) {
+            self.palette.found = Found::default();
+            return self.fill_palette(cx);
+        }
         if query.is_empty() || !matches!(scope, Scope::All | Scope::History) {
             self.palette.found = Found::default();
             return self.fill_palette(cx);
@@ -795,6 +885,21 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> bool {
         let key = stroke.key.as_str();
+        // Alt with C or R flips the switches of the text search.
+        if self.palette.flow.is_none()
+            && stroke.modifiers.alt
+            && !stroke.modifiers.control
+            && !stroke.modifiers.platform
+            && matches!(key, "c" | "r")
+            && parse(&self.palette.input.read(cx).value()).0 == Scope::Text
+        {
+            if key == "c" {
+                self.toggle_search_case(cx);
+            } else {
+                self.toggle_search_regex(cx);
+            }
+            return true;
+        }
         let modified = stroke.modifiers.alt || stroke.modifiers.function;
         if modified {
             return false;
@@ -862,6 +967,7 @@ impl Shell {
             Some(Item::Machine(machine)) => Some(format!("@{}", machine.name)),
             Some(Item::Project(project)) => Some(format!("#{}", project.name)),
             Some(Item::Mode(place)) => MODES.get(*place).map(|(prefix, _)| (*prefix).to_owned()),
+            Some(Item::File(path, _)) => Some(format!("~{path}")),
             _ => None,
         };
         let Some(name) = name else {
@@ -907,7 +1013,17 @@ impl Shell {
             return;
         };
         match item {
-            Item::Section(_) | Item::Line(..) => {}
+            Item::Section(_) | Item::Line(..) | Item::FileHeading(_) => {}
+            Item::File(path, line) => {
+                let target = self.palette.files.target.clone();
+                self.close_palette(window, cx);
+                self.open_found(target, &path, line, window, cx);
+            }
+            Item::Match(hit) => {
+                let target = self.palette.text.target.clone();
+                self.close_palette(window, cx);
+                self.open_found(target, &hit.path, Some(hit.line), window, cx);
+            }
             Item::Choice(place) => {
                 let value = self
                     .palette
@@ -1009,6 +1125,12 @@ impl Shell {
             Action::Engine(op) => self.engine.submit(op),
             Action::StartSession(intent) => self.start_intent(intent, window, cx),
             Action::CloseLive(id) => self.forget_live(id, window, cx),
+            Action::OpenFile(path) => self.open_typed_file(&path, window, cx),
+            Action::SaveFile(id) => self.save_file(id, false, window, cx),
+            Action::SaveAndCloseFile(id) => self.save_file(id, true, window, cx),
+            Action::CloseFile(id) => self.close_file(id, window, cx),
+            Action::OverwriteFile(id) => self.overwrite_file(id, window, cx),
+            Action::ReloadFile(id) => self.reload_file(id, window, cx),
             Action::SleepLive(id) => self.sleep_live(id, window, cx),
             Action::RemoveWorktree {
                 project,
@@ -1081,6 +1203,8 @@ impl Shell {
                 None => crate::settings::set_theme_id(cx, id),
             },
             Action::Quit => self.quit_now(cx),
+            Action::SaveAllAndQuit => self.save_all_and_quit(window, cx),
+            Action::DiscardAndQuit => self.discard_and_quit(cx),
             Action::RestartToUpdate => self.restart_now(cx),
             Action::NewTheme(name) => self.create_theme(&name, cx),
             Action::AddAgent {
@@ -1162,6 +1286,35 @@ impl Shell {
                     );
                     continue;
                 }
+                Item::FileHeading(path) => {
+                    let name = path.rsplit('/').next().unwrap_or(path);
+                    let dir = path.strip_suffix(name).unwrap_or("").trim_end_matches('/');
+                    list = list.child(
+                        div()
+                            .debug_selector(move || format!("palette-file-{index}"))
+                            .h(px(28.))
+                            .pl(px(12.))
+                            .pr_2()
+                            .pt(px(4.))
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .text_size(metrics::TEXT_BODY())
+                            .text_color(colours.text)
+                            .child(self.file_icon(name, false, false, false, colours, cx))
+                            .child(div().flex_none().child(name.to_owned()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(metrics::TEXT_SMALL())
+                                    .text_color(colours.text_faint)
+                                    .child(dir.to_owned()),
+                            ),
+                    );
+                    continue;
+                }
                 Item::Line(name, value) => {
                     let is_error = self.palette.error.as_deref() == Some(name.as_ref());
                     list = list.child(
@@ -1229,6 +1382,25 @@ impl Shell {
                     IconName::Search,
                     None,
                     hit.session.title.clone().into(),
+                    None,
+                ),
+                Item::File(path, line) => {
+                    let name = path.rsplit('/').next().unwrap_or(path);
+                    let dir = path.strip_suffix(name).unwrap_or("").trim_end_matches('/');
+                    (
+                        IconName::File,
+                        Some(match line {
+                            Some(line) => format!("{name}:{line}").into(),
+                            None => name.to_owned().into(),
+                        }),
+                        dir.to_owned().into(),
+                        None,
+                    )
+                }
+                Item::Match(hit) => (
+                    IconName::Search,
+                    None,
+                    format!(":{}", hit.line).into(),
                     None,
                 ),
                 Item::Command(command) => (
@@ -1333,6 +1505,10 @@ impl Shell {
             let label: gpui_kit::AnyElement = match (title, item) {
                 (Some(title), _) => title.into_any_element(),
                 (None, Item::Hit(hit)) => snippet_text(&hit.snippet, colours).into_any_element(),
+                (None, Item::Match(hit)) => {
+                    match_text(&hit.text, self.palette.text.matcher.as_ref(), colours)
+                        .into_any_element()
+                }
                 (None, _) => "".into_any_element(),
             };
             list = list.child(
@@ -1375,6 +1551,16 @@ impl Shell {
                                     .child(agent_icon(agent, px(15.), colours))
                                     .into_any_element(),
                                 None => match item {
+                                    Item::File(path, _) => self.file_icon(
+                                        path.rsplit('/').next().unwrap_or(path),
+                                        false,
+                                        false,
+                                        false,
+                                        colours,
+                                        cx,
+                                    ),
+                                    // A match leads with nothing: its file is the heading.
+                                    Item::Match(_) => div().into_any_element(),
                                     // A project leads with its logo.
                                     Item::Project(project) => self.logo(
                                         &project.id,
@@ -1433,10 +1619,16 @@ impl Shell {
             (Some(_), _) => "ENTER CHOOSE   TAB COMPLETE   ESC BACK",
             (None, Scope::Commands) => "ENTER RUN   CTRL+ENTER RUN AND STAY   ESC CLOSE",
             (None, Scope::Help) => "ENTER CHOOSE   ESC CLOSE",
-            (None, _) => "ENTER OPEN   > COMMANDS   @ MACHINES   # PROJECTS   / HISTORY   ? HELP",
+            (None, Scope::Files) => "ENTER OPEN   PATH:LINE GOES TO A LINE   ESC CLOSE",
+            (None, Scope::Text) => "ENTER OPEN   ALT+C CASE   ALT+R REGEX   ESC CLOSE",
+            (None, _) => {
+                "ENTER OPEN   > COMMANDS   @ MACHINES   # PROJECTS   / HISTORY   ~ FILES   % TEXT   ? HELP"
+            }
         };
         let hints = if crate::platform::is_mac() {
-            hints.replace("CTRL+ENTER", "CMD+ENTER")
+            hints
+                .replace("CTRL+ENTER", "CMD+ENTER")
+                .replace("ALT+", "OPT+")
         } else {
             hints.to_owned()
         };
@@ -1489,6 +1681,10 @@ impl Shell {
                                     .appearance(false),
                             ),
                     )
+                    .children(
+                        (flow.is_none() && scope == Scope::Text)
+                            .then(|| self.search_switches(colours, cx)),
+                    )
                     .child(key_cap(keys::key_label("escape"), colours)),
             )
             .child(list)
@@ -1518,6 +1714,48 @@ impl Shell {
                             .text_color(colours.text_muted),
                     ),
             )
+    }
+
+    /// The two switches of the text search, beside the field: they flip with a
+    /// click or with Alt+C and Alt+R.
+    fn search_switches(&self, colours: &Colours, cx: &mut Context<Self>) -> Div {
+        let switch = |id: &'static str, label: &'static str, on: bool, regex: bool| {
+            let hover = colours.surface_2;
+            div()
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .flex_none()
+                .px(px(6.))
+                .py(px(2.))
+                .rounded(metrics::RADIUS())
+                .cursor_pointer()
+                .text_size(metrics::TEXT_SMALL())
+                .when(on, |this| {
+                    this.bg(colours.surface_2).text_color(colours.text)
+                })
+                .when(!on, |this| this.text_color(colours.text_muted))
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    if regex {
+                        this.toggle_search_regex(cx);
+                    } else {
+                        this.toggle_search_case(cx);
+                    }
+                }))
+                .child(label)
+        };
+        div()
+            .flex_none()
+            .flex()
+            .gap(px(2.))
+            .child(switch(
+                "search-case",
+                "Aa",
+                self.palette.text.case_sensitive,
+                false,
+            ))
+            .child(switch("search-regex", ".*", self.palette.text.regex, true))
     }
 
     /// How far down the window the palette's top is: a fixed share of the
@@ -1609,6 +1847,33 @@ fn worktree_items(world: Option<&World>, query: &str, limit: usize) -> Vec<Item>
     .collect()
 }
 
+/// A matching line with what matched drawn bold and bright, its indent
+/// dropped.
+fn match_text(
+    line: &str,
+    matcher: Option<&crate::search::Matcher>,
+    colours: &Colours,
+) -> StyledText {
+    let text = line.trim_start();
+    let highlights = matcher
+        .map(|matcher| matcher.ranges(text))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|range| {
+            (
+                range,
+                HighlightStyle {
+                    color: Some(colours.text),
+                    font_weight: Some(FontWeight::BOLD),
+                    background_color: Some(colours.border),
+                    ..HighlightStyle::default()
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    StyledText::new(text.to_owned()).with_highlights(highlights)
+}
+
 /// A snippet with the words that matched drawn bold and bright.
 fn snippet_text(snippet: &str, colours: &Colours) -> StyledText {
     let mut text = String::new();
@@ -1644,6 +1909,8 @@ mod tests {
         assert_eq!(parse("@box"), (Scope::Machines, "box"));
         assert_eq!(parse("#api"), (Scope::Projects, "api"));
         assert_eq!(parse("/ migrate users"), (Scope::History, "migrate users"));
+        assert_eq!(parse("~ src/main.rs:12"), (Scope::Files, "src/main.rs:12"));
+        assert_eq!(parse("%needle"), (Scope::Text, "needle"));
         assert_eq!(parse("?"), (Scope::Help, ""));
         assert_eq!(parse(""), (Scope::All, ""));
     }
@@ -1651,7 +1918,7 @@ mod tests {
     #[test]
     fn every_prefix_is_listed_by_the_help() {
         let prefixes: Vec<&str> = MODES.iter().map(|(prefix, _)| *prefix).collect();
-        assert_eq!(prefixes, ["", ">", "@", "#", "/", "?"]);
+        assert_eq!(prefixes, ["", ">", "@", "#", "/", "~", "%", "?"]);
     }
 
     #[test]

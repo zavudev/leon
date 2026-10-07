@@ -128,6 +128,12 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
             Cmd(C::AddMachine),
             Cmd(C::ShareMachine),
             Sep,
+            Cmd(C::OpenFile),
+            Cmd(C::QuickOpen),
+            Cmd(C::SaveFile),
+            Cmd(C::CloseFile),
+            Cmd(C::RevealInTree),
+            Sep,
             Cmd(C::SaveOutput),
             Cmd(C::SaveOutputAnsi),
             Sep,
@@ -157,8 +163,12 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
             Cmd(C::FindNext),
             Cmd(C::FindPrevious),
             Sep,
+            Cmd(C::FindInFile),
+            Cmd(C::ReplaceInFile),
+            Sep,
             Cmd(C::FilterProjects),
             Cmd(C::SearchHistory),
+            Cmd(C::SearchProject),
         ],
     ),
     (
@@ -168,6 +178,8 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
             Cmd(C::GoTo),
             Sep,
             Cmd(C::ToggleSidebar),
+            Cmd(C::ToggleFiles),
+            Cmd(C::TogglePreview),
             Cmd(C::ShowUsage),
             Cmd(C::RefreshUsage),
             Cmd(C::FocusSidebar),
@@ -345,6 +357,33 @@ pub struct Availability {
     pub terminal: bool,
     /// The sidebar is showing (its item says "Hide" or "Show").
     pub sidebar: bool,
+    /// A file is on screen: the pane commands apply to it too, and the file
+    /// commands apply at all.
+    pub file: bool,
+}
+
+/// Whether a pane command also applies to a file on screen.
+fn works_on_file(command: Command) -> bool {
+    matches!(
+        command,
+        C::SplitRight
+            | C::SplitDown
+            | C::NextSplit
+            | C::PreviousSplit
+            | C::FocusPaneLeft
+            | C::FocusPaneRight
+            | C::FocusPaneUp
+            | C::FocusPaneDown
+            | C::ResizeLeft
+            | C::ResizeRight
+            | C::ResizeUp
+            | C::ResizeDown
+            | C::EqualizeSplits
+            | C::ToggleZoom
+            | C::NextTab
+            | C::PreviousTab
+            | C::CloseSession
+    )
 }
 
 /// Whether a command does something only for a terminal on screen.
@@ -418,12 +457,15 @@ pub struct Spec {
 /// holds a modifier, because a bare key (`?`, `/`) is a character in a text
 /// field.
 ///
-/// `Filter the projects` shares `Cmd+F` with finding in a terminal, which wins
-/// while a terminal has the keyboard; a menu binds a key equivalent to one
-/// item only, so the filter's item has no shortcut in the menu (its chord
-/// works as always where it applies).
+/// `Filter the projects` and `Find in the file` share `Cmd+F` with finding in
+/// a terminal, which wins while a terminal has the keyboard; a menu binds a
+/// key equivalent to one item only, so theirs have no shortcut in the menu
+/// (their chords work as always where they apply).
 pub fn menu_chord(command: Command, mac: bool) -> Option<Chord> {
-    if command == C::FilterProjects {
+    // The same goes for saving the terminal's output, which shares Cmd+S
+    // with saving a file: the menu's Cmd+S saves the file, and a terminal
+    // that has the keyboard still gets its own (the key is resolved first).
+    if matches!(command, C::FilterProjects | C::SaveOutput | C::FindInFile) {
         return None;
     }
     let binding = keys::binding(command)?;
@@ -476,7 +518,13 @@ pub fn spec(available: Availability, mac: bool) -> Vec<Spec> {
                             command: *command,
                             chord: chord.as_ref().map(|chord| chord.label_for(mac)),
                             keystroke: chord.as_ref().map(keystroke_of),
-                            enabled: available.terminal || !needs_terminal(*command),
+                            enabled: if keys::needs_file(*command) {
+                                available.file
+                            } else {
+                                available.terminal
+                                    || !needs_terminal(*command)
+                                    || (available.file && works_on_file(*command))
+                            },
                         }
                     }
                 })
@@ -585,6 +633,7 @@ mod tests {
         Availability {
             terminal: true,
             sidebar: true,
+            file: true,
         }
     }
 
@@ -725,6 +774,7 @@ mod tests {
             Availability {
                 terminal: false,
                 sidebar: false,
+                file: false,
             },
             true,
         );
@@ -736,7 +786,11 @@ mod tests {
                 ..
             } = item
             {
-                assert_eq!(*enabled, !needs_terminal(*command), "{command:?}");
+                assert_eq!(
+                    *enabled,
+                    !needs_terminal(*command) && !keys::needs_file(*command),
+                    "{command:?}"
+                );
                 if *command == Command::ToggleSidebar {
                     assert_eq!(label, "Show the sidebar");
                 }

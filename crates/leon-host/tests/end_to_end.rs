@@ -46,6 +46,7 @@ fn shell() -> ExecSpec {
             ("ENV".into(), "/dev/null".into()),
         ],
         cwd: None,
+        stdin: None,
     }
 }
 
@@ -246,11 +247,25 @@ async fn a_command_runs_on_the_host_and_its_output_comes_back() {
         args: vec!["-c".into(), "echo $LEON_X; echo oops >&2; exit 2".into()],
         env: vec![("LEON_X".into(), "hello".into())],
         cwd: None,
+        stdin: None,
     };
     let out = world.client.exec(spec, None).await.unwrap();
     assert_eq!(out.stdout, b"hello\n");
     assert_eq!(out.stderr, b"oops\n");
     assert_eq!(out.status, Some(2));
+}
+
+#[tokio::test]
+async fn a_command_gets_the_standard_input_the_client_sent() {
+    let world = paired().await;
+    let spec = ExecSpec {
+        program: "cat".into(),
+        stdin: Some(b"from the client\n".to_vec()),
+        ..ExecSpec::default()
+    };
+    let out = world.client.exec(spec, None).await.unwrap();
+    assert_eq!(out.stdout, b"from the client\n");
+    assert_eq!(out.status, Some(0));
 }
 
 /// The whole path over TLS: a `wss://` relay with a throwaway certificate for
@@ -272,6 +287,7 @@ async fn pairing_a_command_and_a_terminal_work_over_a_wss_relay() {
                 args: vec!["-c".into(), "echo over-tls".into()],
                 env: vec![],
                 cwd: None,
+                stdin: None,
             },
             None,
         )

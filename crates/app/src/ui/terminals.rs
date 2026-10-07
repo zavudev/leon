@@ -149,6 +149,16 @@ impl Shell {
     /// Gives the keyboard to the terminal on screen when it should have it,
     /// and takes it back to the window when it should not.
     pub(super) fn sync_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A page without its editor on screen has no text to type in.
+        if self.file_has_keyboard() && !self.focused_file_is_page_only() {
+            if let Some(handle) = self.focused_file_handle(cx) {
+                // Its search bar is part of it: the keyboard stays there.
+                if !handle.is_focused(window) && !self.editor_search_has_keyboard(window, cx) {
+                    window.focus(&handle, cx);
+                }
+                return;
+            }
+        }
         if self.terminal_focused() && !self.find_focused(window, cx) {
             if let Main::Live(id) = &self.main {
                 if let Some(session) = self.live.get(*id) {
@@ -164,7 +174,8 @@ impl Shell {
             .live
             .all()
             .iter()
-            .any(|session| session.view.read(cx).focus().is_focused(window));
+            .any(|session| session.view.read(cx).focus().is_focused(window))
+            || self.any_editor_focused(window, cx);
         if held_by_terminal && self.overlay == Overlay::None {
             self.focus.focus(window, cx);
         }
@@ -815,6 +826,16 @@ impl Shell {
     /// Shows a live session in the main pane (its tab, with it focused) and
     /// gives it the keyboard.
     pub(super) fn open_live(&mut self, id: LiveId, window: &mut Window, cx: &mut Context<Self>) {
+        // A file is a pane like the others: its tab is shown and it is
+        // focused, but it has no row in the tree.
+        if self.files.contains_key(&id) {
+            self.workspaces.focus(id);
+            self.main = Main::Live(id);
+            self.pane = Pane::Main;
+            self.sync_focus(window, cx);
+            cx.notify();
+            return;
+        }
         if self.live.get(id).is_none() {
             return;
         }
@@ -915,11 +936,25 @@ impl Shell {
         self.live.remove(id);
         self.find.remove(&id);
         self.refresh_live();
+        self.after_close(closed, was_open, &place.0, &place.1, window, cx);
+    }
+
+    /// What a closed pane leaves on screen: the pane that has the focus now,
+    /// or, when it was the last of its workspace, what the folder shows.
+    pub(super) fn after_close(
+        &mut self,
+        closed: Closed,
+        was_open: bool,
+        machine: &MachineId,
+        cwd: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match closed {
             Closed::Focus(next) if was_open => self.open_live(next, window, cx),
             Closed::Empty if was_open => {
-                let root = tree::workspace_root(&self.snapshot, &place.0, &place.1);
-                self.main = match tree::detail_of_root(&self.snapshot, &place.0, &root) {
+                let root = tree::workspace_root(&self.snapshot, machine, cwd);
+                self.main = match tree::detail_of_root(&self.snapshot, machine, &root) {
                     Some((project, Some(worktree))) => Main::Worktree(project, worktree),
                     Some((project, None)) => Main::Project(project),
                     None => Main::Empty,
@@ -1470,7 +1505,9 @@ impl Shell {
     }
 
     fn pane_area_with(&self, cell_w: f32, cell_h: f32) -> (Rect, MinSize) {
-        let width = self.viewport.width.as_f32() - metrics::SIDEBAR_WIDTH().as_f32();
+        let width = self.viewport.width.as_f32()
+            - metrics::SIDEBAR_WIDTH().as_f32()
+            - metrics::FILES_WIDTH().as_f32();
         let height = self.viewport.height.as_f32()
             - metrics::HEADER_HEIGHT().as_f32()
             - metrics::FOOTER_HEIGHT().as_f32()
@@ -1501,11 +1538,14 @@ impl Shell {
                 .report(StatusKind::Info, "There is no terminal to split.");
             return;
         };
-        let Some((machine, cwd)) = self
-            .live
-            .get(id)
-            .map(|session| (session.machine.clone(), session.cwd.clone()))
-        else {
+        let Some((machine, cwd)) = self.live.get(id).map_or_else(
+            || {
+                self.files
+                    .get(&id)
+                    .map(|doc| (doc.machine.clone(), doc.folder.clone()))
+            },
+            |session| Some((session.machine.clone(), session.cwd.clone())),
+        ) else {
             return;
         };
         self.start_live(
@@ -1758,10 +1798,13 @@ impl Shell {
         for (index, tab) in workspace.tabs.iter().enumerate() {
             let focus = tab.focus;
             let active = index == workspace.active;
-            let (label, agent) = self.live.get(focus).map_or_else(
-                || (String::new(), None),
-                |session| (session.label(), session.shown_agent()),
-            );
+            let (label, agent) = match self.files.get(&focus) {
+                Some(doc) => (Self::file_label(doc), None),
+                None => self.live.get(focus).map_or_else(
+                    || (String::new(), None),
+                    |session| (session.label(), session.shown_agent()),
+                ),
+            };
             let panes = tab.layout.leaves().len();
             bar = bar.child(
                 div()
@@ -1824,6 +1867,9 @@ impl Shell {
         colours: &Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if let Some(file) = self.render_file_pane(id, marked, colours, cx) {
+            return file;
+        }
         let Some(session) = self.live.get(id) else {
             return div().into_any_element();
         };

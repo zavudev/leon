@@ -142,7 +142,8 @@ pub fn set_dock_icon() -> bool {
 /// The font files of every theme, all registered at start so that switching
 /// theme loads nothing: Space Grotesk (regular, medium, bold), Geist Mono
 /// (regular, medium, semibold), Inter (regular, italic, medium, semibold) and
-/// JetBrains Mono (regular, medium).
+/// JetBrains Mono (regular, medium), and the Symbols Nerd Font Mono that draws
+/// the icons of the file tree.
 pub fn fonts() -> Vec<Cow<'static, [u8]>> {
     [
         &include_bytes!("../assets/fonts/SpaceGrotesk-Regular.ttf")[..],
@@ -157,6 +158,7 @@ pub fn fonts() -> Vec<Cow<'static, [u8]>> {
         include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
         include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
         include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf"),
+        include_bytes!("../assets/fonts/SymbolsNerdFontMono-Regular.ttf"),
     ]
     .into_iter()
     .map(Cow::Borrowed)
@@ -320,7 +322,7 @@ mod tests {
     #[test]
     fn every_font_file_is_a_truetype_font() {
         let fonts = fonts();
-        assert_eq!(fonts.len(), 12);
+        assert_eq!(fonts.len(), 13);
         for bytes in fonts {
             // 0x00010000 is the TrueType sfnt version.
             assert_eq!(&bytes[..4], &[0, 1, 0, 0]);
@@ -337,5 +339,8 @@ mod tests {
         ] {
             assert!(licence.contains("SIL OPEN FONT LICENSE"));
         }
+        assert!(
+            include_str!("../assets/fonts/SymbolsNerdFont-LICENSE.txt").contains("The MIT License")
+        );
     }
 }

@@ -82,6 +82,8 @@ pub struct Settings {
     /// The sidebar's width, in pixels at the design size: between
     /// [`theme::SIDEBAR_MIN`] and [`theme::SIDEBAR_MAX`].
     pub sidebar_width: u16,
+    /// Whether the file tree of the project in view is showing.
+    pub files_visible: bool,
 }
 
 impl Default for Settings {
@@ -108,10 +110,11 @@ impl Settings {
             interface_scale: theme::nearest_step(int("interface_scale") as u16),
             sidebar_visible: store.value("sidebar_visible").as_bool().unwrap_or(true),
             sidebar_width: theme::clamp_sidebar(int("sidebar_width") as u16),
+            files_visible: store.value("files_visible").as_bool().unwrap_or(false),
         }
     }
 
-    /// Writes these five keys into a store.
+    /// Writes these six keys into a store.
     fn write_into(&self, store: &mut Store) {
         let set = |store: &mut Store, key: &str, value: Value| {
             if let Some(def) = schema::find(key) {
@@ -140,6 +143,7 @@ impl Settings {
             "sidebar_width",
             Value::Int(i64::from(self.sidebar_width)),
         );
+        set(store, "files_visible", Value::Bool(self.files_visible));
     }
 
     /// Reads the file, falling back to the defaults for whatever is missing,
@@ -373,6 +377,7 @@ fn apply_look(active: &Active) {
     SESSIONS_SHOWN.with(|cell| cell.set(shown.max(1) as usize));
     theme::set_scale(active.values.interface_scale);
     theme::set_sidebar(active.values.sidebar_width, active.values.sidebar_visible);
+    theme::set_files(active.values.files_visible);
     let lines = match active.store.value("blueprint_lines").as_text() {
         Some("on") => theme::LinesMode::On,
         Some("off") => theme::LinesMode::Off,
@@ -846,6 +851,7 @@ mod tests {
             interface_scale: 110,
             sidebar_visible: false,
             sidebar_width: 400,
+            files_visible: true,
         };
         settings.save(&file).unwrap();
         assert_eq!(Settings::load(&file), settings);
@@ -863,6 +869,10 @@ mod tests {
         let loaded = Settings::load(&file);
         assert!(loaded.sidebar_visible);
         assert_eq!(loaded.sidebar_width, theme::SIDEBAR_DEFAULT);
+        assert!(
+            !loaded.files_visible,
+            "the file tree is hidden until asked for"
+        );
     }
 
     #[test]

@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn flipping_any_single_byte_of_a_valid_frame_never_panics() {
         let message = Message::Hello {
-            protocol: 1,
+            protocol: PROTOCOL_VERSION,
             app_version: "0.1.0".into(),
             device_name: "laptop".into(),
             token: Some(vec![1, 2, 3]),

@@ -21,6 +21,9 @@ mod connect;
 mod diagnose;
 mod elsewhere;
 mod engine;
+// The editor is the first caller of the file engine.
+#[allow(dead_code)]
+mod files;
 mod format;
 mod fuzzy;
 mod history_report;
@@ -35,6 +38,7 @@ mod platform;
 mod product;
 mod remote;
 mod schema;
+mod search;
 mod settings;
 mod share;
 mod theme;
