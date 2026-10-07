@@ -50,7 +50,40 @@ switching to one never restarts it.
 
 ## Screenshots
 
-_No screenshots yet._
+<p align="center">
+  <a href="docs/media/video/hero.mp4">
+    <img src="docs/media/video/hero.webp" alt="The tree, a session started by hand, and the agent working in it" width="100%">
+  </a>
+</p>
+
+_The images and clips are from a demo workspace; the agent output in them is
+simulated. The tree, the terminals, the transcripts and the dialogs are Leon
+itself._
+
+| | |
+| --- | --- |
+| ![The tree](docs/media/01-tree.png) | ![A Claude Code session](docs/media/02-session-working.png) |
+| _Every machine, project and worktree in one tree; live sessions above the history of their worktree._ | _A session started from the tree, in a real terminal, with the agent working in it._ |
+| ![A finished session](docs/media/03-session-done.png) | ![A stored transcript](docs/media/04-transcript.png) |
+| _When the agent waits for you the sidebar says so; the session stays alive in the background._ | _`Ctrl+Shift+L` shows the stored transcript; `Enter` resumes it in a terminal._ |
+| ![The command palette](docs/media/05-palette.png) | ![The history search](docs/media/06-search.png) |
+| _The command palette reaches every command, the themes included._ | _`Ctrl+Shift+I` searches the messages of every imported session._ |
+| ![Connecting a machine](docs/media/07-connect.png) | ![Settings](docs/media/08-settings.png) |
+| _Connecting a machine: with a code, through the relay, or over SSH._ | _Settings, from the appearance to the agents._ |
+| ![The light appearance](docs/media/09-light.png) | ![The keyboard shortcuts](docs/media/10-shortcuts.png) |
+| _The same window in the light appearance._ | _`?` lists every shortcut, searchable._ |
+
+### Clips
+
+Four short recordings of the demo workspace; each plays inline and links to
+the MP4 of the same recording.
+
+| | |
+| --- | --- |
+| [![Starting a session](docs/media/video/hero.webp)](docs/media/video/hero.mp4) | [![Resuming a session](docs/media/video/resume-a-session.webp)](docs/media/video/resume-a-session.mp4) |
+| _Starting a session from the tree, and coming back to it while it runs._ | _Resuming a history session, and opening its stored transcript._ |
+| [![Panes and tabs](docs/media/video/panes-and-tabs.webp)](docs/media/video/panes-and-tabs.mp4) | [![Themes](docs/media/video/themes.webp)](docs/media/video/themes.mp4) |
+| _A shell, a command, a split, and moving between panes._ | _Light and dark, and the two built-in themes._ |
 
 ## Install
 
@@ -1369,6 +1402,7 @@ exit status: a way to check the terminal against a real agent
 * [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): crates, rules, the terminal.
 * [`docs/SETTINGS.md`](docs/SETTINGS.md) and [`docs/THEMES.md`](docs/THEMES.md): settings and themes.
 * [`docs/RELEASING.md`](docs/RELEASING.md): how a release is cut, signed and published.
+* [`docs/media/`](docs/media) and [`scripts/media/`](scripts/media): the screenshots and clips of this README, and how they are made.
 * [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md) and [`CHANGELOG.md`](CHANGELOG.md).
 * [`NOTICE`](NOTICE): third-party code, assets and trademarks.
 

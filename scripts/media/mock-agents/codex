@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# A simulated Codex CLI, only for Leon's README media.
+set -u
+
+if [ "${1:-}" = "--version" ]; then
+    echo "codex-cli 0.160.1"
+    exit 0
+fi
+if [ "${1:-}" = "resume" ]; then
+    shift 2 2>/dev/null || true
+fi
+
+ESC=$'\033'
+DIM="${ESC}[38;5;245m"
+TEXT="${ESC}[38;5;252m"
+CYAN="${ESC}[38;5;116m"
+GREEN="${ESC}[38;5;114m"
+YELLOW="${ESC}[38;5;179m"
+RESET="${ESC}[0m"
+
+frame() {
+    clear
+    printf '\033]0;Codex\007'
+    printf '\n'
+    printf '  %s╭──────────────────────────────────────────────────────────────╮%s\n' "$DIM" "$RESET"
+    printf '  %s│%s  %sCodex CLI%s %s0.160.1%s %s· gpt-5.3-codex%s              %s│%s\n' "$DIM" "$RESET" "$TEXT" "$RESET" "$DIM" "$RESET" "$DIM" "$RESET" "$DIM" "$RESET"
+    printf '  %s│%s  %s~/code/atlas-rate-limits%s                               %s│%s\n' "$DIM" "$RESET" "$DIM" "$RESET" "$DIM" "$RESET"
+    printf '  %s╰──────────────────────────────────────────────────────────────╯%s\n' "$DIM" "$RESET"
+    printf '\n'
+    printf '%s›%s %sreview the token bucket math in limiter.rs%s\n' "$CYAN" "$RESET" "$TEXT" "$RESET"
+    printf '\n'
+}
+
+steps() {
+    sleep 0.7
+    printf '%s•%s %sReading src/limiter.rs%s\n' "$GREEN" "$RESET" "$TEXT" "$RESET"
+    printf '\n'
+    sleep 0.7
+    printf '%s•%s %sThe refill rate divides the minute by the request budget, and the%s\n' "$GREEN" "$RESET" "$TEXT" "$RESET"
+    printf '  %sbucket caps at 100 tokens. Two notes:%s\n' "$TEXT" "$RESET"
+    printf '\n'
+    sleep 0.8
+    printf '   %s1.%s A new key starts full, so the first burst is allowed. Start it empty.\n' "$YELLOW" "$RESET"
+    printf '   %s2.%s elapsed-time refill is sound; keep tokens as f64 as you do.\n' "$YELLOW" "$RESET"
+    printf '\n'
+    sleep 0.8
+    printf '%s•%s %sApplied note 1 in src/limiter.rs (+3 −1). The test still passes.%s\n' "$GREEN" "$RESET" "$TEXT" "$RESET"
+    printf '\n'
+    printf '%s›%s \n' "$CYAN" "$RESET"
+}
+
+frame
+stty raw -echo 2>/dev/null
+read -rsn1 _ || true
+stty sane 2>/dev/null
+steps
+while :; do
+    stty raw -echo 2>/dev/null
+    read -rsn1 key || break
+    stty sane 2>/dev/null
+    [ "$key" = $'\003' ] && break
+done

@@ -1,0 +1,7 @@
+# Demo home for Leon's README media. Nothing here is a real user's home.
+# The system bashrc prints user@host:cwd as the terminal title from
+# PROMPT_COMMAND; PS1 runs after it, so it re-titles a plain shell to
+# "Shell", which is what Leon calls it anyway.
+export PS1='\[\033]0;Shell\007\]\[\033[38;5;114m\]\w\[\033[0m\] \[\033[38;5;245m\]❯\[\033[0m\] '
+export PATH="$HOME/bin:$PATH"
+alias ll='ls -la'
