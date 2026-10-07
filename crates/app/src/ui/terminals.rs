@@ -816,6 +816,31 @@ impl Shell {
         cx.notify();
     }
 
+    /// Closes every live terminal whose folder is `root` or lies inside it on
+    /// `machine`. The worktree they ran in was removed with its folder, so
+    /// nothing is left for them to run in: they are closed with it instead of
+    /// staying in the tree under an unsorted folder.
+    pub(super) fn close_live_in(
+        &mut self,
+        machine: &MachineId,
+        root: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let inside: Vec<LiveId> = self
+            .live
+            .all()
+            .iter()
+            .filter(|session| {
+                &session.machine == machine && leon_core::path::is_within(&session.cwd, root)
+            })
+            .map(|session| session.id)
+            .collect();
+        for id in inside {
+            self.close_live(id, window, cx);
+        }
+    }
+
     /// Moves the keyboard into the terminal on screen, or to the most recent
     /// live session.
     pub(super) fn focus_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {

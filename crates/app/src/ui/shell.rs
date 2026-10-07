@@ -509,6 +509,9 @@ pub struct Shell {
     pub(super) checking: Option<Task<()>>,
     /// The removal of a worktree, while it runs.
     pub(super) removing: Option<Task<()>>,
+    /// The removal of a worktree, while it runs. Its project's row says
+    /// `DELETING` meanwhile, so taking a big folder away is visible.
+    pub(super) deleting: Option<(ProjectId, WorktreeId)>,
     /// The coarse timer of that look, while the window lives.
     elsewhere_ticker: Option<Task<()>>,
     /// Whether the window has the focus: the lion sleeps without it.
@@ -607,6 +610,11 @@ impl Shell {
                     // Back in front: a reading older than the interval is
                     // made once.
                     this.usage_tick(cx);
+                    // Another process (a second window, or the person's own
+                    // tooling) may have written the store while this one was
+                    // away: the tree is read again, so a worktree removed
+                    // elsewhere does not stay on screen.
+                    this.reload(cx);
                 }
                 cx.notify();
             }),
@@ -728,6 +736,7 @@ impl Shell {
             resuming: None,
             checking: None,
             removing: None,
+            deleting: None,
             elsewhere_ticker: None,
             window_active: window.is_window_active(),
             mark_error: false,
@@ -1858,6 +1867,10 @@ impl Shell {
     /// modified or untracked files it holds is not forced behind the person's
     /// back: it is left whole and they are asked; only their answer passes
     /// `--force`, which deletes those files with it.
+    ///
+    /// The worktree's folder goes with it, so the sessions that were running
+    /// inside it are closed once it is gone, and its project's row says
+    /// `DELETING` while the removal runs.
     pub(super) fn remove_worktree(
         &mut self,
         project: ProjectId,
@@ -1866,15 +1879,36 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Where the worktree is, while the store still knows: once git has
+        // removed it there is no row to read the folder from.
+        let folder = self.snapshot.project(&project).and_then(|entry| {
+            entry
+                .worktrees
+                .iter()
+                .find(|candidate| candidate.id == worktree)
+                .map(|worktree| (entry.project.machine_id.clone(), worktree.path.clone()))
+        });
+        let started = (project.clone(), worktree.clone());
+        self.deleting = Some(started.clone());
+        cx.notify();
         let removal = self
             .engine
             .remove_worktree(project.clone(), worktree.clone(), force);
         self.removing = Some(cx.spawn_in(window, async move |this, cx| {
             let outcome = removal.await;
             this.update_in(cx, |this, window, cx| {
+                // The answer arrives when nothing runs any more: the question
+                // of the force case is asked without the mark on screen, and
+                // the forced removal puts it back.
+                if this.deleting.as_ref() == Some(&started) {
+                    this.deleting = None;
+                }
                 match outcome {
                     Ok(Ok(Removal::Removed(text))) => {
                         this.engine.report(StatusKind::Info, text);
+                        if let Some((machine, path)) = folder {
+                            this.close_live_in(&machine, &path, window, cx);
+                        }
                     }
                     Ok(Ok(Removal::NeedsForce)) => this.begin_flow_with(
                         Command::RemoveWorktree,
@@ -1883,6 +1917,7 @@ impl Shell {
                         cx,
                     ),
                     Ok(Err(error)) => {
+                        tracing::warn!(%error, "could not remove the worktree");
                         this.engine.report(StatusKind::Error, error.to_string());
                     }
                     // The job was dropped before it finished: nothing to say.

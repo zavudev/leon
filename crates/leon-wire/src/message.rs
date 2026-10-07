@@ -4,6 +4,12 @@
 //! interactive terminal. A host offers exactly those, and everything above
 //! them (git, probing, agents) keeps working unchanged.
 //!
+//! A host may also speak about its own Leon: the projects it holds and the
+//! sessions of its unified history (`ShareState`, `ShareTranscript`). That is
+//! how a paired device mirrors this machine's sidebar in its own; it is
+//! sharing that adds no rights, because a paired device already holds a full
+//! terminal as the host's user.
+//!
 //! Requests carry an `id` the answer repeats. Terminal output flows as
 //! [`Message::PtyData`] with a monotonically increasing byte `offset`, which
 //! is what makes re-attaching exact: a client that saw bytes up to offset
@@ -24,6 +30,10 @@ pub const MAX_PTY_CHUNK: usize = 32 * 1024;
 pub const MAX_EXEC_OUTPUT: usize = 4 * 1024 * 1024;
 /// How many bytes of recent output a host keeps for each terminal.
 pub const REPLAY_BUFFER_BYTES: usize = 2 * 1024 * 1024;
+/// How many history sessions a host offers at most in one
+/// [`Message::ShareStateData`]: the newest ones, older ones left out with
+/// `truncated` set.
+pub const SHARE_SESSIONS_LIMIT: usize = 500;
 
 const MAX_STRING: usize = 64 * 1024;
 const MAX_ITEMS: usize = 4096;
@@ -134,6 +144,66 @@ pub struct WireError {
     pub code: ErrorCode,
     /// A sentence for a person; never carries secrets.
     pub message: String,
+}
+
+// ----- what a host's own Leon shares ---------------------------------------------------
+
+/// A project of the host's own Leon, offered to a paired device. A paired
+/// device already holds a full terminal as the host's user, so this adds no
+/// exposure: it is what it could read with that terminal, handed over well.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedProject {
+    /// The name the host shows it under.
+    pub name: String,
+    /// Absolute path of its root on the host.
+    pub root: String,
+}
+
+/// One session of the host's unified history, without its transcript. The
+/// pair `(agent, external_id)` names it on the host, and its transcript is
+/// asked for by those two.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedSession {
+    /// The agent that ran it: its catalogue tag, such as `claude`.
+    pub agent: String,
+    /// The agent's own id of the session; what its `resume` accepts.
+    pub external_id: String,
+    /// Working directory of the session on the host.
+    pub cwd: String,
+    /// Short human-readable title.
+    pub title: String,
+    /// Model name reported by the agent, when known.
+    pub model: Option<String>,
+    /// Time of the first message: milliseconds since the Unix epoch.
+    pub started_ms: i64,
+    /// Time of the latest message: milliseconds since the Unix epoch.
+    pub updated_ms: i64,
+    /// How many messages the session holds on the host.
+    pub messages: u32,
+}
+
+/// One entry of a shared transcript.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedEntry {
+    /// Who produced it: the role tag the messages use — `user`, `assistant`,
+    /// `tool` or `system`.
+    pub role: String,
+    /// Plain text.
+    pub text: String,
+    /// When it was produced: milliseconds since the Unix epoch.
+    pub at_ms: i64,
+}
+
+/// The transcript of one session, sent on demand because transcripts are the
+/// bulky part of sharing. `(agent, external_id)` names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedTranscript {
+    /// The agent that ran the session.
+    pub agent: String,
+    /// The agent's own id of the session.
+    pub external_id: String,
+    /// The transcript, in order.
+    pub messages: Vec<SharedEntry>,
 }
 
 /// One message of the protocol.
@@ -263,6 +333,43 @@ pub enum Message {
         /// The probe's nonce.
         nonce: u64,
     },
+    /// Asks for the host's own Leon: what projects it holds and what sessions
+    /// its unified history holds, both for the computer the host runs on.
+    /// Hosts that share nothing answer with a [`Message::ShareStateData`]
+    /// that holds nothing.
+    ShareState {
+        /// Request id.
+        id: u64,
+    },
+    /// The host's projects and history sessions, newest first. Older sessions
+    /// past [`SHARE_SESSIONS_LIMIT`] are left out and `truncated` says so.
+    ShareStateData {
+        /// The request id.
+        id: u64,
+        /// The host's projects, in the order the host shows them.
+        projects: Vec<SharedProject>,
+        /// The host's history sessions, newest first.
+        sessions: Vec<SharedSession>,
+        /// Whether `sessions` was cut at [`SHARE_SESSIONS_LIMIT`].
+        truncated: bool,
+    },
+    /// Asks for one history session's transcript.
+    ShareTranscript {
+        /// Request id.
+        id: u64,
+        /// The agent that ran the session.
+        agent: String,
+        /// The agent's own id of the session.
+        external_id: String,
+    },
+    /// The transcript, or `None` when the host holds no session by that
+    /// `(agent, external_id)` any more.
+    ShareTranscriptData {
+        /// The request id.
+        id: u64,
+        /// What was asked for.
+        transcript: Option<SharedTranscript>,
+    },
     /// A request failed.
     Error {
         /// The request it answers, when there was one.
@@ -323,12 +430,84 @@ impl Message {
             Message::PtyListing { ptys, .. } if ptys.len() > MAX_ITEMS => {
                 Err(FrameError::OverLimit("terminal list"))
             }
+            Message::ShareStateData {
+                projects, sessions, ..
+            } => {
+                for (label, count) in [("projects", projects.len()), ("sessions", sessions.len())] {
+                    if count > MAX_ITEMS {
+                        return Err(FrameError::OverLimit(label));
+                    }
+                }
+                for project in projects {
+                    for text in [&project.name, &project.root] {
+                        if text.len() > MAX_STRING {
+                            return Err(FrameError::OverLimit("shared project"));
+                        }
+                    }
+                }
+                shared_sessions(sessions)
+            }
+            Message::ShareTranscript {
+                agent, external_id, ..
+            } => {
+                if agent.len() > MAX_STRING || external_id.len() > MAX_STRING {
+                    Err(FrameError::OverLimit("shared session request"))
+                } else {
+                    Ok(())
+                }
+            }
+            Message::ShareTranscriptData { transcript, .. } => {
+                let Some(transcript) = transcript else {
+                    return Ok(());
+                };
+                if transcript.messages.len() > MAX_ITEMS {
+                    return Err(FrameError::OverLimit("transcript"));
+                }
+                bounded(&transcript.agent)?;
+                bounded(&transcript.external_id)?;
+                for entry in &transcript.messages {
+                    bounded(&entry.role)?;
+                    bounded(&entry.text)?;
+                }
+                Ok(())
+            }
             Message::Error { error, .. } if error.message.len() > MAX_STRING => {
                 Err(FrameError::OverLimit("error text"))
             }
             _ => Ok(()),
         }
     }
+}
+
+/// Whether one bounded string is short enough.
+fn bounded(text: &str) -> Result<(), FrameError> {
+    if text.len() > MAX_STRING {
+        Err(FrameError::OverLimit("shared"))
+    } else {
+        Ok(())
+    }
+}
+
+/// The bounds every shared session's fields must keep.
+fn shared_sessions(sessions: &[SharedSession]) -> Result<(), FrameError> {
+    for session in sessions {
+        for text in [
+            &session.agent,
+            &session.external_id,
+            &session.cwd,
+            &session.title,
+        ] {
+            if text.len() > MAX_STRING {
+                return Err(FrameError::OverLimit("shared session"));
+            }
+        }
+        if let Some(model) = &session.model {
+            if model.len() > MAX_STRING {
+                return Err(FrameError::OverLimit("shared session"));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -373,6 +552,19 @@ mod tests {
             first_offset: 10,
             end_offset: 99,
             attached: 2,
+        }
+    }
+
+    fn shared_session() -> SharedSession {
+        SharedSession {
+            agent: "claude".into(),
+            external_id: "a1b2".into(),
+            cwd: "/srv/api".into(),
+            title: "fix the login bug".into(),
+            model: Some("claude-opus".into()),
+            started_ms: 1_700_000_000_000,
+            updated_ms: 1_700_000_100_000,
+            messages: 12,
         }
     }
 
@@ -457,6 +649,37 @@ mod tests {
             },
             Message::Ping { nonce: 1 },
             Message::Pong { nonce: 1 },
+            Message::ShareState { id: 7 },
+            Message::ShareStateData {
+                id: 7,
+                projects: vec![SharedProject {
+                    name: "api".into(),
+                    root: "/srv/api".into(),
+                }],
+                sessions: vec![shared_session()],
+                truncated: false,
+            },
+            Message::ShareTranscript {
+                id: 8,
+                agent: "claude".into(),
+                external_id: "abc".into(),
+            },
+            Message::ShareTranscriptData {
+                id: 8,
+                transcript: Some(SharedTranscript {
+                    agent: "claude".into(),
+                    external_id: "abc".into(),
+                    messages: vec![SharedEntry {
+                        role: "user".into(),
+                        text: "hello".into(),
+                        at_ms: 1_700_000_000_000,
+                    }],
+                }),
+            },
+            Message::ShareTranscriptData {
+                id: 8,
+                transcript: None,
+            },
             Message::Error {
                 id: Some(3),
                 error: WireError {
@@ -534,5 +757,58 @@ mod tests {
             timeout_ms: None,
         };
         assert!(encode_frame(&message).is_err());
+    }
+
+    #[test]
+    fn a_shared_state_over_the_limits_is_refused() {
+        let one_project = SharedProject {
+            name: "p".into(),
+            root: "/p".into(),
+        };
+        let huge = Message::ShareStateData {
+            id: 1,
+            projects: vec![one_project; MAX_ITEMS + 1],
+            sessions: vec![],
+            truncated: false,
+        };
+        assert!(encode_frame(&huge).is_err());
+        let mut session = shared_session();
+        session.title = "x".repeat(MAX_STRING + 1);
+        session.model = None;
+        let wide = Message::ShareStateData {
+            id: 1,
+            projects: vec![],
+            sessions: vec![session],
+            truncated: false,
+        };
+        assert!(encode_frame(&wide).is_err());
+    }
+
+    #[test]
+    fn a_transcript_over_the_limits_is_refused() {
+        let mut transcript = SharedTranscript {
+            agent: "claude".into(),
+            external_id: "abc".into(),
+            messages: vec![
+                SharedEntry {
+                    role: "user".into(),
+                    text: String::new(),
+                    at_ms: 0,
+                };
+                MAX_ITEMS + 1
+            ],
+        };
+        assert!(encode_frame(&Message::ShareTranscriptData {
+            id: 1,
+            transcript: Some(transcript.clone()),
+        })
+        .is_err());
+        transcript.messages.truncate(256);
+        transcript.messages[0].text = "x".repeat(MAX_STRING + 1);
+        assert!(encode_frame(&Message::ShareTranscriptData {
+            id: 1,
+            transcript: Some(transcript),
+        })
+        .is_err());
     }
 }

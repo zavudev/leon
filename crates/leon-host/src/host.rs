@@ -16,6 +16,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::ptys::PtyTable;
 use crate::session;
+use crate::share::ShareSource;
 
 /// Whether the process runs as the superuser (always `false` off Unix).
 pub fn running_as_root() -> bool {
@@ -90,6 +91,21 @@ pub struct HostConfig {
     pub max_ptys: usize,
     /// An opaque token for a relay that requires one.
     pub token: Option<Vec<u8>>,
+    /// What this installation's own Leon tells paired devices, when it wants
+    /// to: its projects and history sessions, so theirs can show them. `None`
+    /// means nothing is shared and the share requests answer with nothing.
+    pub share: Option<Shared>,
+}
+
+/// What a host shares, kept out of [`HostConfig`]'s `Debug` so the machine's
+/// projects and session titles never land in a log.
+#[derive(Clone)]
+pub struct Shared(pub Arc<dyn ShareSource>);
+
+impl std::fmt::Debug for Shared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ShareSource")
+    }
 }
 
 impl HostConfig {
@@ -106,6 +122,7 @@ impl HostConfig {
             max_sessions: 16,
             max_ptys: 64,
             token: None,
+            share: None,
         }
     }
 }

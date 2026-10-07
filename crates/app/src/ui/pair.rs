@@ -283,7 +283,12 @@ impl Shell {
             Ok(machine) => {
                 self.pair_ui.steps[Step::Agents.index()] = StepState::Running;
                 self.pair_ui.saved = Some(machine.id.clone());
-                self.engine.submit(crate::engine::Op::Probe(machine.id));
+                self.engine
+                    .submit(crate::engine::Op::Probe(machine.id.clone()));
+                // What the host shares of itself: its projects and history
+                // sessions fill this machine's sidebar while the card is
+                // still up.
+                self.engine.submit(crate::engine::Op::SyncHost(machine.id));
             }
             Err(error) => self
                 .engine
@@ -457,11 +462,9 @@ impl Shell {
             );
         }
         if ui.saved.is_some() && ui.failure.is_none() {
-            body = body.child(
-                div()
-                    .debug_selector(|| "pair-saved".into())
-                    .child("Connected. The machine is in the sidebar."),
-            );
+            body = body.child(div().debug_selector(|| "pair-saved".into()).child(
+                "Connected. What it shares — its projects and sessions — appears in the sidebar.",
+            ));
         }
         self.card("pair", colours)
             .w(px(640.))

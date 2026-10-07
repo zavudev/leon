@@ -4,6 +4,13 @@
 
 ### Added
 
+* Share this machine, mirrored: a computer paired with a code now sees what
+  the host's own Leon holds — its projects and the sessions of its history —
+  in the same places its own are. The other machine's section of the sidebar
+  shows its projects, worktrees and sessions ready to open, resume and search,
+  without typing a path anywhere; reconnecting keeps them up to date. Nothing
+  is shared that the paired device could not read with the terminal it already
+  holds, and a headless `leon host` shares nothing.
 * The README shows what Leon looks like: a gallery of screenshots and four
   short clips under `docs/media/`, and `scripts/media/` regenerates them from
   a demo workspace.
@@ -30,6 +37,18 @@
 * A terminal that learned its session's id before the session was stored is
   linked to its history row once it appears, instead of showing the same
   session twice.
+* A worktree row the store no longer has (taken by another window or by a
+  terminal, behind Leon's back) is not an error when it is removed any more:
+  the list is read again, the row goes, and the status says the worktree was
+  already gone.
+* Back in the window, the tree is read again: what another process (a second
+  window, for one) wrote to the store shows up without waiting for a change
+  of Leon's own.
+* Removing a worktree closes the sessions that were running in it: the folder
+  goes with the worktree, so they no longer stay in the tree under an unsorted
+  folder (their programs are hung up with it). The project's row and the
+  worktree's say `DELETING` while the removal runs, so a slow forced removal
+  is visible.
 * `Ctrl+C` in a terminal copies only when there is a selection; without one it
   reaches the program again, so a running command can be interrupted.
 * A terminal whose agent moves to another session inside it (opencode's session

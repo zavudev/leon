@@ -13,6 +13,12 @@
 //!   receive each missed byte exactly once ([`ring`]), and is reaped some time
 //!   after it exits.
 //!
+//! It may also speak of itself: with a [`ShareSource`], the host lets a paired
+//! device see what this Leon holds of this machine — its projects and the
+//! sessions of its history — so the device's own Leon shows them in its
+//! sidebar. Sharing adds no rights: the device already holds a full terminal
+//! as this computer's user.
+//!
 //! [`Host`] ties them to a relay: it registers, accepts pairing attempts and
 //! sessions, reconnects with backoff, and re-checks its device list so a
 //! revoked device is cut off mid-session.
@@ -29,8 +35,10 @@ mod host;
 pub mod ptys;
 pub mod ring;
 mod session;
+pub mod share;
 
 pub use host::{
     running_as_root, Approval, ApprovalRequest, Backoff, Host, HostConfig, HostStatus, PairingInfo,
-    RelayState,
+    RelayState, Shared,
 };
+pub use share::ShareSource;

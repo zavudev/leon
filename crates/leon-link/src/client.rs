@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use leon_wire::relay::RelayErrorCode;
 use leon_wire::{
-    ErrorCode, ExecOutput, ExecSpec, Exit, Grid, HostId, Message, PtyInfo, WireError,
-    PROTOCOL_VERSION,
+    ErrorCode, ExecOutput, ExecSpec, Exit, Grid, HostId, Message, PtyInfo, SharedProject,
+    SharedSession, SharedTranscript, WireError, PROTOCOL_VERSION,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -460,6 +460,48 @@ impl Client {
         }
     }
 
+    /// Asks the host for what its own Leon shares: the projects it holds and
+    /// the sessions of its unified history, newest first. A host that shares
+    /// nothing answers with empty lists.
+    pub async fn share_state(
+        &self,
+    ) -> Result<(Vec<SharedProject>, Vec<SharedSession>, bool), ClientError> {
+        match self.request(|id| Message::ShareState { id }, None).await? {
+            Message::ShareStateData {
+                projects,
+                sessions,
+                truncated,
+                ..
+            } => Ok((projects, sessions, truncated)),
+            _ => Err(ClientError::Protocol),
+        }
+    }
+
+    /// Asks for one history session's transcript; `None` when the host holds
+    /// no session by that `(agent, external_id)`.
+    pub async fn share_transcript(
+        &self,
+        agent: &str,
+        external_id: &str,
+    ) -> Result<Option<SharedTranscript>, ClientError> {
+        let agent = agent.to_owned();
+        let external_id = external_id.to_owned();
+        match self
+            .request(
+                |id| Message::ShareTranscript {
+                    id,
+                    agent,
+                    external_id,
+                },
+                None,
+            )
+            .await?
+        {
+            Message::ShareTranscriptData { transcript, .. } => Ok(transcript),
+            _ => Err(ClientError::Protocol),
+        }
+    }
+
     /// Tries again now, skipping any backoff or terminal failure.
     pub fn reconnect_now(&self) {
         let _ = self.commands.try_send(Command::Reconnect);
@@ -820,6 +862,26 @@ fn on_message(
         Message::PtyListing { id, ptys: list } => {
             if let Some((reply, _)) = pending.remove(&id) {
                 let _ = reply.send(Ok(Message::PtyListing { id, ptys: list }));
+            }
+        }
+        Message::ShareStateData {
+            id,
+            projects,
+            sessions,
+            truncated,
+        } => {
+            if let Some((reply, _)) = pending.remove(&id) {
+                let _ = reply.send(Ok(Message::ShareStateData {
+                    id,
+                    projects,
+                    sessions,
+                    truncated,
+                }));
+            }
+        }
+        Message::ShareTranscriptData { id, transcript } => {
+            if let Some((reply, _)) = pending.remove(&id) {
+                let _ = reply.send(Ok(Message::ShareTranscriptData { id, transcript }));
             }
         }
         Message::Pong { .. } | Message::Ping { .. } => {}

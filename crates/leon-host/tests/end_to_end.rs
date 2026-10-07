@@ -504,3 +504,134 @@ async fn stopping_the_host_hangs_up_its_terminals_and_ends_sessions() {
     })
     .await;
 }
+
+// ----- what the host's own Leon shares -------------------------------------------------------------
+
+use leon_host::ShareSource;
+use leon_wire::{
+    SharedEntry, SharedProject, SharedSession, SharedTranscript, SHARE_SESSIONS_LIMIT,
+};
+
+/// A share source that holds what it was built with, and answers
+/// `yes-no-maybe` transcripts.
+struct FakeShare {
+    projects: Vec<SharedProject>,
+    sessions: Vec<SharedSession>,
+}
+
+impl ShareSource for FakeShare {
+    fn projects(&self) -> Vec<SharedProject> {
+        self.projects.clone()
+    }
+
+    fn sessions(&self) -> Vec<SharedSession> {
+        self.sessions.clone()
+    }
+
+    fn transcript(&self, agent: &str, external_id: &str) -> Option<SharedTranscript> {
+        match (agent, external_id) {
+            ("claude", "a1") => Some(SharedTranscript {
+                agent: "claude".into(),
+                external_id: "a1".into(),
+                messages: vec![SharedEntry {
+                    role: "user".into(),
+                    text: "hello".into(),
+                    at_ms: 10,
+                }],
+            }),
+            _ => None,
+        }
+    }
+}
+
+fn session_of(agent: &str, external_id: &str) -> SharedSession {
+    SharedSession {
+        agent: agent.into(),
+        external_id: external_id.into(),
+        cwd: "/srv/code".into(),
+        title: format!("{agent} works"),
+        model: None,
+        started_ms: 1_700_000_000_000,
+        updated_ms: 1_700_000_060_000,
+        messages: 3,
+    }
+}
+
+/// A host that shares its projects and history, asked through a paired
+/// client: the listing carries both, the truncation happens at the wire's
+/// limit, the transcript comes by `(agent, external_id)`, and an unknown one
+/// is `None`.
+#[tokio::test]
+async fn a_paired_client_sees_what_the_host_shares_of_itself() {
+    let relay = TestRelay::start().await;
+    let url = relay.url();
+    let mut config = HostConfig::new(&url, "build-box");
+    config.share = Some(leon_host::Shared(Arc::new(FakeShare {
+        projects: vec![SharedProject {
+            name: "api".into(),
+            root: "/srv/api".into(),
+        }],
+        sessions: (0..SHARE_SESSIONS_LIMIT + 17)
+            .map(|n| session_of("claude", &format!("a{n}")))
+            .collect(),
+    })));
+    let dir = tempfile::tempdir().unwrap();
+    let host_identity = Arc::new(Identity::generate());
+    let host = Host::start(
+        config,
+        host_identity.clone(),
+        Some(dir.path().join("devices.json")),
+    )
+    .unwrap();
+    while *host.watch_relay().borrow_and_update() != RelayState::Online {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let me = Arc::new(Identity::generate());
+    let info = host.new_pairing_code().await;
+    let pipe = dial(&url, &Target::Room(info.room), None).await.unwrap();
+    pair_as_client(
+        pipe,
+        &me,
+        &PairingCode::parse(&info.code).unwrap(),
+        "Ana's laptop",
+    )
+    .await
+    .unwrap();
+    let client = client_for(&url, &host_identity, &me);
+    client.wait_online(WAIT).await.unwrap();
+
+    let (projects, sessions, truncated) = client.share_state().await.unwrap();
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].root, "/srv/api");
+    assert!(client
+        .share_transcript("nope", "nada")
+        .await
+        .unwrap()
+        .is_none());
+    // Everything the source had, cut at the limit and always newest first.
+    assert_eq!(sessions.len(), SHARE_SESSIONS_LIMIT);
+    assert!(truncated);
+    assert_eq!(sessions[0].external_id, "a0");
+    let transcript = client
+        .share_transcript("claude", "a1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(transcript.messages.len(), 1);
+    assert_eq!(transcript.messages[0].text, "hello");
+}
+
+/// A host that shares nothing answers with nothing, not with an error, so a
+/// paired device's Leon has nothing to sync and keeps working.
+#[tokio::test]
+async fn a_host_that_shares_nothing_answers_the_share_requests_with_nothing() {
+    let world = paired().await;
+    let (projects, sessions, truncated) = world.client.share_state().await.unwrap();
+    assert!(projects.is_empty() && sessions.is_empty() && !truncated);
+    assert!(world
+        .client
+        .share_transcript("claude", "a1")
+        .await
+        .unwrap()
+        .is_none());
+}

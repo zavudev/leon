@@ -5,12 +5,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leon_link::SecureChannel;
-use leon_wire::{ErrorCode, Message, WireError, PROTOCOL_VERSION};
+use leon_wire::{
+    ErrorCode, Message, SharedProject, SharedSession, WireError, PROTOCOL_VERSION,
+    SHARE_SESSIONS_LIMIT,
+};
 use tokio::sync::{mpsc, Notify};
 
 use crate::exec;
-use crate::host::Inner;
+use crate::host::{Inner, Shared};
 use crate::ptys::Outbox;
+use crate::share::{ShareSource, TRANSCRIPT_BUDGET_BYTES};
 
 /// Commands one session may run at the same time.
 const MAX_EXECS: usize = 8;
@@ -210,7 +214,84 @@ fn handle(
                 error: e,
             }),
         },
+        Message::ShareState { id } => share_request(
+            inner.cfg.share.clone(),
+            id,
+            out_tx.clone(),
+            move |share| {
+                let projects: Vec<SharedProject> = share.projects();
+                let mut sessions: Vec<SharedSession> = share.sessions();
+                let truncated = sessions.len() > SHARE_SESSIONS_LIMIT;
+                sessions.truncate(SHARE_SESSIONS_LIMIT);
+                Message::ShareStateData {
+                    id,
+                    projects,
+                    sessions,
+                    truncated,
+                }
+            },
+            move || Message::ShareStateData {
+                id,
+                projects: Vec::new(),
+                sessions: Vec::new(),
+                truncated: false,
+            },
+        ),
+        Message::ShareTranscript {
+            id,
+            agent,
+            external_id,
+        } => share_request(
+            inner.cfg.share.clone(),
+            id,
+            out_tx.clone(),
+            move |share| {
+                let transcript = share
+                    .transcript(&agent, &external_id)
+                    .map(|mut transcript| {
+                        transcript.messages = crate::share::bound_transcript(
+                            &transcript.messages,
+                            TRANSCRIPT_BUDGET_BYTES,
+                        );
+                        transcript
+                    });
+                Message::ShareTranscriptData { id, transcript }
+            },
+            move || Message::ShareTranscriptData {
+                id,
+                transcript: None,
+            },
+        ),
         // Responses and repeated greetings are not requests.
         _ => reply(error(None, ErrorCode::BadRequest, "unexpected message")),
+    }
+}
+
+/// Answers a share request on the blocking pool: what the share source reads
+/// (this Leon's own store and the agents' files) can take longer than an
+/// async turn should. `share` is `None` when nothing is shared: `idle` then
+/// answers with the request's empty result, so a client asking an old or a
+/// bare `leon host` is told "nothing to see" and never an error.
+fn share_request(
+    share: Option<Shared>,
+    id: u64,
+    out: mpsc::Sender<Message>,
+    make: impl FnOnce(&dyn ShareSource) -> Message + Send + 'static,
+    idle: impl FnOnce() -> Message + Send + 'static,
+) -> bool {
+    match share {
+        Some(Shared(share)) => {
+            tokio::spawn(async move {
+                let message = tokio::task::spawn_blocking(move || make(share.as_ref()))
+                    .await
+                    .unwrap_or_else(|_| error(Some(id), ErrorCode::Internal, "the share failed"));
+                let _ = out.send(message).await;
+            });
+            true
+        }
+        None => {
+            let _ = out.try_send(idle());
+            true
+        }
     }
 }

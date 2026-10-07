@@ -198,13 +198,16 @@ fn main() {
         .with_time_limit(COMMAND_TIME_LIMIT),
     );
     let engine = engine::Engine::new(
-        store,
+        store.clone(),
         runner.clone(),
         ssh,
         leon_history::default_roots(),
         runtime.handle().clone(),
     );
     engine.set_icon_fetcher(Arc::new(avatar::CurlFetcher));
+    // What the computers paired with this one share of their own Leon: pulled
+    // from their Leon through the relay into this one's store.
+    engine.set_relay_hub(hub.clone());
     // Usage limits: the files the agents keep are read through the runner; the
     // two network sources run only when their settings are on.
     engine.set_usage(
@@ -222,7 +225,12 @@ fn main() {
     engine.set_process_scanner(runner, Some(std::process::id()));
     let remote_services = Arc::new(remote::Remote {
         hub: hub.clone(),
-        share: share::ShareService::new(identity, runtime.handle().clone(), &data_dir),
+        share: share::ShareService::new(
+            identity,
+            runtime.handle().clone(),
+            &data_dir,
+            store.clone(),
+        ),
         handle: runtime.handle().clone(),
     });
     let backend = Rc::new(remote::RoutingBackend::new(hub, runtime.handle().clone()));
