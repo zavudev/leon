@@ -4430,6 +4430,69 @@ mod live {
     }
 
     #[gpui_kit::test]
+    fn removing_a_worktree_closes_the_sessions_that_ran_in_it(cx: &mut TestAppContext) {
+        let h = open_live(cx);
+        let (_main, root) = real_worktree(&h, cx);
+        // A linked worktree in a real folder of its own, beside the main one.
+        let linked = tempfile::tempdir().unwrap();
+        let path = linked
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let project = project_id(&h, "real");
+        h.store
+            .replace_worktrees(
+                &project,
+                vec![
+                    NewWorktree {
+                        path: root.clone(),
+                        branch: Some("trunk".into()),
+                        head: None,
+                        is_main: true,
+                    },
+                    NewWorktree {
+                        path: path.clone(),
+                        branch: Some("feature/x".into()),
+                        head: None,
+                        is_main: false,
+                    },
+                ],
+            )
+            .unwrap();
+        h.settle(cx);
+        let worktree = worktree_id(&h, "feature/x");
+        put_cursor_on(&h, cx, NodeId::Worktree(worktree.clone()));
+        h.press("ctrl-t", cx);
+        wait_until(&h, cx, "the shell in the worktree", |h, cx| {
+            screen(h, cx, 1).contains(&format!("FAKE-SHELL in {path}"))
+        });
+        let script = script_of(&h, 1);
+        // git removes the worktree and then lists what is left: its main one.
+        h.runner.queue(Output::ok(""));
+        h.runner.queue(Output::ok(format!(
+            "worktree {root}\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/trunk\n"
+        )));
+        put_cursor_on(&h, cx, NodeId::Worktree(worktree));
+        h.press("m", cx);
+        h.type_text("remove", cx);
+        h.press("enter", cx);
+        assert_eq!(
+            h.palette_titles(cx),
+            ["Remove feature/x", "Cancel"].map(str::to_owned)
+        );
+        h.press("enter", cx); // Remove feature/x
+        h.settle(cx);
+        assert!(
+            h.shell(cx, |s| s.live.ids().is_empty()),
+            "the session running in the worktree was closed with it"
+        );
+        assert!(script.hung_up(), "its program was hung up");
+        assert!(!h.outline(cx).contains(&"worktree:feature/x".to_owned()));
+    }
+
+    #[gpui_kit::test]
     fn a_shell_opens_in_the_selected_worktree(cx: &mut TestAppContext) {
         let h = open_live(cx);
         let (_dir, path) = real_worktree(&h, cx);
