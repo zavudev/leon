@@ -629,12 +629,6 @@ pub fn usage_percent_display(cx: &App) -> leon_usage::PercentDisplay {
     leon_usage::PercentDisplay::parse(&text(cx, "usage_percentage_display"))
 }
 
-/// Whether the bar lists every window of each agent (`detailed`) or the one
-/// closest to its limit (`compact`).
-pub fn usage_bar_detailed(cx: &App) -> bool {
-    text(cx, "usage_bar_mode") != "compact"
-}
-
 /// The agents whose limits the settings show.
 pub fn usage_agents(cx: &App) -> Vec<leon_core::AgentId> {
     leon_usage::network::switchable_agents()

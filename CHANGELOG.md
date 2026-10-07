@@ -11,6 +11,17 @@
   files leaves it whole and asks before they are deleted with it: only that
   answer passes `--force`.
 
+### Changed
+
+* The usage bar shows one figure per agent — its logo and the percentage of the
+  window closest to its limit, with the level's marker — instead of every
+  window of every agent; hovering still lists them all and the usage view is
+  unchanged. The `Usage bar: Detailed / Compact` setting is gone. Where the
+  detailed bar held two or three agents, ten now fit; with more than four
+  agents the ones without numbers fold into a `+N` whose hover lists them, and
+  on a narrower window the agent closest to its limit stays and the others fold
+  into the count.
+
 ### Fixed
 
 * `Ctrl+C` in a terminal copies only when there is a selection; without one it

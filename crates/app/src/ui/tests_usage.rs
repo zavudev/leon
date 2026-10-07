@@ -8,7 +8,7 @@
 use super::live::{open_live, real_worktree, wait_until};
 use super::*;
 use crate::agent_usage::{Board, Scope};
-use crate::ui::usage_view::{BarModel, Density};
+use crate::ui::usage_view::BarModel;
 use leon_usage::network::{Credentials, Read, ScriptedHttp};
 use leon_usage::{AgentUsage, Reason, Source, State, UsageWindow, WindowKind};
 
@@ -153,7 +153,7 @@ fn an_unknown_agent_shows_why_instead_of_a_number(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_narrow_window_collapses_the_bar_in_steps(cx: &mut TestAppContext) {
+fn the_bar_keeps_a_figure_per_agent_and_folds_what_does_not_fit(cx: &mut TestAppContext) {
     fn fill(h: &Harness, cx: &mut TestAppContext) {
         for agent in [AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE] {
             put(
@@ -181,44 +181,19 @@ fn a_narrow_window_collapses_the_bar_in_steps(cx: &mut TestAppContext) {
             .iter()
             .map(|agent| h.shows_dynamic(format!("usage-agent-{}", agent.as_str()), cx))
             .collect();
-        (bar(&h, cx).density, shown)
+        let model = bar(&h, cx);
+        (model.items.len(), model.folded.len(), shown)
     };
-    assert_eq!(at(1900.0, cx), (Density::Detailed, vec![true, true, true]));
-    // The compact bar steps down in its own right.
-    set_text(&h, "usage_bar_mode", "compact", cx);
-    // Changing a setting reads the limits at once, which on a computer with no
-    // POSIX shell replaces what was put: put it again.
-    fill(&h, cx);
-    assert_eq!(at(1950.0, cx), (Density::Full, vec![true, true, true]));
-    let (density, _) = at(1200.0, cx);
-    assert!(
-        matches!(density, Density::Short | Density::Minimal),
-        "{density:?}"
-    );
-    let (density, shown) = at(560.0, cx);
-    assert_eq!(density, Density::Single);
-    assert_eq!(
-        shown.iter().filter(|s| **s).count(),
-        1,
-        "one worst-case indicator"
-    );
-}
-
-/// Sets a text setting, as the Settings screen does.
-fn set_text(h: &Harness, key: &str, value: &str, cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        settings::set_value(
-            cx,
-            crate::schema::find(key).unwrap(),
-            crate::schema::Value::Text(value.to_owned()),
-        )
-    });
-    h.shell.update(cx, |_, cx| cx.notify());
-    h.settle(cx);
+    assert_eq!(at(1900.0, cx), (3, 0, vec![true, true, true]));
+    // Narrow: the agent closest to its limit stays, the rest fold into the
+    // count (OpenCode has the highest figure here).
+    let (items, folded, shown) = at(560.0, cx);
+    assert_eq!((items, folded), (1, 2));
+    assert_eq!(shown, vec![false, false, true]);
 }
 
 #[gpui_kit::test]
-fn the_detailed_bar_gives_way_to_the_compact_one_as_the_window_narrows(cx: &mut TestAppContext) {
+fn the_bar_shows_the_window_closest_to_its_limit_in_every_agent(cx: &mut TestAppContext) {
     let (h, _) = open_usage(cx);
     for agent in [AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE] {
         put(
@@ -235,20 +210,17 @@ fn the_detailed_bar_gives_way_to_the_compact_one_as_the_window_narrows(cx: &mut 
             cx,
         );
     }
-    let at = |width: f32, cx: &mut TestAppContext| {
-        VisualTestContext::from_window(h.window.into(), cx)
-            .simulate_resize(size(px(width), px(800.)));
-        h.settle(cx);
-        bar(&h, cx).density
-    };
-    assert_eq!(at(2400.0, cx), Density::Detailed);
-    assert_eq!(at(1500.0, cx), Density::Full, "too narrow for every window");
-    assert!(matches!(at(1000.0, cx), Density::Short | Density::Minimal));
-    assert_eq!(at(500.0, cx), Density::Single);
-    assert_eq!(
-        bar(&h, cx).items[0].detailed_text(),
-        "10% used 2h 29m · 91% used 1d 11h !! · 0% used Fable"
-    );
+    let model = bar(&h, cx);
+    assert_eq!(model.items.len(), 3);
+    for item in &model.items {
+        assert_eq!(item.label, "wk");
+        assert_eq!(item.figure_text(), " 91% !!");
+        assert!(
+            item.tip.contains("Weekly, Fable: 0% used"),
+            "the tooltip keeps every window: {}",
+            item.tip
+        );
+    }
 }
 
 #[gpui_kit::test]
@@ -1101,7 +1073,7 @@ fn a_window_at_93_percent_is_critical_with_a_marker_in_the_view_the_bar_and_the_
         &[AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE],
         now(),
         thresholds,
-        Default::default(),
+        leon_usage::PercentDisplay::Used,
         1600.0,
     )
     .items
@@ -1231,7 +1203,7 @@ fn with_many_agents_the_bar_lists_those_with_numbers_and_folds_the_rest_into_a_c
         &all,
         1_790_000_000,
         leon_usage::Thresholds::default(),
-        Default::default(),
+        leon_usage::PercentDisplay::Used,
         1600.0,
     );
     let shown: Vec<AgentId> = model.items.iter().map(|i| i.agent).collect();
@@ -1250,7 +1222,7 @@ fn with_many_agents_the_bar_lists_those_with_numbers_and_folds_the_rest_into_a_c
         &all,
         1_790_000_000,
         leon_usage::Thresholds::default(),
-        Default::default(),
+        leon_usage::PercentDisplay::Used,
         1600.0,
     );
     assert_eq!(model.items.len(), 2);

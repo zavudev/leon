@@ -851,9 +851,10 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("footer: 38% used 2h 29m · 0% used now"),
-            "{text}"
+            text.contains("footer: 38%"),
+            "the footer line is the bar's own compact figure: {text}"
         );
+        assert!(!text.contains("footer: 38% used"), "{text}");
         assert!(!text.contains("secret-label"), "{text}");
         assert!(!text.contains('@') && !text.contains("/Users"), "{text}");
     }
