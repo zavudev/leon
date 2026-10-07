@@ -4,6 +4,9 @@
 
 ### Added
 
+* The README shows what Leon looks like: a gallery of screenshots and four
+  short clips under `docs/media/`, and `scripts/media/` regenerates them from
+  a demo workspace.
 * Removing a worktree that git refuses because it holds modified or untracked
   files leaves it whole and asks before they are deleted with it: only that
   answer passes `--force`.
