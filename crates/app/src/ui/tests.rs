@@ -2330,7 +2330,7 @@ fn confirming_removes_the_worktree_through_git_and_the_list_updates(cx: &mut Tes
 }
 
 #[gpui_kit::test]
-fn a_project_says_deleting_while_a_worktree_removal_runs(cx: &mut TestAppContext) {
+fn a_worktree_removal_says_deleting_on_the_project_and_on_the_worktree(cx: &mut TestAppContext) {
     let h = open(
         cx,
         ScriptedRunner::new()
@@ -2347,12 +2347,14 @@ fn a_project_says_deleting_while_a_worktree_removal_runs(cx: &mut TestAppContext
         .id;
     let worktree = worktree_id(&h, "feature/login");
     let row = h.row_of(NodeId::Project(project.clone()), cx).unwrap();
+    let worktree_row = h.row_of(NodeId::Worktree(worktree.clone()), cx).unwrap();
     assert!(
-        !h.shows_dynamic(format!("tree-deleting-{row}"), cx),
+        !h.shows_dynamic(format!("tree-deleting-{row}"), cx)
+            && !h.shows_dynamic(format!("tree-deleting-{worktree_row}"), cx),
         "nothing is being deleted yet"
     );
     // Start the removal without letting the engine run: while it is in
-    // flight the project's row says so.
+    // flight both rows say so.
     cx.update_window(h.window.into(), |_, window, cx| {
         h.shell.update(cx, |shell, cx| {
             shell.remove_worktree(project.clone(), worktree.clone(), false, window, cx)
@@ -2363,6 +2365,10 @@ fn a_project_says_deleting_while_a_worktree_removal_runs(cx: &mut TestAppContext
     assert!(
         h.shows_dynamic(format!("tree-deleting-{row}"), cx),
         "the project row says DELETING while git works"
+    );
+    assert!(
+        h.shows_dynamic(format!("tree-deleting-{worktree_row}"), cx),
+        "and so does the worktree being removed"
     );
     h.settle(cx);
     let row = h.row_of(NodeId::Project(project), cx).unwrap();
