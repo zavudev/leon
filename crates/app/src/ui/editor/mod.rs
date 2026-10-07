@@ -36,13 +36,13 @@ mod quick;
 mod session;
 mod view;
 
-#[cfg(test)]
+#[cfg(all(test, leon_posix_tests))]
 pub use document::Body;
 pub use document::EditorDoc;
-#[cfg(test)]
+#[cfg(all(test, leon_posix_tests))]
 pub use drafts::{write as write_draft, Draft};
 pub use files_panel::{next_pane, FileTreeUi};
-#[cfg(test)]
+#[cfg(all(test, leon_posix_tests))]
 pub use filetree::RowKind;
 #[allow(unused_imports)]
 pub use preview::ViewMode;

@@ -226,7 +226,7 @@ fn find_opens_the_editors_search_bar_only_while_a_file_has_the_keyboard(cx: &mut
     assert_eq!(h.shell(cx, |s| s.pane), Pane::Sidebar);
 
     // On the terminal of the same tab the chord is not the editor's.
-    h.press("ctrl-shift-1", cx);
+    h.press_chord("cmd-alt-1", "ctrl-shift-1", cx);
     assert_eq!(h.main_kind(cx), "live:1");
     h.press_chord("cmd-f", "ctrl-f", cx);
     assert_eq!(search_bar(&h, cx), Some((false, false)));
@@ -271,7 +271,7 @@ fn the_find_commands_are_offered_only_while_a_file_is_on_screen(cx: &mut TestApp
         with.contains(&"Replace in the file\u{2026}".to_owned()),
         "{with:?}"
     );
-    h.press("ctrl-shift-1", cx);
+    h.press_chord("cmd-alt-1", "ctrl-shift-1", cx);
     let without = titles(&h, cx);
     assert!(
         !without
@@ -280,7 +280,7 @@ fn the_find_commands_are_offered_only_while_a_file_is_on_screen(cx: &mut TestApp
         "{without:?}"
     );
     // Run from the palette it works too.
-    h.press("ctrl-shift-2", cx);
+    h.press_chord("cmd-alt-2", "ctrl-shift-2", cx);
     h.press("ctrl-shift-p", cx);
     h.type_text("find in the file", cx);
     h.press("enter", cx);

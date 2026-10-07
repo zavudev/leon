@@ -92,7 +92,7 @@ fn a_file_opens_in_a_tab_beside_the_terminal_of_its_folder(cx: &mut TestAppConte
 #[gpui_kit::test]
 fn opening_a_file_again_shows_its_tab_instead_of_adding_one(cx: &mut TestAppContext) {
     let (h, _dir, _file) = with_file(cx, "notes.txt", b"hello\n");
-    h.press("ctrl-shift-1", cx);
+    h.press_chord("cmd-alt-1", "ctrl-shift-1", cx);
     assert_eq!(h.main_kind(cx), "live:1");
     open_by_chord(&h, cx, "notes.txt");
     assert_eq!(h.main_kind(cx), "live:2");
@@ -297,7 +297,7 @@ fn a_file_splits_beside_a_new_terminal_in_the_same_folder(cx: &mut TestAppContex
     assert!(h.shows("file-2", cx));
     assert!(h.shows("live-terminal", cx));
     // Closing the file leaves the terminal beside it.
-    h.press_chord("cmd-shift-[", "ctrl-shift-[", cx);
+    h.press_chord("cmd-[", "ctrl-shift-[", cx);
     assert_eq!(h.main_kind(cx), "live:2");
     h.press_chord("cmd-w", "ctrl-shift-w", cx);
     assert_eq!(files_open(&h, cx), 0);
@@ -327,7 +327,7 @@ fn the_file_commands_apply_only_while_a_file_is_on_screen(cx: &mut TestAppContex
     let with = titles(&h, cx);
     assert!(with.iter().any(|t| t == "Save the file"), "{with:?}");
     assert!(with.iter().any(|t| t == "Close the file"), "{with:?}");
-    h.press("ctrl-shift-1", cx);
+    h.press_chord("cmd-alt-1", "ctrl-shift-1", cx);
     let without = titles(&h, cx);
     assert!(
         without.iter().any(|t| t == "Open a file\u{2026}"),
