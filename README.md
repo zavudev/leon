@@ -1013,25 +1013,23 @@ a test fails when it is stale.
 How much of each agent's limits is left, per machine. The footer under the main
 pane (level with the sidebar's tools, the whole width when the sidebar is
 hidden) shows, for every agent that is installed on the machine in context, its
-logo, a small meter and, by default (**Usage bar: Detailed**), **every window**
-in Orca's wording, `N% used <label>` joined by `·`: the label of the five-hour
-and the weekly window is the live countdown to their reset (`2h 29m`, `1d 11h`,
-floored: `47m`, `6d 7h`, `now`), the label of a per-model window is the model's
-name: `10% used 2h 29m · 91% used 1d 11h !! · 0% used Fable`. **Compact** shows
-the one window closest to its limit (`wk  91% !!  1d 11h`). A level is a colour
-**and** a marker, never a colour alone: `!` from the warning threshold (60% used
-by default), `!!` from the critical one (80%), as Orca's. **Show limits as**
+logo and one figure: the window closest to its limit, `NN%`, in the colour of
+its level and with its marker (` 91% !!`, or ` 9% left !!`). **Hovering** says
+every window the way the usage view does (`5-hour window: 10% used · Resets in
+2h 29m`), so the whole breakdown is one hover away, and a click or `⇧⌘U`
+(`Ctrl+Shift+Alt+U`) opens the view. A level is a colour **and** a marker,
+never a colour alone: `!` from the warning threshold (60% used by default),
+`!!` from the critical one (80%), as Orca's. **Show limits as**
 (`usage_percentage_display`) shows what is left instead (`9% left`); the
 levels, the warnings and the notice always judge what is **used**. Every figure
 is rounded the same way everywhere (half away from zero: 12.5 reads 13, never
 12), between 0 and 100. A window that has already reset since the numbers were
 read shows 0% and says so; one with no usable reading says why (`signed out`,
-`source off`, `too old`, `no data yet`) instead of a number. On a narrow window
-the bar gives up detail in steps: every window of every agent; then the one
-closest to its limit (logo, meter, label, figure, time); then logo, meter and
-figure; then logo and figure; then a single indicator for the agent closest to
-its limit. The refresh button reads the limits again and says when they were
-last read.
+`source off`, `too old`, `no data yet`) instead of a number. With more than
+four agents, the ones that have no numbers fold into a `+N` whose hover lists
+them; on a narrow window the agent closest to its limit stays and the others
+fold into the count. The refresh button reads the limits again and says when
+they were last read.
 
 **When a read fails the numbers stay.** An expired or rejected sign-in (a 401,
 or a 403 that is not a missing scope), a rate limit, being offline and a vendor

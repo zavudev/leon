@@ -179,7 +179,9 @@ above: the engine writes the store and the UI reads it.
   under a local hash of the account, bounded to 14 days and 300 points a series;
   `Store::forget_usage_history`). `StoreChange::Usage` announces both.
 * **UI.** `agent_usage::Board` is what the window reads. `ui/usage_view.rs` holds
-  the pure model (`bar_model` with its `BarStyle`: detailed, every window, as Orca's footer, or compact; `density`; `usage_rows`, worst first; `step_scope`; tested
+  the pure model (`bar_model`: one figure per agent, its logo and the window
+  closest to its limit, with everything else on hover; `usage_rows`, worst first;
+  `step_scope`; tested
   without a window) and the drawing: the footer strip under the main pane (it
   absorbs the status line, and sits level with the sidebar's tools), the usage
   view overlay (`Overlay::Usage`, `Command::ShowUsage`) and the chip in a live
