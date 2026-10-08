@@ -3932,6 +3932,7 @@ dependencies = [
  "gpui-kit",
  "image",
  "leon-core",
+ "leon-den",
  "leon-history",
  "leon-host",
  "leon-link",
@@ -3970,6 +3971,16 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "leon-den"
+version = "0.5.0"
+dependencies = [
+ "gpui-kit",
+ "image",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

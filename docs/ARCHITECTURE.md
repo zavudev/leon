@@ -9,6 +9,7 @@ simple; the tests enforce the ones that can be enforced.
 app (leon)  ── ui, engine, keys, theme, launch, diagnose
  │   ├── leon-term     the embedded terminal (GPUI, PTY, emulator)
  │   ├── leon-mark     the animated lion (GPUI)
+ │   ├── leon-den      the Den: live sessions as pixel-art lions (GPUI)
  │   ├── leon-remote   commands on this machine or over SSH
  │   ├── leon-history  importers for the agents' own session files
 │   ├── leon-usage    the agents' usage limits, per machine
@@ -20,6 +21,7 @@ leon-usage ── leon-core, leon-remote
 leon-update ── leon-remote (only for `spawn`)
 leon-term ── gpui-kit only (no other Leon crate)
 leon-mark ── gpui-kit only (no other Leon crate)
+leon-den ── gpui-kit and image only (no other Leon crate)
 ```
 
 | Crate | What it is |
@@ -838,6 +840,153 @@ this computer, and no fallback to one when the platform has no dialog (that
 is an error status). Typing a path remains for SSH machines.
 `leon --diagnose folder-dialog` calls the same function and prints that the
 prompt was reached.
+
+## The home (`ui/home.rs`)
+
+`Main::Empty` is the home. `Shell::go_home` shows it from anywhere (the
+pinned row of the sidebar, the command `GoHome`, its chord): it closes the
+sheet that is open, leaves the Den (`den_leave`: no back-stack is kept, the
+transcripts stop being read) and sets `Main::Empty` with the keyboard in the
+main pane. It never touches `LiveSessions`: a terminal is shown by
+`Main::Live(id)` and lives in `self.live` whatever the main pane shows, so
+going home closes nothing.
+
+The sidebar's navigation (`home::Nav`: Home, The Den) is drawn between the
+header and the filter, outside the tree's `uniform_list`, so neither the
+scroll nor the filter moves it. Its rows are built like a project's row
+(same height, columns, hover and cursor bar); the Den's closes with the count
+of its lions and the waiting dot (`den_glance`). `HomeUi::nav` says the
+sidebar's cursor is on one of them (set by going there by any route, and by
+Up from the first row of the tree; `move_cursor_to` clears it), and the tree
+then draws no cursor: one cursor at a time.
+
+What the home shows is decided without a window: `home::pride` counts this
+window's terminals by their `Activity` (the sidebar's dot) and the sessions
+the engine's last process scan found elsewhere (`elsewhere::foreign`, every
+machine), and picks the few rows listed; `home::items` is the order the
+keyboard walks (the actions of `home::ACTIONS`, the sessions that wait, the
+ones elsewhere that the history knows, the recent ones) and `home::step`
+moves over it. The recent sessions are the first of `Snapshot::sessions`,
+which the window already holds: nothing is queried on the render path. An
+action runs its command (`run_command`); a session of the history is opened
+by putting the sidebar's cursor on its row and activating it, so it behaves
+exactly as there (a session held elsewhere asks before anything starts).
+
+## The Den (`leon-den`, `ui/den*.rs`)
+
+The Den shows every live session as a lion in a pixel-art office. It is a
+`Main` variant (`Main::Den`): it takes the main pane and leaves the sidebar;
+`Shell::toggle_den` keeps what the main pane showed and `close_den` puts it
+back. Three layers, each pure where it can be:
+
+* **`leon-den`** knows nothing of Leon. `sim::Den` is a pure function from
+  what it was told (`Cub`s and `Happening`s, each with a time) and a time to a
+  `Frame`, with the `Wake` that says when the picture changes next;
+  `layout::DenLayout` is the room as data (size, floor, walls, carpets,
+  pieces by catalogue id; versioned JSON whose reading never fails, with
+  notes of what it repaired); `catalogue` says of each piece its footprint,
+  where it goes (floor, wall, on a table) and its role; `world` derives
+  everything else from a layout (the ground, the spots of each place with
+  their facing, which computer a seat lights, the paths, the backdrop);
+  `editor::Editor` is every change a user can make as a pure operation with
+  undo; `prefabs` are the built-in dens. Placement in `sim` is by capacity:
+  every lion owns a home (a work seat given when it joins and kept while it
+  is a seat; a tile of bare floor apart from the others when the seats are
+  taken), `sim::wanted` names the place a state asks for, and a lion goes
+  there only while it has a free spot (`World::free_spot`; three in the
+  line at the entrance), otherwise it stays home and shows its state there.
+  `paint::plates` lays the name plates out so that none covers another, a
+  face or a bubble, and leaves one out rather than overlap;
+  `narrator` turns a happening into a line of at most two rows of 34
+  characters, and into its plain twin; `feed::Feed` is the log of those
+  lines and of what the agents wrote to the user (speech, kept verbatim):
+  appending with coalescing, the caps (500 entries; the last 40 of a
+  session's past), `backfill` that sums a past turn's tools up in one line,
+  insertion of the past by time, the rows for a width (`lay`: headings,
+  wrapping, long speech cut to four rows until opened, the filter to one
+  lion and its little ones) and where the reader is (following the end, or
+  parked with a count of what is new). Time is data: the host says what
+  time it is (`DenView::set_wall_time`); `paint::compose` composites the room in software at the size of its
+  art; `scene` lays out the chrome in device pixels: in a view at least
+  820 px wide a column on the right with the roster over the feed, in a
+  narrower one the feed under the room and no roster, in one lower than
+  420 px the room alone; the truth card; `view::DenView` scales the picture by a whole number of device
+  pixels, hands it to GPUI as one image, and sets one timer per wake (never an
+  animation frame; none at all when nothing moves). The pictures are PNG files
+  compiled in: pixel-agents' furniture and tiles, and lion sheets that
+  `atelier` derives from its character sheets (`cargo run -p leon-den
+  --example make_lions`; a test fails when the committed sheets differ). The
+  mane is drawn in key colours and dyed per agent, clamped so that any tint
+  stays a mane.
+* **`ui/den.rs`** is the mapping, pure and tested: `Facts` (what the terminal
+  says: the `Activity` of the sidebar's dot, paused, exit code, how long it
+  has been quiet) and an optional `Pulse` (what the transcript says) give the
+  `CubState`, the level (tool calls) and the plain truth of the card. Its
+  header holds the whole state table. `tell` turns transcript beats into the
+  narrator's happenings with the real tool name and subject; `changes` tells
+  what no beat does (joined, went home, fainted with its exit code, fell
+  asleep, the permission prompt on the moment it is inferred).
+* **The feed's facts.** `leon_history::live` gives the speech beat its
+  text (`Beat::Said { text, at }`: the message whole but for control
+  characters, at most 4000 characters, with the line's timestamp).
+  `ui/den_view.rs` turns each poll into what the feed is told, in order:
+  a happening for the narrator, the agent's words, or, for what is read
+  for the first time and for what was written while the Den was closed,
+  the past (`den::past`), which the feed sums up. Lions are refreshed
+  before the feed is told, so a sub-agent's words land under its parent.
+* **Sessions that run elsewhere.** `Shell::den_away` takes the engine's
+  last process scan of this computer (`Engine::elsewhere`, the scan the
+  sidebar's "running elsewhere" mark uses, at its cadence) through
+  `elsewhere::foreign` and keeps the processes that are **certain** matches
+  (the process names its session), of an agent with a transcript `Format`,
+  not held by a terminal of this window, each session once. Each is followed
+  like an own session under an id of its own (`den::away_id`, bit 62) and
+  becomes a lion once its transcript is found. `den::away_state` is its
+  state table (in the header of `ui/den.rs`): the transcript's `Pulse` and
+  the time since the transcript's file was written (`Report::written`). No
+  permission prompt is inferred without a terminal, and a process that left
+  the scan leaves the den (the exit code is unknown: never `Fainted`).
+  Opening one calls the existing `show_elsewhere` (the stored transcript and
+  the notice of who holds it). Likely matches, agents without a `Format`
+  and remote machines are left out.
+* **`ui/den_follow.rs`** follows the transcripts: one
+  `leon_history::live::Follower` per local Claude Code or Codex session whose
+  own session id is known (`LiveSession::learned`, else the id it resumed),
+  and one per sub-agent that is alive (found by the `meta.json` beside its
+  file). `Followers::poll` reads files, so `ui/den_view.rs` calls it on the
+  background executor, once every `Options::den_tick` (one second) **while the
+  Den is open and a session is live**; closed, nothing is read. The first read
+  of a session is from the start of its file (that is what makes `Lv.` right)
+  and is not narrated: it is the past.
+
+* **`ui/den_edit.rs`** and **`ui/den_store.rs`** are the customising. The
+  view owns the editor and turns the pointer into its operations
+  (`DenView::edit`); the shell adds the bar and the strip of things to pick
+  (thumbnails made from the Den's own art, scaled by whole device pixels),
+  the editor's keys, and the files. A den of the user's is
+  `dens/<id>.json` beside `settings.json`; the setting `den` holds the id in
+  use. Like the theme files, they are written by the shell itself with
+  `std::fs` on the window's thread, not by the engine: a den is a few
+  kilobytes, written to a file beside it and renamed over the old one, on
+  every accepted change (`DenEvent::LayoutChanged`). A built-in den is never
+  written: the first change to one makes the user's copy. The file is read
+  when the Den opens. The format and the rules are in `docs/DEN.md`.
+
+**The live tail** (`leon_history::live`) is the reader under it: `Tail` turns
+appended bytes into `Beat`s (tool started and finished, turn ended, sub-agent
+detached and ended...), `Pulse` reduces beats to the current picture. It is
+documented in that module.
+
+**The permission prompt is inferred, and can be wrong.** A transcript holds
+the tool call but nothing about the question asked before it runs. The Den
+says "needs permission" when a call has no result **and** the terminal's
+`Activity` is `Waiting` (quiet beyond the threshold, or the bell rang): an
+agent at work redraws its status line constantly, so a quiet terminal with a
+call in flight is nearly always a question. The limits: it is late by the
+quiet threshold; a tool that runs long while the agent's interface draws
+nothing reads as a prompt; and a session without a transcript (remote, another
+agent, an id not learned yet) can only say "waiting". An `AskUserQuestion` or
+`ExitPlanMode` call in flight is "waiting for you" whatever the terminal does.
 
 ## The lion (`leon-mark`)
 

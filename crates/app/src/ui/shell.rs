@@ -210,6 +210,9 @@ pub struct Options {
     pub notify: notify::Notify,
     /// How long a banner stays on screen.
     pub banner_duration: Duration,
+    /// How often the transcripts of the live sessions are read while the Den
+    /// is open.
+    pub den_tick: Duration,
     /// How long a change of the open terminals waits before it is written.
     pub save_debounce: Duration,
     /// How long a request for an incremental history import waits, so a
@@ -306,6 +309,7 @@ impl Default for Options {
             error_flash: Duration::from_secs(4),
             notify: Rc::new(notify::system),
             banner_duration: Duration::from_secs(8),
+            den_tick: Duration::from_secs(1),
             save_debounce: Duration::from_millis(500),
             import_debounce: Duration::from_secs(2),
             import_interval: Duration::from_secs(60),
@@ -418,6 +422,8 @@ pub enum Main {
     Session(Box<Transcript>),
     /// A live terminal session.
     Live(LiveId),
+    /// The Den: every live session as a lion at work.
+    Den,
 }
 
 /// The application window's view.
@@ -433,6 +439,8 @@ pub struct Shell {
     expansion_file: Option<PathBuf>,
     pub(super) rows: Vec<Row>,
     pub(super) cursor: Option<usize>,
+    /// Where the keyboard is on the home, and on its row of the sidebar.
+    pub(super) home: super::home::HomeUi,
     pub(super) tree_scroll: UniformListScrollHandle,
     pub(super) main: Main,
     /// The terminals that are running.
@@ -448,6 +456,7 @@ pub struct Shell {
     pub(super) connect_ui: super::connect::ConnectUi,
     /// The usage bar and view.
     pub(super) usage: super::usage_view::UsageUi,
+    pub(super) den: super::den_view::DenUi,
     /// "Connect a machine, with a code".
     pub(super) pair_ui: super::pair::PairUi,
     /// "Share this machine".
@@ -676,6 +685,8 @@ impl Shell {
                 if this
                     .update(cx, |this, cx| {
                         this.learn_session_ids(cx);
+                        // A session that started elsewhere is a lion too.
+                        this.den_watch(cx);
                         // What runs elsewhere changes who is active.
                         if this.active_only {
                             this.rebuild_rows();
@@ -720,6 +731,8 @@ impl Shell {
             settings_ui,
             connect_ui,
             usage: super::usage_view::UsageUi::default(),
+            den: super::den_view::DenUi::default(),
+            home: super::home::HomeUi::default(),
             pair_ui,
             share_ui: super::share::ShareUi::default(),
             updates: super::updates_view::UpdateUi::default(),
@@ -843,7 +856,7 @@ impl Shell {
 
     /// Leon's own agent terminals on a machine, as far as the process tree of
     /// another machine cannot tell them from strangers.
-    fn own_terminals(&self, machine: &MachineId) -> Vec<OwnTerminal> {
+    pub(super) fn own_terminals(&self, machine: &MachineId) -> Vec<OwnTerminal> {
         self.live
             .all()
             .iter()
@@ -906,7 +919,7 @@ impl Shell {
                 .project(project)
                 .is_some_and(|entry| entry.worktrees.iter().any(|w| &w.id == worktree)),
             Main::Live(id) => self.live.get(*id).is_none(),
-            Main::Empty | Main::Session(_) => false,
+            Main::Empty | Main::Session(_) | Main::Den => false,
         };
         if gone {
             self.main = Main::Empty;
@@ -1102,6 +1115,7 @@ impl Shell {
         )
         .with_prefs(Self::step_prefs(cx))
         .with_update_ready(self.ready_update_version())
+        .with_dens(self.dens(cx).0, self.dens(cx).1)
         .with_installed(self.installed_agents())
         .with_repositories(
             self.connect_ui
@@ -1740,7 +1754,7 @@ impl Shell {
                 .map(|entry| entry.project.machine_id.clone()),
             Main::Session(transcript) => Some(transcript.session.machine_id.clone()),
             Main::Live(id) => self.live.get(*id).map(|session| session.machine.clone()),
-            Main::Empty => None,
+            Main::Empty | Main::Den => None,
         };
         let found = if self.pane == Pane::Sidebar {
             from_row().or_else(from_main)
@@ -1809,7 +1823,7 @@ impl Shell {
                     let session = self.live.get(*id)?;
                     Some((session.machine.clone(), None, session.cwd.clone()))
                 }
-                Main::Empty => None,
+                Main::Empty | Main::Den => None,
             }
         };
         let (machine, project, cwd) = if self.pane == Pane::Sidebar {
@@ -1830,6 +1844,7 @@ impl Shell {
 
     pub(super) fn move_cursor_to(&mut self, index: usize) {
         self.cursor = Some(index);
+        self.home.nav = None;
         let strategy = if index == 0 {
             ScrollStrategy::Top
         } else {
@@ -2309,6 +2324,15 @@ impl Shell {
         if self.overlay == Overlay::Usage && self.usage_key(stroke, window, cx) {
             return true;
         }
+        // The Den has the keyboard while it is the main pane's and nothing
+        // is open over it: its own keys come before the tree's.
+        if self.overlay == Overlay::None
+            && self.pane == Pane::Main
+            && self.den_open()
+            && self.den_key(stroke, window, cx)
+        {
+            return true;
+        }
         if self.overlay == Overlay::Pair && self.pair_key(stroke, window, cx) {
             return true;
         }
@@ -2497,6 +2521,13 @@ impl Shell {
             },
             C::Settings => self.open_settings(window, cx),
             C::ShowUsage => self.toggle_usage(window, cx),
+            C::ShowDen => self.toggle_den(window, cx),
+            C::GoHome => self.go_home(window, cx),
+            C::EditDen => self.toggle_den_editor(window, cx),
+            C::ChooseDen | C::SaveDenAs | C::RenameDen | C::DeleteDen => {
+                self.begin_flow(command, window, cx)
+            }
+            C::OpenDensFolder => self.open_dens_folder(cx),
             C::RefreshUsage => self.refresh_usage(cx),
             C::WhyMissing => self.open_history_report(window, cx),
             C::RestoreSessions => self.restore_last_sessions(window, cx),
@@ -2665,6 +2696,38 @@ impl Shell {
             return;
         }
         match self.pane {
+            // The navigation is over the tree: Home, then The Den, then the
+            // first row of the tree.
+            Pane::Sidebar if self.home.nav.is_some() => {
+                let nav = self.home.nav.unwrap_or(super::home::Nav::Home);
+                match command {
+                    C::Up | C::PageUp => self.home.nav = nav.step(true),
+                    C::Top => self.home.nav = Some(super::home::Nav::Home),
+                    C::Down | C::PageDown => match nav.step(false) {
+                        Some(next) => self.home.nav = Some(next),
+                        None => {
+                            if let Some(first) = tree::first(&self.rows) {
+                                self.move_cursor_to(first);
+                            }
+                        }
+                    },
+                    C::Bottom => {
+                        if let Some(last) = tree::last(&self.rows) {
+                            self.move_cursor_to(last);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // Up from the first row of the tree is the last of them.
+            Pane::Sidebar
+                if matches!(command, C::Up | C::PageUp)
+                    && self
+                        .cursor
+                        .is_none_or(|at| Some(at) == tree::first(&self.rows)) =>
+            {
+                self.home.nav = Some(super::home::Nav::Den);
+            }
             Pane::Sidebar => {
                 let from = self.cursor.unwrap_or(0);
                 let next = match command {
@@ -2679,6 +2742,18 @@ impl Shell {
                 if let Some(next) = next {
                     self.move_cursor_to(next);
                 }
+            }
+            Pane::Main if matches!(self.main, Main::Empty) => {
+                let by = match command {
+                    C::Down => 1,
+                    C::Up => -1,
+                    C::PageDown => 5,
+                    C::PageUp => -5,
+                    C::Top => i64::MIN,
+                    C::Bottom => i64::MAX,
+                    _ => 0,
+                };
+                self.home_step(by, _cx);
             }
             Pane::Main => {
                 if let Main::Session(transcript) = &self.main {
@@ -2713,6 +2788,11 @@ impl Shell {
             return;
         }
         match (self.pane, &self.main) {
+            (Pane::Sidebar, _) if self.home.nav.is_some() => {
+                let nav = self.home.nav.unwrap_or(super::home::Nav::Home);
+                self.open_nav(nav, window, cx);
+            }
+            (Pane::Main, Main::Empty) => self.home_open(window, cx),
             (Pane::Sidebar, _) => {
                 if let Some(index) = self.cursor {
                     self.activate(index, window, cx);

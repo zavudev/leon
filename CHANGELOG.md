@@ -1,5 +1,82 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+* The Den (`⌥⇧⌘L`, `Ctrl+Shift+Alt+L`, the View menu and the palette's **Open
+  the Den**): every live session as a pixel-art lion at work in an office,
+  in the place of the main pane. A lion types at its desk while its agent
+  edits, empties the shelf while it searches, minds the rack while a command
+  runs, and stands on the rug with a `!` when it waits for you; a sub-agent
+  hatches from an egg and works at the small table. A text box tells it in
+  the voice of an old creature game ("MOSS used CARGO TEST!"), a roster lists
+  the pride with each lion's `Lv.` (the tools it has used), and pointing at a
+  lion shows the plain truth: the tool, the file, the command. For Claude
+  Code and Codex sessions of this computer the facts are read from the
+  agent's own transcript while it grows; other sessions show only whether
+  they work or wait. A pending permission prompt is inferred (a tool call
+  without a result in a quiet terminal) and the card says so. Arrows and Tab
+  select, Enter or a double click opens the session, Escape goes back.
+  `den_narrator` turns the narrator off for a plain count; reduced motion
+  holds the lions still. The art is from pixel-agents (MIT), with lion heads
+  drawn for Leon.
+* The Den's room can be changed. **Edit the Den** (a button over the room,
+  the palette, the View menu, `E` in the Den) opens an editor: furniture is
+  picked from a strip of pictures and put down, dragged, turned, removed;
+  carpets are laid, the floor and the walls repainted, the room made wider or
+  deeper, with undo and redo and every step possible from the keyboard. The
+  lions keep living in the room while it changes and go where the furniture
+  says: a seat that faces a computer is a place to work, a bookshelf a place
+  to read, a rack a place to run commands. A room that lacks one still works,
+  and the editor says what is missing. **Choose a den…** switches between six
+  built-in dens (the office, the open plan, the library, the server room, the
+  lounge, the nook) and your own; a built-in den is never changed, the first
+  change makes a den of yours from it. Dens are JSON files in a `dens` folder
+  beside the settings (**Save the den as…**, **Rename the den…**, **Delete
+  the den…**, **Open dens folder**); the setting `den` holds the one in use.
+  The format, the rules and the catalogue are in `docs/DEN.md`.
+* The Den's narrator moved from a box under the room to **the feed**, a
+  log on the right under the roster, with history. Besides the narrator's
+  lines it shows what each agent **wrote to you**, in its own words (Claude
+  Code and Codex sessions of this computer): marked `said`, never rewritten,
+  long messages cut to a few rows until clicked. Entries carry the lion's
+  mane colour, its name and how long ago. When the Den opens the feed is
+  already filled from each session's transcript (its last messages, and one
+  line per past turn such as `MOSS used 14 tools.`), and what happened while
+  the Den was closed is summed up the same way. It follows its end until you
+  scroll back, then shows how many entries are new; `Page Up`, `Page Down`,
+  `Home`, `End` scroll it, `Shift+Up`/`Shift+Down` walk its entries and
+  `Enter` opens a long message. Selecting a lion narrows it to that lion and
+  its sub-agents. In a narrow pane it sits under the room. With
+  `den_narrator` off its narration is plain and the agents' words stay.
+* In the Den nobody is piled on anybody any more. Every lion has a desk of
+  its own and sleeps there; the sofa, the shelf, the rack and the entrance
+  hold as many as they have places (three wait in line), and a lion that
+  finds its place full stays at its desk and shows there what it does. More
+  lions than desks stand apart on free floor. Name plates say the first
+  meaningful words of a title in plain capitals (accents are folded, so
+  "móvil" reads `MOVIL`), never cover each other, a face or a bubble, and are
+  left out where the room is too crowded. The library's desks face their
+  screens.
+* The Den also shows the Claude Code and Codex sessions of this computer
+  that run **outside this window**: in another Leon window or in a plain
+  terminal. They are found by the existing look at the processes and told by
+  their transcripts alone (tool, `Lv.`, sub-agents, their words and their past
+  in the feed); the card says where each runs and its pid, and for how long
+  nothing was written rather than guessing a permission prompt. `Enter` opens
+  the stored transcript with who holds it. `den_elsewhere` turns them off.
+* The **home** is a place to act from, and always one step away. **Home** and
+  **The Den** are rows at the top of the sidebar, over the filter (no scroll
+  or filter hides them; the Den's row counts its lions),
+  and **Go home** (`⌥⇧⌘H`, `Ctrl+Shift+Alt+H`, the View menu, the palette)
+  goes there from anywhere without closing a terminal. The home has buttons
+  for what starts things (Open the Den first, a new session, open a project,
+  go to, search the history, the palette, connect a machine, shortcuts,
+  usage, settings), the sessions at a glance (how many run here and
+  elsewhere, how many work, and the ones that wait for you, each a click
+  away) and the recent sessions. The arrows walk it and `Enter` opens.
+
 ## [0.5.0] - 2026-10-07
 
 ### Added

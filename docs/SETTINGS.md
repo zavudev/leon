@@ -22,6 +22,9 @@ How Leon looks.
 | Interface size | `interface_scale` | 80 to 125% | `100` | The size of the whole interface, in percent of the design: 80, 90, 100, 110 or 125. |
 | Blueprint lines | `blueprint_lines` | `theme`, `on`, `off` | `theme` | The crosshairs, corner ticks and frames of the line system: the theme's own, always, or never. |
 | Animate the lion | `animate_lion` | on, off | `on` | The Leon mark blinks, narrows its eyes and glances now and then, and shows how the sessions are doing. Off keeps it still. |
+| Narrator in the Den | `den_narrator` | on, off | `on` | The Den's feed tells what the sessions do in the voice of an old creature game. Off says the same facts plainly and replaces the line at its foot with a count of the sessions that work and wait. What the agents themselves wrote is shown as it is either way. |
+| Den | `den` | text | `office` | The room the Den shows: a built-in den by its id (office, open-plan, library, server-room, lounge, nook) or one of yours by the name of its file in the dens folder, without `.json`. "Choose a den" sets it. |
+| Sessions running elsewhere in the Den | `den_elsewhere` | on, off | `on` | The Den also shows the Claude Code and Codex sessions of this computer that run in another Leon window or in a plain terminal, read from their transcripts. They are found by the same look at the processes that marks sessions running elsewhere, so this needs "Detect sessions running elsewhere". |
 | Reduce motion | `reduce_motion` | `system`, `on`, `off` | `system` | Keep the interface still: follow the system's reduce-motion preference, always reduce motion, or never. Reduced motion shows the lion at rest. |
 
 ## Terminal
