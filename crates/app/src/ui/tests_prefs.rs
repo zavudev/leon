@@ -164,7 +164,7 @@ fn copy_on_select_copies_the_selection_when_the_mouse_is_released(cx: &mut TestA
     let pane = h.bounds_of("live-terminal".to_owned(), cx).unwrap();
     let drag = |h: &Harness, cx: &mut TestAppContext| {
         let mut visual = VisualTestContext::from_window(h.window.into(), cx);
-        let y = pane.origin.y + px(8. + 18. * 0.5);
+        let y = pane.origin.y + crate::theme::metrics::TAB_BAR_HEIGHT() + px(8. + 18. * 0.5);
         let from = gpui_kit::point(pane.origin.x + px(9.), y);
         let to = gpui_kit::point(pane.origin.x + px(120.), y);
         visual.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
@@ -671,4 +671,43 @@ fn the_sidebar_settings_hide_and_size_the_sidebar(cx: &mut TestAppContext) {
     );
     set(&h, cx, "sidebar_visible", Value::Bool(false));
     assert!(h.bounds_of("sidebar".to_owned(), cx).is_none());
+}
+
+#[gpui_kit::test]
+fn the_new_session_menu_offers_every_installed_agent_and_only_those(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let (_dir, _) = real_worktree(&h, cx);
+    let project = h.shell(cx, |s| {
+        s.rows
+            .iter()
+            .position(|row| matches!(row.kind, super::tree::Kind::Project { .. }))
+            .unwrap()
+    });
+    let offered = |h: &Harness, cx: &mut TestAppContext| {
+        cx.update(|cx| h.shell.update(cx, |s, cx| s.menu_agents(project, cx)))
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        offered(&h, cx),
+        [AgentId::CLAUDE, AgentId::CODEX, AgentId::OPENCODE]
+    );
+    // Grok is on the PATH: it shows up, in the catalogue's order.
+    cx.update(|cx| {
+        h.shell.update(cx, |shell, _| {
+            shell.options.system = FakeSystem::with(&["grok", "kiro-cli"])
+        })
+    });
+    assert_eq!(
+        offered(&h, cx),
+        [
+            AgentId::CLAUDE,
+            AgentId::CODEX,
+            AgentId::OPENCODE,
+            AgentId::GROK,
+            AgentId::parse("kiro").unwrap()
+        ]
+    );
+    // One turned off in the settings is gone again.
+    set(&h, cx, "agent_grok_enabled", Value::Bool(false));
+    assert!(!offered(&h, cx).contains(&AgentId::GROK));
 }

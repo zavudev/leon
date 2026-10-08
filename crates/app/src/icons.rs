@@ -210,7 +210,7 @@ mod tests {
             .map(|spec| spec.id.as_str())
             .collect();
         assert!(
-            without.contains(&"grok") && without.len() > 20,
+            without.contains(&"amp") && !without.contains(&"grok") && without.len() > 10,
             "{without:?}"
         );
         for spec in leon_core::agent::builtin() {

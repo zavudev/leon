@@ -550,9 +550,14 @@ pub struct Shell {
     /// in the sidebar to be resumed; the tree draws them apart from the
     /// sessions that only have a history. Kept while the window lives.
     pub(super) slept: std::collections::HashSet<SessionId>,
-    /// Whether the tree shows only the active sessions (the setting
-    /// `sidebar_active_only`, read when the settings change).
-    pub(super) active_only: bool,
+    /// The sleeping sessions that have no history row to stand for them.
+    pub(super) dormant: super::dormant::Dormants,
+    /// Where they are remembered, when anywhere.
+    dormant_file: Option<PathBuf>,
+    /// Whether the tree also shows the sessions that are not active (the
+    /// setting `sidebar_show_inactive`, off by default, read when the
+    /// settings change).
+    pub(super) show_inactive: bool,
     /// The removal of a worktree, while it runs.
     pub(super) removing: Option<Task<()>>,
     /// The removal of a worktree, while it runs. Its project's row says
@@ -583,7 +588,13 @@ impl Shell {
     ) -> Self {
         let store = engine.store().clone();
         let snapshot = Snapshot::load(&store).unwrap_or_default();
-        let placement = Placement::compute(&snapshot);
+        let dormant_file = settings::sibling(super::dormant::FILE_NAME, cx);
+        let dormant = dormant_file
+            .as_deref()
+            .map(super::dormant::Dormants::load)
+            .unwrap_or_default();
+        let placement =
+            Placement::compute(&snapshot).with_live(&snapshot, Self::dormant_entries(&dormant));
         let expansion_file = settings::sibling(expansion::FILE_NAME, cx);
         let expansion = expansion_file
             .as_deref()
@@ -708,7 +719,7 @@ impl Shell {
                     .update(cx, |this, cx| {
                         this.learn_session_ids(cx);
                         // What runs elsewhere changes who is active.
-                        if this.active_only {
+                        if !this.show_inactive {
                             this.rebuild_rows();
                         }
                         cx.notify()
@@ -796,7 +807,9 @@ impl Shell {
             resuming: None,
             checking: None,
             slept: std::collections::HashSet::new(),
-            active_only: settings::flag(cx, "sidebar_active_only"),
+            dormant,
+            dormant_file,
+            show_inactive: settings::flag(cx, "sidebar_show_inactive"),
             removing: None,
             deleting: None,
             elsewhere_ticker: None,
@@ -969,18 +982,53 @@ impl Shell {
         Placement::compute(snapshot).with_live(snapshot, self.live_entries())
     }
 
-    /// The live sessions as the tree sees them.
+    /// The sleeping sessions without a history row, as the tree sees them.
+    fn dormant_entries(dormant: &super::dormant::Dormants) -> Vec<LiveEntry> {
+        dormant
+            .all()
+            .iter()
+            .map(|sleeping| LiveEntry {
+                id: sleeping.id(),
+                machine: sleeping.machine(),
+                cwd: sleeping.cwd.clone(),
+                agent: sleeping.agent(),
+                history: None,
+                asleep: Some(sleeping.label.clone().unwrap_or_default()),
+            })
+            .collect()
+    }
+
+    /// Remembers the sleeping sessions.
+    pub(super) fn save_dormant(&self) {
+        if let Some(file) = &self.dormant_file {
+            if let Err(error) = self.dormant.save(file) {
+                tracing::warn!(%error, "the sleeping sessions could not be saved");
+            }
+        }
+    }
+
+    /// The live sessions as the tree sees them: one per workspace, then the
+    /// sleeping ones.
     fn live_entries(&self) -> Vec<LiveEntry> {
+        // A session has one row, its first terminal's: its other tabs are
+        // shells in it, not sessions.
         self.live
             .all()
             .iter()
+            .filter(|session| {
+                self.workspaces
+                    .lead_of(session.id)
+                    .is_none_or(|lead| lead == session.id)
+            })
             .map(|session| LiveEntry {
                 id: session.id,
                 machine: session.machine.clone(),
                 cwd: session.cwd.clone(),
                 agent: session.agent,
                 history: session.history.clone(),
+                asleep: None,
             })
+            .chain(Self::dormant_entries(&self.dormant))
             .collect()
     }
 
@@ -999,7 +1047,7 @@ impl Shell {
                 self.filter.as_ref(),
             )
         };
-        self.rows = if self.active_only {
+        self.rows = if !self.show_inactive {
             // Only the active ones: found in the tree with every node open, so
             // that none hides one, then folded the way the person folded it.
             let folded: std::collections::HashSet<String> = build(&self.expansion)
@@ -1188,6 +1236,11 @@ impl Shell {
 
     /// The machine whose row the cursor is on.
     fn machine_row(&self) -> Option<MachineId> {
+        if self.settings_ui.return_from_palette {
+            if let Some(machine) = &self.settings_ui.machine {
+                return Some(machine.clone());
+            }
+        }
         match &self.rows.get(self.cursor?)?.kind {
             Kind::Machine(machine) => Some(machine.id.clone()),
             _ => None,
@@ -1710,7 +1763,14 @@ impl Shell {
             .map(|session| LiveInfo {
                 id: session.id,
                 label: session.label(),
-                busy: session.busy(cx),
+                // Closing a session ends its tabs' programs too.
+                busy: session.busy(cx)
+                    || (self.workspaces.lead_of(session.id) == Some(session.id)
+                        && self
+                            .workspaces
+                            .terminals_of(session.id)
+                            .iter()
+                            .any(|id| self.live.get(*id).is_some_and(|other| other.busy(cx)))),
             })
             .collect()
     }
@@ -1976,7 +2036,8 @@ impl Shell {
                     self.run_command(Command::ResumeSession, window, cx);
                 }
             }
-            Kind::Live(entry) => self.open_live(entry.id, window, cx),
+            Kind::Live(entry) if entry.asleep.is_some() => self.wake_dormant(entry.id, window, cx),
+            Kind::Live(entry) => self.show_session(entry.id, window, cx),
             Kind::More { .. } => {
                 if let NodeId::More(parent) = &row.id {
                     self.expansion.show_all_under(&parent.key());
@@ -2402,7 +2463,7 @@ impl Shell {
             C::Commands => self.open_palette(">", window, cx),
             C::SearchHistory => self.open_palette("/", window, cx),
             C::FilterProjects => self.focus_filter(window, cx),
-            C::ToggleActiveOnly => self.toggle_active_only(cx),
+            C::ToggleInactiveSessions => self.toggle_show_inactive(cx),
             C::RefreshIcon => self.refresh_icon_here(),
             C::ChooseIcon => self.choose_icon_here(window, cx),
             C::ResetIcon => self.reset_icon_here(),
@@ -2502,6 +2563,12 @@ impl Shell {
             C::PasteImage => self.paste_terminal(super::paste::How::Image, cx),
             C::Copy | C::ScrollPageUp | C::ScrollPageDown => {
                 self.terminal_action(command, cx);
+            }
+            C::CloseSession if self.dormant_here().is_some() => {
+                if let Some(id) = self.dormant_here() {
+                    self.close_dormant(id);
+                    cx.notify();
+                }
             }
             C::NewSession
             | C::AddAgent
@@ -3171,15 +3238,13 @@ impl Shell {
     /// on them.
     fn line_frame(&self, window: &Window) -> lines::Frame<'_> {
         let live = match &self.main {
-            Main::Live(id) => self.workspaces.workspace_of(*id).map(|workspace| {
-                (
-                    workspace.tabs.len() > 1,
-                    workspace.tabs.get(workspace.active),
-                )
-            }),
+            Main::Live(id) => self
+                .workspaces
+                .workspace_of(*id)
+                .map(|workspace| workspace.tabs.get(workspace.active)),
             _ => None,
         };
-        let tab = live.and_then(|(_, tab)| tab);
+        let tab = live.flatten();
         lines::Frame {
             viewport: (
                 window.viewport_size().width.as_f32(),
@@ -3190,9 +3255,7 @@ impl Shell {
             header: metrics::HEADER_HEIGHT().as_f32(),
             status: metrics::FOOTER_HEIGHT().as_f32(),
             tools: metrics::TOOLS_HEIGHT().as_f32(),
-            tabs: live
-                .filter(|(many, _)| *many)
-                .map(|_| metrics::TAB_BAR_HEIGHT().as_f32()),
+            tabs: live.map(|_| metrics::TAB_BAR_HEIGHT().as_f32()),
             layout: tab.filter(|tab| !tab.zoomed).map(|tab| &tab.layout),
             scale_factor: window.scale_factor(),
         }

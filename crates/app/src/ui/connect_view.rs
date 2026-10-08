@@ -8,7 +8,6 @@ use crate::connect::{self as model, Field, Platform};
 use crate::icons::{icon, IconName};
 use crate::keys;
 use crate::theme::{metrics, px, Palette};
-use gpui_kit::component::input::Input;
 use gpui_kit::prelude::*;
 use gpui_kit::{div, Context, Div, SharedString, Stateful};
 use leon_remote::connect::{Check, CheckId, CheckState};
@@ -496,7 +495,7 @@ impl Shell {
                 .child(
                     div()
                         .w_full()
-                        .child(Input::new(ui.input(field)).appearance(false)),
+                        .child(super::widgets::text_input(ui.input(field))),
                 ),
         );
         if field == Field::Identity {

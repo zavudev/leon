@@ -90,8 +90,11 @@ fn a_dividers_ends_are_marked_and_the_marks_move_with_the_split(cx: &mut TestApp
         let x = divider.left().as_f32() + 0.5;
         near(
             centre(h, cx, "crosshair-divider--start"),
-            (x, header.bottom().as_f32() - 0.5),
-            &format!("{when}: where the divider meets the header's rule"),
+            (
+                x,
+                header.bottom().as_f32() + crate::theme::metrics::TAB_BAR_HEIGHT().as_f32() - 0.5,
+            ),
+            &format!("{when}: where the divider meets the tab strip's rule"),
         );
         near(
             centre(h, cx, "crosshair-divider--end"),

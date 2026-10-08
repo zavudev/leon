@@ -17,6 +17,7 @@ fn window(cx: &mut TestAppContext) -> (Harness, tempfile::TempDir, tempfile::Tem
         ScriptedRunner::new(),
         Some(settings.path().join(crate::settings::FILE_NAME)),
     );
+    show_inactive(cx);
     let (dir, path) = real_worktree(&h, cx);
     h.press("ctrl-t", cx);
     wait_until(&h, cx, "the shell's prompt", |h, cx| {

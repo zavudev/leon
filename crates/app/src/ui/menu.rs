@@ -70,13 +70,18 @@ impl Item {
             children: leon_core::agent::all()
                 .iter()
                 .filter(|spec| spec.history.is_some() || spec.custom)
-                .map(|spec| Self {
-                    label: format::agent_name(spec.id).to_owned(),
-                    command: Command::NewSession,
-                    agent: Some(spec.id),
-                    children: Vec::new(),
-                })
+                .map(|spec| Self::agent(spec.id))
                 .collect(),
+        }
+    }
+
+    /// The entry that starts a session of `agent`.
+    fn agent(agent: AgentId) -> Self {
+        Self {
+            label: format::agent_name(agent).to_owned(),
+            command: Command::NewSession,
+            agent: Some(agent),
+            children: Vec::new(),
         }
     }
 }
@@ -175,6 +180,10 @@ pub fn items_for_held(kind: &Kind, local: bool, held: Option<bool>) -> Vec<Item>
         .into_iter()
         .flatten()
         .collect(),
+        Kind::Live(entry) if entry.asleep.is_some() => vec![
+            Item::new("Wake", C::Open),
+            Item::new("Close", C::CloseSession),
+        ],
         Kind::Live(_) => vec![
             Item::new("Focus", C::FocusTerminal),
             Item::new("Split right", C::SplitRight),
@@ -362,7 +371,16 @@ impl Menu {
 
 impl Shell {
     /// The row to put a menu on and the menu's items.
-    fn menu_for(&self, index: usize, at: Point<Pixels>) -> Option<Menu> {
+    ///
+    /// `agents` is what the "New agent session" submenu offers: the agents
+    /// installed where the row is (see [`Self::menu_agents`]); `None` keeps the
+    /// default list of [`Item::new_session`].
+    fn menu_for(
+        &self,
+        index: usize,
+        at: Point<Pixels>,
+        agents: Option<&[AgentId]>,
+    ) -> Option<Menu> {
         let row: &Row = self.rows.get(index)?;
         let local = row.machine.is_local();
         let held = match &row.kind {
@@ -372,6 +390,13 @@ impl Shell {
             _ => None,
         };
         let mut items = items_for_held(&row.kind, local, held);
+        if let Some(agents) = agents {
+            for item in items.iter_mut().filter(|item| item.agent.is_none()) {
+                if item.command == Command::NewSession && !item.children.is_empty() {
+                    item.children = agents.iter().map(|agent| Item::agent(*agent)).collect();
+                }
+            }
+        }
         // A session another terminal or Leon holds is not resumed from here
         // by default: the transcript comes first, and resuming is "Resume
         // here anyway".
@@ -416,10 +441,32 @@ impl Shell {
         (!items.is_empty()).then(|| Menu::new(row.id.clone(), items, at))
     }
 
+    /// The agents the "New agent session" submenu of the row at `index` offers:
+    /// every agent of the catalogue that is installed on the row's machine and
+    /// not turned off in the settings, in the catalogue's order (so Grok and
+    /// the rest show up as soon as their program is on the `PATH`). `None`
+    /// when nothing is known of the machine or nothing is installed there: the
+    /// default list stays.
+    pub(super) fn menu_agents(&self, index: usize, cx: &Context<Self>) -> Option<Vec<AgentId>> {
+        let machine = &self.rows.get(index)?.machine;
+        let found = self
+            .installed_agents()
+            .into_iter()
+            .find(|(id, _)| id == machine)?
+            .1;
+        let enabled = Self::step_prefs(cx).agents_enabled;
+        let list: Vec<AgentId> = leon_core::agent::all()
+            .iter()
+            .map(|spec| spec.id)
+            .filter(|id| found.contains(id) && enabled.contains(id))
+            .collect();
+        (!list.is_empty()).then_some(list)
+    }
+
     /// The labels of the menu of the row at `index`, for tests.
     #[cfg(test)]
     pub(super) fn menu_for_test(&self, index: usize) -> Vec<String> {
-        self.menu_for(index, point(px(0.), px(0.)))
+        self.menu_for(index, point(px(0.), px(0.)), None)
             .map(|menu| menu.items.into_iter().map(|item| item.label).collect())
             .unwrap_or_default()
     }
@@ -434,7 +481,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let anchor = at.unwrap_or_else(|| self.row_anchor(index));
-        let Some(menu) = self.menu_for(index, anchor) else {
+        let agents = self.menu_agents(index, cx);
+        let Some(menu) = self.menu_for(index, anchor, agents.as_deref()) else {
             self.engine.report(
                 crate::engine::StatusKind::Info,
                 "There is nothing to do with this row.",
@@ -626,7 +674,7 @@ impl Shell {
             launch,
             &place.machine,
             &place.cwd,
-            super::terminals::Place::Tab,
+            super::terminals::Place::Session,
             None,
             window,
             cx,
@@ -1020,6 +1068,7 @@ mod tests {
             cwd: "/".into(),
             agent: None,
             history: None,
+            asleep: None,
         });
         assert_eq!(
             labels(&items_for(&live, true)),

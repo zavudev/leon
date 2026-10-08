@@ -2,6 +2,8 @@
 //! focus rule under a pane's header.
 
 use crate::theme::{fonts, metrics, px, Palette};
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::{Sizable, Size};
 use gpui_kit::prelude::*;
 use gpui_kit::{div, App, Div, FontWeight, Hsla, Pixels, SharedString};
 use leon_mark::{AnimatedMark, Mood};
@@ -177,4 +179,12 @@ pub fn activity_dot(activity: Activity, palette: &Palette) -> Div {
         Activity::Waiting => slot.child(div().size(px(7.)).bg(palette.warning)),
         Activity::Failed => slot.child(div().size(px(7.)).bg(palette.error)),
     }
+}
+
+/// A bare text field for a box of the interface: no border or background of
+/// its own, and the Small size, whose 24 px box holds the 20 px line with 2 px
+/// above and below. The default Medium box (32 px with 8 px above and below)
+/// leaves 16 px for the same line and cuts the bottom of the letters.
+pub fn text_input(state: &gpui_kit::Entity<InputState>) -> Input {
+    Input::new(state).with_size(Size::Small).appearance(false)
 }

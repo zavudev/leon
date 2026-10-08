@@ -106,6 +106,32 @@ fn rig(
     (h, processes, dir, path, id)
 }
 
+/// [`rig`] with the setting's own default: inactive sessions hidden.
+fn rig_filter(
+    cx: &mut TestAppContext,
+) -> (
+    Harness,
+    Arc<Processes>,
+    tempfile::TempDir,
+    String,
+    leon_core::SessionId,
+) {
+    let rigged = rig(cx);
+    cx.update(|cx| {
+        settings::set_value(
+            cx,
+            crate::schema::find("sidebar_show_inactive").unwrap(),
+            crate::schema::Value::Bool(false),
+        );
+        rigged
+            .0
+            .shell
+            .update(cx, |shell, cx| shell.sync_settings(cx));
+    });
+    rigged.0.settle(cx);
+    rigged
+}
+
 fn scan(h: &Harness, cx: &mut TestAppContext) {
     h.engine.submit(Op::Scan(MachineId::local()));
     h.settle(cx);
@@ -714,12 +740,12 @@ fn kinds(h: &Harness, cx: &mut TestAppContext) -> Vec<String> {
     })
 }
 
-fn toggle_active_only(h: &Harness, cx: &mut TestAppContext) {
+fn toggle_show_inactive(h: &Harness, cx: &mut TestAppContext) {
     h.mouse_on(
-        if h.shows("filter-active-only-on", cx) {
-            "filter-active-only-on"
+        if h.shows("filter-show-inactive-on", cx) {
+            "filter-show-inactive-on"
         } else {
-            "filter-active-only"
+            "filter-show-inactive"
         }
         .to_owned(),
         gpui_kit::MouseButton::Left,
@@ -729,27 +755,45 @@ fn toggle_active_only(h: &Harness, cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn active_only_says_so_when_nothing_is_active_and_remembers_the_choice(cx: &mut TestAppContext) {
-    let (h, _processes, _dir, _path, _id) = rig(cx);
-    assert!(kinds(&h, cx).iter().any(|k| k.starts_with("session:")));
-    toggle_active_only(&h, cx);
+fn inactive_sessions_are_hidden_by_default_and_the_toggle_shows_them_and_is_remembered(
+    cx: &mut TestAppContext,
+) {
+    let (h, _processes, _dir, _path, _id) = rig_filter(cx);
+    // Off from the start: nothing is active, so the tree says so.
+    assert!(!cx.update(|cx| crate::settings::flag(cx, "sidebar_show_inactive")));
     assert_eq!(kinds(&h, cx), ["no-active"]);
     assert!(h.shows("tree-no-active", cx));
-    assert!(h.shows("filter-active-only-on", cx));
-    assert!(cx.update(|cx| crate::settings::flag(cx, "sidebar_active_only")));
-    // Off again: the whole tree is back.
-    toggle_active_only(&h, cx);
+    assert!(h.shows("filter-show-inactive", cx));
+    // On: the whole tree is back.
+    toggle_show_inactive(&h, cx);
     assert!(kinds(&h, cx).iter().any(|k| k.starts_with("session:")));
-    assert!(!cx.update(|cx| crate::settings::flag(cx, "sidebar_active_only")));
+    assert!(h.shows("filter-show-inactive-on", cx));
+    assert!(cx.update(|cx| crate::settings::flag(cx, "sidebar_show_inactive")));
+    // Off again: only the active ones.
+    toggle_show_inactive(&h, cx);
+    assert_eq!(kinds(&h, cx), ["no-active"]);
+    assert!(!cx.update(|cx| crate::settings::flag(cx, "sidebar_show_inactive")));
 }
 
 #[gpui_kit::test]
-fn active_only_keeps_a_session_running_elsewhere_and_what_holds_it(cx: &mut TestAppContext) {
-    let (h, processes, _dir, _path, _id) = rig(cx);
+fn the_old_active_only_setting_is_ignored(cx: &mut TestAppContext) {
+    // A file written by the version that had "Show only active sessions" off
+    // (the default then): it does not turn inactive sessions on.
+    let (h, _processes, _dir, _path, _id) = rig_filter(cx);
+    let def = crate::schema::find("sidebar_show_inactive").unwrap();
+    assert_eq!(def.default, crate::schema::Initial::Bool(false));
+    assert!(crate::schema::find("sidebar_active_only").is_none());
+    assert_eq!(kinds(&h, cx), ["no-active"]);
+}
+
+#[gpui_kit::test]
+fn hiding_inactive_keeps_a_session_running_elsewhere_and_what_holds_it(cx: &mut TestAppContext) {
+    let (h, processes, _dir, _path, _id) = rig_filter(cx);
     show(&processes, &strange_claude("alpha-3"));
     scan(&h, cx);
+    toggle_show_inactive(&h, cx);
     let before = kinds(&h, cx);
-    toggle_active_only(&h, cx);
+    toggle_show_inactive(&h, cx);
     let shown = kinds(&h, cx);
     assert!(shown.contains(&"session:alpha".to_owned()), "{shown:?}");
     assert!(shown.len() < before.len(), "{shown:?} < {before:?}");
@@ -767,18 +811,17 @@ fn active_only_keeps_a_session_running_elsewhere_and_what_holds_it(cx: &mut Test
 }
 
 #[gpui_kit::test]
-fn active_only_keeps_a_live_terminal_and_the_nodes_above_it(cx: &mut TestAppContext) {
-    let (h, _processes, _dir, _path, id) = rig(cx);
-    toggle_active_only(&h, cx);
+fn hiding_inactive_keeps_a_live_terminal_and_the_nodes_above_it(cx: &mut TestAppContext) {
+    let (h, _processes, _dir, _path, id) = rig_filter(cx);
     assert_eq!(kinds(&h, cx), ["no-active"]);
-    toggle_active_only(&h, cx);
+    toggle_show_inactive(&h, cx);
     put_cursor_on(&h, cx, NodeId::Session(id));
     h.press("enter", cx);
     h.press("enter", cx); // Resume
     wait_until(&h, cx, "the resumed agent", |h, cx| {
         screen(h, cx, 1).contains("FAKE-CLAUDE --resume alpha-3")
     });
-    toggle_active_only(&h, cx);
+    toggle_show_inactive(&h, cx);
     let shown = kinds(&h, cx);
     assert!(!shown.contains(&"no-active".to_owned()), "{shown:?}");
     // The terminal's own row and the nodes above it, nothing else: no other
@@ -793,11 +836,10 @@ fn active_only_keeps_a_live_terminal_and_the_nodes_above_it(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
-fn active_only_lets_the_person_fold_and_open_nodes(cx: &mut TestAppContext) {
-    let (h, processes, _dir, _path, _id) = rig(cx);
+fn hiding_inactive_lets_the_person_fold_and_open_nodes(cx: &mut TestAppContext) {
+    let (h, processes, _dir, _path, _id) = rig_filter(cx);
     show(&processes, &strange_claude("alpha-3"));
     scan(&h, cx);
-    toggle_active_only(&h, cx);
     let open = kinds(&h, cx);
     assert!(open.contains(&"session:alpha".to_owned()), "{open:?}");
     // Folding the node above it hides what is under it, and its row stays.

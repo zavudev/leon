@@ -27,11 +27,13 @@ fn wait_until(
 /// A window whose settings are in `settings`.
 fn window_in(cx: &mut TestAppContext, settings: &tempfile::TempDir) -> Harness {
     cx.executor().allow_parking();
-    open_with(
+    let h = open_with(
         cx,
         ScriptedRunner::new(),
         Some(settings.path().join(crate::settings::FILE_NAME)),
-    )
+    );
+    show_inactive(cx);
+    h
 }
 
 fn open_by_chord(h: &Harness, cx: &mut TestAppContext, typed: &str) {

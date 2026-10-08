@@ -417,7 +417,9 @@ const ROWS: &[Row] = &[
     .resume(&["--session", "{id}"])
     .exit("/exit")
     .mark("opencode"),
-    row("grok", "Grok", "grok", "https://x.ai/cli").resume(&["--resume", "{id}"]),
+    row("grok", "Grok", "grok", "https://x.ai/cli")
+        .resume(&["--resume", "{id}"])
+        .mark("grok"),
     row("cursor", "Cursor", "cursor-agent", "https://cursor.com/cli")
         .resume(&["--resume", "{id}"])
         .mark("cursor"),
@@ -429,7 +431,9 @@ const ROWS: &[Row] = &[
     )
     .resume(&["--resume={id}"])
     .mark("copilot"),
-    row("muse", "Muse", "muse", "https://dev.meta.ai/docs/muse-code").resume(&["resume", "{id}"]),
+    row("muse", "Muse", "muse", "https://dev.meta.ai/docs/muse-code")
+        .resume(&["resume", "{id}"])
+        .mark("muse"),
     row(
         "dsh",
         "DeepSeek Harness",
@@ -446,7 +450,8 @@ const ROWS: &[Row] = &[
         "mimo",
         "https://mimo.xiaomi.com/coder",
     )
-    .resume(&["--session", "{id}"]),
+    .resume(&["--session", "{id}"])
+    .mark("mimo-code"),
     row("amp", "Amp", "amp", "https://ampcode.com/manual#install"),
     row(
         "openclaude",
@@ -460,8 +465,9 @@ const ROWS: &[Row] = &[
         "agy",
         "https://antigravity.google/docs/cli-overview",
     )
-    .resume(&["--conversation", "{id}"]),
-    row("pi", "Pi", "pi", "https://pi.dev"),
+    .resume(&["--conversation", "{id}"])
+    .mark("antigravity"),
+    row("pi", "Pi", "pi", "https://pi.dev").mark("pi"),
     row("omp", "oh-my-pi", "omp", "https://omp.sh"),
     row(
         "hermes",
@@ -469,8 +475,11 @@ const ROWS: &[Row] = &[
         "hermes",
         "https://hermes-agent.nousresearch.com/docs/",
     )
-    .args(&["--tui"]),
-    row("devin", "Devin", "devin", "https://devin.ai/cli").resume(&["--resume", "{id}"]),
+    .args(&["--tui"])
+    .mark("hermes-agent"),
+    row("devin", "Devin", "devin", "https://devin.ai/cli")
+        .resume(&["--resume", "{id}"])
+        .mark("devin"),
     row(
         "goose",
         "Goose",
@@ -482,7 +491,8 @@ const ROWS: &[Row] = &[
         "Auggie",
         "auggie",
         "https://docs.augmentcode.com/cli/overview",
-    ),
+    )
+    .mark("auggie"),
     row(
         "autohand",
         "Autohand Code",
@@ -509,7 +519,8 @@ const ROWS: &[Row] = &[
         "https://www.codebuddy.ai/cli",
     )
     .resume(&["--resume", "{id}"])
-    .detect(&["codebuddy", "cbc"]),
+    .detect(&["codebuddy", "cbc"])
+    .mark("codebuddy"),
     row(
         "codebuff",
         "Codebuff",
@@ -541,7 +552,7 @@ const ROWS: &[Row] = &[
         "https://docs.factory.ai/cli/getting-started/quickstart",
     )
     .resume(&["--resume", "{id}"]),
-    row("kilo", "Kilocode", "kilo", "https://kilo.ai/docs/cli"),
+    row("kilo", "Kilocode", "kilo", "https://kilo.ai/docs/cli").mark("kilocode"),
     row(
         "kimi",
         "Kimi",
@@ -551,7 +562,9 @@ const ROWS: &[Row] = &[
     .resume(&["--session", "{id}"])
     .detect(&["kimi", "kimi-code"])
     .mark("kimi"),
-    row("kiro", "Kiro", "kiro-cli", "https://kiro.dev/docs/cli/").args(&["chat", "--tui"]),
+    row("kiro", "Kiro", "kiro-cli", "https://kiro.dev/docs/cli/")
+        .args(&["chat", "--tui"])
+        .mark("kiro"),
     row(
         "mistral-vibe",
         "Mistral Vibe",
@@ -594,14 +607,16 @@ const ROWS: &[Row] = &[
         "Trae",
         "traecli",
         "https://docs.trae.cn/cli_get-started-with-trae-cli",
-    ),
+    )
+    .mark("trae"),
     row(
         "qoder",
         "Qoder CLI",
         "qodercli",
         "https://docs.qoder.com/cli/overview",
     )
-    .resume(&["--resume", "{id}"]),
+    .resume(&["--resume", "{id}"])
+    .mark("qoder"),
     row(
         "qoder-cn",
         "Qoder CLI China",
@@ -609,7 +624,8 @@ const ROWS: &[Row] = &[
         "https://docs.qoder.cn/cli/overview",
     )
     .resume(&["--resume", "{id}"])
-    .detect(&["qoderclicn", "qodercn"]),
+    .detect(&["qoderclicn", "qodercn"])
+    .mark("qoder"),
     row(
         "prime-agent",
         "Prime Agent",

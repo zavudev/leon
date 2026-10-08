@@ -249,11 +249,12 @@ impl Shell {
             return None;
         }
         let id = self.live.next_id();
-        let key = super::super::workspace::key_of(machine.as_str(), &folder);
         let mut doc = EditorDoc::open(machine, entry.path.clone(), folder, content, id, window, cx);
         self.restore_draft_of(&mut doc, window, cx);
+        let (machine, folder) = (doc.machine.clone(), doc.folder.clone());
         self.files.insert(id, doc);
-        self.workspaces.add_tab(&key, id);
+        self.workspaces
+            .add_folder_tab(machine.as_str(), &folder, id);
         self.go_to_line(id, Some(entry.line + 1), window, cx);
         if is_markdown(&entry.path) {
             match ViewMode::parse(&entry.mode) {

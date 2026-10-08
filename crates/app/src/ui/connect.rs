@@ -934,7 +934,7 @@ impl Shell {
             crate::launch::Launch::Shell,
             &id,
             &home,
-            super::terminals::Place::Tab,
+            super::terminals::Place::Session,
             None,
             window,
             cx,

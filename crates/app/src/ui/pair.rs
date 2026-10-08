@@ -13,7 +13,7 @@ use crate::keys;
 use crate::pair::{self as model, Failure, Step, StepState};
 use crate::settings;
 use crate::theme::{metrics, px, Palette};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::{div, Context, Div, Entity, Keystroke, Stateful, Subscription, Task, Window};
 use leon_core::{MachineId, MachineKind};
@@ -362,7 +362,7 @@ impl Shell {
                         .border_1()
                         .border_color(colours.border)
                         .rounded(metrics::RADIUS())
-                        .child(Input::new(input).appearance(false)),
+                        .child(super::widgets::text_input(input)),
                 )
         };
         let mut steps = div()

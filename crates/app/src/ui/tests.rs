@@ -57,6 +57,7 @@ type Window = WindowHandle<gpui_kit::base::Root>;
 /// settings, kept in memory unless a test gives them a file.
 fn prepare(cx: &mut gpui_kit::App, settings_file: Option<std::path::PathBuf>) {
     gpui_kit::init(cx);
+    let settings_file_is_none = settings_file.is_none();
     settings::init(
         settings_file,
         settings::Overrides {
@@ -65,6 +66,28 @@ fn prepare(cx: &mut gpui_kit::App, settings_file: Option<std::path::PathBuf>) {
         },
         cx,
     );
+    // The tests that are not about the sidebar's filter look at the whole
+    // tree; the ones about it (`tests_elsewhere`) switch this off to see the
+    // default.
+    if settings_file_is_none {
+        settings::set_value(
+            cx,
+            crate::schema::find("sidebar_show_inactive").unwrap(),
+            crate::schema::Value::Bool(true),
+        );
+    }
+}
+
+/// Shows the sessions that are not active too, for a test that gave its
+/// settings a file (which keeps the default, off).
+fn show_inactive(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        settings::set_value(
+            cx,
+            crate::schema::find("sidebar_show_inactive").unwrap(),
+            crate::schema::Value::Bool(true),
+        );
+    });
 }
 
 /// A key as this platform has it. The tests write the secondary key as
@@ -94,6 +117,8 @@ struct FakeSystem {
     dir: tempfile::TempDir,
     /// Programs this computer does not have.
     missing: Vec<&'static str>,
+    /// Programs beyond the three agents it always has.
+    extra: Vec<&'static str>,
 }
 
 /// The shell's startup file: a prompt, a banner, and the three agents.
@@ -113,7 +138,15 @@ impl FakeSystem {
         Rc::new(Self {
             dir,
             missing: Vec::new(),
+            extra: Vec::new(),
         })
+    }
+
+    /// The same computer with these programs too.
+    fn with(extra: &[&'static str]) -> Rc<Self> {
+        let mut computer = Rc::try_unwrap(Self::new()).ok().expect("just made");
+        computer.extra = extra.to_vec();
+        Rc::new(computer)
     }
 
     /// The same computer without these programs.
@@ -126,8 +159,9 @@ impl FakeSystem {
 
 impl System for FakeSystem {
     fn find_program(&self, name: &str) -> Option<std::path::PathBuf> {
-        (matches!(name, "claude" | "codex" | "opencode") && !self.missing.contains(&name))
-            .then(|| self.dir.path().join(name))
+        ((matches!(name, "claude" | "codex" | "opencode") || self.extra.contains(&name))
+            && !self.missing.contains(&name))
+        .then(|| self.dir.path().join(name))
     }
     fn login_shell(&self) -> (String, Vec<String>) {
         let rc = self.dir.path().join("rc");
@@ -4432,6 +4466,79 @@ mod live {
         });
     }
 
+    /// The project of `real_worktree`, and the queue of git answers a worktree
+    /// named `branch` needs; returns where it is added.
+    fn queue_new_worktree(
+        h: &Harness,
+        cx: &mut TestAppContext,
+        path: &str,
+        branch: &str,
+    ) -> (leon_core::ProjectId, String) {
+        let project = h
+            .shell(cx, |shell| shell.snapshot.projects.clone())
+            .into_iter()
+            .find(|entry| entry.project.name == "real")
+            .expect("the project the worktree belongs to")
+            .project
+            .id;
+        h.runner.queue(Output::ok("trunk\n"));
+        h.runner.queue(Output::ok(String::new()));
+        let added = crate::address::worktree_path(path, branch);
+        std::fs::create_dir_all(&added).unwrap();
+        let listing = format!(
+            "worktree {path}\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/trunk\n\
+             worktree {added}\nHEAD 2222222222222222222222222222222222222222\n\
+             branch refs/heads/{branch}\n",
+        );
+        for _ in 0..4 {
+            h.runner.queue(Output::ok(listing.clone()));
+        }
+        (project, added)
+    }
+
+    #[gpui_kit::test]
+    fn a_worktree_made_in_the_dialog_without_an_agent_starts_a_shell(cx: &mut TestAppContext) {
+        let h = open_live(cx);
+        let (_dir, path) = real_worktree(&h, cx);
+        let (project, added) = queue_new_worktree(&h, cx, &path, "feature/shelled");
+        put_cursor_on(&h, cx, NodeId::Project(project));
+        h.press("ctrl-shift-n", cx);
+        assert_eq!(
+            h.shell(cx, |s| s.new_worktree_ui.as_ref().unwrap().agent),
+            None,
+            "nothing was chosen"
+        );
+        h.type_text("feature/shelled", cx);
+        for _ in 0..4 {
+            h.press("tab", cx);
+        }
+        h.press("enter", cx);
+        cx.executor().advance_clock(Duration::from_secs(1));
+        h.settle(cx);
+        wait_until(&h, cx, "the worktree's shell", |h, cx| {
+            screen(h, cx, 1).contains(&format!("FAKE-SHELL in {added}"))
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_worktree_made_in_the_palette_starts_a_shell_without_a_default_agent(
+        cx: &mut TestAppContext,
+    ) {
+        let h = open_live(cx);
+        let (_dir, path) = real_worktree(&h, cx);
+        let (_project, added) = queue_new_worktree(&h, cx, &path, "fix-palette");
+        // The keyboard is on the machine, so the palette asks for the project.
+        put_cursor_on(&h, cx, NodeId::Open(MachineId::local()));
+        h.press("ctrl-shift-n", cx);
+        answer(&h, "fix-palette", cx);
+        h.press("enter", cx); // HEAD
+        cx.executor().advance_clock(Duration::from_secs(1));
+        h.settle(cx);
+        wait_until(&h, cx, "the worktree's shell", |h, cx| {
+            screen(h, cx, 1).contains(&format!("FAKE-SHELL in {added}"))
+        });
+    }
+
     #[gpui_kit::test]
     fn the_new_worktree_dialog_offers_the_last_agent_started(cx: &mut TestAppContext) {
         let h = open_live(cx);
@@ -5036,9 +5143,13 @@ mod live {
         ));
         assert!(h.shows("pane-1", cx) && h.shows("pane-2", cx));
         assert!(h.shows("divider-", cx), "a divider between them");
-        // Both are rows of the tree, in one workspace: one tab.
+        // Both are panes of one tab, in one session.
         assert_eq!(h.shell(cx, |s| s.live.ids().len()), 2);
-        assert!(!h.shows("terminal-tabs", cx), "one tab: no strip");
+        assert!(
+            h.shows("terminal-tabs", cx) && h.shows("terminal-tab-new", cx),
+            "one tab: the strip is there, with its +"
+        );
+        assert!(!h.shows("terminal-tab-1", cx), "and only one tab in it");
         let (a, b) = h.shell(cx, |s| {
             (
                 s.live.get(LiveId(1)).unwrap().cwd.clone(),
@@ -5849,7 +5960,11 @@ mod live {
             "a program runs: it asks"
         );
         h.press("enter", cx);
-        assert_eq!(h.shell(cx, |s| s.live.ids().len()), 1);
+        assert_eq!(
+            h.shell(cx, |s| s.live.ids().len()),
+            0,
+            "closing the row of a session ends all its panes"
+        );
     }
 
     // ----- the activity dot -----------------------------------------------------------------
@@ -6404,10 +6519,10 @@ mod live {
             assert!(s.terminal_focused(), "the terminal has the keyboard");
             let workspace = s.workspaces.workspace_of(LiveId(1)).unwrap();
             assert_eq!(workspace.tabs.len(), 1, "the first pane of its workspace");
-            assert_eq!(
-                workspace.key,
-                crate::ui::workspace::key_of(MachineId::local().as_str(), &path)
-            );
+            assert!(workspace.key.starts_with(&crate::ui::workspace::key_of(
+                MachineId::local().as_str(),
+                &path
+            )));
         });
         // Typing goes straight to the terminal.
         h.type_text("hello there", cx);
@@ -6513,13 +6628,17 @@ mod live {
         put_cursor_on(&h, cx, NodeId::Session(id.clone()));
         h.press("enter", cx);
         h.press("enter", cx); // Resume
-        assert_eq!(h.main_kind(cx), "live:1", "the terminal that has it");
+        assert_eq!(
+            h.main_kind(cx),
+            "live:2",
+            "the session as it was left: its second tab in front"
+        );
         assert_eq!(live_count(&h, cx), 2, "nothing new was started");
         assert!(h.computer.script(2).is_none(), "no third terminal exists");
         h.shell(cx, |s| {
             assert!(s.terminal_focused());
             let workspace = s.workspaces.workspace_of(LiveId(1)).unwrap();
-            assert_eq!(workspace.active, 0, "its tab is the one on screen");
+            assert_eq!(workspace.active, 1, "its tab is the one on screen");
         });
         // The palette opens it the same way.
         h.press_chord("cmd-b", "ctrl-shift-b", cx);
@@ -6528,8 +6647,130 @@ mod live {
         h.type_text("alpha", cx);
         h.settle(cx);
         h.press("enter", cx);
-        assert_eq!(h.main_kind(cx), "live:1");
+        assert_eq!(h.main_kind(cx), "live:2");
         assert_eq!(live_count(&h, cx), 2);
+    }
+
+    /// How many sessions the sidebar lists as terminals of their own.
+    fn live_rows(h: &Harness, cx: &mut TestAppContext) -> usize {
+        h.shell(cx, |s| {
+            s.rows
+                .iter()
+                .filter(|row| matches!(row.kind, Kind::Live(_)))
+                .count()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn a_new_tab_is_a_shell_in_the_session_and_only_a_new_session_adds_a_row(
+        cx: &mut TestAppContext,
+    ) {
+        let h = open_live(cx);
+        let _real = real_worktree(&h, cx);
+        h.press("ctrl-t", cx); // a session: its first tab
+        assert_eq!(h.main_kind(cx), "live:1");
+        h.press_chord("cmd-t", "ctrl-shift-t", cx); // a tab in it
+        assert_eq!(h.main_kind(cx), "live:2");
+        h.shell(cx, |s| {
+            assert_eq!(s.workspaces.len(), 1, "one session");
+            assert_eq!(s.workspaces.tab_position(LiveId(2)), Some((1, 2)));
+        });
+        assert_eq!(live_rows(&h, cx), 1, "the tab has no row");
+        // From the worktree, a shell is a session of its own, in the same folder.
+        show_worktree_detail(&h, cx, "real", "trunk");
+        h.press("ctrl-t", cx);
+        assert_eq!(h.main_kind(cx), "live:3");
+        h.shell(cx, |s| {
+            assert_eq!(s.workspaces.len(), 2, "two sessions in one folder");
+            assert_eq!(s.workspaces.tab_position(LiveId(3)), Some((0, 1)));
+        });
+        assert_eq!(live_rows(&h, cx), 2);
+        // Opening the first session again shows the tab it was left on.
+        h.shell(cx, |s| {
+            assert_eq!(s.workspaces.front_of(LiveId(1)), Some(LiveId(2)))
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_shell_session_whose_last_tab_closes_stays_in_the_sidebar_asleep_and_wakes(
+        cx: &mut TestAppContext,
+    ) {
+        let h = open_live(cx);
+        let (_dir, path) = real_worktree(&h, cx);
+        h.press("ctrl-t", cx);
+        assert_eq!(live_rows(&h, cx), 1);
+        h.press("ctrl-t", cx);
+        assert_eq!(
+            h.shell(cx, |s| s.workspaces.len()),
+            1,
+            "ctrl-t in a session is a tab"
+        );
+        cx.update_window(h.window.into(), |_, window, cx| {
+            h.shell.update(cx, |shell, cx| {
+                shell.close_tab(LiveId(2), window, cx);
+                shell.close_tab(LiveId(1), window, cx);
+            })
+        })
+        .unwrap();
+        assert_eq!(live_count(&h, cx), 0);
+        assert_eq!(live_rows(&h, cx), 1, "the row stays");
+        let asleep = h.shell(cx, |s| {
+            assert_eq!(s.dormant.all().len(), 1);
+            assert_eq!(s.dormant.all()[0].cwd, path);
+            s.dormant.all()[0].id()
+        });
+        put_cursor_on(&h, cx, NodeId::Live(asleep));
+        h.press("enter", cx);
+        assert_eq!(live_count(&h, cx), 1, "waking starts a shell again");
+        h.shell(cx, |s| assert!(s.dormant.all().is_empty()));
+        assert_eq!(live_rows(&h, cx), 1, "and its row is the new session's");
+        // A session put to sleep again can be closed from its row.
+        let woken = h.shell(cx, |s| s.live.ids()[0]);
+        cx.update_window(h.window.into(), |_, window, cx| {
+            h.shell
+                .update(cx, |shell, cx| shell.close_tab(woken, window, cx))
+        })
+        .unwrap();
+        let asleep = h.shell(cx, |s| s.dormant.all()[0].id());
+        put_cursor_on(&h, cx, NodeId::Live(asleep));
+        h.press_chord("cmd-w", "ctrl-shift-w", cx);
+        h.shell(cx, |s| assert!(s.dormant.all().is_empty()));
+        assert_eq!(live_rows(&h, cx), 0);
+    }
+
+    #[gpui_kit::test]
+    fn closing_a_tab_keeps_the_session_and_closing_the_last_one_puts_it_to_sleep(
+        cx: &mut TestAppContext,
+    ) {
+        let h = open_live(cx);
+        let (_dir, _, id) = local_session(&h, cx, AgentId::CLAUDE, "alpha");
+        put_cursor_on(&h, cx, NodeId::Session(id.clone()));
+        h.press("enter", cx);
+        h.press("enter", cx); // Resume
+        wait_until(&h, cx, "the agent", |h, cx| {
+            screen(h, cx, 1).contains("FAKE-CLAUDE --resume alpha-3")
+        });
+        h.press_chord("cmd-t", "ctrl-shift-t", cx); // a shell tab beside the agent
+        assert_eq!(live_count(&h, cx), 2);
+        let close_tab = |h: &Harness, cx: &mut TestAppContext, of: u64| {
+            cx.update_window(h.window.into(), |_, window, cx| {
+                h.shell
+                    .update(cx, |shell, cx| shell.close_tab(LiveId(of), window, cx))
+            })
+            .unwrap();
+        };
+        close_tab(&h, cx, 2);
+        assert_eq!(live_count(&h, cx), 1, "the shell tab went");
+        h.shell(cx, |s| {
+            assert!(!s.slept.contains(&id), "the session did not")
+        });
+        assert_eq!(h.main_kind(cx), "live:1");
+        close_tab(&h, cx, 1);
+        assert_eq!(live_count(&h, cx), 0);
+        h.shell(cx, |s| {
+            assert!(s.slept.contains(&id), "the last tab put it to sleep");
+            assert_eq!(s.workspaces.len(), 0);
+        });
     }
 
     #[gpui_kit::test]
@@ -6648,7 +6889,7 @@ mod live {
     }
 
     #[gpui_kit::test]
-    fn a_resumed_session_opens_as_a_new_tab_of_the_workspace_that_already_has_panes(
+    fn a_resumed_session_is_a_session_of_its_own_beside_the_shell_of_its_folder(
         cx: &mut TestAppContext,
     ) {
         let h = open_live(cx);
@@ -6666,9 +6907,19 @@ mod live {
         h.shell(cx, |s| {
             let first = s.workspaces.workspace_of(LiveId(1)).unwrap();
             let second = s.workspaces.workspace_of(LiveId(2)).unwrap();
-            assert_eq!(first.key, second.key, "the workspace of the folder");
-            assert_eq!(second.tabs.len(), 2, "a new tab beside the shell");
-            assert_eq!(second.active, 1);
+            assert_ne!(first.key, second.key, "a session of its own");
+            assert_eq!(first.tabs.len(), 1);
+            assert_eq!(second.tabs.len(), 1, "its terminal is its first tab");
+            assert_eq!(s.workspaces.len(), 2);
+            let folder = |key: &str| {
+                key.rsplit_once('\u{1f}')
+                    .map(|(folder, _)| folder.to_owned())
+            };
+            assert_eq!(
+                folder(&first.key),
+                folder(&second.key),
+                "in the same folder"
+            );
         });
     }
 
