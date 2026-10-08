@@ -3944,7 +3944,7 @@ checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
 name = "leon"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -3982,7 +3982,7 @@ dependencies = [
 
 [[package]]
 name = "leon-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -3997,7 +3997,7 @@ dependencies = [
 
 [[package]]
 name = "leon-den"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "gpui-kit",
  "image",
@@ -4007,7 +4007,7 @@ dependencies = [
 
 [[package]]
 name = "leon-history"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "leon-core",
@@ -4021,7 +4021,7 @@ dependencies = [
 
 [[package]]
 name = "leon-host"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "leon-link",
  "leon-pty",
@@ -4037,7 +4037,7 @@ dependencies = [
 
 [[package]]
 name = "leon-link"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ed25519-dalek",
  "futures-util",
@@ -4065,7 +4065,7 @@ dependencies = [
 
 [[package]]
 name = "leon-mark"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "gpui-kit",
  "roxmltree 0.21.1",
@@ -4073,7 +4073,7 @@ dependencies = [
 
 [[package]]
 name = "leon-pty"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "flume 0.11.1",
  "libc",
@@ -4085,7 +4085,7 @@ dependencies = [
 
 [[package]]
 name = "leon-remote"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "leon-core",
@@ -4102,7 +4102,7 @@ dependencies = [
 
 [[package]]
 name = "leon-term"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "alacritty_terminal",
  "flume 0.11.1",
@@ -4117,7 +4117,7 @@ dependencies = [
 
 [[package]]
 name = "leon-update"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "flate2",
  "leon-remote",
@@ -4136,7 +4136,7 @@ dependencies = [
 
 [[package]]
 name = "leon-usage"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "leon-core",
@@ -4151,7 +4151,7 @@ dependencies = [
 
 [[package]]
 name = "leon-wire"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "postcard",
  "serde",
@@ -9787,7 +9787,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "flate2",
  "sha2 0.10.9",
