@@ -250,25 +250,27 @@ fn the_room_is_edited_from_the_keyboard_alone(cx: &mut TestAppContext) {
             turn: 0
         }
     );
-    // The keyboard's pointer starts in the middle of the room, where a
-    // desk stands already.
+    // The keyboard's pointer starts in the middle of the room: the aisle
+    // between the two rows of desks. Two tiles up, a desk stands already.
     h.press("down", cx);
     h.press("up", cx);
     assert_eq!(
         editor(&h, cx, |editor| editor.pointer()),
-        Some(leon_den::world::Tile::new(7, 5))
+        Some(leon_den::world::Tile::new(10, 7))
     );
+    h.press("up", cx);
+    h.press("up", cx);
     let pieces = default_layout().items.len();
     h.press("enter", cx);
     assert_eq!(layout(&h, cx).items.len(), pieces, "refused");
     assert_eq!(said(&h, cx), "Something is in the way.");
-    for _ in 0..3 {
+    for _ in 0..7 {
         h.press("down", cx);
     }
     h.press("enter", cx);
     assert_eq!(
         layout(&h, cx).items.last(),
-        Some(&Placed::new("desk", 7, 7))
+        Some(&Placed::new("desk", 10, 11))
     );
     assert_eq!(said(&h, cx), "", "an accepted change clears what was said");
     assert_eq!(read_den(&dir, "my-office").unwrap().items.len(), pieces + 1);
@@ -281,20 +283,20 @@ fn the_room_is_edited_from_the_keyboard_alone(cx: &mut TestAppContext) {
     assert_eq!(editor(&h, cx, |editor| editor.selected()), Some(pieces));
     // The arrows move the selected piece, as far as it may go.
     h.press("left", cx);
-    assert_eq!(layout(&h, cx).items[pieces], Placed::new("desk", 6, 7));
+    assert_eq!(layout(&h, cx).items[pieces], Placed::new("desk", 9, 11));
     h.press("right", cx);
     h.press("right", cx);
     assert_eq!(
         layout(&h, cx).items[pieces],
-        Placed::new("desk", 7, 7),
+        Placed::new("desk", 10, 11),
         "the bin is in the way"
     );
     assert_eq!(said(&h, cx), "Something is in the way.");
     // Undo and redo.
     h.press("ctrl-z", cx);
-    assert_eq!(layout(&h, cx).items[pieces], Placed::new("desk", 6, 7));
+    assert_eq!(layout(&h, cx).items[pieces], Placed::new("desk", 9, 11));
     h.press("ctrl-shift-z", cx);
-    assert_eq!(layout(&h, cx).items[pieces], Placed::new("desk", 7, 7));
+    assert_eq!(layout(&h, cx).items[pieces], Placed::new("desk", 10, 11));
     // Delete removes what is selected.
     h.press("space", cx);
     h.press("delete", cx);
@@ -304,6 +306,7 @@ fn the_room_is_edited_from_the_keyboard_alone(cx: &mut TestAppContext) {
     h.press("up", cx);
     h.press("up", cx);
     h.press("up", cx);
+    h.press("left", cx);
     h.press("space", cx);
     assert!(editor(&h, cx, |editor| editor.selected()).is_some());
     h.press("escape", cx);
@@ -313,12 +316,12 @@ fn the_room_is_edited_from_the_keyboard_alone(cx: &mut TestAppContext) {
     // Shift and an arrow move a wall; F and W change the floor and walls.
     h.press("shift-right", cx);
     h.press("shift-down", cx);
-    assert_eq!((layout(&h, cx).cols, layout(&h, cx).rows), (15, 12));
+    assert_eq!((layout(&h, cx).cols, layout(&h, cx).rows), (21, 16));
     h.press("shift-left", cx);
     h.press("shift-up", cx);
-    assert_eq!((layout(&h, cx).cols, layout(&h, cx).rows), (14, 11));
+    assert_eq!((layout(&h, cx).cols, layout(&h, cx).rows), (20, 15));
     h.press("shift-left", cx);
-    assert_eq!(layout(&h, cx).cols, 14, "not onto the racks");
+    assert_eq!(layout(&h, cx).cols, 20, "not onto the racks");
     assert_eq!(said(&h, cx), "It does not fit in the room there.");
     h.press("f", cx);
     h.press("w", cx);

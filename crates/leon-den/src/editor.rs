@@ -52,6 +52,8 @@ pub struct Marks {
     pub ghost: Option<(Placed, bool)>,
     /// The tiles of the selected piece.
     pub selected: Vec<Tile>,
+    /// The selected piece: its index in the layout.
+    pub chosen: Option<usize>,
     /// The tile under the pointer, for a carpet brush.
     pub tile: Option<(Tile, bool)>,
     /// The tile under the pointer of an empty hand: what a click would take.
@@ -112,6 +114,11 @@ impl Editor {
     /// Where the pointer is, in tiles.
     pub fn pointer(&self) -> Option<Tile> {
         self.pointer
+    }
+
+    /// The piece the pointer is dragging: its index in the layout.
+    pub fn dragging(&self) -> Option<usize> {
+        self.drag.as_ref().map(|drag| drag.index)
     }
 
     /// Lets go of the selected piece: nothing is selected.
@@ -518,6 +525,7 @@ impl Editor {
         if let Some(index) = self.selected {
             if let Some(piece) = self.layout.items.get(index) {
                 marks.selected = piece.footprint();
+                marks.chosen = Some(index);
             }
         }
         let Some(tile) = self.pointer else {

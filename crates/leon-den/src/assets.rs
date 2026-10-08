@@ -174,8 +174,10 @@ pub fn wall(id: &str) -> Option<usize> {
 
 /// Every picture, decoded.
 pub struct Art {
-    /// The lion sheets: ten frames of 16 by 32 in three rows each.
-    pub lions: Vec<Bitmap>,
+    /// The lion sheets, by body and then by style
+    /// ([`crate::atelier::STYLES`]): ten frames of 16 by 32 in three rows
+    /// each.
+    pub lions: Vec<Vec<Bitmap>>,
     /// The cub sheet: eight frames of 16 by 16 in three rows.
     pub cub: Bitmap,
     /// The egg: three frames of 16 by 16.
@@ -227,11 +229,46 @@ impl Art {
             .collect();
         Art {
             lions: vec![
-                png!("lions/lion_0.png"),
-                png!("lions/lion_1.png"),
-                png!("lions/lion_2.png"),
-                png!("lions/lion_3.png"),
-                png!("lions/lion_4.png"),
+                vec![
+                    png!("lions/lion_0_0.png"),
+                    png!("lions/lion_0_1.png"),
+                    png!("lions/lion_0_2.png"),
+                    png!("lions/lion_0_3.png"),
+                    png!("lions/lion_0_4.png"),
+                    png!("lions/lion_0_5.png"),
+                ],
+                vec![
+                    png!("lions/lion_1_0.png"),
+                    png!("lions/lion_1_1.png"),
+                    png!("lions/lion_1_2.png"),
+                    png!("lions/lion_1_3.png"),
+                    png!("lions/lion_1_4.png"),
+                    png!("lions/lion_1_5.png"),
+                ],
+                vec![
+                    png!("lions/lion_2_0.png"),
+                    png!("lions/lion_2_1.png"),
+                    png!("lions/lion_2_2.png"),
+                    png!("lions/lion_2_3.png"),
+                    png!("lions/lion_2_4.png"),
+                    png!("lions/lion_2_5.png"),
+                ],
+                vec![
+                    png!("lions/lion_3_0.png"),
+                    png!("lions/lion_3_1.png"),
+                    png!("lions/lion_3_2.png"),
+                    png!("lions/lion_3_3.png"),
+                    png!("lions/lion_3_4.png"),
+                    png!("lions/lion_3_5.png"),
+                ],
+                vec![
+                    png!("lions/lion_4_0.png"),
+                    png!("lions/lion_4_1.png"),
+                    png!("lions/lion_4_2.png"),
+                    png!("lions/lion_4_3.png"),
+                    png!("lions/lion_4_4.png"),
+                    png!("lions/lion_4_5.png"),
+                ],
             ],
             cub: png!("lions/cub.png"),
             egg: png!("props/egg.png"),

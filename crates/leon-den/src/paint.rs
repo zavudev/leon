@@ -11,15 +11,23 @@
 //! The room has its own colours. Only what is chrome is painted in the
 //! host's palette: the bubbles, the name plates, the selection.
 //!
-//! A [`Wardrobe`] keeps the sheets already dyed in a mane's colour, so that
-//! a lion is dyed once and not on every frame.
+//! # The look of a lion
+//!
+//! Its seed makes a lion an individual ([`Look`]): which body and clothes,
+//! which head ([`crate::atelier::STYLES`]), which fur ([`COATS`]) and which
+//! shade of its agent's colour ([`SHADES`]). The agent's colour is on every
+//! lion, on its mane or on what it wears, so the agents are told apart at
+//! a glance and the sessions of one agent are not one lion many times.
+//!
+//! A [`Wardrobe`] keeps the sheets already dyed, so that a lion is dyed
+//! once and not on every frame.
 
 use std::collections::HashMap;
 
 use gpui_kit::Hsla;
 
 use crate::assets::art;
-use crate::atelier::{CUB_FRAME, FRAME_H, FRAME_W, MANE};
+use crate::atelier::{COAT, CUB_FRAME, FRAME_H, FRAME_W, MANE, STYLES};
 use crate::bitmap::{hsl, Bitmap, Rgba};
 use crate::catalogue::Role;
 use crate::editor::Marks;
@@ -84,20 +92,180 @@ pub fn mane(tint: [u8; 3]) -> [[u8; 3]; 3] {
     ]
 }
 
-/// A sheet with its mane in a tint: the key colours of the workshop are
-/// replaced by the ramp of [`mane`].
-pub fn dyed(sheet: &Bitmap, tint: [u8; 3]) -> Bitmap {
+/// A coat: the light, the middle and the dark of the fur, the cream of the
+/// muzzle and the inside of the ear, in the order of [`COAT`].
+pub type Coat = [[u8; 3]; 5];
+
+/// The coats a lion can have, the golden one of the sheets first. They are
+/// all coats of a lion, the white one too.
+pub const COATS: [Coat; 6] = [
+    // Golden: the sheets as they are drawn.
+    [
+        [244, 200, 124],
+        [226, 166, 88],
+        [178, 114, 56],
+        [252, 236, 204],
+        [204, 126, 104],
+    ],
+    // Tawny.
+    [
+        [226, 160, 96],
+        [198, 124, 62],
+        [140, 80, 38],
+        [246, 222, 186],
+        [176, 98, 84],
+    ],
+    // Sand.
+    [
+        [246, 226, 180],
+        [228, 200, 146],
+        [186, 152, 100],
+        [255, 246, 226],
+        [214, 150, 130],
+    ],
+    // White.
+    [
+        [250, 248, 240],
+        [228, 224, 212],
+        [180, 174, 164],
+        [255, 252, 246],
+        [232, 170, 170],
+    ],
+    // Dusky brown.
+    [
+        [168, 120, 88],
+        [136, 92, 64],
+        [92, 58, 40],
+        [226, 196, 164],
+        [150, 90, 84],
+    ],
+    // Ash grey.
+    [
+        [190, 186, 180],
+        [152, 148, 144],
+        [104, 100, 100],
+        [232, 228, 220],
+        [176, 128, 128],
+    ],
+];
+
+/// The shades of a mane: how far its hue (in degrees) and its lightness
+/// stand from the agent's colour. The first is the colour itself. They are
+/// few and small: two lions of one agent differ, and both are still plainly
+/// that agent's.
+pub const SHADES: [(f32, f32); 9] = [
+    (0., 0.),
+    (-10., 0.),
+    (10., 0.),
+    (0., 0.08),
+    (0., -0.08),
+    (-10., 0.08),
+    (10., 0.08),
+    (-10., -0.08),
+    (10., -0.08),
+];
+
+/// The tint of a mane in one of the [`SHADES`].
+pub fn shaded(tint: [u8; 3], shade: usize) -> [u8; 3] {
+    let (turn, lift) = SHADES[shade % SHADES.len()];
+    if turn == 0. && lift == 0. {
+        return tint;
+    }
+    let (hue, saturation, lightness) = to_hsl(tint);
+    hsl(
+        (hue + turn).rem_euclid(360.),
+        saturation,
+        (lightness + lift).clamp(0.04, 0.96),
+    )
+}
+
+/// What an individual looks like: all of it follows from its seed, so a
+/// session keeps its lion for as long as it lives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Look {
+    /// Which body, and so which clothes: an index into the sheets.
+    pub body: usize,
+    /// Which head: an index into [`STYLES`].
+    pub style: usize,
+    /// Which fur: an index into [`COATS`].
+    pub coat: usize,
+    /// Which shade of its agent's colour: an index into [`SHADES`].
+    pub shade: usize,
+}
+
+impl Look {
+    /// How many looks there are.
+    pub fn count() -> usize {
+        art().lions.len() * STYLES.len() * COATS.len() * SHADES.len()
+    }
+
+    /// The look of the individual with this seed. Each choice is a digit of
+    /// its own of the scrambled seed, so none follows from another.
+    pub fn of(seed: u64) -> Self {
+        let mut rest = scramble(seed);
+        let mut pick = |choices: usize| {
+            let chosen = (rest % choices as u64) as usize;
+            rest /= choices as u64;
+            chosen
+        };
+        Self {
+            body: pick(art().lions.len()),
+            style: pick(STYLES.len()),
+            coat: pick(COATS.len()),
+            shade: pick(SHADES.len()),
+        }
+    }
+}
+
+/// How far apart a mane and a fur must be to be told apart: the distance
+/// between their colours, each channel counted.
+const MANE_FROM_FUR: i32 = 40;
+
+/// The coat a lion wears under a mane of this tint: the one asked for,
+/// unless the mane would be lost on it (a silver mane on a white or an ash
+/// coat); then the next coat that shows it.
+pub fn coat_under(coat: usize, tint: [u8; 3]) -> usize {
+    let middle = mane(tint)[1];
+    let apart = |fur: [u8; 3]| -> i32 {
+        (0..3)
+            .map(|channel| (i32::from(fur[channel]) - i32::from(middle[channel])).abs())
+            .sum()
+    };
+    (0..COATS.len())
+        .map(|step| (coat + step) % COATS.len())
+        .find(|coat| {
+            COATS[*coat][..2]
+                .iter()
+                .all(|fur| apart(*fur) >= MANE_FROM_FUR)
+        })
+        .unwrap_or(coat % COATS.len())
+}
+
+/// A sheet with its mane in a tint and its fur in a coat: the key colours
+/// of the workshop are replaced by the ramp of [`mane`] and by the colours
+/// of the coat.
+pub fn dyed(sheet: &Bitmap, tint: [u8; 3], coat: usize) -> Bitmap {
     let ramp = mane(tint);
-    sheet.mapped(|pixel| match MANE.iter().position(|key| *key == pixel) {
-        Some(step) => [ramp[step][0], ramp[step][1], ramp[step][2], pixel[3]],
-        None => pixel,
+    let coat = COATS[coat % COATS.len()];
+    sheet.mapped(|pixel| {
+        if let Some(step) = MANE.iter().position(|key| *key == pixel) {
+            [ramp[step][0], ramp[step][1], ramp[step][2], pixel[3]]
+        } else if let Some(part) = COAT.iter().position(|key| *key == pixel) {
+            [coat[part][0], coat[part][1], coat[part][2], pixel[3]]
+        } else {
+            pixel
+        }
     })
 }
 
-/// The sheets, dyed: one per mane colour and body.
+/// How many dyed sheets the wardrobe keeps before it starts again: far more
+/// than a den can hold, so a full room never dyes a sheet twice.
+const WARDROBE: usize = 192;
+
+/// The sheets, dyed: one per look and agent colour.
 #[derive(Default)]
 pub struct Wardrobe {
-    sheets: HashMap<(Sheet, usize, [u8; 3]), Bitmap>,
+    sheets: HashMap<(Sheet, Look, [u8; 3]), Bitmap>,
 }
 
 impl Wardrobe {
@@ -116,27 +284,45 @@ impl Wardrobe {
         self.sheets.is_empty()
     }
 
-    /// The sheet of a lion: which body its seed picks, in its mane's tint.
+    /// The sheet of a lion: the body and the head its seed picks, in its
+    /// coat and in its shade of its agent's tint. A little one has one body
+    /// and one head, and an egg has no fur: what does not show is not told
+    /// apart.
     fn sheet(&mut self, kind: Sheet, seed: u64, tint: Hsla) -> &Bitmap {
         let art = art();
-        let body = match kind {
-            Sheet::Lion => (scramble(seed) % art.lions.len() as u64) as usize,
-            _ => 0,
+        let look = Look::of(seed);
+        let look = match kind {
+            Sheet::Lion => look,
+            Sheet::Cub => Look {
+                body: 0,
+                style: 0,
+                ..look
+            },
+            Sheet::Egg => Look {
+                body: 0,
+                style: 0,
+                coat: 0,
+                ..look
+            },
         };
         let color = bytes(tint);
         let tint = [color[0], color[1], color[2]];
-        // A wardrobe that grew past every colour a den can hold is one of a
-        // theme that changed: start again.
-        if self.sheets.len() > 64 {
+        let look = Look {
+            coat: coat_under(look.coat, shaded(tint, look.shade)),
+            ..look
+        };
+        // A wardrobe that grew past everything a den can hold is one of a
+        // theme that changed, or of many sessions long gone: start again.
+        if self.sheets.len() > WARDROBE {
             self.sheets.clear();
         }
-        self.sheets.entry((kind, body, tint)).or_insert_with(|| {
+        self.sheets.entry((kind, look, tint)).or_insert_with(|| {
             let source = match kind {
-                Sheet::Lion => &art.lions[body],
+                Sheet::Lion => &art.lions[look.body][look.style],
                 Sheet::Cub => &art.cub,
                 Sheet::Egg => &art.egg,
             };
-            dyed(source, tint)
+            dyed(source, shaded(tint, look.shade), look.coat)
         })
     }
 }

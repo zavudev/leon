@@ -4,11 +4,11 @@
 use crate::assets::{floor, FLOORS, WALLS};
 use crate::editor::{advice, advice_for, Brush, Edge, Editor, UNDO_DEPTH};
 use crate::layout::{DenLayout, Placed, Why, MAX_COLS, MAX_ROWS};
-use crate::prefabs::{default_layout, prefab};
+use crate::prefabs::{prefab, small_office};
 use crate::world::{Place, Tile};
 
 fn office() -> Editor {
-    Editor::new(default_layout())
+    Editor::new(small_office())
 }
 
 fn index_of(editor: &Editor, id: &str) -> usize {
@@ -51,7 +51,7 @@ fn a_piece_in_hand_is_put_down_where_it_fits_and_nowhere_else() {
     valid(&editor);
     // Each is a step back.
     assert!(editor.undo() && editor.undo());
-    assert_eq!(editor.layout(), &default_layout());
+    assert_eq!(editor.layout(), &small_office());
     assert!(!editor.undo() && !editor.changed());
     assert!(editor.redo());
     assert_eq!(editor.layout().items.len(), pieces + 1);
@@ -114,7 +114,7 @@ fn a_table_moves_with_what_stands_on_it_in_one_step() {
     assert_eq!(editor.move_to(desk, 0, 3), Err(Why::OutOfRoom));
     assert_eq!(editor.move_to(99, 2, 3), Err(Why::Unknown));
     assert!(editor.undo());
-    assert_eq!(editor.layout(), &default_layout());
+    assert_eq!(editor.layout(), &small_office());
     // To where it is already is no move, and nothing to undo.
     assert_eq!(editor.move_to(desk, 2, 4), Ok(()));
     assert!(!editor.can_undo());
@@ -144,7 +144,7 @@ fn a_drag_follows_the_pointer_as_far_as_the_piece_may_go_and_is_one_step() {
     assert!(editor.undo());
     assert_eq!(
         editor.layout(),
-        &default_layout(),
+        &small_office(),
         "the whole drag is one step"
     );
     assert!(!editor.can_undo());
@@ -154,7 +154,7 @@ fn a_drag_follows_the_pointer_as_far_as_the_piece_may_go_and_is_one_step() {
     editor.release();
     editor.point(Some(Tile::new(3, 4)));
     assert!(!editor.can_undo());
-    assert_eq!(editor.layout(), &default_layout());
+    assert_eq!(editor.layout(), &small_office());
     // A click on bare floor selects nothing.
     editor.press(Tile::new(5, 8)).unwrap();
     assert_eq!(editor.selected(), None);
@@ -169,7 +169,7 @@ fn a_drag_follows_the_pointer_as_far_as_the_piece_may_go_and_is_one_step() {
     editor.point(Some(Tile::new(3, 4)));
     assert_eq!(
         editor.layout(),
-        &default_layout(),
+        &small_office(),
         "let go, it is not dragged"
     );
 }
@@ -265,7 +265,7 @@ fn deleting_a_table_takes_what_stands_on_it_too() {
     assert_eq!(editor.piece_at(Tile::new(2, 4)), None);
     valid(&editor);
     assert!(editor.undo());
-    assert_eq!(editor.layout(), &default_layout());
+    assert_eq!(editor.layout(), &small_office());
     // A computer alone leaves the desk.
     editor.press(Tile::new(2, 4)).unwrap();
     editor.release();
@@ -355,7 +355,7 @@ fn the_floor_and_the_walls_go_through_every_style_and_round() {
     editor.cycle_wall(true);
     assert_eq!(editor.layout().wall, WALLS[WALLS.len() - 1].id);
     // The carpets stayed.
-    assert_eq!(editor.layout().carpets, default_layout().carpets);
+    assert_eq!(editor.layout().carpets, small_office().carpets);
     valid(&editor);
 }
 
@@ -372,12 +372,12 @@ fn the_room_grows_and_shrinks_by_its_right_and_its_open_side_within_limits() {
     );
     valid(&editor);
     assert!(editor.undo() && editor.undo());
-    assert_eq!(editor.layout(), &default_layout());
+    assert_eq!(editor.layout(), &small_office());
     // Not onto the furniture: the racks stand by the right wall, the
     // nests on the last row.
     assert_eq!(editor.resize(Edge::Right, -1), Err(Why::OutOfRoom));
     assert_eq!(editor.resize(Edge::Bottom, -1), Err(Why::OutOfRoom));
-    assert_eq!(editor.layout(), &default_layout());
+    assert_eq!(editor.layout(), &small_office());
     assert!(!editor.can_undo());
     // An empty room goes down to the least and up to the most.
     let mut bare = Editor::new(DenLayout::empty("Bare", 9, 9));
@@ -413,10 +413,10 @@ fn another_den_replaces_this_one_in_one_step() {
     editor.point(Some(Tile::new(3, 4)));
     assert_eq!(editor.layout(), &nook);
     assert!(editor.undo());
-    assert_eq!(editor.layout(), &default_layout());
+    assert_eq!(editor.layout(), &small_office());
     assert!(!editor.changed());
     // The same den again is nothing to undo.
-    editor.replace(default_layout());
+    editor.replace(small_office());
     assert!(!editor.can_undo());
 }
 
@@ -435,7 +435,7 @@ fn the_editor_remembers_a_limited_number_of_steps() {
 
 #[test]
 fn a_room_is_told_what_it_lacks_in_the_narrators_voice_and_plainly() {
-    assert_eq!(advice_for(&default_layout()), Vec::new());
+    assert_eq!(advice_for(&small_office()), Vec::new());
     let bare = advice_for(&DenLayout::empty("Bare", 10, 9));
     assert_eq!(bare.len(), 9);
     assert_eq!(advice(Place::Watch), None);

@@ -15,6 +15,27 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # A den's layout is kept as JSON.
 serde.workspace = true
 serde_json.workspace = true
+# The room in 2.5D (`den3d`): the GPU that draws it off screen. The version
+# GPUI itself draws with on Linux, so it is in the build already there.
+wgpu = { version = "29", optional = true }
+pollster = { version = "0.4", optional = true }
+
+[features]
+# Draws the room in 2.5D with the GPU. Without it the Den is the pixel art,
+# and nothing of the GPU is built.
+den3d = ["dep:wgpu", "dep:pollster"]
+
+[[example]]
+name = "den_iso_png"
+required-features = ["den3d"]
+
+[[example]]
+name = "den_view_png"
+required-features = ["den3d"]
+
+[[example]]
+name = "den_chrome_png"
+required-features = ["den3d"]
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

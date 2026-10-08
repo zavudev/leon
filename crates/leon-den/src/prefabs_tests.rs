@@ -33,7 +33,7 @@ fn there_are_at_least_five_and_each_has_an_id_and_a_name_of_its_own() {
 fn the_default_is_the_office_the_room_everybody_had_before_dens_could_be_chosen() {
     assert_eq!(prefabs()[0].id, OFFICE);
     let office = default_layout();
-    assert_eq!((office.cols, office.rows), (14, 11));
+    assert_eq!((office.cols, office.rows), (20, 15));
     assert_eq!(
         (office.floor.as_str(), office.wall.as_str()),
         ("wood", "rock")
@@ -81,7 +81,7 @@ fn the_prefabs_differ_in_size_and_in_how_many_can_work_there() {
             .spots(Place::Desks)
             .len()
     };
-    assert_eq!(seats("office"), 6);
+    assert_eq!(seats("office"), 12);
     assert!(seats("open-plan") > seats("office"));
     assert!(seats("nook") < seats("office"));
     let sizes: HashSet<(i32, i32)> = prefabs()

@@ -344,7 +344,7 @@ mod tests {
         assert_eq!(all[built_in.len() + 1].detail, "This file is not a den.");
         assert!(all[built_in.len()]
             .detail
-            .starts_with("Yours \u{b7} 14 by 11"));
+            .starts_with("Yours \u{b7} 20 by 15"));
 
         remove(folder, "zebra").unwrap();
         remove(folder, "zebra").unwrap();

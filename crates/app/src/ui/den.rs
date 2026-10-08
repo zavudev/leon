@@ -15,9 +15,7 @@
 //! | the terminal ended, code not 0 | `Fainted` | the exit code |
 //! | the terminal ended, code 0 | `Gone` | |
 //! | restored and paused (its agent is not resumed yet) | `Asleep` | that it is paused |
-//! | no agent in front (a plain shell, or the agent returned to the shell), a program printing | `Running` | that a program runs; which is not known |
-//! | the same, a program quiet or the bell rang | `WaitingForUser` | as the sidebar's dot says |
-//! | the same, at the prompt | `Idle`, or `Asleep` after [`ASLEEP_AFTER`] of silence | |
+//! | no agent in front (a plain shell, or the agent returned to the shell) | **no lion**: see below | |
 //! | an agent, **no transcript** (a remote session, an agent Leon cannot follow, an id not learned yet): printing | `Mystery` | nothing: only working or quiet is known |
 //! | the same, quiet or the bell rang | `WaitingForUser` | |
 //! | the same, at the prompt | `Idle` | |
@@ -28,6 +26,16 @@
 //! | no tool in flight, the turn not over | `Thinking` | reading the message, thinking, writing, or reading a result |
 //! | the turn over, background sub-agents alive | `Delegating` | how many |
 //! | the turn over | `WaitingForUser`, or `Asleep` after [`ASLEEP_AFTER`] of silence | |
+//!
+//! # A terminal without an agent has no lion
+//!
+//! The Den is where the agents are. A plain shell is not one, and neither is
+//! a terminal whose agent was quit and that is back at its prompt: [`cubs`]
+//! gives no lion for them, so a lion that was there goes home. A session
+//! that was restored and waits to be resumed is an agent's and keeps its
+//! lion, asleep. [`state`] still answers for a terminal without an agent
+//! (running, waiting, idle): it is the plain truth of the terminal, shown by
+//! nobody.
 //!
 //! # A session that runs elsewhere
 //!
@@ -73,6 +81,16 @@
 //! nothing, and it is late by the quiet threshold. The truth card says it is
 //! inferred.
 //!
+//! # What a lion asks, and its summary
+//!
+//! Under its state, the truth card of a lion says what it asks, in full
+//! ([`asked`]): the whole command or path of the call a permission prompt is
+//! about, a question with its answers, a plan. It never offers an answer:
+//! the transcript does not say which key answers, nor that the question is
+//! still on screen, so the answer is given in the terminal. Then comes a
+//! summary of the session in two groups ([`notes`]), the conversation and
+//! the session, every line a fact of the window or of the transcript.
+//!
 //! # What is never made up
 //!
 //! A session without a transcript is a `mystery`: its level is 0, it has no
@@ -84,7 +102,7 @@ use std::time::Duration;
 
 use gpui_kit::Hsla;
 use leon_den::feed::Past;
-use leon_den::{Cub, CubState, Event, Happening, Species};
+use leon_den::{Cub, CubState, Event, Happening, Note, Species};
 use leon_history::live::{Beat, Phase, Pulse, SubAgent, ToolInFlight, ToolKind};
 
 use super::activity::Activity;
@@ -122,6 +140,248 @@ pub struct Reading {
     pub pulse: Pulse,
     /// Its sub-agents' own pictures.
     pub subs: HashMap<String, Pulse>,
+    /// How many messages the user sent it, as far as was read.
+    pub prompts: u32,
+    /// What it last wrote to the user.
+    pub last_words: Option<String>,
+    /// What the user first wrote to it, as far as was read.
+    pub first_prompt: Option<String>,
+    /// What the user last wrote to it.
+    pub last_prompt: Option<String>,
+}
+
+impl Reading {
+    /// Keeps what the truth card says of the conversation and no picture
+    /// holds: how many times the user spoke, their first and last words,
+    /// and the agent's last words.
+    pub fn note(&mut self, beats: &[Beat]) {
+        for beat in beats {
+            match beat {
+                Beat::Prompt => self.prompts += 1,
+                Beat::Said { text, .. } if !text.trim().is_empty() => {
+                    self.last_words = Some(text.clone());
+                }
+                Beat::Heard { text, .. } if !text.trim().is_empty() => {
+                    if self.first_prompt.is_none() {
+                        self.first_prompt = Some(text.clone());
+                    }
+                    self.last_prompt = Some(text.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// What the window knows of a session beside its transcript, for the
+/// summary on its truth card.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct About {
+    /// Its title in the history, when it is there.
+    pub title: Option<String>,
+    /// For how long it has run here.
+    pub running_for: Option<Duration>,
+    /// How many messages the history holds of it.
+    pub messages: Option<u32>,
+    /// How many messages from the Den wait to be typed into it.
+    pub queued: usize,
+    /// The name of its agent.
+    pub agent: Option<String>,
+    /// The model its agent last said it uses, when the history knows.
+    pub model: Option<String>,
+    /// The folder it runs in: its last component, or the project's name.
+    pub folder: Option<String>,
+    /// The branch checked out there, when that folder is a worktree Leon
+    /// knows.
+    pub branch: Option<String>,
+}
+
+/// How long, in the words of the truth card: `less than a minute`, `38 min`,
+/// `2 h 05 min`, `3 d 4 h`.
+pub fn span(time: Duration) -> String {
+    let minutes = time.as_secs() / 60;
+    match minutes {
+        0 => "less than a minute".to_owned(),
+        1..=59 => format!("{minutes} min"),
+        60..=1439 => format!("{} h {:02} min", minutes / 60, minutes % 60),
+        _ => format!("{} d {} h", minutes / 1440, minutes % 1440 / 60),
+    }
+}
+
+/// A count of tokens as the truth card writes it: `840`, `84k`, `1.2M`.
+fn tokens(count: u64) -> String {
+    match count {
+        0..=999 => count.to_string(),
+        1_000..=999_999 => format!("{}k", (count + 500) / 1000),
+        _ => format!("{:.1}M", count as f64 / 1_000_000.),
+    }
+}
+
+/// How many characters of the agent's last words, and of the user's
+/// first and last, the truth card shows.
+pub const LAST_WORDS_CHARS: usize = 140;
+
+/// A text on one line, cut at [`LAST_WORDS_CHARS`] with an ellipsis.
+fn one_line(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= LAST_WORDS_CHARS {
+        return flat;
+    }
+    let mut cut: String = flat.chars().take(LAST_WORDS_CHARS).collect();
+    cut.push('\u{2026}');
+    cut
+}
+
+/// What a lion asks of the user, in full, for somebody who decides at a
+/// glance: the question and its answers, the plan, or the whole of the call
+/// a permission prompt is (probably) about. Empty when it asks nothing.
+///
+/// It ends by saying where the answer is given. Leon types no answer: a
+/// transcript does not say which key an answer has, nor that the question
+/// is still on screen.
+pub fn asked(state: CubState, pulse: &Pulse) -> Vec<String> {
+    let Some(tool) = pulse.tools().last() else {
+        return Vec::new();
+    };
+    let subject = tool
+        .brief
+        .as_deref()
+        .map(str::trim)
+        .filter(|brief| !brief.is_empty())
+        .unwrap_or_else(|| tool.detail.trim());
+    let mut out = Vec::new();
+    if tool.kind == ToolKind::Ask {
+        if !subject.is_empty() {
+            out.push(format!("Asks: {subject}"));
+        }
+        if !tool.options.is_empty() {
+            out.push(format!("Answers: {}", tool.options.join(" | ")));
+        }
+        out.push("Open it to answer in its terminal.".to_owned());
+    } else if tool.name.eq_ignore_ascii_case("ExitPlanMode") {
+        if !subject.is_empty() {
+            out.push(format!("Its plan: {subject}"));
+        }
+        out.push("Open it to approve or change the plan in its terminal.".to_owned());
+    } else if state == CubState::NeedsPermission {
+        let wants = match tool.kind {
+            ToolKind::Run => "Wants to run".to_owned(),
+            ToolKind::Edit => "Wants to change".to_owned(),
+            ToolKind::Read => "Wants to read".to_owned(),
+            ToolKind::Web => "Wants to fetch".to_owned(),
+            ToolKind::Search => "Wants to search for".to_owned(),
+            _ => format!("Wants to use {}", tool.name),
+        };
+        out.push(if subject.is_empty() {
+            wants
+        } else {
+            format!("{wants}: {subject}")
+        });
+        out.push("Open it to allow or refuse it in its terminal.".to_owned());
+    }
+    out
+}
+
+/// What the truth card of a session says under its state, a line each:
+/// what it asks, when it asks ([`asked`]), then a summary in two groups, the
+/// conversation and the session. Facts of the window and of the transcript,
+/// and nothing that is not known. No model writes it.
+pub fn notes(
+    name: &str,
+    about: &About,
+    reading: Option<&Reading>,
+    state: Option<CubState>,
+) -> Vec<Note> {
+    let mut out: Vec<Note> = Vec::new();
+    if let (Some(state), Some(reading)) = (state, reading) {
+        out.extend(asked(state, &reading.pulse).into_iter().map(Note::urgent));
+    }
+
+    // The conversation: who said what, and how much of it there is.
+    let mut talk = Vec::new();
+    if let Some(reading) = reading {
+        let first = reading.first_prompt.as_deref().map(one_line);
+        let last = reading.last_prompt.as_deref().map(one_line);
+        match (&first, &last) {
+            (Some(first), Some(last)) if first != last => {
+                talk.push(format!("You first said: {first}"));
+                talk.push(format!("You last said: {last}"));
+            }
+            (_, Some(last)) => talk.push(format!("You said: {last}")),
+            _ => {}
+        }
+        if let Some(words) = &reading.last_words {
+            talk.push(format!("Last said: {}", one_line(words)));
+        }
+    }
+    let turns = reading.map_or(0, |reading| reading.prompts);
+    talk.extend(match (turns, about.messages) {
+        (0, None | Some(0)) => None,
+        (0, Some(messages)) => Some(format!("{messages} messages")),
+        (turns, None | Some(0)) => Some(format!("{turns} of your messages")),
+        (turns, Some(messages)) => Some(format!("{turns} of your messages, {messages} in all")),
+    });
+    if about.queued > 0 {
+        talk.push(format!(
+            "{} queued for its prompt",
+            super::den_post::count(about.queued)
+        ));
+    }
+
+    // The session: what runs, where, since when and what it has used.
+    let mut session = Vec::new();
+    match (about.agent.as_deref(), about.model.as_deref()) {
+        (Some(agent), Some(model)) => session.push(format!("{agent}, {model}")),
+        (Some(agent), None) => session.push(agent.to_owned()),
+        (None, Some(model)) => session.push(model.to_owned()),
+        (None, None) => {}
+    }
+    match (about.folder.as_deref(), about.branch.as_deref()) {
+        (Some(folder), Some(branch)) => session.push(format!("In {folder}, on {branch}")),
+        (Some(folder), None) => session.push(format!("In {folder}")),
+        _ => {}
+    }
+    if let Some(title) = about
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty() && !title.eq_ignore_ascii_case(name.trim()))
+    {
+        session.push(format!("Title: {title}"));
+    }
+    if let Some(running) = about.running_for {
+        session.push(format!("Running for {}", span(running)));
+    }
+    if let Some(reading) = reading {
+        let pulse = &reading.pulse;
+        match (pulse.tool_calls(), pulse.failed_calls()) {
+            (0, _) => {}
+            (calls, 0) => session.push(format!("{calls} tools used")),
+            (calls, failed) => session.push(format!("{calls} tools used, {failed} failed")),
+        }
+        match (pulse.context_tokens(), pulse.context_window()) {
+            (Some(used), Some(window)) if window > 0 => session.push(format!(
+                "Context: {} of {} tokens ({}%)",
+                tokens(used),
+                tokens(window),
+                used * 100 / window
+            )),
+            (Some(used), _) => session.push(format!("Context: {} tokens", tokens(used))),
+            _ => {}
+        }
+        match pulse.subagents().len() {
+            0 => {}
+            1 => session.push("1 sub-agent out".to_owned()),
+            n => session.push(format!("{n} sub-agents out")),
+        }
+    }
+    for (heading, lines) in [("CONVERSATION", talk), ("SESSION", session)] {
+        if !lines.is_empty() {
+            out.push(Note::heading(heading));
+            out.extend(lines.into_iter().map(Note::plain));
+        }
+    }
+    out
 }
 
 /// A stable number from a text (FNV-1a): the seed that makes a session an
@@ -240,9 +500,10 @@ pub fn state(facts: &Facts, pulse: Option<&Pulse>) -> (CubState, Option<String>)
         if facts.activity == Activity::Waiting {
             return (
                 CubState::NeedsPermission,
+                // What the call is about is said once, by `asked`, in full.
                 Some(format!(
                     "{} has no result and the terminal is quiet: probably a permission prompt",
-                    tool_line(tool)
+                    tool.name
                 )),
             );
         }
@@ -299,6 +560,60 @@ pub struct Away {
     pub pid: u32,
     /// How long ago its transcript was last written.
     pub quiet_for: Option<Duration>,
+}
+
+/// Made-up lions, for a development run that wants a den with somebody in
+/// it (`LEON_DEN_CAST`): `count` of them, each in a state that moves on
+/// with `round`, in the three agents' colours. Their ids are no live
+/// session's and no session's elsewhere, so nothing can be done to them.
+pub fn made_up(count: usize, round: usize, tints: [Hsla; 3]) -> Vec<Cub> {
+    const NAMES: [&str; 12] = [
+        "Moss", "Fern", "Tansy", "Brook", "Flint", "Hazel", "Rowan", "Pike", "Ash", "Wren", "Sol",
+        "Juniper",
+    ];
+    const STATES: [CubState; 13] = [
+        CubState::Editing,
+        CubState::Reading,
+        CubState::Thinking,
+        CubState::Searching,
+        CubState::Running,
+        CubState::WaitingForUser,
+        CubState::Web,
+        CubState::Planning,
+        CubState::NeedsPermission,
+        CubState::UsingTool,
+        CubState::Idle,
+        CubState::Asleep,
+        CubState::Fainted,
+    ];
+    (0..count)
+        .map(|index| {
+            // Not all at once: each moves on every third round, in turn.
+            let step = (round + index * 2) / 3;
+            Cub {
+                id: (1 << 40) + index as u64,
+                name: match index / NAMES.len() {
+                    0 => NAMES[index].to_owned(),
+                    again => format!("{} {}", NAMES[index % NAMES.len()], again + 1),
+                },
+                species: Species {
+                    tint: tints[index % 3],
+                    seed: hash(NAMES[index % NAMES.len()]) ^ index as u64,
+                },
+                state: STATES[(index * 5 + step) % STATES.len()],
+                level: (index as u32 * 7 + step as u32) % 40,
+                detail: Some("made up: LEON_DEN_CAST".to_owned()),
+                parent: None,
+                mystery: false,
+            }
+        })
+        .collect()
+}
+
+/// The id of a row of the roster's "at home" part, from what wakes the
+/// session it stands for.
+pub fn home_id(key: &str) -> u64 {
+    hash(key)
 }
 
 /// The id of the lion of a session that runs elsewhere: a number that stays
@@ -457,8 +772,12 @@ fn little(parent: u64, tint: Hsla, sub: &SubAgent, own: Option<&Pulse>) -> Cub {
     }
 }
 
-/// The lion of a session and its little ones: the session first.
+/// The lion of a session and its little ones: the session first. A
+/// terminal with no agent in front of its shell has none.
 pub fn cubs(facts: &Facts, reading: Option<&Reading>) -> Vec<Cub> {
+    if !facts.agent {
+        return Vec::new();
+    }
     let pulse = reading.map(|reading| &reading.pulse);
     let (state, detail) = state(facts, pulse);
     let mut out = vec![Cub {
@@ -722,9 +1041,14 @@ mod tests {
         assert_eq!(state, CubState::NeedsPermission);
         let detail = detail.unwrap();
         assert!(
-            detail.contains("Bash rm -rf target") && detail.contains("probably"),
+            detail.starts_with("Bash has no result") && detail.contains("probably"),
             "{detail}"
         );
+        // The command is said once on the card: by what it asks, in full,
+        // and not by the line that says the prompt is inferred.
+        let asks = asked(state, &pulse(&beats));
+        assert_eq!(asks[0], "Wants to run: rm -rf target");
+        assert!(!detail.contains("rm -rf"), "{detail}");
         // The result arrives: it was allowed, the agent works again.
         let after = [beats[0].clone(), beats[1].clone(), finished("t1", false)];
         assert_eq!(
@@ -842,17 +1166,41 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_shell_says_what_its_terminal_says_and_is_no_mystery() {
+    fn a_plain_shell_has_no_lion_whatever_its_terminal_does() {
         let mut shell = facts(Activity::Working);
         shell.agent = false;
+        // The terminal's own truth is still told to whoever asks.
         assert_eq!(state(&shell, None).0, CubState::Running);
         shell.activity = Activity::Waiting;
         assert_eq!(state(&shell, None).0, CubState::WaitingForUser);
         shell.activity = Activity::Idle;
         assert_eq!(state(&shell, None).0, CubState::Idle);
-        let lion = &cubs(&shell, None)[0];
-        assert!(!lion.mystery);
-        assert_eq!(lion.level, 0);
+        for activity in [Activity::Working, Activity::Waiting, Activity::Idle] {
+            shell.activity = activity;
+            assert!(cubs(&shell, None).is_empty(), "{activity:?}");
+        }
+        // Not even with a transcript left over from the agent that was quit,
+        // nor once the terminal ended.
+        let reading = Reading {
+            pulse: pulse(&[Beat::Prompt, started("t1", "Agent", "look")]),
+            subs: HashMap::new(),
+            ..Reading::default()
+        };
+        assert!(cubs(&shell, Some(&reading)).is_empty());
+        shell.exit = Some(1);
+        assert!(cubs(&shell, None).is_empty());
+    }
+
+    #[test]
+    fn an_agent_that_returned_to_its_shell_goes_home() {
+        let agent = facts(Activity::Idle);
+        let before = cubs(&agent, None);
+        let mut shell = agent.clone();
+        shell.agent = false;
+        let after = cubs(&shell, None);
+        let told = changes(&before, &after, |_| None, |_| false);
+        assert_eq!(told.len(), 1);
+        assert_eq!(told[0].event, Event::WentHome);
     }
 
     #[test]
@@ -887,6 +1235,7 @@ mod tests {
         let mut reading = Reading {
             pulse: pulse(&beats),
             subs: HashMap::new(),
+            ..Reading::default()
         };
         let lions = cubs(&facts(Activity::Working), Some(&reading));
         assert_eq!(lions.len(), 2);
@@ -927,6 +1276,222 @@ mod tests {
         let mut ended = facts(Activity::Failed);
         ended.exit = Some(2);
         assert_eq!(cubs(&ended, Some(&reading)).len(), 1);
+    }
+
+    fn texts(notes: &[Note]) -> Vec<&str> {
+        notes.iter().map(|note| note.text.as_str()).collect()
+    }
+
+    #[test]
+    fn the_summary_of_a_session_is_its_facts_and_nothing_that_is_not_known() {
+        // Nothing known: nothing said, not even a heading.
+        assert!(notes("moss", &About::default(), None, None).is_empty());
+        assert!(notes("moss", &About::default(), Some(&Reading::default()), None).is_empty());
+
+        let heard = |text: &str| Beat::Heard {
+            text: text.to_owned(),
+            at: None,
+        };
+        let beats = [
+            Beat::Prompt,
+            heard("fix   the build\nplease"),
+            started("t1", "Read", "a.rs"),
+            finished("t1", false),
+            started("t2", "Bash", "cargo test"),
+            finished("t2", true),
+            Beat::Usage {
+                context: 84_200,
+                output: 10,
+                window: Some(200_000),
+            },
+            Beat::Said {
+                text: "The build   is fixed.\n\nTwo files changed.".to_owned(),
+                at: None,
+            },
+            Beat::TurnEnded,
+            Beat::Prompt,
+            heard("now find the tests"),
+            started("t3", "Task", "Explore: find the tests"),
+        ];
+        let mut reading = Reading {
+            pulse: pulse(&beats),
+            ..Reading::default()
+        };
+        reading.note(&beats);
+        assert_eq!(reading.prompts, 2);
+        let about = About {
+            title: Some("Fix the build".to_owned()),
+            running_for: Some(Duration::from_secs(38 * 60 + 12)),
+            messages: Some(14),
+            queued: 2,
+            agent: Some("Claude Code".to_owned()),
+            model: Some("claude-opus".to_owned()),
+            folder: Some("leon".to_owned()),
+            branch: Some("main".to_owned()),
+        };
+        let said = notes("moss", &about, Some(&reading), Some(CubState::Delegating));
+        assert_eq!(
+            texts(&said),
+            [
+                "CONVERSATION",
+                "You first said: fix the build please",
+                "You last said: now find the tests",
+                "Last said: The build is fixed. Two files changed.",
+                "2 of your messages, 14 in all",
+                "2 messages queued for its prompt",
+                "SESSION",
+                "Claude Code, claude-opus",
+                "In leon, on main",
+                "Title: Fix the build",
+                "Running for 38 min",
+                "3 tools used, 1 failed",
+                "Context: 84k of 200k tokens (42%)",
+                "1 sub-agent out",
+            ]
+        );
+        // The names of the groups are headings, the facts are plain.
+        let headings: Vec<&str> = said
+            .iter()
+            .filter(|note| note.tone == leon_den::NoteTone::Heading)
+            .map(|note| note.text.as_str())
+            .collect();
+        assert_eq!(headings, ["CONVERSATION", "SESSION"]);
+        assert!(said
+            .iter()
+            .all(|note| note.tone != leon_den::NoteTone::Urgent));
+        // A title that is the lion's name already is not said twice, and
+        // what the history does not know is left out.
+        let plain = About {
+            title: Some("MOSS".to_owned()),
+            running_for: Some(Duration::from_secs(20)),
+            folder: Some("api".to_owned()),
+            ..About::default()
+        };
+        assert_eq!(
+            texts(&notes("moss", &plain, None, None)),
+            ["SESSION", "In api", "Running for less than a minute"]
+        );
+        // Without a transcript only the window's own facts are said.
+        let stored = About {
+            messages: Some(6),
+            queued: 1,
+            ..About::default()
+        };
+        assert_eq!(
+            texts(&notes("moss", &stored, None, None)),
+            [
+                "CONVERSATION",
+                "6 messages",
+                "1 message queued for its prompt"
+            ]
+        );
+        // One message of the user's is said once; long words are cut.
+        let mut long = Reading::default();
+        long.note(&[
+            heard("only this"),
+            Beat::Said {
+                text: "word ".repeat(80),
+                at: None,
+            },
+        ]);
+        let said = notes("moss", &About::default(), Some(&long), None);
+        assert_eq!(said.len(), 3);
+        assert_eq!(said[1].text, "You said: only this");
+        assert!(said[2].text.ends_with('\u{2026}'));
+        assert_eq!(
+            said[2].text.chars().count(),
+            "Last said: ".len() + LAST_WORDS_CHARS + 1
+        );
+    }
+
+    #[test]
+    fn what_a_lion_asks_is_said_in_full_and_where_to_answer_and_no_answer_is_offered() {
+        let brief = |id: &str, text: &str, options: &[&str]| Beat::Brief {
+            id: id.to_owned(),
+            text: text.to_owned(),
+            options: options.iter().map(|option| (*option).to_owned()).collect(),
+        };
+        // A permission prompt: the whole command, not its caption.
+        let run = pulse(&[
+            Beat::Prompt,
+            started("t1", "Bash", "rm -rf target && cargo build"),
+            brief("t1", "rm -rf target && cargo build --release --locked", &[]),
+        ]);
+        assert_eq!(
+            asked(CubState::NeedsPermission, &run),
+            [
+                "Wants to run: rm -rf target && cargo build --release --locked",
+                "Open it to allow or refuse it in its terminal."
+            ]
+        );
+        // The same call while the terminal prints is work: nothing is asked.
+        assert!(asked(CubState::Running, &run).is_empty());
+        // Without a brief the caption is all there is.
+        let edit = pulse(&[Beat::Prompt, started("t1", "Edit", "main.rs")]);
+        assert_eq!(
+            asked(CubState::NeedsPermission, &edit)[0],
+            "Wants to change: main.rs"
+        );
+        let other = pulse(&[Beat::Prompt, started("t1", "mcp__db__query", "")]);
+        assert_eq!(
+            asked(CubState::NeedsPermission, &other)[0],
+            "Wants to use mcp__db__query"
+        );
+        // A question: its words and its answers.
+        let question = pulse(&[
+            Beat::Prompt,
+            started("t1", "AskUserQuestion", "Storage"),
+            brief("t1", "Where do the sessions live?", &["SQLite", "Postgres"]),
+        ]);
+        assert_eq!(
+            asked(CubState::WaitingForUser, &question),
+            [
+                "Asks: Where do the sessions live?",
+                "Answers: SQLite | Postgres",
+                "Open it to answer in its terminal."
+            ]
+        );
+        // A plan to approve.
+        let plan = pulse(&[
+            Beat::Prompt,
+            started("t1", "ExitPlanMode", ""),
+            brief("t1", "1. Read it. 2. Fix it.", &[]),
+        ]);
+        assert_eq!(
+            asked(CubState::WaitingForUser, &plan),
+            [
+                "Its plan: 1. Read it. 2. Fix it.",
+                "Open it to approve or change the plan in its terminal."
+            ]
+        );
+        // A turn that is over asks nothing.
+        assert!(asked(CubState::WaitingForUser, &pulse(&[Beat::TurnEnded])).is_empty());
+        // On the card, what is asked comes first and stands out.
+        let reading = Reading {
+            pulse: question,
+            ..Reading::default()
+        };
+        let said = notes(
+            "moss",
+            &About::default(),
+            Some(&reading),
+            Some(CubState::WaitingForUser),
+        );
+        assert_eq!(said[0], Note::urgent("Asks: Where do the sessions live?"));
+        assert!(said[..3]
+            .iter()
+            .all(|note| note.tone == leon_den::NoteTone::Urgent));
+    }
+
+    #[test]
+    fn a_span_of_time_is_said_in_the_largest_two_units() {
+        assert_eq!(span(Duration::from_secs(59)), "less than a minute");
+        assert_eq!(span(Duration::from_secs(60)), "1 min");
+        assert_eq!(span(Duration::from_secs(125 * 60)), "2 h 05 min");
+        assert_eq!(span(Duration::from_secs(76 * 3600)), "3 d 4 h");
+        assert_eq!(tokens(840), "840");
+        assert_eq!(tokens(84_600), "85k");
+        assert_eq!(tokens(1_240_000), "1.2M");
     }
 
     #[test]
@@ -1073,6 +1638,32 @@ mod tests {
             state,
             ..cubs(&facts, None).remove(0)
         }
+    }
+
+    #[test]
+    fn the_made_up_lions_are_nobodys_sessions_and_move_on_in_turn() {
+        let tints = [Hsla::default(); 3];
+        let cast = made_up(14, 0, tints);
+        assert_eq!(cast.len(), 14);
+        // No two share an id or a name, none is a session elsewhere, a
+        // little one or a small number a live session could have.
+        for (index, lion) in cast.iter().enumerate() {
+            assert!(!is_away(lion.id) && lion.id > 1 << 32 && lion.parent.is_none());
+            for other in &cast[..index] {
+                assert!(lion.id != other.id && lion.name != other.name);
+            }
+        }
+        // The same round is the same cast; a later one has some, not all,
+        // in another state.
+        assert_eq!(made_up(14, 0, tints), cast);
+        let later = made_up(14, 1, tints);
+        let moved = cast
+            .iter()
+            .zip(&later)
+            .filter(|(before, after)| before.state != after.state)
+            .count();
+        assert!(moved > 0 && moved < 14, "{moved} moved");
+        assert!(made_up(0, 3, tints).is_empty());
     }
 
     #[test]

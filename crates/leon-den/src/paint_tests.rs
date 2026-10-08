@@ -2,10 +2,12 @@
 
 use std::time::Duration;
 
-use crate::atelier::MANE;
+use crate::atelier::{COAT, MANE, STYLES};
 use crate::bitmap::Bitmap;
 use crate::model::CubState;
-use crate::paint::{compose, dyed, mane, tag_name, Wardrobe};
+use crate::paint::{
+    coat_under, compose, dyed, mane, shaded, tag_name, Look, Wardrobe, COATS, SHADES,
+};
 use crate::palette::bytes;
 use crate::pose::TILE;
 use crate::sim::Den;
@@ -39,7 +41,7 @@ fn count(picture: &Bitmap, color: [u8; 4]) -> usize {
 fn the_picture_is_the_map_a_pixel_of_art_for_a_pixel() {
     let den = den(&[]);
     let room = picture(&den, 0, true);
-    assert_eq!((room.w, room.h), (14 * TILE, 11 * TILE));
+    assert_eq!((room.w, room.h), (20 * TILE, 15 * TILE));
     // An empty den is its backdrop and its furniture: more than the
     // backdrop alone.
     assert_ne!(&room, den.world().backdrop());
@@ -69,7 +71,7 @@ fn a_mane_is_dyed_in_the_tint_of_its_lion_and_no_key_colour_is_left() {
         [0xd9, 0x77, 0x57],
         "a tint that is a mane is kept as it is"
     );
-    let sheet = dyed(&crate::assets::art().lions[0], [0xd9, 0x77, 0x57]);
+    let sheet = dyed(&crate::assets::art().lions[0][0], [0xd9, 0x77, 0x57], 0);
     for key in MANE {
         assert_eq!(count(&sheet, key), 0);
     }
@@ -83,7 +85,146 @@ fn a_mane_is_dyed_in_the_tint_of_its_lion_and_no_key_colour_is_left() {
     for key in MANE {
         assert_eq!(count(&room, key), 0, "a key colour in the room");
     }
-    assert!(count(&room, [0xd9, 0x77, 0x57, 255]) > 30);
+    // Each wears its own shade of the agent's colour.
+    let worn: usize = [1, 9]
+        .into_iter()
+        .map(|seed| {
+            let [r, g, b] = mane(shaded([0xd9, 0x77, 0x57], Look::of(seed).shade))[1];
+            count(&room, [r, g, b, 255])
+        })
+        .sum();
+    assert!(worn > 30, "{worn} pixels in the agent's colour");
+}
+
+#[test]
+fn a_seed_is_one_look_and_the_seeds_are_many_looks() {
+    let looks: Vec<Look> = (0..400).map(Look::of).collect();
+    assert_eq!(looks, (0..400).map(Look::of).collect::<Vec<_>>());
+    let bodies = crate::assets::art().lions.len();
+    assert_eq!(
+        Look::count(),
+        bodies * STYLES.len() * COATS.len() * SHADES.len()
+    );
+    // Every body, head, coat and shade is somebody's.
+    for body in 0..bodies {
+        assert!(looks.iter().any(|look| look.body == body), "body {body}");
+    }
+    for style in 0..STYLES.len() {
+        assert!(
+            looks.iter().any(|look| look.style == style),
+            "style {style}"
+        );
+    }
+    for coat in 0..COATS.len() {
+        assert!(looks.iter().any(|look| look.coat == coat), "coat {coat}");
+    }
+    for shade in 0..SHADES.len() {
+        assert!(
+            looks.iter().any(|look| look.shade == shade),
+            "shade {shade}"
+        );
+    }
+    // Two sessions are rarely the same lion: of 400, most looks are worn
+    // once, and no head goes with one coat only.
+    let mut distinct = looks.clone();
+    distinct.sort_by_key(|look| (look.body, look.style, look.coat, look.shade));
+    distinct.dedup();
+    assert!(
+        distinct.len() > 330,
+        "{} looks for 400 seeds",
+        distinct.len()
+    );
+    for style in 0..STYLES.len() {
+        let mut coats: Vec<usize> = looks
+            .iter()
+            .filter(|look| look.style == style)
+            .map(|look| look.coat)
+            .collect();
+        coats.sort_unstable();
+        coats.dedup();
+        assert_eq!(coats.len(), COATS.len(), "style {style}");
+    }
+    // A room of a dozen sessions of one agent is a dozen different sheets.
+    let twelve: Vec<crate::model::Cub> = (1..=12)
+        .map(|id| cub(id, "moss", CubState::WaitingForUser))
+        .collect();
+    let den = den(&twelve);
+    let mut wardrobe = Wardrobe::new();
+    compose(
+        &den,
+        &den.frame(at(400)),
+        &palette(true),
+        &mut wardrobe,
+        None,
+    );
+    assert!(wardrobe.len() >= 10, "{} sheets for twelve", wardrobe.len());
+}
+
+#[test]
+fn a_coat_dyes_the_fur_and_leaves_no_key_colour_but_the_golden_ones() {
+    let art = crate::assets::art();
+    let tint = [0xd9, 0x77, 0x57];
+    // The golden coat is the sheet as it is drawn.
+    assert_eq!(
+        COATS[0].map(|[r, g, b]| [r, g, b, 255]),
+        COAT,
+        "the first coat is the workshop's"
+    );
+    for (index, coat) in COATS.iter().enumerate().skip(1) {
+        for sheet in [&art.lions[0][0], &art.lions[2][1], &art.cub] {
+            let worn = dyed(sheet, tint, index);
+            for key in COAT {
+                assert_eq!(count(&worn, key), 0, "coat {index} left a golden pixel");
+            }
+            let [r, g, b] = coat[1];
+            assert!(count(&worn, [r, g, b, 255]) > 20, "coat {index} is worn");
+            // Only the fur changed: the clothes and the mane are the same.
+            let golden = dyed(sheet, tint, 0);
+            for y in 0..sheet.h {
+                for x in 0..sheet.w {
+                    let was = sheet.get(x, y);
+                    if !COAT.contains(&was) {
+                        assert_eq!(worn.get(x, y), golden.get(x, y));
+                    }
+                }
+            }
+        }
+        // A coat is fur: three steps of one colour, the light the lightest.
+        assert!(lightness(coat[0]) > lightness(coat[1]) && lightness(coat[1]) > lightness(coat[2]));
+        assert!(
+            lightness(coat[3]) > lightness(coat[0]),
+            "the muzzle is paler"
+        );
+    }
+    // No two coats are the same fur.
+    for (index, coat) in COATS.iter().enumerate() {
+        for other in &COATS[index + 1..] {
+            assert!(apart(coat[1], other[1]) > 30., "{coat:?} and {other:?}");
+        }
+    }
+}
+
+#[test]
+fn a_shade_stays_in_the_family_of_its_agents_colour() {
+    let (clay, blue) = ([0xd9, 0x77, 0x57], [0x3b, 0x82, 0xf6]);
+    assert_eq!(
+        shaded(clay, 0),
+        clay,
+        "the first shade is the colour itself"
+    );
+    let mut seen = Vec::new();
+    for shade in 0..SHADES.len() {
+        let (mine, other) = (mane(shaded(clay, shade))[1], mane(shaded(blue, shade))[1]);
+        // Nearer to its own agent's colour than to another agent's, by far.
+        assert!(apart(mine, clay) < 75., "shade {shade}: {mine:?}");
+        assert!(apart(mine, clay) * 2. < apart(mine, blue), "shade {shade}");
+        assert!(
+            apart(other, blue) * 2. < apart(other, clay),
+            "shade {shade}"
+        );
+        assert!(!seen.contains(&mine), "shade {shade} is another's");
+        seen.push(mine);
+    }
 }
 
 #[test]
@@ -589,4 +730,44 @@ fn the_selected_lion_is_always_named_and_first() {
     assert_eq!((after[0].id, after[0].selected), (hidden, true));
     let (x, y, w, h) = after[0].area;
     assert!(x >= 0 && y >= 0 && x + w <= 10 * TILE && y + h <= 9 * TILE);
+}
+
+#[test]
+fn a_mane_is_never_lost_on_its_coat() {
+    // The agents' colours of both themes, the colourless ones too.
+    let tints: [[u8; 3]; 7] = [
+        [0xd9, 0x77, 0x57],
+        [0xb8, 0x58, 0x3a],
+        [0xfa, 0xfa, 0xf9],
+        [0x0c, 0x0a, 0x09],
+        [0xf1, 0xec, 0xec],
+        [0x21, 0x1e, 0x1e],
+        [0x3b, 0x82, 0xf6],
+    ];
+    for tint in tints {
+        let mut worn = Vec::new();
+        for shade in 0..SHADES.len() {
+            let tint = shaded(tint, shade);
+            for coat in 0..COATS.len() {
+                let under = coat_under(coat, tint);
+                let middle = mane(tint)[1];
+                for fur in &COATS[under][..2] {
+                    let apart: i32 = (0..3)
+                        .map(|channel| (i32::from(fur[channel]) - i32::from(middle[channel])).abs())
+                        .sum();
+                    assert!(
+                        apart >= 40,
+                        "{tint:?} on coat {under}: {middle:?} on {fur:?}"
+                    );
+                }
+                worn.push(under);
+            }
+        }
+        // And every agent still has lions of several coats.
+        worn.sort_unstable();
+        worn.dedup();
+        assert!(worn.len() >= 4, "{tint:?} wears only {worn:?}");
+    }
+    // A mane that shows keeps the coat its lion was given.
+    assert_eq!(coat_under(3, [0x3b, 0x82, 0xf6]), 3);
 }

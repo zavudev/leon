@@ -254,8 +254,13 @@ impl Shell {
         self.shelves.settle_merged = settings::flag(cx, "sidebar_settle_merged");
         self.settle_merged_now();
         self.rebuild_rows();
-        // The Den may have somebody to follow now: sessions elsewhere.
+        // The Den may have somebody to follow now: sessions elsewhere. And
+        // what the settings say of the Den itself (its picture, its
+        // narrator) is on it at once.
         self.den_watch(cx);
+        if self.den_open() {
+            self.den_refresh(false, cx);
+        }
         cx.notify();
     }
 

@@ -201,6 +201,9 @@ pub struct Options {
     pub system: Rc<dyn System>,
     /// Shows a folder in the system's file manager.
     pub reveal: Reveal,
+    /// How many made-up lions the Den has besides the real ones: for a
+    /// development run that wants to look at a full den. None in a release.
+    pub den_cast: usize,
     /// Where terminals come from: a real PTY, or a scripted stand-in in tests
     /// of what Leon does with a terminal rather than of the terminal.
     pub backend: Rc<dyn Backend>,
@@ -219,6 +222,10 @@ pub struct Options {
     /// lights of the sessions whose agent is followed, and, while the Den is
     /// open, for the Den.
     pub den_tick: Duration,
+    /// How long after a message from the Den was pasted into a terminal the
+    /// Enter key follows: an agent reads a paste and a key right behind it
+    /// as one.
+    pub den_submit_after: Duration,
     /// How long a change of the open terminals waits before it is written.
     pub save_debounce: Duration,
     /// How long after the last change of a file's text it is looked at
@@ -320,6 +327,7 @@ impl Default for Options {
             pick_folder: Rc::new(system_picker),
             system: Rc::new(launch::RealSystem),
             reveal: Rc::new(|cx, path| cx.reveal_path(path)),
+            den_cast: 0,
             backend: Rc::new(Pty::default()),
             ready: Readiness::default(),
             activity: Thresholds::default(),
@@ -327,6 +335,7 @@ impl Default for Options {
             notify: Rc::new(notify::system),
             banner_duration: Duration::from_secs(8),
             den_tick: Duration::from_secs(1),
+            den_submit_after: Duration::from_millis(150),
             save_debounce: Duration::from_millis(500),
             editor_debounce: Duration::from_millis(150),
             draft_debounce: Duration::from_millis(1000),
@@ -443,7 +452,7 @@ pub enum Main {
     Session(Box<Transcript>),
     /// A live terminal session.
     Live(LiveId),
-    /// The Den: every live session as a lion at work.
+    /// The Den: every live agent session as a lion at work.
     Den,
 }
 
@@ -1316,6 +1325,8 @@ impl Shell {
         .with_live(self.live_infos(cx), self.here_live())
         .with_checkouts(self.snapshot.statuses.clone(), self.running_per_worktree())
         .with_clock(self.now(), super::shelf::local_offset())
+        .with_lion(self.den_lion_info(cx))
+        .with_pride(self.den_pride_info(cx))
         .with_files(self.file_info(), self.unsaved_files())
         .with_targets(
             self.machine_row(),
@@ -1421,7 +1432,10 @@ impl Shell {
                 live.map(|live| live.id),
             ))
         };
-        if self.pane == Pane::Sidebar {
+        if self.den_lion_live().is_some() {
+            // The selected lion's session, whatever the tree's cursor is on.
+            live()
+        } else if self.pane == Pane::Sidebar {
             project().or_else(machine).or_else(session).or_else(live)
         } else {
             live().or_else(project).or_else(machine).or_else(session)
@@ -1710,6 +1724,17 @@ impl Shell {
                 .report(crate::engine::StatusKind::Info, "Select a session first.");
             return;
         };
+        self.pin_session(session, machine, pinned, cx);
+    }
+
+    /// Pins or unpins `session` among the pinned sessions of `machine`.
+    pub(super) fn pin_session(
+        &mut self,
+        session: SessionId,
+        machine: MachineId,
+        pinned: bool,
+        cx: &mut Context<Self>,
+    ) {
         let rest: Vec<SessionId> = self
             .pinned_ids(&machine)
             .into_iter()
@@ -1931,6 +1956,10 @@ impl Shell {
     /// The live session on screen or under the cursor, whichever has the
     /// keyboard.
     pub(super) fn here_live(&self) -> Option<LiveId> {
+        // In the Den the keyboard is on the selected lion: its session.
+        if let Some(lion) = self.den_lion_live() {
+            return Some(lion);
+        }
         let from_row = || match &self.rows.get(self.cursor?)?.kind {
             Kind::Live(entry) => Some(entry.id),
             // A history session with a terminal is that terminal's row.
@@ -2730,10 +2759,29 @@ impl Shell {
         if matches!(
             command,
             C::FilterProjects | C::Machine(_) | C::ContextMenu | C::FocusSidebar
-        ) {
+        ) && !(command == C::ContextMenu && self.den_lion().is_some())
+        {
             self.reveal_sidebar(cx);
         }
         match command {
+            // In the Den the commands of a session are the selected lion's.
+            C::ContextMenu if self.den_lion().is_some() => self.den_menu_here(cx),
+            C::PinSession | C::UnpinSession if self.den_lion().is_some() => {
+                self.den_pin(command == C::PinSession, cx);
+            }
+            C::CloseSession | C::SleepSession | C::Rename if self.den_lion_live().is_some() => {
+                self.begin_flow(command, window, cx);
+            }
+            C::MessageLion
+            | C::SendLionHome
+            | C::MessagePride
+            | C::QueuedMessages
+            | C::HatchLion
+            | C::WakeLion
+            | C::GoToLion => self.begin_flow(command, window, cx),
+            C::NextNeedyLion => self.den_next_needy(window, cx),
+            C::InterruptLion => self.den_interrupt(cx),
+            C::DenKeys => self.den_toggle_keys(window, cx),
             C::GoTo => self.open_palette("", window, cx),
             C::Commands => self.open_palette(">", window, cx),
             C::SearchHistory => self.open_palette("/", window, cx),

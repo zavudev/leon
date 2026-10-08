@@ -11,7 +11,9 @@
 //! down`, `home` and `end` move the feed, `shift` with `up` or `down` walks
 //! its entries and `enter` then opens a long message; `+` and `-` change
 //! how many lions there are, `r` turns reduced motion on and off, `p` moves
-//! the pride to the next built-in den.
+//! the pride to the next built-in den, `3` switches between the room in
+//! 2.5D and the pixel art (the title says which is shown; 2.5D needs
+//! `--features den3d`).
 //!
 //! Environment:
 //!
@@ -25,9 +27,10 @@
 //! - `DEN_START=7` starts every lion that many steps into its script.
 //! - `DEN_WIDTH` and `DEN_HEIGHT` set the size of the window.
 //! - `DEN_SELECT=1` selects that lion of the roster at the start.
+//! - `DEN_3D=1` starts with the room in 2.5D.
 //! - `DEN_TRACE=1` prints, every round, how many times the view painted, how
-//!   many pictures of the room it composited and how many timers it set:
-//!   what the Den costs.
+//!   many pictures of the room it composited, how long one took and how
+//!   many timers it set: what the Den costs.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -55,6 +58,7 @@ fn number(name: &str, default: usize) -> usize {
 fn style(dark: bool) -> DenStyle {
     DenStyle {
         palette: support::palette(dark),
+        room: leon_den::iso::Theme::from_tokens(&support::tokens(dark)),
         font_family: std::env::var("DEN_FONT")
             .unwrap_or_else(|_| "JetBrains Mono".to_owned())
             .into(),
@@ -70,6 +74,7 @@ struct Demo {
     round: usize,
     start: usize,
     reduced: bool,
+    three_d: bool,
     cast: Vec<Cub>,
     opened: Option<u64>,
     prefab: usize,
@@ -106,10 +111,13 @@ impl Demo {
             }
         });
         if flag("DEN_TRACE") {
-            let (paints, pictures, timers) = self.den.read(cx).cost();
+            let den = self.den.read(cx);
+            let (paints, pictures, timers) = den.cost();
             eprintln!(
-                "round {}: {paints} paints, {pictures} pictures, {timers} timers",
-                self.round
+                "round {}: {paints} paints, {pictures} pictures ({:.2} ms each, {:?}), {timers} timers",
+                self.round,
+                den.picture_time().as_secs_f64() * 1000. / pictures.max(1) as f64,
+                den.drawn(),
             );
         }
         if self.round == 0 {
@@ -138,6 +146,11 @@ impl Demo {
                 // The manes are theme colours too.
                 self.round = self.round.saturating_sub(1);
                 self.advance(cx);
+            }
+            "3" => {
+                self.three_d = !self.three_d;
+                let three_d = self.three_d;
+                self.den.update(cx, |den, cx| den.set_three_d(three_d, cx));
             }
             "r" => {
                 self.reduced = !self.reduced;
@@ -176,9 +189,15 @@ impl Demo {
             "-" => self.count = self.count.saturating_sub(1),
             _ => return,
         }
+        let drawn = match self.den.read(cx).drawn() {
+            leon_den::Drawn::Pixels => "pixel art".to_owned(),
+            leon_den::Drawn::Waiting => "2.5D".to_owned(),
+            leon_den::Drawn::Iso(adapter) => format!("2.5D on {adapter}"),
+            leon_den::Drawn::Failed(why) => format!("pixel art ({why})"),
+        };
         window.set_window_title(&match self.opened {
-            Some(id) => format!("The Den - opened lion {id}"),
-            None => "The Den".to_owned(),
+            Some(id) => format!("The Den - {drawn} - opened lion {id}"),
+            None => format!("The Den - {drawn}"),
         });
         cx.notify();
     }
@@ -217,6 +236,9 @@ fn main() {
                 if flag("DEN_REDUCED") {
                     den.update(cx, |den, cx| den.set_reduced_motion(Some(true), cx));
                 }
+                if flag("DEN_3D") {
+                    den.update(cx, |den, cx| den.set_three_d(true, cx));
+                }
                 cx.subscribe(&den, |demo: &mut Demo, _, event, cx| {
                     if let DenEvent::Opened(id) = event {
                         demo.opened = Some(*id);
@@ -241,6 +263,7 @@ fn main() {
                     round: 0,
                     start: number("DEN_START", 0),
                     reduced: flag("DEN_REDUCED"),
+                    three_d: flag("DEN_3D"),
                     cast: Vec::new(),
                     opened: None,
                     prefab,

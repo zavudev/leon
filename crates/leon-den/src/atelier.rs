@@ -23,7 +23,19 @@
 //! cross for each eye.
 //!
 //! The mane is painted in three key colours ([`MANE`]) that are in no source
-//! sheet, so that the app can give each lion the mane of its agent.
+//! sheet, so that the app can give each lion the mane of its agent. The fur
+//! is painted in the colours of [`COAT`], which are in no source sheet
+//! either: the app gives each lion a coat of its own.
+//!
+//! # The styles
+//!
+//! One body does not make an individual, so a lion also has a [`Style`]: a
+//! head of its own and what it wears on it. [`STYLES`] has them all, and
+//! there is a sheet for every body in every style. Every style keeps the
+//! face where the classic head has it (columns 3 to 12, the eyes at rows 8
+//! and 9), so the three faces of the extra frames fit them all, and every
+//! style shows the key colours of the mane somewhere: a lioness has no
+//! mane, and wears a scarf in her agent's colour.
 
 use crate::bitmap::{Bitmap, Rgba, CLEAR};
 
@@ -44,6 +56,11 @@ pub const FRAME_OUT: i32 = 9;
 
 /// The key colours of the mane: light, middle and dark.
 pub const MANE: [Rgba; 3] = [[255, 0, 255, 255], [200, 0, 200, 255], [120, 0, 120, 255]];
+
+/// The key colours of the coat: the light, the middle and the dark of the
+/// fur, the cream of the muzzle and the inside of the ear. They are the
+/// golden coat itself, so a sheet that is not dyed is a golden lion.
+pub const COAT: [Rgba; 5] = [FUR_LIGHT, FUR, FUR_DARK, CREAM, EAR];
 
 const OUTLINE: Rgba = [50, 25, 29, 255];
 const FUR_LIGHT: Rgba = [244, 200, 124, 255];
@@ -141,14 +158,19 @@ const HEAD_DOWN: [&str; 15] = [
     "..o.oooooooo.o..",
 ];
 
-/// The rows 7 to 9 of the front head with the eyes shut.
-const EYES_SHUT: [&str; 3] = ["oMmfFFFFFFFFfmMo", ".omfdFFFFFFdfmo.", "oMmfeefccfeefmMo"];
+/// The column the face starts at in every front head: the faces below are
+/// drawn from there.
+const FACE_X: i32 = 3;
+
+/// The face, rows 7 to 9 of a front head and its columns 3 to 12, with the
+/// eyes shut.
+const EYES_SHUT: [&str; 3] = ["fFFFFFFFFf", "fdFFFFFFdf", "feefccfeef"];
 
 /// The same rows with the eyes wide: the stare.
-const EYES_WIDE: [&str; 3] = ["oMmfeeFFFFeefmMo", ".omfweFFFFwefmo.", "oMmfeefccfeefmMo"];
+const EYES_WIDE: [&str; 3] = ["feeFFFFeef", "fweFFFFwef", "feefccfeef"];
 
 /// The same rows with a cross for each eye.
-const EYES_OUT: [&str; 3] = ["oMmeFeFFFFeFemMo", ".omfeFFFFFFefmo.", "oMmeFefccfeFemMo"];
+const EYES_OUT: [&str; 3] = ["eFeFFFFeFe", "feFFFFFFef", "eFefccfeFe"];
 
 /// The lion's head from behind: all mane.
 const HEAD_UP: [&str; 15] = [
@@ -186,6 +208,254 @@ const HEAD_RIGHT: [&str; 14] = [
     "onnmnmmmmffo....",
     ".ononmmmmoo.....",
     "..o.ooooo.......",
+];
+
+/// The lioness from the front: no mane, a scarf in her agent's colour.
+const LIONESS_DOWN: [&str; 15] = [
+    "..oo........oo..",
+    ".ofFo.oooo.oFfo.",
+    ".ofiooFFFFooifo.",
+    "..oofFFFFFFfoo..",
+    "..ofFFFFFFFFfo..",
+    "..ofFFFFFFFFfo..",
+    "..ofFFFFFFFFfo..",
+    "..ofdFFFFFFdfo..",
+    "..ofedFFFFdefo..",
+    "..ofewfccfwefo..",
+    "..odffccccffdo..",
+    "..oMdccppccdMo..",
+    ".oMMmfccccfmMMo.",
+    ".onmMmmmmmmMmno.",
+    "..oooooooooooo..",
+];
+
+const LIONESS_UP: [&str; 15] = [
+    "..oo........oo..",
+    ".ofFo.oooo.oFfo.",
+    ".offooffffooffo.",
+    "..ooffffffffoo..",
+    "..offfFFFFfffo..",
+    "..offFFFFFFffo..",
+    "..offFFFFFFffo..",
+    "..offfFFFFfffo..",
+    "..odffffffffdo..",
+    "..odffffffffdo..",
+    "..oddffffffddo..",
+    "..oMddffffddMo..",
+    ".oMMmmmmmmmmMMo.",
+    ".onmMmmnnmmMmno.",
+    "..oooooooooooo..",
+];
+
+const LIONESS_RIGHT: [&str; 14] = [
+    "......oo........",
+    ".....ofFo.......",
+    "...ooofiooo.....",
+    "..offffoFFfo....",
+    ".offffFFFFFFo...",
+    ".offfFFFFFFFFo..",
+    ".offfFFFFddFFoo.",
+    ".odffFFFFFewFcco",
+    ".odffFFFFFFccccp",
+    ".oddffFFFFcccco.",
+    "..oMMmmffccoo...",
+    ".onmMMmmmmo.....",
+    "..onnmmmoo......",
+    "...ooooo........",
+];
+
+/// A young lion from the front: a mane cropped short, a ring round the face.
+const SHORT_DOWN: [&str; 15] = [
+    "..oo........oo..",
+    ".ofFo.oooo.oFfo.",
+    ".ofioommmmooifo.",
+    ".oomMmffffmMmoo.",
+    ".omMffFFFFffMmo.",
+    ".ommfFFFFFFfmmo.",
+    ".omfFFFFFFFFfmo.",
+    ".omfdFFFFFFdfmo.",
+    ".omfedFFFFdefmo.",
+    ".omfewfccfwefmo.",
+    ".onfffccccfffno.",
+    ".onmfccppccfmno.",
+    "..onmfccccfmno..",
+    "...onmmffmmno...",
+    "....oooooooo....",
+];
+
+const SHORT_UP: [&str; 15] = [
+    "..oo........oo..",
+    ".ofFo.oooo.oFfo.",
+    ".offommmmmmoffo.",
+    ".oomMmmMMmmMmoo.",
+    ".omMmmMmmMmmMmo.",
+    ".ommMmmmMmmMmmo.",
+    ".omMmmMmmmMmmMo.",
+    ".ommmMmmMmmmMmo.",
+    ".omMmmmMmmMmmmo.",
+    ".onmmMmmmMmmmno.",
+    ".onmnmmMmmmnmno.",
+    ".onnmmnmmnmmnno.",
+    "..onnmnmmnmnno..",
+    "...onnmmmmnno...",
+    "....oooooooo....",
+];
+
+const SHORT_RIGHT: [&str; 14] = [
+    "......oo........",
+    ".....ofFo.......",
+    "...ooofiooo.....",
+    "..ommmmoFFfo....",
+    ".omMmmfFFFFFo...",
+    ".ommMmfFFFFFFo..",
+    ".omMmmfFFddFFoo.",
+    ".ommMmfFFFewFcco",
+    ".onmmmfFFFFccccp",
+    ".onmMmffFFcccco.",
+    "..onmmmffccoo...",
+    "..onnmmmffo.....",
+    "...onnmmmo......",
+    "....ooooo.......",
+];
+
+/// A lion with a crest from the front: a strip of mane over the head and a
+/// tuft under the chin.
+const CREST_DOWN: [&str; 15] = [
+    "..oo..oMMo..oo..",
+    ".ofFo.oMmo.oFfo.",
+    ".ofiooMMmmooifo.",
+    "..oofFMmmMFfoo..",
+    "..ofFFFmmFFFfo..",
+    "..ofFFFFFFFFfo..",
+    "..ofFFFFFFFFfo..",
+    "..ofdFFFFFFdfo..",
+    "..ofedFFFFdefo..",
+    "..ofewfccfwefo..",
+    "..odffccccffdo..",
+    "..oddccppccddo..",
+    "...odfccccfdo...",
+    "...oonmmmmnoo...",
+    ".....onmmno.....",
+];
+
+const CREST_UP: [&str; 15] = [
+    "..oo..oMMo..oo..",
+    ".ofFo.oMmo.oFfo.",
+    ".offooMMmmooffo.",
+    "..ooffMmmMffoo..",
+    "..offFMMmmFffo..",
+    "..offFmMmMFffo..",
+    "..offFMmmMFffo..",
+    "..offfmMMmfffo..",
+    "..odffMmmmffdo..",
+    "..odffnmmnffdo..",
+    "..oddffnnffddo..",
+    "..oddffffffddo..",
+    "...oddffffddo...",
+    "...ooddddddoo...",
+    ".....oooooo.....",
+];
+
+const CREST_RIGHT: [&str; 14] = [
+    "....oooo........",
+    "...oMofFo.......",
+    "..oMmofiooo.....",
+    ".oMmmffoFFfo....",
+    ".oMmffFFFFFFo...",
+    ".omffFFFFFFFFo..",
+    ".onffFFFFddFFoo.",
+    ".odffFFFFFewFcco",
+    ".odffFFFFFFccccp",
+    ".oddffFFFFcccco.",
+    "..oddfffffccoo..",
+    "...oddffnmmo....",
+    "....ooonmmo.....",
+    ".......ooo......",
+];
+
+/// A pair of glasses from the front: it goes over rows 7 to 10 of a front
+/// head, after the eyes.
+const GLASSES_DOWN: [&str; 4] = [
+    "...kkkk..kkkk...",
+    "...k..kkkk..k...",
+    "...k..k..k..k...",
+    "...kkkk..kkkk...",
+];
+
+/// The glasses from the side: a lens and its arm, over rows 6 to 8.
+const GLASSES_RIGHT: [&str; 3] = [".........kkkk...", ".....kkkkk..k...", ".........kkkk..."];
+
+/// A bow in the agent's colour, for the top of an ear.
+const BOW: [&str; 3] = ["MM.MM", "mnMnm", "MM.MM"];
+
+/// Something a style wears on its head: a drawing and where it goes in the
+/// head's own drawing, for each way the lion faces (down, up, right).
+/// `None` where it does not show.
+#[derive(Clone, Copy, Debug)]
+struct Worn {
+    drawing: &'static [&'static str],
+    at: [Option<(i32, i32)>; 3],
+}
+
+/// A head of its own: what tells one lion from the next, whatever it wears.
+#[derive(Clone, Copy, Debug)]
+pub struct Style {
+    /// What the style is called.
+    pub name: &'static str,
+    /// The head facing down, up and right.
+    heads: [&'static [&'static str]; 3],
+    /// What goes on the head, drawn last.
+    worn: &'static [Worn],
+}
+
+const GLASSES: [Worn; 2] = [
+    Worn {
+        drawing: &GLASSES_DOWN,
+        at: [Some((0, 7)), None, None],
+    },
+    Worn {
+        drawing: &GLASSES_RIGHT,
+        at: [None, None, Some((0, 6))],
+    },
+];
+
+const BOWS: [Worn; 1] = [Worn {
+    drawing: &BOW,
+    at: [Some((10, 0)), Some((1, 0)), Some((4, 0))],
+}];
+
+/// Every style, the classic lion first.
+pub const STYLES: [Style; 6] = [
+    Style {
+        name: "classic",
+        heads: [&HEAD_DOWN, &HEAD_UP, &HEAD_RIGHT],
+        worn: &[],
+    },
+    Style {
+        name: "lioness",
+        heads: [&LIONESS_DOWN, &LIONESS_UP, &LIONESS_RIGHT],
+        worn: &[],
+    },
+    Style {
+        name: "short",
+        heads: [&SHORT_DOWN, &SHORT_UP, &SHORT_RIGHT],
+        worn: &[],
+    },
+    Style {
+        name: "crest",
+        heads: [&CREST_DOWN, &CREST_UP, &CREST_RIGHT],
+        worn: &[],
+    },
+    Style {
+        name: "glasses",
+        heads: [&HEAD_DOWN, &HEAD_UP, &HEAD_RIGHT],
+        worn: &GLASSES,
+    },
+    Style {
+        name: "bow",
+        heads: [&LIONESS_DOWN, &LIONESS_UP, &LIONESS_RIGHT],
+        worn: &BOWS,
+    },
 ];
 
 /// The tail seen from the front: it shows beside the legs.
@@ -226,9 +496,15 @@ fn is_skin([r, g, b, a]: Rgba) -> bool {
     a > 0 && r > g + 18 && g > b + 8 && r >= 120 && r - b < 150 && !(r > 240 && g > 240)
 }
 
-/// One frame of a source sheet as a lion: the head off, the lion's head on,
-/// the hands in fur, a tail.
-fn lion_frame(source: &Bitmap, row: usize, frame: usize, eyes: Option<&[&str; 3]>) -> Bitmap {
+/// One frame of a source sheet as a lion: the head off, the head of the
+/// style on, the hands in fur, a tail.
+fn lion_frame(
+    source: &Bitmap,
+    style: &Style,
+    row: usize,
+    frame: usize,
+    eyes: Option<&[&str; 3]>,
+) -> Bitmap {
     let body = source.part(
         frame as i32 * FRAME_W,
         row as i32 * FRAME_H,
@@ -236,11 +512,7 @@ fn lion_frame(source: &Bitmap, row: usize, frame: usize, eyes: Option<&[&str; 3]
         FRAME_H,
     );
     let head_y = head_y(&body, row);
-    let head: &[&str] = match row {
-        0 => &HEAD_DOWN,
-        1 => &HEAD_UP,
-        _ => &HEAD_RIGHT,
-    };
+    let head = style.heads[row];
     let neck = head_y + head.len() as i32;
     let mut out = Bitmap::new(FRAME_W, FRAME_H);
     // The body: everything under the neck, hands and all, the skin as fur.
@@ -284,17 +556,23 @@ fn lion_frame(source: &Bitmap, row: usize, frame: usize, eyes: Option<&[&str; 3]
     }
     out.draw(&drawing(head), 0, head_y);
     if let (Some(eyes), 0) = (eyes, row) {
-        out.draw(&drawing(eyes), 0, head_y + 7);
+        out.draw(&drawing(eyes), FACE_X, head_y + 7);
+    }
+    for worn in style.worn {
+        if let Some((x, y)) = worn.at[row] {
+            out.draw(&drawing(worn.drawing), x, head_y + y);
+        }
     }
     out
 }
 
-/// The lion sheet made from a source sheet: [`FRAMES`] frames in 3 rows.
-pub fn lion_sheet(source: &Bitmap) -> Bitmap {
+/// The lion sheet made from a source sheet in a style: [`FRAMES`] frames in
+/// 3 rows.
+pub fn lion_sheet(source: &Bitmap, style: &Style) -> Bitmap {
     let mut sheet = Bitmap::new(FRAMES * FRAME_W, 3 * FRAME_H);
     for row in 0..3 {
         for frame in 0..SOURCE_FRAMES as usize {
-            let lion = lion_frame(source, row, frame, None);
+            let lion = lion_frame(source, style, row, frame, None);
             sheet.draw(&lion, frame as i32 * FRAME_W, row as i32 * FRAME_H);
         }
         for (frame, from, eyes) in [
@@ -302,7 +580,7 @@ pub fn lion_sheet(source: &Bitmap) -> Bitmap {
             (FRAME_STARE, 1, &EYES_WIDE),
             (FRAME_OUT, 1, &EYES_OUT),
         ] {
-            let lion = lion_frame(source, row, from, Some(eyes));
+            let lion = lion_frame(source, style, row, from, Some(eyes));
             sheet.draw(&lion, frame * FRAME_W, row as i32 * FRAME_H);
         }
     }
@@ -648,15 +926,20 @@ pub fn rug() -> Bitmap {
 /// it cleanly.
 pub const SOURCES: [usize; 5] = [0, 2, 3, 4, 5];
 
+/// The path under `assets/` of the sheet of a body in a style.
+pub fn lion_file(body: usize, style: usize) -> String {
+    format!("lions/lion_{body}_{style}.png")
+}
+
 /// Every file the workshop makes: its path under `assets/` and its picture.
 /// `source` reads the source sheet of a number.
 pub fn everything(source: impl Fn(usize) -> Bitmap) -> Vec<(String, Bitmap)> {
     let mut files = Vec::new();
-    for (lion, index) in SOURCES.iter().enumerate() {
-        files.push((
-            format!("lions/lion_{lion}.png"),
-            lion_sheet(&source(*index)),
-        ));
+    for (body, index) in SOURCES.iter().enumerate() {
+        let source = source(*index);
+        for (style, look) in STYLES.iter().enumerate() {
+            files.push((lion_file(body, style), lion_sheet(&source, look)));
+        }
     }
     files.push(("lions/cub.png".to_owned(), cub_sheet()));
     for (name, bitmap) in [

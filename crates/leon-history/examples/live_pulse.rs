@@ -92,6 +92,8 @@ fn main() {
 fn name(beat: &Beat) -> &'static str {
     match beat {
         Beat::Prompt => "Prompt",
+        Beat::Heard { .. } => "Heard",
+        Beat::Brief { .. } => "Brief",
         Beat::Woken => "Woken",
         Beat::Thinking => "Thinking",
         Beat::Said { .. } => "Said",

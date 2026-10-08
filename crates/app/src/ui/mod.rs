@@ -22,6 +22,7 @@ mod connect_view;
 mod den;
 mod den_edit;
 mod den_follow;
+mod den_post;
 mod den_store;
 mod den_view;
 mod dialogs;

@@ -370,6 +370,40 @@ pub const NOT_IN_MENUS: &[(Command, &str)] = &[
         C::RemoveFromHistory,
         "palette and the tree's menu: needs a row",
     ),
+    (
+        C::MessageLion,
+        "palette, the Den's bar and a lion's menu: needs a selected lion",
+    ),
+    (
+        C::SendLionHome,
+        "palette, the Den's bar and a lion's menu: needs a selected lion",
+    ),
+    (
+        C::NextNeedyLion,
+        "palette, the Den's bar and its key: about the lions of the Den",
+    ),
+    (
+        C::InterruptLion,
+        "palette, a lion's menu and its key: needs a selected lion",
+    ),
+    (
+        C::MessagePride,
+        "palette and the Den's key: asks who and what",
+    ),
+    (
+        C::QueuedMessages,
+        "palette, a lion's menu and its key: needs a selected lion",
+    ),
+    (
+        C::HatchLion,
+        "palette and the Den's key: the new session's questions",
+    ),
+    (
+        C::WakeLion,
+        "palette, the Den's roster and its key: asks which",
+    ),
+    (C::GoToLion, "palette and the Den's key: asks which"),
+    (C::DenKeys, "palette and the Den's key: about the Den"),
     (C::SetAppearance, "palette: a question"),
     (C::SetInterfaceSize, "palette: a question"),
     (

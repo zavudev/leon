@@ -10,9 +10,49 @@
 //! (a sub-agent opens its parent's). `E` opens the editor of the room, which
 //! has keys of its own ([`super::den_edit`]).
 //!
+//! # What is done to a lion
+//!
+//! While the Den has the keyboard, the selected lion's session is what the
+//! commands of a session act on ([`Shell::den_lion`]): Rename, Sleep, Close
+//! and Pin do to it what they do from its row of the sidebar, to the whole
+//! session and never to one pane of it. A little one stands for its
+//! parent's session. The right button on a lion, `M`, `Shift+F10` or the
+//! menu key open its menu: Open, Message, Rename, Pin, Send home, Close.
+//!
+//! **Send home** puts the session to sleep, always after asking: its agent
+//! is stopped and it stays in the sidebar to be woken. **Message** (`I`)
+//! types a prompt into the session's terminal: at once when its agent waits
+//! at its prompt, else it is kept and typed when it next does
+//! ([`super::den_post`] says when that is, and why never into a question).
+//! A session that runs elsewhere has no terminal here: it is only opened.
+//!
+//! The truth card says what a lion asks, in full, and ends with a summary
+//! of the session in two groups, made of facts alone
+//! ([`super::den::notes`]). Leon types no answer to a question or a
+//! permission prompt: Enter opens the terminal, where it is answered.
+//!
+//! # For somebody with many agents
+//!
+//! * **Who needs me.** `N` selects the next lion that asks for a
+//!   permission, waits, or fainted, the most pressing first; the roster
+//!   lists those first and counts them.
+//! * **Interrupt** (`X`) sends the agent its interrupt key, where
+//!   [`leon_core::agent::AgentSpec::interrupt`] knows it, and only in the
+//!   middle of a turn.
+//! * **Messages.** `Q` lists the ones that wait for the selected lion, to
+//!   take any back. `P` sends one message to several lions, after saying
+//!   who gets it now, for whom it waits and who is left out.
+//! * **Hatch and wake.** `A` starts a new agent session and stays in the
+//!   Den, where it joins as an egg. The sessions that were sent home are
+//!   listed under the roster; a click, or `W`, wakes one.
+//! * **Go to a lion** (`/`) asks which, by name, state or folder.
+//! * `?` shows every key of the Den ([`DEN_KEYS`], the table the keys are
+//!   read from).
+//!
 //! # Where the facts come from
 //!
-//! Every live session is a lion. What it does is decided by [`super::den`]
+//! Every live session with an agent in front of its shell is a lion; a
+//! plain shell is none ([`super::den::cubs`]). What it does is decided by [`super::den`]
 //! from two things: what its terminal says (the same [`Activity`] the
 //! sidebar's dot shows) and, for a session of this computer whose agent
 //! Leon can follow and whose own session id was learned, its transcript,
@@ -35,13 +75,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use gpui_kit::prelude::*;
-use gpui_kit::{div, AnyElement, Context, Entity, Keystroke, Subscription, Task, Window};
-use leon_den::{Cub, DenEvent, DenPalette, DenStyle, DenView, Tokens};
+use gpui_kit::{div, px, AnyElement, Context, Entity, Keystroke, Subscription, Task, Window};
+use leon_den::{Cub, CubState, DenEvent, DenPalette, DenStyle, DenView, HomeEntry, Note, Tokens};
 use leon_history::live::{Beat, Format};
 
 use super::activity::terminal_activity;
 use super::den::{self, Facts, Reading};
 use super::den_follow::{Followers, Report, Wanted};
+use super::den_post::{self, Due, Outbox, Posted, Ready};
 use super::live::LiveId;
 use super::shell::{Main, Pane, Shell};
 use crate::settings;
@@ -53,6 +94,9 @@ pub struct DenUi {
     /// The view, made the first time the Den is opened.
     pub(super) view: Option<Entity<DenView>>,
     events: Option<Subscription>,
+    /// Which picture the view last said it shows: logged when it changes,
+    /// so that a fall back to the pixel art is never silent.
+    drawn: Option<leon_den::Drawn>,
     /// What the main pane showed before the Den, and which pane had the
     /// keyboard: what closing it puts back.
     back: Option<(Main, Pane)>,
@@ -72,11 +116,26 @@ pub struct DenUi {
     catching_up: bool,
     /// The den in use, once it was read.
     pub(super) active: Option<super::den_edit::ActiveDen>,
+    /// The lion selected in the view, as the view last said.
+    pub(super) selected: Option<u64>,
+    /// The messages that wait for a session to be at its prompt.
+    pub(super) post: Outbox,
+    /// The sessions that were sent home, as the roster last listed them:
+    /// the row's id, and what wakes the session.
+    home: Vec<(u64, Home)>,
     /// What the strip under the room shows while it is edited.
     pub(super) tab: super::den_edit::Tab,
     /// The pictures of the strip, made once each: the image and its size in
     /// device pixels.
     pub(super) thumbs: std::cell::RefCell<HashMap<String, super::den_edit::Thumb>>,
+    /// Until when the strip may go on making pictures in 2.5D in the
+    /// render under way, and whether one was put off to the next.
+    pub(super) thumbs_until: std::cell::Cell<Option<std::time::Instant>>,
+    pub(super) thumbs_owed: std::cell::Cell<bool>,
+    /// The made-up lions of a development run (`LEON_DEN_CAST`): how many
+    /// times they have moved on.
+    pub(super) cast_round: usize,
+    pub(super) cast_loop: Option<gpui_kit::Task<()>>,
 }
 
 impl DenUi {
@@ -86,6 +145,248 @@ impl DenUi {
     pub(super) fn watch_is_idle(&self) -> bool {
         self.watch.is_none()
     }
+}
+
+/// A session that was sent home and can be woken.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Home {
+    /// It sleeps as a session of the history: resuming it wakes it.
+    Slept(leon_core::SessionId),
+    /// It sleeps without a history row of its own.
+    Dormant(LiveId),
+}
+
+impl Home {
+    /// What the questions of the palette know it by.
+    fn key(&self) -> String {
+        match self {
+            Home::Slept(id) => format!("s:{id}"),
+            Home::Dormant(id) => format!("d:{}", id.0),
+        }
+    }
+}
+
+/// What a key of the Den does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum DenKey {
+    /// Lets go a step at a time: the keys, the feed's entry, the selected
+    /// lion, then the Den.
+    Back,
+    /// The next lion of the roster.
+    Next,
+    /// The previous one.
+    Previous,
+    /// Opens the selected lion's terminal, or the feed's entry.
+    Open,
+    /// The next lion that needs the user.
+    Needy,
+    /// A message to the selected lion.
+    Message,
+    /// A message to several lions.
+    Pride,
+    /// The messages that wait for the selected lion.
+    Queued,
+    /// The selected lion's agent is interrupted.
+    Interrupt,
+    /// Renames the selected lion's session.
+    Rename,
+    /// Sends the selected lion home.
+    SendHome,
+    /// Wakes a session that is at home.
+    Wake,
+    /// Starts a new agent session.
+    Hatch,
+    /// Asks which lion and selects it.
+    GoTo,
+    /// The selected lion's menu.
+    Menu,
+    /// The feed, a page up or down.
+    FeedPage(bool),
+    /// The feed, to its start or its end.
+    FeedEnd(bool),
+    /// The feed's entries, one back or on.
+    FeedStep(bool),
+    /// The editor of the room.
+    Edit,
+    /// Every key, over the room.
+    Keys,
+}
+
+/// A row of the Den's keys: the strokes (a key and whether Shift is held),
+/// how the row is written, what it does, and the action.
+pub(super) struct DenKeyRow {
+    strokes: &'static [(&'static str, bool)],
+    /// The keys as the overlay writes them.
+    pub label: &'static str,
+    /// What they do, in plain words.
+    pub what: &'static str,
+    pub key: DenKey,
+}
+
+/// The keys of the Den. [`Shell::den_key`] reads a keystroke from this
+/// table and the overlay (`?`) lists it, so the two cannot differ.
+/// What is said when 2.5D is on and the Den shows the pixel art.
+pub(super) fn den_fallback_line(why: &str) -> String {
+    format!("2.5D is on but cannot be drawn here: {why}. The Den shows the pixel art.")
+}
+
+/// Why a view that shows this picture is not in 2.5D although it was asked
+/// to be, in a line for the user. Pixel art that was asked for, and a
+/// renderer that has not been needed yet, are nothing to say.
+pub(super) fn den_fallback_of(drawn: &leon_den::Drawn) -> Option<String> {
+    match drawn {
+        leon_den::Drawn::Failed(why) => Some(den_fallback_line(why)),
+        leon_den::Drawn::Pixels | leon_den::Drawn::Waiting | leon_den::Drawn::Iso(_) => None,
+    }
+}
+
+pub(super) const DEN_KEYS: &[DenKeyRow] = &[
+    DenKeyRow {
+        strokes: &[("tab", false), ("down", false), ("right", false)],
+        label: "Tab, Down, Right",
+        what: "the next lion",
+        key: DenKey::Next,
+    },
+    DenKeyRow {
+        strokes: &[("tab", true), ("up", false), ("left", false)],
+        label: "Shift+Tab, Up, Left",
+        what: "the previous lion",
+        key: DenKey::Previous,
+    },
+    DenKeyRow {
+        strokes: &[("n", false)],
+        label: "N",
+        what: "the next lion that needs you",
+        key: DenKey::Needy,
+    },
+    DenKeyRow {
+        strokes: &[("/", false), ("g", false)],
+        label: "/ or G",
+        what: "go to a lion by name, state or folder",
+        key: DenKey::GoTo,
+    },
+    DenKeyRow {
+        strokes: &[("enter", false)],
+        label: "Enter",
+        what: "open its terminal: answer it there",
+        key: DenKey::Open,
+    },
+    DenKeyRow {
+        strokes: &[("i", false)],
+        label: "I",
+        what: "message it: typed at its prompt, or queued",
+        key: DenKey::Message,
+    },
+    DenKeyRow {
+        strokes: &[("q", false)],
+        label: "Q",
+        what: "its queued messages, to take one back",
+        key: DenKey::Queued,
+    },
+    DenKeyRow {
+        strokes: &[("p", false)],
+        label: "P",
+        what: "message several lions of the pride",
+        key: DenKey::Pride,
+    },
+    DenKeyRow {
+        strokes: &[("x", false)],
+        label: "X",
+        what: "interrupt its agent in the middle of a turn",
+        key: DenKey::Interrupt,
+    },
+    DenKeyRow {
+        strokes: &[("r", false)],
+        label: "R",
+        what: "rename its session",
+        key: DenKey::Rename,
+    },
+    DenKeyRow {
+        strokes: &[("h", false)],
+        label: "H",
+        what: "send it home: asleep, to be woken later",
+        key: DenKey::SendHome,
+    },
+    DenKeyRow {
+        strokes: &[("w", false)],
+        label: "W",
+        what: "wake a session that is at home",
+        key: DenKey::Wake,
+    },
+    DenKeyRow {
+        strokes: &[("a", false)],
+        label: "A",
+        what: "hatch a lion: a new agent session",
+        key: DenKey::Hatch,
+    },
+    DenKeyRow {
+        strokes: &[("m", false)],
+        label: "M",
+        what: "its menu",
+        key: DenKey::Menu,
+    },
+    DenKeyRow {
+        strokes: &[("pageup", false)],
+        label: "Page Up",
+        what: "the feed, a page back",
+        key: DenKey::FeedPage(true),
+    },
+    DenKeyRow {
+        strokes: &[("pagedown", false)],
+        label: "Page Down",
+        what: "the feed, a page on",
+        key: DenKey::FeedPage(false),
+    },
+    DenKeyRow {
+        strokes: &[("home", false)],
+        label: "Home",
+        what: "the start of the feed",
+        key: DenKey::FeedEnd(true),
+    },
+    DenKeyRow {
+        strokes: &[("end", false)],
+        label: "End",
+        what: "the end of the feed",
+        key: DenKey::FeedEnd(false),
+    },
+    DenKeyRow {
+        strokes: &[("up", true)],
+        label: "Shift+Up",
+        what: "the feed's entry before",
+        key: DenKey::FeedStep(true),
+    },
+    DenKeyRow {
+        strokes: &[("down", true)],
+        label: "Shift+Down",
+        what: "the feed's entry after",
+        key: DenKey::FeedStep(false),
+    },
+    DenKeyRow {
+        strokes: &[("e", false)],
+        label: "E",
+        what: "edit the room",
+        key: DenKey::Edit,
+    },
+    DenKeyRow {
+        strokes: &[("?", false), ("?", true), ("/", true)],
+        label: "?",
+        what: "these keys",
+        key: DenKey::Keys,
+    },
+    DenKeyRow {
+        strokes: &[("escape", false)],
+        label: "Escape",
+        what: "let go of the entry, the lion, then the Den",
+        key: DenKey::Back,
+    },
+];
+
+/// What a key does in the Den, with or without Shift.
+pub(super) fn den_key_of(key: &str, shift: bool) -> Option<DenKey> {
+    DEN_KEYS
+        .iter()
+        .find(|row| row.strokes.contains(&(key, shift)))
+        .map(|row| row.key)
 }
 
 /// A session of this computer that runs in another window of Leon or in a
@@ -122,7 +423,13 @@ enum Told {
 
 /// The colours of the Den's chrome in a theme.
 pub fn den_palette(colours: &Palette) -> DenPalette {
-    DenPalette::from_tokens(&Tokens {
+    DenPalette::from_tokens(&den_tokens(colours))
+}
+
+/// The tokens of a theme, as the Den takes them: its chrome and its room in
+/// 2.5D are both made of these.
+pub fn den_tokens(colours: &Palette) -> Tokens {
+    Tokens {
         background: colours.background,
         surface: colours.surface,
         surface_2: colours.surface_2,
@@ -139,7 +446,7 @@ pub fn den_palette(colours: &Palette) -> DenPalette {
         warning: colours.warning,
         error: colours.error,
         info: colours.info,
-    })
+    }
 }
 
 impl Shell {
@@ -149,10 +456,37 @@ impl Shell {
     }
 
     fn den_style(&self, cx: &gpui_kit::App) -> DenStyle {
+        let colours = crate::theme::palette(cx);
         DenStyle {
-            palette: den_palette(&crate::theme::palette(cx)),
+            palette: den_palette(&colours),
+            room: leon_den::iso::Theme::from_tokens(&den_tokens(&colours)),
             font_family: fonts::mono().into(),
             font_size: metrics::TEXT_SMALL(),
+        }
+    }
+
+    /// Opens the Den, if it is not open: what `--den` asks at the start.
+    /// With made-up lions asked for (`LEON_DEN_CAST`, in a development
+    /// build), they move on every few seconds.
+    pub fn show_den(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.den_open() {
+            self.toggle_den(window, cx);
+        }
+        if self.options.den_cast > 0 && self.den.cast_loop.is_none() {
+            self.den.cast_loop = Some(cx.spawn(async move |this, cx| loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(6))
+                    .await;
+                let alive = this.update(cx, |this, cx| {
+                    this.den.cast_round += 1;
+                    if this.den_open() {
+                        this.den_refresh(true, cx);
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }));
         }
     }
 
@@ -172,7 +506,23 @@ impl Shell {
                 |this, _, event: &DenEvent, window, cx| match event {
                     DenEvent::Opened(id) => this.den_open_lion(*id, window, cx),
                     DenEvent::LayoutChanged => this.den_keep(cx),
-                    DenEvent::Clicked(_) | DenEvent::Selected(_) => {}
+                    DenEvent::Selected(id) => {
+                        this.den.selected = *id;
+                        cx.notify();
+                    }
+                    DenEvent::Menu { id, at } => this.den_menu(*id, *at, window, cx),
+                    DenEvent::Wake(id) => {
+                        let home = this
+                            .den
+                            .home
+                            .iter()
+                            .find(|(row, _)| row == id)
+                            .map(|(_, home)| home.clone());
+                        if let Some(home) = home {
+                            this.den_wake(&home.key(), window, cx);
+                        }
+                    }
+                    DenEvent::Clicked(_) => {}
                 },
             ));
             self.den.view = Some(view);
@@ -183,6 +533,7 @@ impl Shell {
         if let Some(view) = self.den.view.clone() {
             view.update(cx, |den, cx| den.select(None, cx));
         }
+        self.den.selected = None;
         // Who runs elsewhere, as of now rather than as of the last look.
         self.scan_elsewhere_now(false, cx);
         // The cursor of the sidebar is on its row, as on a project that is
@@ -206,7 +557,7 @@ impl Shell {
         if !self.den_open() {
             return;
         }
-        self.den.watch = None;
+        self.den_stop_watching();
         if let Some(view) = self.den.view.clone() {
             view.update(cx, |den, cx| den.stop_editing(cx));
         }
@@ -240,7 +591,7 @@ impl Shell {
         if !self.den_open() {
             return;
         }
-        self.den.watch = None;
+        self.den_stop_watching();
         self.den.back = None;
         self.home.nav = None;
         if let Some(view) = self.den.view.clone() {
@@ -266,7 +617,7 @@ impl Shell {
             };
             match away.stored {
                 Some(stored) => {
-                    self.den.watch = None;
+                    self.den_stop_watching();
                     self.den.back = None;
                     self.home.nav = None;
                     self.show_elsewhere(stored, &away.found, cx);
@@ -288,10 +639,984 @@ impl Shell {
         else {
             return;
         };
-        self.den.watch = None;
+        self.den_stop_watching();
         self.den.back = None;
         self.home.nav = None;
         self.open_live(live, window, cx);
+    }
+
+    /// The transcripts stop being read as the Den is left, unless a message
+    /// still waits for a session: then they are read until it was typed.
+    fn den_stop_watching(&mut self) {
+        if !self.den.post.busy() {
+            self.den.watch = None;
+        }
+    }
+
+    // ----- what is done to a lion --------------------------------------------
+
+    /// The lion the Den's keyboard is on: the selected one, or its parent
+    /// for a little one. Only while the Den has the keyboard.
+    pub(super) fn den_lion(&self) -> Option<u64> {
+        if !self.den_open() || self.pane != Pane::Main {
+            return None;
+        }
+        let selected = self.den.selected?;
+        let cub = self.den.cubs.iter().find(|cub| cub.id == selected)?;
+        Some(cub.parent.unwrap_or(cub.id))
+    }
+
+    /// The terminal of the lion the Den's keyboard is on. `None` for a
+    /// session that runs elsewhere: it has none here.
+    pub(super) fn den_lion_live(&self) -> Option<LiveId> {
+        let id = self.den_lion()?;
+        (!den::is_away(id))
+            .then_some(LiveId(id))
+            .filter(|live| self.live.get(*live).is_some())
+    }
+
+    /// The transcript of a live session as far as it was read, when it is
+    /// the one its terminal holds now.
+    fn den_reading(&self, id: u64) -> Option<&Reading> {
+        let (session, reading) = self.den.readings.get(&id)?;
+        self.den_wanted()
+            .iter()
+            .any(|wanted| wanted.live == id && &wanted.session == session)
+            .then_some(reading)
+    }
+
+    /// Whether a message may be typed into a live session now.
+    /// How many prompts the transcript of a session held when last read.
+    fn den_prompts(&self, id: u64) -> u32 {
+        self.den_reading(id).map_or(0, |reading| reading.prompts)
+    }
+
+    fn den_ready(&self, id: u64, cx: &gpui_kit::App) -> Ready {
+        let facts = self.den_facts(cx);
+        match facts.iter().find(|facts| facts.id == id) {
+            Some(facts) => {
+                den_post::ready(facts, self.den_reading(id).map(|reading| &reading.pulse))
+            }
+            None => Ready::Never(den_post::Never::Ended),
+        }
+    }
+
+    /// The selected lion, as the questions of the palette need to know it.
+    pub(super) fn den_lion_info(&self, cx: &gpui_kit::App) -> Option<super::steps::LionInfo> {
+        let id = self.den_lion()?;
+        if den::is_away(id) {
+            let away = self.den_away(cx).into_iter().find(|away| away.id == id)?;
+            let name = leon_den::narrator::shout(&away.name);
+            let why = format!(
+                "{name} runs elsewhere ({}): Leon has no terminal of it here, so it can only be opened.",
+                away.found.describe()
+            );
+            return Some(super::steps::LionInfo {
+                name,
+                live: None,
+                elsewhere: Some(why),
+                no_message: None,
+                queued: Vec::new(),
+                cwd: None,
+            });
+        }
+        let live = self.den_lion_live()?;
+        let name = leon_den::narrator::shout(&self.live.get(live)?.label());
+        let no_message = match self.den_ready(id, cx) {
+            Ready::Never(why) => Some(why.why(&name)),
+            Ready::Now | Ready::Later => None,
+        };
+        Some(super::steps::LionInfo {
+            name,
+            live: Some(live),
+            elsewhere: None,
+            no_message,
+            queued: self.den.post.list(id),
+            cwd: self.live.get(live).map(|session| session.cwd.clone()),
+        })
+    }
+
+    /// The Den and its lions, as the questions of the palette need to know
+    /// them: in the order of the roster, the little ones left out.
+    pub(super) fn den_pride_info(&self, cx: &gpui_kit::App) -> super::steps::PrideInfo {
+        use super::steps::{Post, PrideLion};
+        let Some(view) = self.den.view.as_ref().filter(|_| self.den_open()) else {
+            return super::steps::PrideInfo {
+                home: self
+                    .den_home()
+                    .into_iter()
+                    .map(|(home, name, _)| (home.key(), name))
+                    .collect(),
+                ..Default::default()
+            };
+        };
+        let roster = view.read(cx).read(|den| den.roster());
+        let away = self.den_away(cx);
+        let folder = |cwd: &str| {
+            cwd.trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(cwd)
+                .to_owned()
+        };
+        let lions = roster
+            .iter()
+            .filter(|entry| !entry.little)
+            .map(|entry| {
+                let name = leon_den::narrator::shout(&entry.name);
+                let (place, post) = match self.live.get(LiveId(entry.id)) {
+                    Some(session) if !den::is_away(entry.id) => {
+                        let post = match self.den_ready(entry.id, cx) {
+                            Ready::Now => Post::Now,
+                            Ready::Later => Post::Later,
+                            Ready::Never(why) => Post::Never(why.short().to_owned()),
+                        };
+                        (self.den_place(&session.machine, &session.cwd).0, Some(post))
+                    }
+                    _ => (
+                        away.iter()
+                            .find(|one| one.id == entry.id)
+                            .map_or_else(String::new, |one| folder(&one.cwd)),
+                        None,
+                    ),
+                };
+                PrideLion {
+                    id: entry.id,
+                    name,
+                    state: entry.state.label().to_owned(),
+                    place,
+                    needs: entry.needs,
+                    post,
+                }
+            })
+            .collect();
+        super::steps::PrideInfo {
+            open: true,
+            lions,
+            home: self
+                .den_home()
+                .into_iter()
+                .map(|(home, name, _)| (home.key(), name))
+                .collect(),
+        }
+    }
+
+    /// The project a folder of a machine belongs to and the branch checked
+    /// out there, when it is in a worktree Leon knows; else the folder's
+    /// own name and no branch.
+    fn den_place(&self, machine: &leon_core::MachineId, cwd: &str) -> (String, Option<String>) {
+        let within = |root: &str| {
+            let root = root.trim_end_matches('/');
+            !root.is_empty() && (cwd == root || cwd.starts_with(&format!("{root}/")))
+        };
+        let found = self
+            .snapshot
+            .projects
+            .iter()
+            .filter(|entry| entry.project.machine_id == *machine)
+            .flat_map(|entry| {
+                entry
+                    .worktrees
+                    .iter()
+                    .map(move |worktree| (entry, worktree))
+            })
+            .filter(|(_, worktree)| within(&worktree.path))
+            .max_by_key(|(_, worktree)| worktree.path.len());
+        match found {
+            Some((entry, worktree)) => (entry.project.name.clone(), worktree.branch.clone()),
+            None => (
+                cwd.trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(cwd)
+                    .to_owned(),
+                None,
+            ),
+        }
+    }
+
+    /// The agent sessions that were sent home and can be woken: what wakes
+    /// each, its name and its agent. A plain shell that sleeps is none.
+    pub(super) fn den_home(&self) -> Vec<(Home, String, Option<leon_core::AgentId>)> {
+        let mut home: Vec<(Home, String, Option<leon_core::AgentId>)> = self
+            .snapshot
+            .sessions
+            .iter()
+            .filter(|stored| self.slept.contains(&stored.id))
+            // One that runs again is in the room, not at home.
+            .filter(|stored| self.live.of_history(&stored.id).is_none())
+            .map(|stored| {
+                (
+                    Home::Slept(stored.id.clone()),
+                    stored.title.trim().to_owned(),
+                    Some(stored.agent),
+                )
+            })
+            .collect();
+        home.extend(
+            self.dormant
+                .all()
+                .iter()
+                .filter_map(|sleeping| Some((sleeping, sleeping.agent()?)))
+                .map(|(sleeping, agent)| {
+                    let name = sleeping
+                        .label
+                        .clone()
+                        .filter(|label| !label.trim().is_empty())
+                        .unwrap_or_else(|| agent.name().to_owned());
+                    (Home::Dormant(sleeping.id()), name, Some(agent))
+                }),
+        );
+        home
+    }
+
+    /// Wakes a session that was sent home, by the key the palette knows it
+    /// by, and comes back to the Den when its terminal opened at once.
+    pub(super) fn den_wake(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((home, name, _)) = self
+            .den_home()
+            .into_iter()
+            .find(|(home, ..)| home.key() == key)
+        else {
+            self.engine.report(
+                crate::engine::StatusKind::Info,
+                "That session is no longer at home.",
+            );
+            return;
+        };
+        let was_open = self.den_open();
+        match home {
+            Home::Slept(id) => {
+                let Some(stored) = self
+                    .snapshot
+                    .sessions
+                    .iter()
+                    .find(|stored| stored.id == id)
+                    .cloned()
+                else {
+                    return;
+                };
+                self.resume_session(stored, window, cx);
+            }
+            Home::Dormant(id) => self.wake_dormant(id, window, cx),
+        }
+        self.engine.report(
+            crate::engine::StatusKind::Info,
+            format!(
+                "Woke {}: its agent starts again in its terminal.",
+                leon_den::narrator::shout(&name)
+            ),
+        );
+        // Its terminal took the main pane: back to the Den, where it was
+        // woken from. (When Leon first looks for another process that holds
+        // the session, the terminal opens a moment later and stays in front.)
+        if was_open && !self.den_open() && matches!(self.main, Main::Live(_)) {
+            self.toggle_den(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Selects a lion of the Den, opening the Den when it is closed.
+    pub(super) fn den_select(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.den_open() {
+            self.toggle_den(window, cx);
+        }
+        if let Some(view) = self.den.view.clone() {
+            view.update(cx, |den, cx| den.select(Some(id), cx));
+        }
+        cx.notify();
+    }
+
+    /// Selects the next lion that needs the user, opening the Den when it
+    /// is closed.
+    pub(super) fn den_next_needy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.den_open() {
+            self.toggle_den(window, cx);
+        }
+        let found = self
+            .den
+            .view
+            .clone()
+            .is_some_and(|view| view.update(cx, |den, cx| den.select_needy(cx)));
+        if !found {
+            self.engine.report(
+                crate::engine::StatusKind::Info,
+                "No lion needs you: none waits, asks for a permission or fainted.",
+            );
+        }
+        cx.notify();
+    }
+
+    /// Why the Den shows the pixel art although 2.5D is asked for, in a
+    /// line for the user; `None` when it shows what was asked.
+    pub(super) fn den_fallback(&self, cx: &gpui_kit::App) -> Option<String> {
+        den_fallback_of(&self.den.view.as_ref()?.read(cx).drawn())
+    }
+
+    /// Shows the keys of the Den over the room, or takes them away.
+    pub(super) fn den_toggle_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.den_open() {
+            self.toggle_den(window, cx);
+        }
+        let fallback = self.den_fallback(cx);
+        if let Some(view) = self.den.view.clone() {
+            view.update(cx, |den, cx| {
+                let keys = (!den.keys_shown()).then(|| {
+                    DEN_KEYS
+                        .iter()
+                        .map(|row| (row.label.to_owned(), row.what.to_owned()))
+                        // In the Den `?` and `/` are the Den's: the sheet of
+                        // every shortcut and the sidebar's filter are still
+                        // a command away.
+                        .chain([(
+                            "The palette".to_owned(),
+                            "Keyboard shortcuts: all of Leon's keys".to_owned(),
+                        )])
+                        // And why the room is the pixel art, when 2.5D was
+                        // asked for and cannot be drawn.
+                        .chain(fallback.map(|why| ("Pixel art".to_owned(), why)))
+                        .collect()
+                });
+                den.show_keys(keys, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    /// Whether the agent of a live session can be sent its interrupt key
+    /// now: the key, or why not.
+    fn den_can_interrupt(&self, id: LiveId, cx: &gpui_kit::App) -> Result<String, String> {
+        let Some(session) = self.live.get(id) else {
+            return Err("That session has ended: there is nothing to interrupt.".to_owned());
+        };
+        let name = leon_den::narrator::shout(&session.label());
+        if session.signals(cx).exited.is_some() {
+            return Err(format!("{name} has ended: there is nothing to interrupt."));
+        }
+        if session.is_paused() {
+            return Err(format!("{name} is paused: its agent is not running."));
+        }
+        let Some(agent) = session.shown_agent() else {
+            return Err(format!("{name} has no agent in front of its shell."));
+        };
+        let Some(key) = agent.spec().and_then(|spec| spec.interrupt.clone()) else {
+            return Err(format!(
+                "Leon does not know the key that interrupts {}: open {name} and stop it there.",
+                agent.name()
+            ));
+        };
+        // Only in the middle of a turn: at its prompt the key would do
+        // something else.
+        let state = self
+            .den
+            .cubs
+            .iter()
+            .find(|cub| cub.id == id.0)
+            .map(|cub| cub.state);
+        let mid_turn = match state {
+            Some(state) if state.is_working() => true,
+            Some(CubState::NeedsPermission) => true,
+            Some(CubState::WaitingForUser) => self
+                .den_reading(id.0)
+                .is_some_and(|reading| !reading.pulse.tools().is_empty()),
+            _ => false,
+        };
+        if !mid_turn {
+            return Err(format!(
+                "{name} is not in the middle of a turn: there is nothing to interrupt."
+            ));
+        }
+        Ok(key)
+    }
+
+    /// Sends the agent of the selected lion its interrupt key.
+    pub(super) fn den_interrupt(&mut self, cx: &mut Context<Self>) {
+        let Some(info) = self.den_lion_info(cx) else {
+            self.engine.report(
+                crate::engine::StatusKind::Info,
+                "Select a lion in the Den first.",
+            );
+            return;
+        };
+        let Some(live) = info.live else {
+            self.engine.report(
+                crate::engine::StatusKind::Info,
+                info.elsewhere
+                    .unwrap_or_else(|| format!("{} has no terminal here.", info.name)),
+            );
+            return;
+        };
+        match self.den_can_interrupt(live, cx) {
+            Ok(key) => {
+                if let Some(session) = self.live.get(live) {
+                    let agent = session
+                        .shown_agent()
+                        .map_or("its agent", |agent| agent.name());
+                    session
+                        .view
+                        .read(cx)
+                        .terminal()
+                        .write(key.as_bytes().to_vec());
+                    let named = if key == "\u{1b}" { "Escape" } else { "its key" };
+                    self.engine.report(
+                        crate::engine::StatusKind::Info,
+                        format!(
+                            "Sent {named} to {}: that interrupts {agent} in the middle of a turn.",
+                            info.name
+                        ),
+                    );
+                }
+            }
+            Err(why) => self.engine.report(crate::engine::StatusKind::Info, why),
+        }
+        cx.notify();
+    }
+
+    /// Takes back a message that waits for a live session, or all of them.
+    pub(super) fn den_cancel_queued(
+        &mut self,
+        id: LiveId,
+        place: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self.live.get(id).map_or_else(
+            || "it".to_owned(),
+            |s| leon_den::narrator::shout(&s.label()),
+        );
+        let said = match place {
+            Some(place) => match self.den.post.cancel(id.0, place) {
+                Some(_) => format!(
+                    "Took back a message queued for {name}: it will not be typed ({} still queued).",
+                    den_post::count(self.den.post.waiting(id.0))
+                ),
+                None => format!("That message is no longer queued for {name}."),
+            },
+            None => match self.den.post.clear(id.0) {
+                0 => format!("No message is queued for {name}."),
+                taken => format!(
+                    "Took back {} queued for {name}: none of them will be typed.",
+                    den_post::count(taken)
+                ),
+            },
+        };
+        self.engine.report(crate::engine::StatusKind::Info, said);
+        self.den_refresh(false, cx);
+        cx.notify();
+    }
+
+    /// One message for several live sessions: each gets it now or when its
+    /// agent next waits, and the status line says who, and who did not.
+    pub(super) fn den_message_pride(&mut self, ids: &[LiveId], text: &str, cx: &mut Context<Self>) {
+        let Some(text) = den_post::prompt(text) else {
+            return;
+        };
+        let (mut sent, mut queued, mut refused) = (Vec::new(), Vec::new(), Vec::new());
+        for id in ids {
+            let Some(session) = self.live.get(*id) else {
+                continue;
+            };
+            let name = leon_den::narrator::shout(&session.label());
+            let ready = self.den_ready(id.0, cx);
+            match self
+                .den
+                .post
+                .post(id.0, &text, ready, self.den_prompts(id.0))
+            {
+                Posted::Send(text) => {
+                    self.den_type(*id, &text, cx);
+                    sent.push(name);
+                }
+                Posted::Queued(_) => queued.push(name),
+                Posted::Refused(why) => refused.push(format!("{name} ({})", why.short())),
+            }
+        }
+        let mut said = Vec::new();
+        if !sent.is_empty() {
+            said.push(format!("Sent to {}.", sent.join(", ")));
+        }
+        if !queued.is_empty() {
+            said.push(format!(
+                "Queued for {} until each waits at its prompt.",
+                queued.join(", ")
+            ));
+        }
+        if !refused.is_empty() {
+            said.push(format!("Not sent to {}.", refused.join("; ")));
+        }
+        if said.is_empty() {
+            said.push("Nobody was there to message.".to_owned());
+        }
+        self.engine.report(
+            if sent.is_empty() && queued.is_empty() {
+                crate::engine::StatusKind::Error
+            } else {
+                crate::engine::StatusKind::Info
+            },
+            said.join(" "),
+        );
+        self.den_watch(cx);
+        self.den_refresh(false, cx);
+        cx.notify();
+    }
+
+    /// Starts an agent session from the Den and stays in the Den, the new
+    /// lion selected: it joins as an egg.
+    pub(super) fn den_hatch(
+        &mut self,
+        intent: super::steps::SessionIntent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.live.ids();
+        self.start_intent(intent, window, cx);
+        let new = self.live.ids().into_iter().find(|id| !before.contains(id));
+        if !self.den_open() {
+            self.toggle_den(window, cx);
+        }
+        if let (Some(new), Some(view)) = (new, self.den.view.clone()) {
+            view.update(cx, |den, cx| den.select(Some(new.0), cx));
+        }
+        cx.notify();
+    }
+
+    /// Asks the view for the menu of the selected lion (the keyboard's way
+    /// in): it answers with [`DenEvent::Menu`].
+    pub(super) fn den_menu_here(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self.den.view.clone() {
+            view.update(cx, |den, cx| den.menu_selection(cx));
+        }
+    }
+
+    /// Opens the menu of a lion at a point of the window.
+    fn den_menu(
+        &mut self,
+        id: u64,
+        at: gpui_kit::Point<gpui_kit::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.den_open() || self.den_editing(cx) {
+            return;
+        }
+        // The view selected it before it asked.
+        self.den.selected = Some(id);
+        self.pane = Pane::Main;
+        let Some(session) = self.den_lion() else {
+            return;
+        };
+        let live = self.den_lion_live();
+        let items = self.den_lion_items();
+        if live.is_none() {
+            if let Some(why) = self.den_lion_info(cx).and_then(|lion| lion.elsewhere) {
+                self.engine.report(crate::engine::StatusKind::Info, why);
+            }
+        }
+        if self.overlay != super::shell::Overlay::None {
+            self.close_overlay(window, cx);
+        }
+        let mut menu =
+            super::menu::Menu::new(super::tree::NodeId::Live(LiveId(session)), items, at);
+        menu.lion = Some(session);
+        self.overlay = super::shell::Overlay::Menu;
+        self.menu = Some(menu);
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// What can be done to the selected lion: the items of its menu, and of
+    /// the strip of actions under the room.
+    fn den_lion_items(&self) -> Vec<super::menu::Item> {
+        let live = self.den_lion_live();
+        let pinned = live.and_then(|live| {
+            let history = self.history_of_live(live)?;
+            let machine = self.live.get(live)?.machine.clone();
+            Some(self.pinned_ids(&machine).contains(&history))
+        });
+        super::menu::items_for_lion(super::menu::LionMenu {
+            pinned,
+            elsewhere: live.is_none(),
+            interrupt: live.is_some_and(|live| {
+                self.live
+                    .get(live)
+                    .and_then(|session| session.shown_agent()?.spec()?.interrupt.clone())
+                    .is_some()
+            }),
+            queued: live.map_or(0, |live| self.den.post.waiting(live.0)),
+        })
+    }
+
+    /// The actions of the selected lion, as buttons over the foot of the
+    /// room: what its menu holds, with the key of each. Nothing while
+    /// nobody is selected or the room is edited.
+    fn render_den_actions(&self, colours: &Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::keys::Command as C;
+        let lion = self.den_lion()?;
+        if self.den_editing(cx) {
+            return None;
+        }
+        let name = self.den_lion_info(cx)?.name;
+        let buttons = self.den_lion_items().into_iter().map(|item| {
+            let key = match item.command {
+                C::Open => Some("Enter"),
+                C::MessageLion => Some("I"),
+                C::QueuedMessages => Some("Q"),
+                C::InterruptLion => Some("X"),
+                C::Rename => Some("R"),
+                C::SendLionHome => Some("H"),
+                _ => None,
+            };
+            let label = match key {
+                Some(key) => format!("{} ({key})", item.label),
+                None => item.label.clone(),
+            };
+            let id: gpui_kit::SharedString =
+                format!("den-act-{:?}", item.command).to_lowercase().into();
+            let command = item.command;
+            super::den_edit::tool_button(id, label, true, false, colours).on_click(cx.listener(
+                move |this, _: &gpui_kit::ClickEvent, window, cx| {
+                    this.run_lion_item(lion, command, window, cx);
+                    cx.notify();
+                },
+            ))
+        });
+        // A lion that runs elsewhere can only be opened: what it could be
+        // told here is shown dimmed, and a click says why not.
+        let elsewhere = self.den_lion_info(cx).and_then(|lion| lion.elsewhere);
+        let buttons: Vec<_> = buttons.collect();
+        let dimmed = elsewhere.into_iter().flat_map(|why| {
+            [
+                "Message\u{2026}",
+                "Interrupt",
+                "Rename\u{2026}",
+                "Send home",
+            ]
+            .into_iter()
+            .enumerate()
+            .map(move |(index, label)| (index, label, why.clone()))
+        });
+        let dimmed: Vec<_> = dimmed
+            .map(|(index, label, why)| {
+                let id: gpui_kit::SharedString = format!("den-act-no-{index}").into();
+                super::den_edit::tool_button(id, label, false, false, colours).on_click(
+                    cx.listener(move |this, _: &gpui_kit::ClickEvent, _, cx| {
+                        this.engine
+                            .report(crate::engine::StatusKind::Info, why.clone());
+                        cx.notify();
+                    }),
+                )
+            })
+            .collect();
+        let note = (!dimmed.is_empty()).then(|| {
+            super::widgets::mono("runs outside this window: act on it there")
+                .text_color(colours.text_faint)
+        });
+        Some(
+            div()
+                .id("den-actions")
+                .debug_selector(|| "den-actions".into())
+                .absolute()
+                .bottom(px(12.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .occlude()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(6.))
+                        .px(px(10.))
+                        .py(px(6.))
+                        .rounded(metrics::RADIUS())
+                        .border_1()
+                        .border_color(colours.signal)
+                        .bg(colours.surface)
+                        .child(super::widgets::mono(name).text_color(colours.text))
+                        .children(buttons)
+                        .children(dimmed)
+                        .children(note),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Does what an item of a lion's menu says, for that lion.
+    pub(super) fn run_lion_item(
+        &mut self,
+        lion: u64,
+        command: crate::keys::Command,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The menu took nothing away: the lion is still the selected one,
+        // unless it left meanwhile.
+        if self.den_lion() != Some(lion) {
+            return;
+        }
+        match command {
+            crate::keys::Command::Open => self.den_open_lion(lion, window, cx),
+            command => {
+                self.run_command(command, window, cx);
+            }
+        }
+    }
+
+    /// Pins or unpins the session of the selected lion.
+    pub(super) fn den_pin(&mut self, pinned: bool, cx: &mut Context<Self>) {
+        let Some(live) = self.den_lion_live() else {
+            if let Some(why) = self.den_lion_info(cx).and_then(|lion| lion.elsewhere) {
+                self.engine.report(crate::engine::StatusKind::Info, why);
+            }
+            return;
+        };
+        let Some(session) = self.live.get(live) else {
+            return;
+        };
+        let (machine, name) = (session.machine.clone(), session.label());
+        match self.history_of_live(live) {
+            Some(history) => self.pin_session(history, machine, pinned, cx),
+            None => self.engine.report(
+                crate::engine::StatusKind::Info,
+                format!("{name} is not in the history yet: there is nothing to pin."),
+            ),
+        }
+    }
+
+    /// Sends a lion home: its whole session is put to sleep, as from its
+    /// row of the sidebar. The messages that waited for it are dropped.
+    pub(super) fn den_send_home(
+        &mut self,
+        id: LiveId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = self.live.get(id).map(|session| session.label()) else {
+            return;
+        };
+        let dropped = self.den.post.forget(id.0);
+        // The lions as they are now, a new name included: who leaves is
+        // told by the name it has.
+        self.den_refresh(true, cx);
+        self.end_live(id, true, true, window, cx);
+        let name = leon_den::narrator::shout(&name);
+        let mut said = format!("Sent {name} home: its session is asleep in the sidebar.");
+        if dropped > 0 {
+            said.push_str(&format!(
+                " {} queued for it {} dropped.",
+                den_post::count(dropped),
+                if dropped == 1 { "was" } else { "were" }
+            ));
+        }
+        self.engine.report(crate::engine::StatusKind::Info, said);
+        // Whoever left is seen to leave now, not at the next poll.
+        self.den_refresh(true, cx);
+        cx.notify();
+    }
+
+    /// A message for a live session: typed now when its agent waits at its
+    /// prompt, kept for later when it is busy, refused when it can never be.
+    pub(super) fn den_message(&mut self, id: LiveId, text: &str, cx: &mut Context<Self>) {
+        let (Some(text), Some(session)) = (den_post::prompt(text), self.live.get(id)) else {
+            return;
+        };
+        let name = leon_den::narrator::shout(&session.label());
+        let ready = self.den_ready(id.0, cx);
+        match self.den.post.post(id.0, &text, ready, self.den_prompts(id.0)) {
+            Posted::Send(text) => {
+                self.den_type(id, &text, cx);
+                self.engine.report(
+                    crate::engine::StatusKind::Info,
+                    format!("Sent to {name}."),
+                );
+            }
+            Posted::Queued(waiting) if self.den.post.stalled(id.0) => self.engine.report(
+                crate::engine::StatusKind::Info,
+                format!(
+                    "Not sent yet: the last message to {name} may still be in its input. Open {name} and send or clear it ({} queued).",
+                    den_post::count(waiting)
+                ),
+            ),
+            Posted::Queued(waiting) => self.engine.report(
+                crate::engine::StatusKind::Info,
+                format!(
+                    "{name} is busy: not sent yet. It is typed when {name} next waits at its prompt ({} queued).",
+                    den_post::count(waiting)
+                ),
+            ),
+            Posted::Refused(why) => self
+                .engine
+                .report(crate::engine::StatusKind::Error, why.why(&name)),
+        }
+        // Until it was typed the transcripts are read, the Den open or not.
+        self.den_watch(cx);
+        self.den_refresh(false, cx);
+        cx.notify();
+    }
+
+    /// Looks at every session a message waits for, or was just typed into:
+    /// the next one is typed into a session that is at its prompt, and the
+    /// ones of a session that ended, or that can no longer be messaged, are
+    /// dropped, which the status line says.
+    fn den_post_tick(&mut self, cx: &mut Context<Self>) {
+        for id in self.den.post.all() {
+            let name = self
+                .live
+                .get(LiveId(id))
+                .map(|session| leon_den::narrator::shout(&session.label()));
+            let ready = match &name {
+                Some(_) => self.den_ready(id, cx),
+                None => Ready::Never(den_post::Never::Ended),
+            };
+            if let Ready::Never(why) = ready {
+                let dropped = self.den.post.forget(id);
+                if dropped > 0 {
+                    let name = name.unwrap_or_else(|| "A session".to_owned());
+                    self.engine.report(
+                        crate::engine::StatusKind::Info,
+                        format!(
+                            "{} {} queued for it {} dropped.",
+                            why.why(&name),
+                            den_post::count(dropped),
+                            if dropped == 1 { "was" } else { "were" }
+                        ),
+                    );
+                }
+                continue;
+            }
+            let Some(name) = name else {
+                continue;
+            };
+            match self.den.post.due(id, ready, self.den_prompts(id)) {
+                Due::Nothing => {}
+                Due::Type(text) => {
+                    self.den_type(LiveId(id), &text, cx);
+                    let left = self.den.post.waiting(id);
+                    self.engine.report(
+                        crate::engine::StatusKind::Info,
+                        match left {
+                            0 => format!(
+                                "{name} waits at its prompt: the queued message was typed."
+                            ),
+                            left => format!(
+                                "{name} waits at its prompt: a queued message was typed ({} still queued).",
+                                den_post::count(left)
+                            ),
+                        },
+                    );
+                }
+                // Its Enter may have been lost: nothing is typed after it.
+                Due::Stalled(left) => self.engine.report(
+                    crate::engine::StatusKind::Error,
+                    match left {
+                        0 => format!(
+                            "{name} did not start on the message it was sent: it may still be in its input. Open {name} and send or clear it."
+                        ),
+                        left => format!(
+                            "{name} did not start on the message it was sent: it may still be in its input. Open {name} and send or clear it; {} queued {} held until it starts a turn.",
+                            den_post::count(left),
+                            if left == 1 { "is" } else { "are" }
+                        ),
+                    },
+                ),
+            }
+        }
+    }
+
+    /// Types a message into a session's terminal as a prompt: pasted, so
+    /// that its line breaks are not the Enter key, then Enter a moment
+    /// later, as a person would. Where the program did not ask for pastes to
+    /// be bracketed, the line breaks are typed as spaces.
+    fn den_type(&mut self, id: LiveId, text: &str, cx: &mut Context<Self>) {
+        let Some(session) = self.live.get(id) else {
+            return;
+        };
+        let terminal = session.view.read(cx).terminal().clone();
+        terminal.scroll_to_bottom();
+        if terminal.bracketed_paste() {
+            terminal.paste(text);
+        } else {
+            terminal.paste(&text.replace('\n', " "));
+        }
+        let after = self.options.den_submit_after;
+        cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(after).await;
+            terminal.write(b"\r".to_vec());
+        })
+        .detach();
+    }
+
+    /// What the truth card of each lion says under its state: what it asks,
+    /// and the summary of its session.
+    fn den_notes(&self, cx: &gpui_kit::App) -> HashMap<u64, Vec<Note>> {
+        let now = self.now().timestamp_millis();
+        let facts = self.den_facts(cx);
+        let mut notes = HashMap::new();
+        for session in self.live.all() {
+            let id = session.id.0;
+            let stored = self.history_of_live(session.id).and_then(|history| {
+                self.snapshot
+                    .sessions
+                    .iter()
+                    .find(|stored| stored.id == history)
+            });
+            let (folder, branch) = self.den_place(&session.machine, &session.cwd);
+            let about = den::About {
+                title: stored.map(|stored| stored.title.clone()),
+                running_for: Some(std::time::Duration::from_millis(
+                    (now - session.started_ms).max(0) as u64,
+                )),
+                messages: stored.map(|stored| stored.message_count),
+                queued: self.den.post.waiting(id),
+                agent: session.shown_agent().map(|agent| agent.name().to_owned()),
+                model: stored.and_then(|stored| stored.model.clone()),
+                folder: Some(folder),
+                branch,
+            };
+            let reading = self.den_reading(id);
+            let state = facts
+                .iter()
+                .find(|facts| facts.id == id)
+                .map(|facts| den::state(facts, reading.map(|reading| &reading.pulse)).0);
+            let lines = den::notes(&session.label(), &about, reading, state);
+            if !lines.is_empty() {
+                notes.insert(id, lines);
+            }
+        }
+        for away in self.den_away(cx) {
+            let reading = self
+                .den
+                .readings
+                .get(&away.id)
+                .filter(|(session, _)| *session == away.external)
+                .map(|(_, reading)| reading);
+            let (folder, branch) = self.den_place(&leon_core::MachineId::local(), &away.cwd);
+            let about = den::About {
+                title: away.stored.as_ref().map(|stored| stored.title.clone()),
+                running_for: None,
+                messages: away.stored.as_ref().map(|stored| stored.message_count),
+                queued: 0,
+                agent: Some(away.agent.name().to_owned()),
+                model: away.stored.as_ref().and_then(|stored| stored.model.clone()),
+                folder: Some(folder),
+                branch,
+            };
+            // What it asks is said as for any lion; no permission prompt is
+            // claimed for it, so only its own questions show.
+            let state = self
+                .den
+                .cubs
+                .iter()
+                .find(|cub| cub.id == away.id)
+                .map(|cub| cub.state);
+            let lines = den::notes(&away.name, &about, reading, state);
+            if !lines.is_empty() {
+                notes.insert(away.id, lines);
+            }
+        }
+        notes
     }
 
     /// What a key does while the Den has the keyboard. `true` when taken.
@@ -313,11 +1638,41 @@ impl Shell {
         let Some(view) = self.den.view.clone() else {
             return false;
         };
-        match (stroke.key.as_str(), m.shift) {
+        // The keys, while they are shown, are over everything: any key takes
+        // them away and does nothing else.
+        if view.read(cx).keys_shown() {
+            view.update(cx, |den, cx| den.show_keys(None, cx));
+            cx.notify();
+            return true;
+        }
+        let Some(key) = den_key_of(stroke.key.as_str(), m.shift) else {
+            return false;
+        };
+        use crate::keys::Command;
+        // What is done to a lion needs one: said here, so that the key never
+        // falls through to the row the sidebar's cursor was left on.
+        let needs_lion = matches!(
+            key,
+            DenKey::Message
+                | DenKey::Queued
+                | DenKey::Interrupt
+                | DenKey::Rename
+                | DenKey::SendHome
+                | DenKey::Menu
+        );
+        if needs_lion && self.den_lion().is_none() {
+            self.engine.report(
+                crate::engine::StatusKind::Info,
+                "Select a lion in the Den first.",
+            );
+            cx.notify();
+            return true;
+        }
+        match key {
             // Escape lets go a step at a time: the entry of the feed the
             // keyboard is on, then the selected lion (the feed is
             // everybody's again), then the Den.
-            ("escape", false) => {
+            DenKey::Back => {
                 let held = view.update(cx, |den, cx| {
                     if den.feed_release(cx) {
                         return true;
@@ -330,29 +1685,52 @@ impl Shell {
                     self.close_den(window, cx);
                 }
             }
-            ("pageup", false) => view.update(cx, |den, cx| den.scroll_feed(-1, cx)),
-            ("pagedown", false) => view.update(cx, |den, cx| den.scroll_feed(1, cx)),
-            ("home", false) => view.update(cx, |den, cx| den.feed_to(false, cx)),
-            ("end", false) => view.update(cx, |den, cx| den.feed_to(true, cx)),
-            ("up", true) => view.update(cx, |den, cx| den.feed_step(true, cx)),
-            ("down", true) => view.update(cx, |den, cx| den.feed_step(false, cx)),
-            ("e", false) => self.den_tool(super::den_edit::Tool::Edit, cx),
-            ("tab", true) | ("up", false) | ("left", false) => {
-                view.update(cx, |den, cx| den.select_previous(cx));
+            DenKey::FeedPage(up) => {
+                view.update(cx, |den, cx| den.scroll_feed(if up { -1 } else { 1 }, cx));
             }
-            ("tab", false) | ("down", false) | ("right", false) => {
-                view.update(cx, |den, cx| den.select_next(cx));
-            }
+            DenKey::FeedEnd(top) => view.update(cx, |den, cx| den.feed_to(!top, cx)),
+            DenKey::FeedStep(back) => view.update(cx, |den, cx| den.feed_step(back, cx)),
+            DenKey::Previous => view.update(cx, |den, cx| den.select_previous(cx)),
+            DenKey::Next => view.update(cx, |den, cx| den.select_next(cx)),
             // On an entry of the feed, Enter opens its message; otherwise it
-            // opens the selected lion's session.
-            ("enter", false) => {
+            // opens the selected lion's session, where a question or a
+            // permission prompt is answered.
+            DenKey::Open => {
                 view.update(cx, |den, cx| {
                     if !den.feed_toggle(cx) {
                         den.open_selection(cx);
                     }
                 });
             }
-            _ => return false,
+            DenKey::Needy => self.den_next_needy(window, cx),
+            DenKey::Message => {
+                self.run_command(Command::MessageLion, window, cx);
+            }
+            DenKey::Pride => {
+                self.run_command(Command::MessagePride, window, cx);
+            }
+            DenKey::Queued => {
+                self.run_command(Command::QueuedMessages, window, cx);
+            }
+            DenKey::Interrupt => self.den_interrupt(cx),
+            DenKey::Rename => {
+                self.run_command(Command::Rename, window, cx);
+            }
+            DenKey::SendHome => {
+                self.run_command(Command::SendLionHome, window, cx);
+            }
+            DenKey::Wake => {
+                self.run_command(Command::WakeLion, window, cx);
+            }
+            DenKey::Hatch => {
+                self.run_command(Command::HatchLion, window, cx);
+            }
+            DenKey::GoTo => {
+                self.run_command(Command::GoToLion, window, cx);
+            }
+            DenKey::Menu => self.den_menu_here(cx),
+            DenKey::Edit => self.den_tool(super::den_edit::Tool::Edit, cx),
+            DenKey::Keys => self.den_toggle_keys(window, cx),
         }
         cx.notify();
         true
@@ -529,7 +1907,7 @@ impl Shell {
     /// Starts the loop that reads the transcripts, if the Den is open, a
     /// session is live and it does not run already.
     pub(super) fn den_watch(&mut self, cx: &mut Context<Self>) {
-        if !self.den_open()
+        if !(self.den_open() || self.den.post.busy())
             || self.den.watch.is_some()
             || (self.live.all().is_empty() && self.den_away(cx).is_empty())
         {
@@ -544,8 +1922,9 @@ impl Shell {
         self.den.watch = Some(cx.spawn(async move |this, cx| loop {
             let Ok(Some(wanted)) = this.read_with(cx, |this, cx| {
                 let wanted = this.den_wanted_all(cx);
-                (this.den_open() && !(this.live.all().is_empty() && wanted.is_empty()))
-                    .then_some(wanted)
+                ((this.den_open() || this.den.post.busy())
+                    && !(this.live.all().is_empty() && wanted.is_empty()))
+                .then_some(wanted)
             }) else {
                 // Closed, or nobody left: the loop ends and with it the task.
                 // Whoever was last in the den is seen to leave.
@@ -571,6 +1950,9 @@ impl Shell {
                 // The pictures first, then the lions, then what is told of
                 // them: a little one is in the den before its words are.
                 let told = this.den_apply(reports, cx);
+                // What waits for a session to be at its prompt is typed
+                // from what was just read of it.
+                this.den_post_tick(cx);
                 this.den_refresh(true, cx);
                 this.den_tell(told, cx);
                 this.options.den_tick
@@ -617,6 +1999,7 @@ impl Shell {
                 *entry = (report.session.clone(), Reading::default());
             }
             let reading = &mut entry.1;
+            reading.note(&report.beats);
             if gap || moved || report.restarted {
                 den::tell(report.live, &name, &mut reading.pulse, &report.beats);
                 told.push(Told::Past(
@@ -699,6 +2082,20 @@ impl Shell {
         let Some(view) = self.den.view.clone() else {
             return;
         };
+        let drawn = view.read(cx).drawn();
+        if self.den.drawn.as_ref() != Some(&drawn) {
+            match &drawn {
+                leon_den::Drawn::Failed(why) => {
+                    tracing::warn!(%why, "the Den shows the pixel art: 2.5D cannot be drawn");
+                    // Said once where it is seen, too: a den that looks as
+                    // it always did must not be the only sign.
+                    self.engine
+                        .report(crate::engine::StatusKind::Info, den_fallback_line(why));
+                }
+                other => tracing::info!(picture = ?other, "the Den's picture"),
+            }
+            self.den.drawn = Some(drawn);
+        }
         let facts = self.den_facts(cx);
         let wanted: Vec<(u64, String)> = self
             .den_wanted()
@@ -751,6 +2148,18 @@ impl Shell {
                 reading,
             ));
         }
+        // The made-up lions of a development run.
+        if self.options.den_cast > 0 {
+            cubs.extend(den::made_up(
+                self.options.den_cast,
+                self.den.cast_round,
+                [
+                    colours.agent(leon_core::AgentId::CLAUDE),
+                    colours.agent(leon_core::AgentId::CODEX),
+                    colours.agent(leon_core::AgentId::OPENCODE),
+                ],
+            ));
+        }
         let told = if narrate {
             den::changes(
                 &self.den.cubs,
@@ -764,14 +2173,36 @@ impl Shell {
         let style = self.den_style(cx);
         let reduced = settings::reduce_motion(cx);
         let narrator = settings::flag(cx, "den_narrator");
+        // The room in 2.5D, where the setting asks for it. Never in a test:
+        // a test has no graphics card to count on, and the pixel art is the
+        // same picture every time.
+        let three_d = !cfg!(test) && settings::flag(cx, "den_3d");
+        let notes = self.den_notes(cx);
+        // Who was sent home: listed under the roster, to be woken there.
+        let home = self.den_home();
+        self.den.home = home
+            .iter()
+            .map(|(home, ..)| (den::home_id(&home.key()), home.clone()))
+            .collect();
+        let home: Vec<HomeEntry> = home
+            .into_iter()
+            .map(|(home, name, agent)| HomeEntry {
+                id: den::home_id(&home.key()),
+                name,
+                tint: agent.map_or(colours.text_muted, |agent| colours.agent(agent)),
+            })
+            .collect();
         // The time of what is told from now on, and what "5m" counts from.
         let wall = self.now().timestamp();
         view.update(cx, |den, cx| {
             den.set_wall_time(wall, cx);
             den.set_style(style, cx);
+            den.set_three_d(three_d, cx);
             den.set_reduced_motion(Some(reduced), cx);
             den.set_narrator(narrator, cx);
             den.set_cubs(&cubs, cx);
+            den.set_notes(notes, cx);
+            den.set_home(home, cx);
             for happening in &told {
                 den.happen(happening, cx);
             }
@@ -799,9 +2230,133 @@ impl Shell {
             .size_full()
             .flex()
             .flex_col()
+            // A click anywhere in the Den gives it the keyboard back, as a
+            // click in the tree gives it to the tree: its keys are dead
+            // while the sidebar has it.
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                if this.pane != Pane::Main && this.overlay == super::shell::Overlay::None {
+                    this.pane = Pane::Main;
+                    if this.filter_focused(window, cx) {
+                        this.focus.focus(window, cx);
+                    }
+                    cx.notify();
+                }
+            }))
             .child(self.render_den_bar(colours, cx))
-            .child(div().flex_1().min_h_0().children(self.den.view.clone()))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .children(self.den.view.clone())
+                    .children(self.render_den_actions(colours, cx)),
+            )
             .when(editing, |den| den.child(self.render_den_strip(colours, cx)))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keys::{self, Command};
+    use std::collections::HashSet;
+
+    #[test]
+    fn pixel_art_shown_for_want_of_a_gpu_is_said_with_its_reason_and_nothing_else_is() {
+        use leon_den::Drawn;
+        let said = den_fallback_of(&Drawn::Failed("no adapter: none was found".to_owned()));
+        assert_eq!(
+            said.as_deref(),
+            Some(
+                "2.5D is on but cannot be drawn here: no adapter: none was found. The Den shows the pixel art."
+            )
+        );
+        // What was asked for is shown, or will be: nothing to say.
+        for drawn in [
+            Drawn::Pixels,
+            Drawn::Waiting,
+            Drawn::Iso("an adapter".to_owned()),
+        ] {
+            assert_eq!(den_fallback_of(&drawn), None, "{drawn:?}");
+        }
+    }
+
+    /// The command of the palette that does what a key of the Den does,
+    /// where there is one.
+    fn command_of(key: DenKey) -> Option<Command> {
+        Some(match key {
+            DenKey::Needy => Command::NextNeedyLion,
+            DenKey::Message => Command::MessageLion,
+            DenKey::Pride => Command::MessagePride,
+            DenKey::Queued => Command::QueuedMessages,
+            DenKey::Interrupt => Command::InterruptLion,
+            DenKey::SendHome => Command::SendLionHome,
+            DenKey::Wake => Command::WakeLion,
+            DenKey::Hatch => Command::HatchLion,
+            DenKey::GoTo => Command::GoToLion,
+            DenKey::Edit => Command::EditDen,
+            DenKey::Keys => Command::DenKeys,
+            _ => return None,
+        })
+    }
+
+    #[test]
+    fn every_key_of_the_den_is_in_its_table_once_and_is_written_as_it_is_pressed() {
+        let mut strokes = HashSet::new();
+        let mut actions = HashSet::new();
+        for row in DEN_KEYS {
+            assert!(!row.strokes.is_empty(), "{}", row.label);
+            assert!(!row.label.is_empty() && !row.what.is_empty());
+            assert!(actions.insert(row.key), "{:?} has two rows", row.key);
+            for (key, shift) in row.strokes {
+                assert!(strokes.insert((*key, *shift)), "{key} is bound twice");
+                // The table is what the keyboard is read from.
+                assert_eq!(den_key_of(key, *shift), Some(row.key));
+            }
+            // A row names its first key, as it is pressed.
+            let (first, shift) = row.strokes[0];
+            let written = row.label.to_lowercase().replace(' ', "");
+            assert!(written.contains(first), "{} lacks {first}", row.label);
+            assert_eq!(shift, written.starts_with("shift+"), "{}", row.label);
+        }
+        // What a key does plainly, it does not do with Shift.
+        assert_eq!(den_key_of("n", true), None);
+        assert_eq!(den_key_of("f5", false), None);
+        // The keys the Den had before are still its keys.
+        for (key, shift, action) in [
+            ("escape", false, DenKey::Back),
+            ("enter", false, DenKey::Open),
+            ("i", false, DenKey::Message),
+            ("e", false, DenKey::Edit),
+            ("m", false, DenKey::Menu),
+            ("tab", true, DenKey::Previous),
+            ("pageup", false, DenKey::FeedPage(true)),
+        ] {
+            assert_eq!(den_key_of(key, shift), Some(action), "{key}");
+        }
+    }
+
+    #[test]
+    fn the_readme_says_the_key_of_every_command_the_den_has_a_key_for() {
+        let readme = include_str!("../../../../README.md");
+        let mut seen = 0;
+        for row in DEN_KEYS {
+            let Some(command) = command_of(row.key) else {
+                continue;
+            };
+            seen += 1;
+            let label = keys::label(command);
+            let line = readme
+                .lines()
+                .find(|line| line.starts_with(&format!("| {label} |")))
+                .unwrap_or_else(|| panic!("the README has no row for {label:?}"));
+            let key = row.strokes[0].0.to_uppercase();
+            assert!(
+                line.contains(&format!("`{key}` in the Den")),
+                "the README does not say {key} for {label:?}: {line}"
+            );
+        }
+        assert_eq!(seen, 11);
     }
 }

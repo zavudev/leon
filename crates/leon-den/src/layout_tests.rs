@@ -2,11 +2,11 @@
 //! text at all gives a valid den, and a piece goes only where it may.
 
 use crate::layout::{Carpet, DenLayout, Placed, Why, MAX_COLS, MAX_ROWS, VERSION};
-use crate::prefabs::{default_layout, prefabs};
+use crate::prefabs::{prefabs, small_office};
 use crate::world::Tile;
 
 fn read(text: &str) -> (DenLayout, Vec<String>) {
-    let loaded = DenLayout::load(text, &default_layout());
+    let loaded = DenLayout::load(text, &small_office());
     (loaded.layout, loaded.notes)
 }
 
@@ -22,7 +22,7 @@ fn a_den_is_written_as_json_with_its_version_and_read_back_the_same() {
         assert_eq!(room, prefab.layout);
         assert_eq!(notes, Vec::<String>::new());
     }
-    let text = default_layout().to_json();
+    let text = small_office().to_json();
     assert!(text.contains(&format!("\"version\": {VERSION}")));
     assert!(text.contains("\"name\": \"The office\""));
     assert!(text.contains("\"based_on\": \"office\""));
@@ -62,7 +62,7 @@ fn a_text_that_is_no_den_gives_the_default_one_and_says_so() {
         "{\"cols\": 3",
     ] {
         let (room, notes) = read(text);
-        assert_eq!(room, default_layout(), "{text:?}");
+        assert_eq!(room, small_office(), "{text:?}");
         assert_eq!(notes.len(), 1, "{text:?}");
         assert!(notes[0].starts_with("This is not a den"), "{}", notes[0]);
         assert!(
@@ -179,12 +179,12 @@ fn no_text_makes_reading_panic() {
             let world = crate::world::World::build(&room);
             assert_eq!(world.ground(room.door()), crate::world::Ground::Floor);
             let _ = world.backdrop();
-            read_some += usize::from(room != default_layout());
+            read_some += usize::from(room != small_office());
         }
     }
     assert!(read_some > 20, "the numbers that are numbers were read");
     // Cut anywhere, a file is no den or a smaller one, never a panic.
-    let whole = default_layout().to_json();
+    let whole = small_office().to_json();
     for end in (0..whole.len()).step_by(7) {
         if whole.is_char_boundary(end) {
             let _ = read(&whole[..end]);
@@ -194,7 +194,7 @@ fn no_text_makes_reading_panic() {
 
 #[test]
 fn a_piece_goes_only_where_it_may() {
-    let room = default_layout();
+    let room = small_office();
     let check = |piece: Placed| room.check(&piece, &[]);
     assert_eq!(check(Placed::new("throne", 5, 8)), Err(Why::Unknown));
     // On the floor: inside the walls, on nothing else, off the way in.
@@ -257,7 +257,7 @@ fn a_piece_goes_only_where_it_may() {
 
 #[test]
 fn what_is_put_on_a_table_stands_on_it_and_beside_what_is_there() {
-    let room = default_layout();
+    let room = small_office();
     let desk = index_of(&room, "desk");
     let riders = room.on_top_of(desk);
     assert_eq!(riders.len(), 2, "two computers");

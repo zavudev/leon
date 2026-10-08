@@ -296,6 +296,11 @@ pub struct AgentSpec {
     /// such an agent can still set any variable, but its history and limits are
     /// not read per account.
     pub config_env: Option<String>,
+    /// The key that stops the agent in the middle of a turn without ending
+    /// its session, as the bytes a terminal sends for it: Escape for Claude
+    /// Code and for Codex, whose own interfaces say so while they work.
+    /// Absent where it is not known; nothing is sent to those.
+    pub interrupt: Option<String>,
 }
 
 /// The word that stands for the prompt in [`AgentSpec::prompt`].
@@ -376,6 +381,7 @@ struct Row {
     headless: &'static [&'static str],
     prompt: &'static [&'static str],
     config_env: &'static str,
+    interrupt: &'static str,
 }
 
 const fn row(
@@ -398,6 +404,7 @@ const fn row(
         headless: &[],
         prompt: &[],
         config_env: "",
+        interrupt: "",
     }
 }
 
@@ -451,7 +458,16 @@ impl Row {
         self.config_env = config_env;
         self
     }
+    /// The key that interrupts a turn, as the bytes a terminal sends. Only
+    /// for agents whose key is known.
+    const fn interrupt(mut self, interrupt: &'static str) -> Self {
+        self.interrupt = interrupt;
+        self
+    }
 }
+
+/// What a terminal sends for the Escape key.
+const ESCAPE: &str = "\u{1b}";
 
 /// The built-in agents, in display order. The prompt forms (`.prompt`) were
 /// read in the `--help` of the installed programs: `claude [prompt]`,
@@ -484,12 +500,14 @@ const ROWS: &[Row] = &[
     ])
     .prompt(&["{prompt}"])
     .config_env("CLAUDE_CONFIG_DIR")
+    .interrupt(ESCAPE)
     .mark("claude"),
     row("codex", "Codex", "codex", "https://github.com/openai/codex")
         .resume(&["resume", "{id}"])
         .headless(&["exec", "--sandbox", "read-only"])
         .prompt(&["{prompt}"])
         .config_env("CODEX_HOME")
+        .interrupt(ESCAPE)
         .mark("codex"),
     row(
         "opencode",
@@ -790,6 +808,7 @@ fn from_row(row: &Row) -> AgentSpec {
         headless: (!row.headless.is_empty()).then(|| words(row.headless)),
         prompt: (!row.prompt.is_empty()).then(|| words(row.prompt)),
         config_env: (!row.config_env.is_empty()).then(|| row.config_env.to_owned()),
+        interrupt: (!row.interrupt.is_empty()).then(|| row.interrupt.to_owned()),
     }
 }
 
@@ -1068,6 +1087,7 @@ impl CustomAgent {
             headless: None,
             prompt,
             config_env: None,
+            interrupt: None,
         })
     }
 }
@@ -1523,5 +1543,19 @@ mod tests {
         let specs = custom_from_entries(&[old.to_owned()]);
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].prompt, None);
+    }
+
+    #[test]
+    fn only_the_agents_whose_interrupt_key_is_known_have_one_and_it_is_escape() {
+        let with: Vec<&str> = builtin()
+            .iter()
+            .filter(|spec| spec.interrupt.is_some())
+            .map(|spec| spec.id.as_str())
+            .collect();
+        assert_eq!(with, ["claude", "codex"]);
+        assert!(builtin()
+            .iter()
+            .filter_map(|spec| spec.interrupt.as_deref())
+            .all(|key| key == "\u{1b}"));
     }
 }

@@ -213,6 +213,54 @@ pub fn items_for_held(kind: &Kind, local: bool, held: Option<bool>) -> Vec<Item>
     }
 }
 
+/// What the menu of a lion depends on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LionMenu {
+    /// Whether its session is pinned; `None` when it is not in the history
+    /// and cannot be.
+    pub pinned: Option<bool>,
+    /// It runs elsewhere and has no terminal here: it can only be opened.
+    pub elsewhere: bool,
+    /// The key that interrupts its agent is known.
+    pub interrupt: bool,
+    /// How many messages wait for it.
+    pub queued: usize,
+}
+
+/// The items for a lion of the Den.
+pub fn items_for_lion(lion: LionMenu) -> Vec<Item> {
+    use Command as C;
+    if lion.elsewhere {
+        return vec![Item::new("Open transcript", C::Open)];
+    }
+    let pinned = lion.pinned;
+    [
+        Some(Item::new("Open", C::Open)),
+        Some(Item::new("Message\u{2026}", C::MessageLion)),
+        (lion.queued > 0).then(|| {
+            Item::new(
+                &format!("Queued messages ({})\u{2026}", lion.queued),
+                C::QueuedMessages,
+            )
+        }),
+        lion.interrupt
+            .then(|| Item::new("Interrupt", C::InterruptLion)),
+        Some(Item::new("Rename\u{2026}", C::Rename)),
+        pinned.map(|pinned| {
+            if pinned {
+                Item::new("Unpin", C::UnpinSession)
+            } else {
+                Item::new("Pin", C::PinSession)
+            }
+        }),
+        Some(Item::new("Send home", C::SendLionHome)),
+        Some(Item::new("Close", C::CloseSession)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// What choosing the selected item does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Chosen {
@@ -245,6 +293,8 @@ pub struct Menu {
     /// Whether it is the menu of a terminal pane (`node` is then that
     /// terminal) and not of a row of the tree.
     pub terminal: bool,
+    /// The lion it is the menu of, when it was opened in the Den.
+    pub lion: Option<u64>,
 }
 
 impl Menu {
@@ -259,6 +309,7 @@ impl Menu {
             typed_at: None,
             at,
             terminal: false,
+            lion: None,
         }
     }
 
@@ -622,7 +673,14 @@ impl Shell {
     ) {
         let node = self.menu.as_ref().map(|menu| menu.node.clone());
         let of_terminal = self.menu.as_ref().is_some_and(|menu| menu.terminal);
+        let lion = self.menu.as_ref().and_then(|menu| menu.lion);
         self.close_menu(window, cx);
+        if let Some(lion) = lion {
+            // The lion it was opened on is the selected one: the command
+            // does what it does for it.
+            self.run_lion_item(lion, item.command, window, cx);
+            return;
+        }
         if of_terminal {
             // The terminal it was opened on has the keyboard: the command does
             // what it does for it.
@@ -877,6 +935,85 @@ mod tests {
 
     fn labels(items: &[Item]) -> Vec<&str> {
         items.iter().map(|item| item.label.as_str()).collect()
+    }
+
+    #[test]
+    fn a_lion_has_the_menu_of_its_session_and_one_elsewhere_is_only_opened() {
+        let plain = LionMenu {
+            pinned: Some(false),
+            ..LionMenu::default()
+        };
+        let items = items_for_lion(plain);
+        assert_eq!(
+            labels(&items),
+            [
+                "Open",
+                "Message\u{2026}",
+                "Rename\u{2026}",
+                "Pin",
+                "Send home",
+                "Close"
+            ]
+        );
+        let commands: Vec<Command> = items.iter().map(|item| item.command).collect();
+        assert_eq!(
+            commands,
+            [
+                Command::Open,
+                Command::MessageLion,
+                Command::Rename,
+                Command::PinSession,
+                Command::SendLionHome,
+                Command::CloseSession
+            ]
+        );
+        // A pinned one is unpinned; one the history does not hold has
+        // nothing to pin.
+        let pinned = LionMenu {
+            pinned: Some(true),
+            ..LionMenu::default()
+        };
+        assert_eq!(items_for_lion(pinned)[3].command, Command::UnpinSession);
+        assert_eq!(
+            labels(&items_for_lion(LionMenu::default())),
+            [
+                "Open",
+                "Message\u{2026}",
+                "Rename\u{2026}",
+                "Send home",
+                "Close"
+            ]
+        );
+        // An agent whose interrupt key is known can be interrupted, and
+        // messages that wait can be looked at.
+        let busy = LionMenu {
+            interrupt: true,
+            queued: 2,
+            ..LionMenu::default()
+        };
+        let items = items_for_lion(busy);
+        assert_eq!(
+            labels(&items),
+            [
+                "Open",
+                "Message\u{2026}",
+                "Queued messages (2)\u{2026}",
+                "Interrupt",
+                "Rename\u{2026}",
+                "Send home",
+                "Close"
+            ]
+        );
+        assert_eq!(items[2].command, Command::QueuedMessages);
+        assert_eq!(items[3].command, Command::InterruptLion);
+        // A session that runs elsewhere has no terminal here.
+        let away = LionMenu {
+            pinned: Some(true),
+            elsewhere: true,
+            interrupt: true,
+            queued: 3,
+        };
+        assert_eq!(labels(&items_for_lion(away)), ["Open transcript"]);
     }
 
     fn machine(local: bool) -> Kind {

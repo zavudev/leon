@@ -4001,8 +4001,10 @@ version = "0.6.0"
 dependencies = [
  "gpui-kit",
  "image",
+ "pollster 0.4.0",
  "serde",
  "serde_json",
+ "wgpu",
 ]
 
 [[package]]

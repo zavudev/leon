@@ -10,7 +10,7 @@ use crate::scene::{
     build, empty_feed, wrap_detail, Layout, Rect, Scene, TextMetrics, BELOW_MIN_VIEW, CARD_CHARS,
     ROSTER_ROWS, SIDE_CHARS, SIDE_MIN_VIEW,
 };
-use crate::sim::Den;
+use crate::sim::{Den, HomeEntry, Note};
 use crate::testing::{at, cub, palette};
 
 const METRICS: TextMetrics = TextMetrics {
@@ -25,6 +25,10 @@ fn layout(width: i32, height: i32, scale: f32, lions: usize) -> Layout {
     };
     // The default room.
     Layout::compute(width, height, scale, metrics, 14, 11, lions)
+}
+
+fn layout_with_home(width: i32, height: i32, lions: usize, home: usize) -> Layout {
+    Layout::compute_with_home(width, height, 1., METRICS, 14, 11, lions, home)
 }
 
 fn apart(a: Rect, b: Rect) -> bool {
@@ -221,6 +225,7 @@ fn the_chrome_is_the_page_the_frame_the_roster_and_the_feed() {
     let texts: Vec<&str> = scene.texts.iter().map(|text| text.text.as_str()).collect();
     for expected in [
         "THE PRIDE",
+        "1 NEEDS YOU",
         "moss",
         "fern",
         "Lv.3",
@@ -232,7 +237,8 @@ fn the_chrome_is_the_page_the_frame_the_roster_and_the_feed() {
         assert!(texts.contains(&expected), "{expected} is not in {texts:?}");
     }
     assert_eq!(scene.rows.len(), 2);
-    let (row, id) = scene.rows[1];
+    // The one that asks is listed first.
+    let (row, id) = scene.rows[0];
     assert_eq!(id, 2);
     assert_eq!(scene.row_at(row.x + 3, row.y + 3), Some(2));
     assert_eq!(scene.row_at(l.map.x + 3, l.map.y + 3), None);
@@ -268,6 +274,52 @@ fn the_truth_card_of_the_selected_lion_says_the_exact_detail() {
         .find(|text| text.text == "Needs your permission")
         .unwrap();
     assert_eq!(status.color, p.warning, "what is urgent carries its colour");
+}
+
+#[test]
+fn the_truth_card_ends_with_what_the_host_says_of_the_session() {
+    let l = layout(1280, 800, 1., 2);
+    let mut den = den(&l);
+    let p = palette(false);
+    den.select(Some(1));
+    assert!(den.set_notes(
+        [(
+            1,
+            vec![
+                Note::plain("Fix the parser"),
+                Note::plain("2 messages queued")
+            ]
+        )]
+        .into()
+    ));
+    let scene = build(&den, &den.frame(at(400)), &l, &p, None);
+    let added: Vec<&str> = scene.texts[scene.texts.len() - 5..]
+        .iter()
+        .map(|text| text.text.as_str())
+        .collect();
+    assert_eq!(
+        added,
+        vec![
+            "moss  Lv.3",
+            "Running a command",
+            "cargo test -p leon-den",
+            "Fix the parser",
+            "2 messages queued"
+        ]
+    );
+    let note = scene.texts.last().unwrap();
+    assert_eq!(note.color, p.text_muted, "a note is not the detail");
+    // The same notes again change nothing; a lion without notes has none.
+    let same = [(
+        1,
+        vec![
+            Note::plain("Fix the parser"),
+            Note::plain("2 messages queued"),
+        ],
+    )]
+    .into();
+    assert!(!den.set_notes(same));
+    assert!(den.truth(2).unwrap().notes.is_empty());
 }
 
 #[test]
@@ -721,4 +773,256 @@ fn no_size_of_view_and_no_text_of_a_session_makes_the_scene_panic() {
             let _ = crate::feed::wrap_text(&text, width);
         }
     }
+}
+
+#[test]
+fn the_roster_says_who_needs_the_user_marks_the_row_under_the_pointer_and_lists_who_is_at_home() {
+    let l = layout_with_home(1280, 800, 2, 2);
+    let mut den = den(&l);
+    let p = palette(true);
+    // Nobody at home: no such part.
+    let scene = build(&den, &den.frame(at(400)), &l, &p, None);
+    assert!(!texts(&scene).contains(&"AT HOME"));
+    assert!(scene.home_rows.is_empty());
+    let home = |id: u64, name: &str| HomeEntry {
+        id,
+        name: name.to_owned(),
+        tint: p.warning,
+    };
+    assert!(den.set_home(vec![home(70, "ash"), home(71, "rowan")]));
+    assert!(!den.set_home(vec![home(70, "ash"), home(71, "rowan")]));
+    let scene = build(&den, &den.frame(at(400)), &l, &p, None);
+    let said = texts(&scene);
+    for expected in ["AT HOME", "ash", "rowan", "WAKE"] {
+        assert!(said.contains(&expected), "{expected} is not in {said:?}");
+    }
+    assert_eq!(scene.home_rows.len(), 2);
+    let (row, id) = scene.home_rows[1];
+    assert_eq!(id, 71);
+    assert_eq!(scene.home_at(row.x + 3, row.y + 3), Some(71));
+    assert_eq!(scene.row_at(row.x + 3, row.y + 3), None, "it is no lion");
+    // The rows of the pride and of those at home do not cover each other.
+    for (lion, _) in &scene.rows {
+        for (asleep, _) in &scene.home_rows {
+            assert!(apart(*lion, *asleep));
+        }
+    }
+    // The row under the pointer is raised, a lion's and a sleeper's.
+    let raised = |scene: &Scene| scene.quads.iter().filter(|q| q.color == p.raised).count();
+    let before = raised(&scene);
+    den.hover(Some(1));
+    assert!(den.hover_home(Some(70)));
+    let scene = build(&den, &den.frame(at(400)), &l, &p, None);
+    assert_eq!(raised(&scene), before + 2);
+    let wake = scene
+        .texts
+        .iter()
+        .filter(|t| t.text == "WAKE")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        wake[0].color, p.signal,
+        "the way back shows under the pointer"
+    );
+    assert_eq!(wake[1].color, p.text_muted);
+    // Somebody who left home is no longer under the pointer.
+    den.set_home(vec![home(71, "rowan")]);
+    assert_eq!(den.home_hovered(), None);
+    // More at home than the roster names: the rest is counted.
+    den.set_home((0..7).map(|n| home(80 + n, "sleeper")).collect());
+    let l = layout_with_home(1280, 800, 2, 7);
+    let scene = build(&den, &den.frame(at(400)), &l, &p, None);
+    assert_eq!(scene.home_rows.len(), 2);
+    assert!(texts(&scene).contains(&"+5 more at home"));
+    assert_eq!(scene.rows.len(), 2, "the pride keeps its rows");
+    // A roster with somebody at home is higher by their part, so the
+    // pride lists as many lions as without them, while the feed keeps most
+    // of the column.
+    let alone = layout(1280, 800, 1., 6).roster.unwrap().h;
+    let with_home = layout_with_home(1280, 800, 6, 2).roster.unwrap().h;
+    assert_eq!(with_home, alone + 3 * 25, "a heading and two rows of 25 px");
+    let full = layout_with_home(1280, 800, 8, 5);
+    assert!(full.roster.unwrap().h * 5 <= (800 - 24) * 2, "{full:?}");
+    assert_eq!(
+        layout_with_home(1280, 800, 40, 0).roster,
+        layout(1280, 800, 1., 40).roster
+    );
+}
+
+#[test]
+fn the_truth_card_groups_what_the_host_says_and_what_is_asked_stands_out() {
+    let l = layout(1280, 800, 1., 2);
+    let mut den = den(&l);
+    let p = palette(true);
+    den.select(Some(2));
+    den.set_notes(
+        [(
+            2,
+            vec![
+                Note::urgent("Asks to run: rm -rf target && cargo build --release"),
+                Note::heading("CONVERSATION"),
+                Note::plain("You last said: clean and rebuild"),
+                Note::heading("SESSION"),
+                Note::plain("Claude Code, opus"),
+            ],
+        )]
+        .into(),
+    );
+    let scene = build(&den, &den.frame(at(400)), &l, &p, None);
+    let find = |text: &str| scene.texts.iter().find(|t| t.text == text).unwrap();
+    let asked = find("Asks to run: rm -rf target && cargo");
+    assert_eq!((asked.color, asked.bold), (p.text, false));
+    let heading = find("CONVERSATION");
+    assert_eq!((heading.color, heading.bold), (p.text_muted, true));
+    assert_eq!(find("Claude Code, opus").color, p.text_muted);
+    // The groups are in the order the host gave them.
+    let order: Vec<usize> = [
+        "CONVERSATION",
+        "You last said: clean and rebuild",
+        "SESSION",
+    ]
+    .iter()
+    .map(|text| scene.texts.iter().position(|t| t.text == *text).unwrap())
+    .collect();
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
+#[test]
+fn a_card_with_no_room_says_less_and_never_covers_its_lion_or_leaves_the_view() {
+    let p = palette(true);
+    let notes = || -> Vec<Note> {
+        let mut notes = vec![Note::urgent("Asks to run: cargo test --workspace")];
+        for group in ["CONVERSATION", "SESSION"] {
+            notes.push(Note::heading(group));
+            for line in 0..6 {
+                notes.push(Note::plain(format!("{group} fact number {line}")));
+            }
+        }
+        notes
+    };
+    // A wide and high view: all of it is said.
+    let l = layout(1600, 1000, 1., 2);
+    let mut big = den(&l);
+    big.select(Some(2));
+    big.set_notes([(2, notes())].into());
+    let scene = build(&big, &big.frame(at(400)), &l, &p, None);
+    let said = texts(&scene);
+    assert!(said.contains(&"SESSION fact number 5") && !said.contains(&"\u{2026}"));
+    // A small one: the summary goes from its end, what is asked stays, and
+    // the card says there is more.
+    for (width, height) in [(900, 420), (560, 420), (1100, 300), (640, 360), (700, 240)] {
+        let l = layout(width, height, 1., 2);
+        let mut den = den(&l);
+        den.select(Some(2));
+        den.set_notes([(2, notes())].into());
+        let frame = den.frame(at(400));
+        let scene = build(&den, &frame, &l, &p, None);
+        let said = texts(&scene);
+        assert!(said.contains(&"Needs your permission"), "{width}x{height}");
+        // Either all of it is said, or the end is missing and the card says so.
+        let whole = said.contains(&"SESSION fact number 5");
+        assert_eq!(
+            whole,
+            !said.contains(&"\u{2026}"),
+            "{width}x{height}: {said:?}"
+        );
+        if height <= 300 {
+            assert!(!whole, "{width}x{height} has no room for all of it");
+            // What is asked outlasts the summary.
+            assert!(
+                said.iter().any(|line| line.starts_with("Asks to run:")),
+                "{width}x{height}: {said:?}"
+            );
+        }
+        // No heading is left with nothing under it.
+        assert_ne!(said[said.len() - 2], "SESSION", "{width}x{height}");
+        assert_ne!(said[said.len() - 2], "CONVERSATION", "{width}x{height}");
+        // The card is the last box drawn: its fill is the paper.
+        let card = scene
+            .quads
+            .iter()
+            .rev()
+            .find(|quad| quad.color == p.paper)
+            .unwrap()
+            .rect;
+        assert!(
+            card.y >= 0 && card.y + card.h <= l.view.h,
+            "{width}x{height}: {card:?}"
+        );
+        // A note beside its lion, not a page over the room: a third of the
+        // room at most, unless only what cannot be dropped is left.
+        if said.iter().any(|line| line.ends_with("fact number 0")) {
+            assert!(
+                i64::from(card.w) * i64::from(card.h) * 3
+                    <= i64::from(l.field.w) * i64::from(l.view.h),
+                "{width}x{height}: {card:?} is more than a third of {:?}",
+                l.field
+            );
+        }
+        let actor = frame.actors.iter().find(|actor| actor.id == 2).unwrap();
+        let (left, top, w, h) = actor.bounds();
+        let lion = Rect {
+            x: l.map.x + left * l.unit,
+            y: l.map.y + top * l.unit,
+            w: w * l.unit,
+            h: h * l.unit,
+        };
+        if card.h + lion.h + l.px(60.) < l.view.h {
+            assert!(
+                apart(card, lion),
+                "{width}x{height}: {card:?} covers {lion:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_keys_are_listed_over_the_room_in_as_many_columns_as_they_need() {
+    let l = layout(1280, 800, 1., 2);
+    let mut den = den(&l);
+    let p = palette(true);
+    let keys: Vec<(String, String)> = (0..9)
+        .map(|n| (format!("K{n}"), format!("does thing number {n}")))
+        .collect();
+    assert!(den.set_keys(Some(keys.clone())));
+    assert!(!den.set_keys(Some(keys.clone())));
+    let scene = build(&den, &den.frame(at(400)), &l, &p, None);
+    let said = texts(&scene);
+    for expected in [
+        "THE KEYS OF THE DEN",
+        "K0",
+        "does thing number 8",
+        "? or Escape closes this.",
+    ] {
+        assert!(said.contains(&expected), "{expected} is not in {said:?}");
+    }
+    let rect = scene.keys.unwrap();
+    assert!(inside(rect, l.view));
+    // Every key is on a row of its own, within the box.
+    let rows: Vec<(i32, i32)> = scene
+        .texts
+        .iter()
+        .filter(|text| text.text.starts_with('K') && text.text.len() == 2)
+        .map(|text| (text.x, text.y))
+        .collect();
+    assert_eq!(rows.len(), 9);
+    for (index, a) in rows.iter().enumerate() {
+        assert!(rect.contains(a.0, a.1));
+        assert!(rows[index + 1..].iter().all(|b| a != b));
+    }
+    // A low view lays them in columns and still shows them all.
+    let low = layout(1280, 230, 1., 2);
+    let scene = build(&den, &den.frame(at(400)), &low, &p, None);
+    let columns: std::collections::BTreeSet<i32> = scene
+        .texts
+        .iter()
+        .filter(|text| text.text.starts_with('K') && text.text.len() == 2)
+        .map(|text| text.x)
+        .collect();
+    assert!(columns.len() > 1, "{columns:?}");
+    assert!(texts(&scene).contains(&"does thing number 8"));
+    assert!(inside(scene.keys.unwrap(), low.view));
+    // Taken away, nothing of them is left.
+    assert!(den.set_keys(None));
+    let scene = build(&den, &den.frame(at(400)), &l, &p, None);
+    assert!(scene.keys.is_none() && !texts(&scene).contains(&"THE KEYS OF THE DEN"));
 }

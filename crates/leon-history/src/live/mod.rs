@@ -23,10 +23,12 @@
 //! | Beat | Line |
 //! | --- | --- |
 //! | [`Beat::Prompt`] | a `user` line with text or a picture, not injected (`isMeta`), not a local command, whose `origin.kind` is `human` or absent |
+//! | [`Beat::Heard`] | the user's own words of that line ([`heard`]: without the markers of pictures, a paste as [`PASTED`]), after its [`Beat::Prompt`]; none for a picture alone. Also a slash command typed with words after it (`<command-name>` with a non-empty `<command-args>`), as `/name words`, which is no prompt by itself |
 //! | [`Beat::Woken`] | a `user` line whose `origin.kind` is not `human`: a task notification, a message from another agent |
 //! | [`Beat::Thinking`] | an `assistant` line with a `thinking` block |
 //! | [`Beat::Said`] | an `assistant` line with a non-empty `text` block; it carries the text ([`speech`]: whole but for control characters, at most [`MAX_SPEECH_CHARS`]) and the line's `timestamp` |
 //! | [`Beat::ToolStarted`] | an `assistant` line with a `tool_use` block |
+//! | [`Beat::Brief`] | the same block, after its [`Beat::ToolStarted`], when its input says more than the caption: the whole command, path or address, the plan, or the question and its answers ([`brief`]) |
 //! | [`Beat::ToolFinished`] | a `tool_result` block of a `user` line; `is_error` is `failed` |
 //! | [`Beat::Detached`] | a `tool_result` whose line has `toolUseResult.agentId` and an `async_launched` status |
 //! | [`Beat::TaskEnded`] | a `<task-notification>` with a `<task-id>` and a `<status>` |
@@ -41,7 +43,12 @@
 //! [`Beat::TurnEnded`] and [`Beat::Interrupted`]; `reasoning` and assistant
 //! `message` items are [`Beat::Thinking`] and [`Beat::Said`]; tool calls and
 //! their outputs are matched by `call_id`; `token_count` is [`Beat::Usage`]
-//! and `compacted` is [`Beat::Compacted`]. Codex has no sub-agent beats.
+//! and `compacted` is [`Beat::Compacted`]. A `message` item of the user's
+//! role is [`Beat::Heard`], but for the blocks the harness writes there
+//! itself (those that open with a tag or with the heading of the folder's
+//! instructions); where the interface wrote what was attached first, only
+//! what stands under `## My request:` is the user's. A call's [`Beat::Brief`] is read from its arguments as in
+//! a Claude Code transcript. Codex has no sub-agent beats.
 //!
 //! # What a transcript does not say
 //!
@@ -65,7 +72,10 @@ mod locate;
 mod pulse;
 mod tail;
 
-pub use beat::{detail, speech, Beat, TaskOutcome, ToolKind, MAX_DETAIL_CHARS, MAX_SPEECH_CHARS};
+pub use beat::{
+    brief, detail, heard, speech, Beat, TaskOutcome, ToolKind, MAX_BRIEF_CHARS, MAX_DETAIL_CHARS,
+    MAX_OPTIONS, MAX_SPEECH_CHARS, PASTED,
+};
 pub use locate::{
     claude_project_dir_name, claude_subagent_files, claude_subagent_path, claude_subagents_dir,
     claude_transcript_path, find_claude_transcript, find_codex_rollout, is_codex_rollout_of,
