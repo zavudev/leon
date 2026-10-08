@@ -316,6 +316,7 @@ impl Shell {
         view.update(cx, |view, _| view.set_padding(metrics::TERMINAL_PADDING()));
         super::prefs::apply_terminal_prefs(&view, cx);
         if !remote {
+            view.read(cx).terminal().set_file_base(Some(cwd.to_owned()));
             Self::link_pull_requests(view.read(cx).terminal().clone(), cwd.to_owned());
         }
 
@@ -804,6 +805,11 @@ impl Shell {
                 self.raise(notify::Event::of_exit(info.code), id, cx);
             }
             ViewEvent::ContextMenu(at) => self.open_terminal_menu(id, *at, window, cx),
+            ViewEvent::OpenFile { path, line } => {
+                if let Some(machine) = self.live.get(id).map(|session| session.machine.clone()) {
+                    self.open_file(machine, path.clone(), *line, window, cx);
+                }
+            }
             ViewEvent::Clicked => {
                 // A click on a pane makes it the focused one of its tab.
                 if self.overlay == Overlay::None && self.live.get(id).is_some() {

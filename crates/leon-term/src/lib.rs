@@ -49,6 +49,7 @@
 
 pub mod buffer;
 pub mod colors;
+pub mod files;
 pub mod find;
 pub mod keys;
 pub mod layout;
