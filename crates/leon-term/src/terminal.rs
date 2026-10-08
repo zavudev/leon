@@ -28,6 +28,7 @@
 
 use crate::buffer::{self, Cleared, Extent};
 use crate::colors::{to_rgb8, TerminalTheme};
+use crate::files::{file_refs, Files};
 use crate::find::Highlights;
 use crate::size::GridSize;
 use crate::spec::{command_builder, SpawnSpec};
@@ -183,6 +184,9 @@ struct Shared {
     /// Where a `#123` printed in the terminal points to (see
     /// [`Terminal::set_reference_base`]).
     reference_base: Mutex<Option<Arc<str>>>,
+    /// The folder whose files a printed path names (see
+    /// [`Terminal::set_file_base`]).
+    files: Mutex<Option<Arc<Files>>>,
 }
 
 impl Shared {
@@ -204,6 +208,7 @@ impl Shared {
             highlights: Mutex::new(None),
             options: Mutex::new((SCROLLBACK_LINES, CursorShape::Block)),
             reference_base: Mutex::new(None),
+            files: Mutex::new(None),
         })
     }
 
@@ -762,11 +767,26 @@ impl Terminal {
     }
 
     /// The OSC 8 or HTTP(S) hyperlink under a viewport cell, across wraps. A
-    /// `#123` is one too when a [reference base](Self::set_reference_base) is set.
+    /// `#123` is one too when a [reference base](Self::set_reference_base) is set,
+    /// and a path to a file when a [file base](Self::set_file_base) is.
     pub fn link_at(&self, col: usize, row: usize) -> Option<String> {
         let base = self.reference_base();
+        let files = self.files();
         let term = self.term.lock();
-        link_at(&term, col, row, base.as_deref())
+        link_at(&term, col, row, base.as_deref(), files.as_deref())
+    }
+
+    /// Makes a path printed in the output a link when it names a file of
+    /// `cwd` (or an absolute one, or `~/`): the host opens it in its editor.
+    /// `None` turns it off.
+    pub fn set_file_base(&self, cwd: Option<String>) {
+        *self.shared.files.lock() = cwd.map(|cwd| Arc::new(Files::new(cwd)));
+        self.shared.wake_once();
+    }
+
+    /// What [`Self::set_file_base`] set.
+    pub(crate) fn files(&self) -> Option<Arc<Files>> {
+        self.shared.files.lock().clone()
     }
 
     /// Makes `#123` in the output a link to `{base}123`: the pull request
@@ -879,7 +899,13 @@ pub(crate) fn openable(uri: &str) -> bool {
         && !uri.chars().any(char::is_control)
 }
 
-fn link_at(term: &Term<EventProxy>, col: usize, row: usize, base: Option<&str>) -> Option<String> {
+fn link_at(
+    term: &Term<EventProxy>,
+    col: usize,
+    row: usize,
+    base: Option<&str>,
+    files: Option<&Files>,
+) -> Option<String> {
     let point = viewport_point(term, col, row);
     let grid = term.grid();
     if let Some(link) = grid[point].hyperlink() {
@@ -907,21 +933,28 @@ fn link_at(term: &Term<EventProxy>, col: usize, row: usize, base: Option<&str>) 
             text.push(if cell.c == '\0' { ' ' } else { cell.c });
         }
     }
-    plain_link_at(&text, clicked?, base)
+    plain_link_at(&text, clicked?, base, files)
 }
 
-fn plain_link_at(text: &[char], clicked: usize, base: Option<&str>) -> Option<String> {
-    plain_links(text, base)
+fn plain_link_at(
+    text: &[char],
+    clicked: usize,
+    base: Option<&str>,
+    files: Option<&Files>,
+) -> Option<String> {
+    plain_links(text, base, files)
         .into_iter()
         .find(|(range, _)| range.contains(&clicked))
         .map(|(_, uri)| uri)
 }
 
-/// The HTTP(S) links in `text`, and with a `base` the `#123` references too,
-/// as character ranges and the address each opens.
+/// The HTTP(S) links in `text`, with `files` the paths of files that exist
+/// and with a `base` the `#123` references too, as character ranges and the
+/// address each opens.
 pub(crate) fn plain_links(
     text: &[char],
     base: Option<&str>,
+    files: Option<&Files>,
 ) -> Vec<(std::ops::Range<usize>, String)> {
     let mut links = Vec::new();
     let mut start = 0;
@@ -953,6 +986,21 @@ pub(crate) fn plain_links(
             links.push((start..end, text[start..end].iter().collect()));
         }
         start = end.max(start + 1);
+    }
+    if let Some(files) = files {
+        let mut paths = file_refs(text)
+            .into_iter()
+            .filter(|(range, _, _)| {
+                !links
+                    .iter()
+                    .any(|(link, _): &(std::ops::Range<usize>, String)| {
+                        link.start < range.end && range.start < link.end
+                    })
+            })
+            .filter_map(|(range, path, line)| Some((range, files.link(&path, line)?)))
+            .collect::<Vec<_>>();
+        links.append(&mut paths);
+        links.sort_by_key(|(range, _)| range.start);
     }
     if let Some(base) = base {
         let mut references = references(text)
@@ -1005,7 +1053,11 @@ fn references(text: &[char]) -> Vec<(std::ops::Range<usize>, String)> {
     found
 }
 
-pub(crate) fn visible_links(term: &Term<EventProxy>, base: Option<&str>) -> Vec<Option<String>> {
+pub(crate) fn visible_links(
+    term: &Term<EventProxy>,
+    base: Option<&str>,
+    files: Option<&Files>,
+) -> Vec<Option<String>> {
     let grid = term.grid();
     let columns = grid.columns();
     let rows = grid.screen_lines();
@@ -1034,7 +1086,7 @@ pub(crate) fn visible_links(term: &Term<EventProxy>, base: Option<&str>) -> Vec<
                 points.push(point);
             }
         }
-        for (range, uri) in plain_links(&text, base) {
+        for (range, uri) in plain_links(&text, base, files) {
             for point in &points[range] {
                 let row = point.line.0 + offset;
                 if row >= 0 && row < rows as i32 {
@@ -1262,10 +1314,10 @@ mod tests {
         let mut headless = Headless::new(80, 4, theme());
         headless.feed(b"See (https://example.com/a_(b)). Next");
         assert_eq!(
-            link_at(headless.term(), 10, 0, None).as_deref(),
+            link_at(headless.term(), 10, 0, None, None).as_deref(),
             Some("https://example.com/a_(b)")
         );
-        assert_eq!(link_at(headless.term(), 31, 0, None), None);
+        assert_eq!(link_at(headless.term(), 31, 0, None, None), None);
     }
 
     #[test]
@@ -1273,10 +1325,10 @@ mod tests {
         let mut headless = Headless::new(12, 4, theme());
         headless.feed(b"https://example.com/docs");
         assert_eq!(
-            link_at(headless.term(), 3, 1, None).as_deref(),
+            link_at(headless.term(), 3, 1, None, None).as_deref(),
             Some("https://example.com/docs")
         );
-        let links = visible_links(headless.term(), None);
+        let links = visible_links(headless.term(), None, None);
         assert_eq!(links[3].as_deref(), Some("https://example.com/docs"));
         assert_eq!(links[12 + 3].as_deref(), Some("https://example.com/docs"));
     }
@@ -1286,16 +1338,16 @@ mod tests {
         let mut headless = Headless::new(60, 4, theme());
         headless.feed(b"created PR #29 (see #7, not #123456 or a/#5 or c#4)");
         let base = Some("https://github.com/o/r/pull/");
-        assert_eq!(link_at(headless.term(), 12, 0, None), None);
+        assert_eq!(link_at(headless.term(), 12, 0, None, None), None);
         assert_eq!(
-            link_at(headless.term(), 12, 0, base).as_deref(),
+            link_at(headless.term(), 12, 0, base, None).as_deref(),
             Some("https://github.com/o/r/pull/29")
         );
         assert_eq!(
-            link_at(headless.term(), 21, 0, base).as_deref(),
+            link_at(headless.term(), 21, 0, base, None).as_deref(),
             Some("https://github.com/o/r/pull/7")
         );
-        let numbers = visible_links(headless.term(), base)
+        let numbers = visible_links(headless.term(), base, None)
             .into_iter()
             .flatten()
             .collect::<std::collections::BTreeSet<_>>();
@@ -1303,9 +1355,27 @@ mod tests {
     }
 
     #[test]
+    fn a_printed_path_to_an_existing_file_is_a_link_with_a_file_base() {
+        let dir = std::env::temp_dir().join(format!("leon-term-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.md"), "x").unwrap();
+        let files = Files::new(&dir);
+        let mut headless = Headless::new(60, 4, theme());
+        headless.feed(b"wrote notes.md:3 and gone.md");
+        assert_eq!(link_at(headless.term(), 8, 0, None, None), None);
+        let link = link_at(headless.term(), 8, 0, None, Some(&files)).unwrap();
+        assert_eq!(
+            crate::files::parse(&link),
+            Some((dir.join("notes.md").to_string_lossy().into_owned(), Some(3)))
+        );
+        assert_eq!(link_at(headless.term(), 24, 0, None, Some(&files)), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn a_reference_inside_a_url_stays_part_of_the_url() {
         let text: Vec<char> = "https://example.com/x #12".chars().collect();
-        let links = plain_links(&text, Some("https://example.com/pull/"));
+        let links = plain_links(&text, Some("https://example.com/pull/"), None);
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].1, "https://example.com/x");
         assert_eq!(links[1].1, "https://example.com/pull/12");
@@ -1316,7 +1386,7 @@ mod tests {
         let mut headless = Headless::new(40, 4, theme());
         headless.feed(b"\x1b]8;;https://example.com/target\x1b\\read me\x1b]8;;\x1b\\");
         assert_eq!(
-            link_at(headless.term(), 3, 0, None).as_deref(),
+            link_at(headless.term(), 3, 0, None, None).as_deref(),
             Some("https://example.com/target")
         );
     }

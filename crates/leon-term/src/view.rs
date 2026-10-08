@@ -72,6 +72,14 @@ pub enum ViewEvent {
     /// its menu at this point. A program that asked for the mouse keeps
     /// the right button unless Shift is held, as in other terminals.
     ContextMenu(Point<Pixels>),
+    /// A path printed in the output was clicked: the host opens the file,
+    /// at `line` (from 1) when the output said one.
+    OpenFile {
+        /// The absolute path.
+        path: String,
+        /// The line after the path, if there was one.
+        line: Option<u32>,
+    },
 }
 
 /// Where the grid was last drawn, for turning pointer positions into cells.
@@ -390,7 +398,11 @@ impl TerminalView {
         if event.button == MouseButton::Left {
             let (col, row, _) = self.cell_at(event.position);
             if let Some(link) = self.terminal.link_at(col, row) {
-                if event.modifiers.secondary() {
+                if let Some((path, line)) = crate::files::parse(&link) {
+                    self.link_prompt = None;
+                    self.link_clicked = true;
+                    cx.emit(ViewEvent::OpenFile { path, line });
+                } else if event.modifiers.secondary() {
                     self.link_prompt = None;
                     self.link_clicked = true;
                     cx.open_url(&link);
@@ -829,9 +841,10 @@ fn paint_grid(
     // The matches of the find bar, none while it is closed.
     let highlights = terminal.highlights();
     let reference_base = terminal.reference_base();
+    let files = terminal.files();
     let mut next_match = 0usize;
     let (cols, rows) = terminal.with_term(|term| {
-        let links = visible_links(term, reference_base.as_deref());
+        let links = visible_links(term, reference_base.as_deref(), files.as_deref());
         let columns = term.grid().columns();
         let content = term.renderable_content();
         let offset = content.display_offset as i32;
