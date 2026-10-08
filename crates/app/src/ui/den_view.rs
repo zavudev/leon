@@ -20,11 +20,13 @@
 //!
 //! # Cost
 //!
-//! Nothing is followed while the Den is closed: opening it reads each
+//! The Den follows nothing while it is closed: opening it reads each
 //! transcript once from its start (tens of milliseconds for tens of
 //! megabytes, on the background executor), then only what is appended, once
 //! every [`Options::den_tick`]. The loop ends when the Den is closed or no
 //! session is live, and the followers of sessions that ended are dropped.
+//! The sessions' lights have a reader of their own (`transcript_watch`) that
+//! runs with the Den closed and does not touch these followers.
 //!
 //! [`Activity`]: super::activity::Activity
 //! [`Options::den_tick`]: super::shell::Options
@@ -37,6 +39,7 @@ use gpui_kit::{div, AnyElement, Context, Entity, Keystroke, Subscription, Task, 
 use leon_den::{Cub, DenEvent, DenPalette, DenStyle, DenView, Tokens};
 use leon_history::live::{Beat, Format};
 
+use super::activity::terminal_activity;
 use super::den::{self, Facts, Reading};
 use super::den_follow::{Followers, Report, Wanted};
 use super::live::LiveId;
@@ -364,6 +367,9 @@ impl Shell {
             .iter()
             .map(|session| {
                 let signals = session.signals(cx);
+                // The terminal's own reading: the Den adds the transcript
+                // itself, from the pulse it keeps.
+                let activity = terminal_activity(&signals, &self.options.activity);
                 Facts {
                     id: session.id.0,
                     name: session.label(),
@@ -371,7 +377,7 @@ impl Shell {
                         .agent
                         .map_or(colours.text_muted, |agent| colours.agent(agent)),
                     agent: session.shown_agent().is_some(),
-                    activity: session.activity,
+                    activity,
                     paused: session.is_paused(),
                     exit: signals.exited,
                     quiet_for: signals.quiet_for,

@@ -312,6 +312,98 @@ fn sync_custom_agents(active: &Active) {
     }
 }
 
+/// Tells the registry which accounts of the agents the settings hold.
+fn sync_accounts(active: &Active) {
+    let entries = active
+        .store
+        .value("agent_accounts")
+        .as_list()
+        .map(<[String]>::to_vec)
+        .unwrap_or_default();
+    leon_core::account::register(leon_core::account::from_entries(&entries));
+}
+
+/// The user's accounts of the agents, in the order they were added.
+pub fn accounts(cx: &App) -> Vec<leon_core::Account> {
+    leon_core::account::from_entries(&list(cx, "agent_accounts"))
+}
+
+/// The lines of the default-account setting (`agent=name`).
+pub fn default_accounts(cx: &App) -> Vec<String> {
+    list(cx, "default_accounts")
+}
+
+fn store_accounts(cx: &mut App, accounts: &[leon_core::Account]) {
+    if let Some(def) = schema::find("agent_accounts") {
+        let entries = accounts
+            .iter()
+            .filter_map(|account| serde_json::to_string(account).ok())
+            .collect();
+        set_value(cx, def, Value::List(entries));
+    }
+}
+
+/// Adds an account of an agent: its name and the variables (`NAME=value`
+/// words, such as `CLAUDE_CONFIG_DIR=~/.claude-work`) that make the agent
+/// another account. Everything is checked here before anything is kept.
+pub fn add_account(
+    cx: &mut App,
+    agent: leon_core::AgentId,
+    name: &str,
+    variables: &str,
+) -> Result<leon_core::Account, leon_core::account::AccountError> {
+    let mut accounts = accounts(cx);
+    let env = leon_core::account::parse_variables(variables)?;
+    let account = leon_core::Account::new(agent, name, env, &accounts)?;
+    accounts.push(account.clone());
+    store_accounts(cx, &accounts);
+    Ok(account)
+}
+
+/// Gives an account another name. Its id stays, so the sessions that ran with
+/// it still do, and a default-account line that named it follows.
+pub fn rename_account(
+    cx: &mut App,
+    id: &str,
+    name: &str,
+) -> Result<(), leon_core::account::AccountError> {
+    let mut accounts = accounts(cx);
+    let Some(position) = accounts.iter().position(|account| account.id == id) else {
+        return Ok(());
+    };
+    let before = accounts[position].clone();
+    accounts[position].name = name.trim().to_owned();
+    accounts[position].check(&accounts)?;
+    let renamed = accounts[position].clone();
+    store_accounts(cx, &accounts);
+    let defaults: Vec<String> = default_accounts(cx)
+        .into_iter()
+        .map(|line| match line.split_once('=') {
+            Some((agent, named))
+                if agent.trim().eq_ignore_ascii_case(before.agent.as_str())
+                    && named.trim().eq_ignore_ascii_case(before.name.trim()) =>
+            {
+                format!("{}={}", agent.trim(), renamed.name)
+            }
+            _ => line,
+        })
+        .collect();
+    if let Some(def) = schema::find("default_accounts") {
+        set_value(cx, def, Value::List(defaults));
+    }
+    Ok(())
+}
+
+/// Removes an account. The sessions that ran with it stay in the history; they
+/// are not resumed as another account (see `LaunchError::UnknownAccount`).
+pub fn remove_account(cx: &mut App, id: &str) {
+    let accounts: Vec<leon_core::Account> = accounts(cx)
+        .into_iter()
+        .filter(|account| account.id != id)
+        .collect();
+    store_accounts(cx, &accounts);
+}
+
 /// Adds an agent of the user's: any command line tool. The name and the
 /// command are checked here, and the agent is offered everywhere the built-in
 /// ones are. Returns the new agent's id.
@@ -321,9 +413,11 @@ pub fn add_custom_agent(
     command: &str,
     args: &str,
     resume_args: &str,
+    prompt_args: &str,
 ) -> Result<leon_core::AgentId, leon_core::agent::CustomError> {
     let taken: Vec<leon_core::AgentId> = leon_core::agent::all().iter().map(|s| s.id).collect();
-    let agent = leon_core::CustomAgent::new(name, command, args, resume_args, &taken)?;
+    let agent = leon_core::CustomAgent::new(name, command, args, resume_args, &taken)?
+        .with_prompt_args(prompt_args)?;
     let names: Vec<String> = leon_core::agent::all()
         .iter()
         .map(|spec| spec.name.clone())
@@ -369,6 +463,7 @@ pub fn sessions_shown() -> usize {
 /// tree's lists.
 fn apply_look(active: &Active) {
     sync_custom_agents(active);
+    sync_accounts(active);
     let shown = active
         .store
         .value("sessions_per_worktree")
@@ -598,6 +693,11 @@ pub fn engine_prefs(cx: &App, engine: &crate::engine::Engine) -> crate::engine::
     if let Some(file) = folder("history_dir_opencode") {
         roots.opencode_db = Some(file.into());
     }
+    // The folders of the user's accounts are history to import and limits to read
+    // on this computer, beside the agents' own.
+    let accounts = accounts(cx);
+    roots.accounts =
+        leon_history::account_roots(&accounts, leon_history::home_dir().as_deref(), &roots);
     let seconds = int(cx, "ssh_connect_timeout");
     crate::engine::Prefs {
         ssh_multiplex: flag(cx, "ssh_multiplex"),
@@ -607,6 +707,8 @@ pub fn engine_prefs(cx: &App, engine: &crate::engine::Engine) -> crate::engine::
         discover_projects: flag(cx, "discover_projects"),
         detect_logos: flag(cx, "detect_logos"),
         fetch_avatars: flag(cx, "fetch_avatars"),
+        worktree_location: text(cx, "worktree_location"),
+        accounts,
     }
 }
 
@@ -665,7 +767,9 @@ impl Notifications {
     /// Whether an event is said at all.
     pub fn allows(&self, event: crate::ui::notify::Event) -> bool {
         match event {
-            crate::ui::notify::Event::Waiting => self.waiting,
+            crate::ui::notify::Event::Waiting
+            | crate::ui::notify::Event::TurnOver
+            | crate::ui::notify::Event::NeedsAnswer => self.waiting,
             crate::ui::notify::Event::Finished { .. } => self.finished,
             crate::ui::notify::Event::Failed { .. } => self.failed,
         }
@@ -1150,6 +1254,7 @@ mod tests {
                 claude_projects: Some("/default/claude".into()),
                 codex_sessions: Some("/default/codex".into()),
                 opencode_db: None,
+                accounts: Vec::new(),
             },
             runtime.handle().clone(),
         )

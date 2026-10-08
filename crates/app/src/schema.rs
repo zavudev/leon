@@ -757,6 +757,26 @@ const BASE: &[Def] = &[
         K::Toggle,
         D::Bool(true),
     ),
+    def(
+        "offer_merged_cleanup",
+        S::Projects,
+        "Offer to remove merged worktrees",
+        "When the pull request of a worktree's branch is merged, show a banner that offers to remove the merged worktrees. Nothing is removed without asking, and a worktree with changes, unpushed commits or a running session is never ticked.",
+        "worktree merged pull request banner remove clean up cleanup branch github",
+        K::Toggle,
+        D::Bool(false),
+    ),
+    def(
+        "worktree_location",
+        S::Projects,
+        "Where new worktrees go",
+        "The folder of a new worktree: {root} is the project's folder and {branch} the branch name with its slashes turned into dashes. The default puts it next to the project.",
+        "worktree folder path directory location template branch",
+        K::Text {
+            placeholder: "{root}-worktrees/{branch}",
+        },
+        D::Text("{root}-worktrees/{branch}"),
+    ),
     // ----- machines
     only(
         def(
@@ -961,7 +981,7 @@ const BASE: &[Def] = &[
         "notify_waiting",
         S::Notifications,
         "When an agent wants you",
-        "An agent finished its turn, went quiet or rang the bell.",
+        "An agent finished its turn, needs an answer, went quiet or rang the bell.",
         "waiting prompt question input idle finished turn",
         K::Toggle,
         D::Bool(true),
@@ -1018,6 +1038,15 @@ const BASE: &[Def] = &[
         "Show inactive sessions",
         "The sidebar also lists the sessions that are not active: sleeping ones and the history of past sessions, with the projects and worktrees that have none running. Off (the default), it lists only the active sessions: a live terminal, or an agent running in another terminal or Leon.",
         "tree filter active inactive live running show hide sleeping history only",
+        K::Toggle,
+        D::Bool(false),
+    ),
+    def(
+        "sidebar_settle_merged",
+        S::Window,
+        "Settle merged work",
+        "Put a session on the Settled shelf, at the bottom of its machine, once the pull request of its worktree is merged and its terminal is not live. A session pinned, running, or taken off a shelf by hand stays where it is, and so does one Leon has not been able to check for another terminal (it needs Detect sessions running elsewhere, and a look at the machine that worked). Off by default.",
+        "settle shelf archive done merged pull request finished sessions sidebar",
         K::Toggle,
         D::Bool(false),
     ),
@@ -1449,6 +1478,33 @@ const CUSTOM_AGENTS: Def = def(
     D::List,
 );
 
+/// The user's accounts of the agents: one JSON object per entry, edited by the
+/// palette's account commands and by Settings, Agents (never typed by hand).
+const AGENT_ACCOUNTS: Def = def(
+    "agent_accounts",
+    S::Agents,
+    "Your accounts",
+    "Several accounts of one agent, added with Add an account: a name and the variables (usually the agent's own configuration folder) that make the agent another account.",
+    "accounts account login profile config folder work personal claude codex",
+    K::List {
+        placeholder: "none",
+    },
+    D::List,
+);
+
+/// Which account a new session of an agent starts with, without asking.
+const DEFAULT_ACCOUNTS: Def = def(
+    "default_accounts",
+    S::Agents,
+    "Account for a new session",
+    "agent=account lines, such as claude=work, for the account a new session of that agent starts with instead of asking; claude=default is the agent's own setup. An agent with accounts and no line asks each time.",
+    "default account ask which login profile",
+    K::List {
+        placeholder: "claude=work",
+    },
+    D::List,
+);
+
 fn build() -> Vec<Def> {
     let mut all = Vec::new();
     for def in BASE {
@@ -1457,6 +1513,8 @@ fn build() -> Vec<Def> {
                 all.push(default_agent_def());
                 all.push(*def);
                 all.push(CUSTOM_AGENTS);
+                all.push(AGENT_ACCOUNTS);
+                all.push(DEFAULT_ACCOUNTS);
                 for spec in leon_core::agent::builtin() {
                     all.extend(agent_defs(spec));
                 }

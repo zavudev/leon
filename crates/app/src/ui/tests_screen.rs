@@ -448,7 +448,7 @@ fn the_screen_is_the_same_set_of_options_as_the_schema(cx: &mut TestAppContext) 
     });
     for def in schema::settings()
         .iter()
-        .filter(|d| d.platform.here() && d.key != "custom_agents")
+        .filter(|d| d.platform.here() && d.key != "custom_agents" && d.key != "agent_accounts")
     {
         section(&h, def.section, cx);
         assert!(

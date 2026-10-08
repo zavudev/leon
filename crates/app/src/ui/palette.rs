@@ -352,6 +352,24 @@ impl Shell {
 
     // ----- flows -----------------------------------------------------------------
 
+    /// Removes an account of an agent, and the lines of its limits with it
+    /// (the engine drops them; the usage view reads again when it has).
+    pub(super) fn remove_account(&mut self, id: &str, cx: &mut Context<Self>) {
+        let name = leon_core::account::name_of(id);
+        crate::settings::remove_account(cx, id);
+        let keep: Vec<String> = crate::settings::accounts(cx)
+            .into_iter()
+            .map(|account| account.id)
+            .collect();
+        self.engine
+            .submit(crate::engine::Op::DropAccountUsage { keep });
+        self.engine.report(
+            crate::engine::StatusKind::Info,
+            format!("The account {name} was removed. Its sessions stay in the history."),
+        );
+        cx.notify();
+    }
+
     /// Starts asking for `command`, opening the palette if it is closed.
     pub(super) fn begin_flow(
         &mut self,
@@ -371,12 +389,15 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A session that was waiting for its account is forgotten by any other
+        // question.
+        self.pending_start = None;
         self.open_palette("", window, cx);
         self.palette.world = Some(self.world(cx));
         self.advance_flow(command, answers, window, cx);
     }
 
-    fn advance_flow(
+    pub(super) fn advance_flow(
         &mut self,
         command: Command,
         answers: Vec<String>,
@@ -1144,6 +1165,18 @@ impl Shell {
                 self.start_when_worktree_appears(project, machine, branch, launch, window, cx);
             }
             Action::Engine(op) => self.engine.submit(op),
+            Action::PromptAgents {
+                project,
+                prompt,
+                agents,
+                base,
+            } => self.start_prompt_agents(project, prompt, agents, base, window, cx),
+            Action::RunScript {
+                project,
+                machine,
+                cwd,
+                name,
+            } => self.run_script(&project, &machine, &cwd, &name, window, cx),
             Action::StartSession(intent) => self.start_intent(intent, window, cx),
             Action::CloseLive(id) => self.forget_live(id, window, cx),
             Action::OpenFile(path) => self.open_typed_file(&path, window, cx),
@@ -1153,11 +1186,36 @@ impl Shell {
             Action::OverwriteFile(id) => self.overwrite_file(id, window, cx),
             Action::ReloadFile(id) => self.reload_file(id, window, cx),
             Action::SleepLive(id) => self.sleep_live(id, window, cx),
+            Action::Snooze(session, until) => self.snooze_session(&session, until, cx),
             Action::RemoveWorktree {
                 project,
                 worktree,
                 force,
             } => self.remove_worktree(project, worktree, force, window, cx),
+            Action::RemoveWorktrees(list) => self.remove_worktrees(list, window, cx),
+            Action::ShowChanges { project, worktree } => {
+                let found = self.snapshot.project(&project).and_then(|entry| {
+                    entry
+                        .worktrees
+                        .iter()
+                        .find(|found| found.id == worktree)
+                        .map(|found| super::changes::Target {
+                            machine: entry.project.machine_id.clone(),
+                            project: project.clone(),
+                            worktree: Some(found.id.clone()),
+                            path: found.path.clone(),
+                        })
+                });
+                match found {
+                    Some(target) => {
+                        self.open_changes(target, window, cx);
+                    }
+                    None => self.engine.report(
+                        crate::engine::StatusKind::Error,
+                        "That worktree is not known any more.",
+                    ),
+                }
+            }
             Action::ResumeSession(session) => {
                 let found = self
                     .snapshot
@@ -1237,8 +1295,16 @@ impl Shell {
                 command,
                 args,
                 resume_args,
+                prompt_args,
             } => {
-                match crate::settings::add_custom_agent(cx, &name, &command, &args, &resume_args) {
+                match crate::settings::add_custom_agent(
+                    cx,
+                    &name,
+                    &command,
+                    &args,
+                    &resume_args,
+                    &prompt_args,
+                ) {
                     Ok(_) => self.engine.report(
                         crate::engine::StatusKind::Info,
                         format!("{name} is now an agent: New agent session offers it."),
@@ -1248,6 +1314,32 @@ impl Shell {
                         .report(crate::engine::StatusKind::Error, error.to_string()),
                 }
             }
+            Action::AddAccount {
+                agent,
+                name,
+                variables,
+            } => match crate::settings::add_account(cx, agent, &name, &variables) {
+                Ok(account) => self.engine.report(
+                    crate::engine::StatusKind::Info,
+                    super::steps::added_note(&account),
+                ),
+                Err(error) => self
+                    .engine
+                    .report(crate::engine::StatusKind::Error, error.to_string()),
+            },
+            Action::RenameAccount { id, name } => {
+                match crate::settings::rename_account(cx, &id, &name) {
+                    Ok(()) => self.engine.report(
+                        crate::engine::StatusKind::Info,
+                        format!("The account is now called {}.", name.trim()),
+                    ),
+                    Err(error) => self
+                        .engine
+                        .report(crate::engine::StatusKind::Error, error.to_string()),
+                }
+            }
+            Action::RemoveAccount(id) => self.remove_account(&id, cx),
+            Action::StartWithAccount(account) => self.start_waiting_with(account, window, cx),
             Action::RemoveAgent(agent) => {
                 crate::settings::remove_custom_agent(cx, agent);
                 self.engine.report(
@@ -1467,14 +1559,18 @@ impl Shell {
                 Item::Choice(place) => match flow.map(|flow| &flow.step.kind) {
                     Some(StepKind::Choices { choices, .. }) => match choices.get(*place) {
                         Some(choice) => (
-                            if choice.current {
-                                IconName::Check
-                            } else {
-                                IconName::Circle
-                            },
+                            choice
+                                .icon
+                                .as_deref()
+                                .and_then(crate::icons::script_icon)
+                                .unwrap_or(if choice.current {
+                                    IconName::Check
+                                } else {
+                                    IconName::Circle
+                                }),
                             Some(choice.label.clone().into()),
                             choice.detail.clone().into(),
-                            None,
+                            choice.keys.clone(),
                         ),
                         None => continue,
                     },

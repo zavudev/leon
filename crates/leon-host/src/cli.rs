@@ -8,12 +8,18 @@
 //! leon host status      say whether the service is running and what it is doing
 //! ```
 //!
+//! `leon host service install | uninstall | status | logs` (the background
+//! service of the user's own session) is the application's: it needs the
+//! command runner, which this crate does not use. The usage text names it.
+//!
 //! Options: `--relay <url>` (or `LEON_RELAY_URL`), `--name <name>`,
 //! `--data-dir <path>`, `--allow-root`.
 //!
 //! The service keeps its files in `<data dir>/host`: `devices.json`
 //! (owner-only), a `status` heartbeat and a `control`
-//! directory through which `leon host pair` talks to the running process. The
+//! directory through which `leon host pair` talks to the running process (it
+//! says since when the process runs, as `started`, which the service's
+//! `status` reads). The
 //! installation's `identity.key` is in `<data dir>` itself (owner-only). Both
 //! are plain text and carry no key material; the pairing code in the reply is
 //! deleted as soon as it has been printed.
@@ -77,7 +83,8 @@ pub fn usage() -> &'static str {
      --name <name>        The name your devices see (default: this computer's name)\n  \
      --data-dir <path>    Keep the service's files here\n  \
      --allow-root         Allow running as the superuser (not recommended)\n  \
-     -h, --help           Print this help"
+     -h, --help           Print this help\n\n\
+     In the background: leon host service install | uninstall | status | logs"
 }
 
 /// Parses the arguments after `host`.
@@ -148,7 +155,8 @@ impl Paths {
             dir: data_dir.join("host"),
         }
     }
-    fn devices(&self) -> PathBuf {
+    /// The paired devices.
+    pub fn devices(&self) -> PathBuf {
         self.dir.join("devices.json")
     }
     fn status(&self) -> PathBuf {
@@ -242,6 +250,7 @@ pub async fn serve(
     tokio::pin!(stop);
     let mut tick = tokio::time::interval(Duration::from_millis(400));
     let mut last_status = 0u64;
+    let started = now_unix();
     loop {
         tokio::select! {
             _ = &mut stop => break,
@@ -269,9 +278,9 @@ pub async fn serve(
                     last_status = now;
                     let status = host.status();
                     let text = format!(
-                        "pid={}\nhost_id={}\nrelay={}\nsessions={}\nterminals={}\nupdated={}\n",
+                        "pid={}\nhost_id={}\nrelay={}\nsessions={}\nterminals={}\nstarted={}\nupdated={}\n",
                         std::process::id(), status.host_id, relay_text(&status.relay),
-                        status.sessions, status.terminals, now
+                        status.sessions, status.terminals, started, now
                     );
                     let _ = write_text(&paths.status(), &text);
                 }
@@ -303,11 +312,57 @@ fn read_kv(path: &Path) -> Option<std::collections::HashMap<String, String>> {
     )
 }
 
-/// The running service's heartbeat, when it is recent.
+/// How old a heartbeat may be and still count as a running host, in seconds.
+const HEARTBEAT_LIFETIME: u64 = 10;
+
+/// Whether the process `pid` exists. A pid that is not a plain process id
+/// (zero and negative ones address whole groups) never does. Where this cannot
+/// be asked (not Unix) it says yes, so the heartbeat's age decides alone.
+fn process_exists(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let Some(pid) = i32::try_from(pid).ok().filter(|pid| *pid > 0) else {
+            return false;
+        };
+        // SAFETY: signal 0 only checks that the process can be signalled.
+        let found = unsafe { libc::kill(pid, 0) } == 0;
+        // EPERM: it exists and belongs to someone else.
+        found || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+/// Whether a heartbeat is that of a host that is running: written in the last
+/// [`HEARTBEAT_LIFETIME`] seconds *and* by a process that still exists. The
+/// second half matters after a crash: the file a killed host leaves behind is
+/// seconds old when a service manager starts the next one, and that start must
+/// not be refused because of its dead predecessor. (A heartbeat without a pid
+/// is judged by its age alone.)
+fn heartbeat_is_live(
+    map: &std::collections::HashMap<String, String>,
+    now: u64,
+    exists: impl Fn(u32) -> bool,
+) -> bool {
+    let Some(updated) = map.get("updated").and_then(|v| v.parse::<u64>().ok()) else {
+        return false;
+    };
+    if now.saturating_sub(updated) > HEARTBEAT_LIFETIME {
+        return false;
+    }
+    match map.get("pid").and_then(|v| v.parse::<u32>().ok()) {
+        Some(pid) => exists(pid),
+        None => true,
+    }
+}
+
+/// The running service's heartbeat, when it is recent and its process lives.
 pub fn running_status(paths: &Paths) -> Option<std::collections::HashMap<String, String>> {
     let map = read_kv(&paths.status())?;
-    let updated: u64 = map.get("updated")?.parse().ok()?;
-    (now_unix().saturating_sub(updated) <= 10).then_some(map)
+    heartbeat_is_live(&map, now_unix(), process_exists).then_some(map)
 }
 
 fn ago(unix: u64) -> String {
@@ -465,9 +520,7 @@ pub fn run(args: Vec<String>, default_data_dir: PathBuf) -> i32 {
                     return 1;
                 }
             };
-            let result = runtime.block_on(serve(&paths, relay, name, pair, async {
-                let _ = tokio::signal::ctrl_c().await;
-            }));
+            let result = runtime.block_on(serve(&paths, relay, name, pair, shutdown_signal()));
             match result {
                 Ok(()) => 0,
                 Err(error) => {
@@ -477,6 +530,24 @@ pub fn run(args: Vec<String>, default_data_dir: PathBuf) -> i32 {
             }
         }
     }
+}
+
+/// Completes when the person (Ctrl-C) or a service manager (`SIGTERM`, what
+/// `systemctl stop` and `launchctl bootout` send) asks the service to stop, so
+/// that it removes its heartbeat and closes its sessions instead of being cut.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut terminate) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// Where the identity of a host data directory lives, for the UI.
@@ -533,6 +604,93 @@ mod tests {
     #[test]
     fn help_wins() {
         assert_eq!(p(&["pair", "--help"]).unwrap().action, Action::Help);
+    }
+
+    #[test]
+    fn the_usage_names_the_background_service() {
+        assert!(usage().contains("leon host service install"));
+    }
+
+    fn heartbeat(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn a_heartbeat_left_by_a_crashed_host_does_not_count_as_running() {
+        // Written one second ago by a process that is gone: what a SIGKILL or
+        // an out-of-memory kill leaves for the restart that follows it.
+        let left_behind = heartbeat(&[("pid", "4242"), ("updated", "999")]);
+        assert!(!heartbeat_is_live(&left_behind, 1_000, |_| false));
+        assert!(heartbeat_is_live(&left_behind, 1_000, |pid| pid == 4242));
+    }
+
+    #[test]
+    fn a_heartbeat_counts_only_while_it_is_recent() {
+        let beat = heartbeat(&[("pid", "4242"), ("updated", "1000")]);
+        assert!(heartbeat_is_live(&beat, 1_010, |_| true));
+        assert!(!heartbeat_is_live(&beat, 1_011, |_| true));
+        assert!(!heartbeat_is_live(
+            &heartbeat(&[("pid", "1")]),
+            1_000,
+            |_| true
+        ));
+        assert!(!heartbeat_is_live(
+            &heartbeat(&[("updated", "soon")]),
+            1_000,
+            |_| true
+        ));
+    }
+
+    #[test]
+    fn a_heartbeat_without_a_pid_is_judged_by_its_age() {
+        let beat = heartbeat(&[("updated", "1000")]);
+        assert!(heartbeat_is_live(&beat, 1_005, |_| false));
+        assert!(!heartbeat_is_live(&beat, 1_020, |_| true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn this_process_exists_and_numbers_that_are_not_a_process_do_not() {
+        assert!(process_exists(std::process::id()));
+        // Zero and numbers above `i32::MAX` would address groups or nothing.
+        assert!(!process_exists(0));
+        assert!(!process_exists(u32::MAX));
+        assert!(!process_exists(i32::MAX as u32));
+    }
+
+    #[test]
+    fn a_stale_status_file_does_not_stop_the_next_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        std::fs::create_dir_all(&paths.dir).unwrap();
+        // A process id no system hands out, written a moment ago.
+        let text = format!("pid=0\nupdated={}\n", now_unix());
+        std::fs::write(paths.status(), text).unwrap();
+        #[cfg(unix)]
+        assert!(running_status(&paths).is_none());
+        let text = format!("pid={}\nupdated={}\n", std::process::id(), now_unix());
+        std::fs::write(paths.status(), text).unwrap();
+        assert!(running_status(&paths).is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sigterm_ends_the_wait_for_a_shutdown() {
+        let mut stop = Box::pin(shutdown_signal());
+        // Poll once so the handler is installed before the signal is sent.
+        tokio::select! {
+            biased;
+            _ = &mut stop => panic!("stopped before any signal"),
+            () = std::future::ready(()) => {}
+        }
+        // SAFETY: sends a signal to this process, which the handler now owns.
+        assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGTERM) }, 0);
+        tokio::time::timeout(Duration::from_secs(20), stop)
+            .await
+            .expect("SIGTERM stops the host");
     }
 
     #[test]
@@ -593,13 +751,22 @@ mod tests {
             })
         };
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        while running_status(&paths).is_none() {
+        let heartbeat = loop {
+            if let Some(map) = running_status(&paths) {
+                break map;
+            }
             assert!(
                 std::time::Instant::now() < deadline,
                 "the service never reported"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        };
+        assert!(
+            heartbeat
+                .get("started")
+                .is_some_and(|s| s.parse::<u64>().is_ok()),
+            "the heartbeat says since when the service runs"
+        );
         let args = vec![
             "pair".to_owned(),
             "--data-dir".to_owned(),

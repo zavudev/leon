@@ -24,6 +24,7 @@
 use super::sheet::{sheet_rows, SheetRow};
 use super::shell::{Overlay, Shell};
 use super::widgets::{key_cap, led, mono, section_label};
+use crate::format;
 use crate::fuzzy::score;
 use crate::icons::{icon, IconName};
 use crate::schema::{self, Def, Kind, Section, Value};
@@ -125,6 +126,10 @@ pub enum Entry {
     AddAgent,
     /// An agent of the user's, with its removal.
     CustomAgent(leon_core::AgentId),
+    /// The button that adds an account of an agent.
+    AddAccount,
+    /// An account of an agent (its id), with its rename and removal.
+    Account(String),
     /// The agents that are not installed here, folded into one line that
     /// shows them when chosen.
     MoreAgents {
@@ -245,6 +250,7 @@ impl Shell {
         for entry in list {
             match entry {
                 Entry::Setting(def) if def.key == "custom_agents" => {}
+                Entry::Setting(def) if def.key == "agent_accounts" => {}
                 Entry::Setting(def) => match def.agent {
                     Some(agent) if !installed.contains(&agent) => {
                         folded.insert(agent);
@@ -261,6 +267,12 @@ impl Shell {
                 .into_iter()
                 .filter(|spec| spec.custom)
                 .map(|spec| Entry::CustomAgent(spec.id)),
+        );
+        shown.push(Entry::AddAccount);
+        shown.extend(
+            leon_core::account::all()
+                .into_iter()
+                .map(|account| Entry::Account(account.id)),
         );
         if !folded.is_empty() {
             let expanded = self.settings_ui.agents_expanded;
@@ -564,6 +576,11 @@ impl Shell {
                 self.settings_remove_agent(*agent, cx);
                 return;
             }
+            ("backspace" | "delete" | "x", Some(Entry::Account(id))) => {
+                let id = id.clone();
+                self.begin_flow_with(crate::keys::Command::RemoveAccount, vec![id], window, cx);
+                return;
+            }
             _ => {}
         }
         match key {
@@ -594,6 +611,12 @@ impl Shell {
             }
             Some(Entry::Dismissed(dismissed)) => self.settings_restore_root(dismissed),
             Some(Entry::AddAgent) => self.begin_flow(crate::keys::Command::AddAgent, window, cx),
+            Some(Entry::AddAccount) => {
+                self.begin_flow(crate::keys::Command::AddAccount, window, cx)
+            }
+            Some(Entry::Account(id)) => {
+                self.begin_flow_with(crate::keys::Command::RenameAccount, vec![id], window, cx)
+            }
             Some(Entry::MoreAgents { expanded, .. }) => {
                 self.settings_ui.agents_expanded = !expanded;
                 cx.notify();
@@ -1132,6 +1155,130 @@ impl Shell {
                             ),
                     )
             }
+            Entry::AddAccount => {
+                let selector = format!("settings-add-account-{index}");
+                base.debug_selector(move || selector.clone())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(div().child("Your accounts"))
+                            .child(
+                                div()
+                                    .text_size(metrics::TEXT_SMALL())
+                                    .text_color(colours.text_muted)
+                                    .child("Several accounts of one agent: a name and the variables, usually its configuration folder."),
+                            ),
+                    )
+                    .child(
+                        mono("ADD AN ACCOUNT…".to_owned())
+                            .px(px(8.))
+                            .py(px(3.))
+                            .rounded(metrics::RADIUS())
+                            .border_1()
+                            .border_color(colours.elevated_border)
+                            .cursor_pointer()
+                            .debug_selector(move || format!("settings-add-account-button-{index}"))
+                            .on_mouse_down(
+                                gpui_kit::MouseButton::Left,
+                                cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.settings_select(index, window, cx);
+                                    this.begin_flow(crate::keys::Command::AddAccount, window, cx);
+                                }),
+                            ),
+                    )
+            }
+            Entry::Account(id) => {
+                let found = leon_core::account::find(id);
+                let title = found.as_ref().map_or_else(
+                    || id.clone(),
+                    |account| format!("{} ({})", format::agent_name(account.agent), account.name),
+                );
+                let detail = found.as_ref().map_or_else(String::new, |account| {
+                    if account.env.is_empty() {
+                        "no variables: the agent's own setup under this name".to_owned()
+                    } else {
+                        leon_core::account::variables_line(&account.env)
+                    }
+                });
+                let selector = format!("settings-account-{index}");
+                let (rename_id, remove_id) = (id.clone(), id.clone());
+                base.debug_selector(move || selector.clone())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(div().truncate().child(title))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(metrics::TEXT_SMALL())
+                                    .text_color(colours.text_muted)
+                                    .child(detail),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .gap(px(6.))
+                            .child(
+                                mono("RENAME".to_owned())
+                                    .px(px(8.))
+                                    .py(px(3.))
+                                    .rounded(metrics::RADIUS())
+                                    .border_1()
+                                    .border_color(colours.elevated_border)
+                                    .cursor_pointer()
+                                    .debug_selector(move || {
+                                        format!("settings-rename-account-{index}")
+                                    })
+                                    .on_mouse_down(
+                                        gpui_kit::MouseButton::Left,
+                                        cx.listener(move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.begin_flow_with(
+                                                crate::keys::Command::RenameAccount,
+                                                vec![rename_id.clone()],
+                                                window,
+                                                cx,
+                                            );
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                mono("REMOVE".to_owned())
+                                    .px(px(8.))
+                                    .py(px(3.))
+                                    .rounded(metrics::RADIUS())
+                                    .border_1()
+                                    .border_color(colours.elevated_border)
+                                    .cursor_pointer()
+                                    .debug_selector(move || {
+                                        format!("settings-remove-account-{index}")
+                                    })
+                                    .on_mouse_down(
+                                        gpui_kit::MouseButton::Left,
+                                        cx.listener(move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.begin_flow_with(
+                                                crate::keys::Command::RemoveAccount,
+                                                vec![remove_id.clone()],
+                                                window,
+                                                cx,
+                                            );
+                                        }),
+                                    ),
+                            ),
+                    )
+            }
             Entry::MoreAgents { count, expanded } => {
                 let (count, expanded) = (*count, *expanded);
                 let selector = format!("settings-more-agents-{index}");
@@ -1549,6 +1696,7 @@ mod tests {
             [
                 "sidebar_visible",
                 "sidebar_show_inactive",
+                "sidebar_settle_merged",
                 "sidebar_width",
                 "files_visible",
                 "quit_confirmation"

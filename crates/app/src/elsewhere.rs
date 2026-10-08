@@ -333,6 +333,7 @@ mod tests {
             updated_at: Utc.timestamp_opt(updated, 0).unwrap(),
             message_count: 3,
             sort_order: None,
+            account: None,
         }
     }
 

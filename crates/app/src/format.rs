@@ -38,6 +38,12 @@ pub fn agent_tag(agent: AgentId) -> &'static str {
     agent.tag()
 }
 
+/// The name of the account with this id in the mono labels, in capitals; the id
+/// itself when the account was removed.
+pub fn account_tag(account: &str) -> String {
+    leon_core::account::name_of(account).to_uppercase()
+}
+
 /// The agent's name in running text.
 pub fn agent_name(agent: AgentId) -> &'static str {
     agent.name()

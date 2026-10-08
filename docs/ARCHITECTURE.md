@@ -28,7 +28,7 @@ leon-den ── gpui-kit and image only (no other Leon crate)
 | --- | --- |
 | `leon-core` | Machines, projects, worktrees, sessions and messages, and the `Store` (SQLite) with change notification. No UI, no processes. |
 | `leon-history` | Reads the history Claude Code, Codex and opencode keep on disk and turns it into sessions and messages. |
-| `leon-remote` | A `CommandSpec` says what to run and where; `run_on` and `interactive_on` place it on a machine (unchanged locally, `ssh` remotely, with shell quoting and optional connection sharing). Git worktree operations, how each agent starts and resumes, the machine probe and the connection checklist (`connect`, `diagnosis`) are built on it. A scripted runner makes all of it testable without a process. |
+| `leon-remote` | A `CommandSpec` says what to run and where; `run_on` and `interactive_on` place it on a machine (unchanged locally, `ssh` remotely, with shell quoting and optional connection sharing). Git worktree operations, the changed files and diffs of a checkout and the commit, push and pull request (`changes`, `ship`), how each agent starts and resumes, the machine probe and the connection checklist (`connect`, `diagnosis`) are built on it. A scripted runner makes all of it testable without a process. |
 | `leon-usage` | How much of each agent's limits is left. A provider-neutral model (`AgentUsage`: windows with a used percentage, a reset time and a length, or an explicit `Reason` why nothing is known; staleness is part of it), pure parsers for each source (`codex`, `claude`, `opencode`), the burn-rate `forecast`, the wording (`present`, `view`), `collect_machine` (one bounded command per machine through a `Runner`) and the opt-in `network` sources behind an `Http` trait. No UI. |
 | `leon-update` | Updates from the GitHub releases of this repository. `version` (which tags count, which is newer), `release` (the API's answer, the platform's file), `http` (an `Http` trait and the system `curl` behind it, with the host allow-list), `download` (redirects by hand, resumable, bounded), `checksums` (`SHA256SUMS`, constant-time), `package` (the program out of the dmg, tarball or zip, strictly), `trust` (the signature rules), `install` (where Leon is installed and the swap with its way back), `launch` (the hand-over, the watch, the confirmation, the rollback), `updater` (the state machine published over a watch channel) and `state` (what is kept). No UI; every system tool (`hdiutil`, `ditto`, `codesign`, PowerShell) is behind a `Tools` trait. |
 | `leon-wire` | The wire protocol: versioned length-prefixed frames, the application messages (run a command, terminals, re-attach) and the relay rendezvous messages. Pure (`postcard` over `serde`); every decoder is bounded and fuzz-style tested. |
@@ -101,6 +101,11 @@ them (git, probing, icons, the process scan, history) is unchanged.
   behind "Share this machine"), `ui/pair.rs` and `ui/share.rs` are the two
   overlays. Connection state per machine comes from the hub and is explained by
   `Why is it offline?`.
+* `host_service/` is `leon host service install | uninstall | status | logs`: the
+  text of the systemd unit and the launchd agent (`unit.rs`), the plan of files
+  and commands (`plan.rs`) and the reading of the manager's answers (`status.rs`)
+  are pure functions; the commands run through `leon_remote::Runner`, so the
+  tests script `systemctl` and `launchctl`.
 
 The relay server is operated by Zavu and is not part of this repository; the
 protocol it speaks is specified in `docs/REMOTE.md` and `leon-wire`'s `relay`
@@ -129,6 +134,40 @@ module. See `docs/REMOTE.md` for the security model.
    a session runs (`launch::plan`), key to bytes (`leon_term::keys`), cells to
    runs (`leon_term::layout`), resize maths (`leon_term::size`).
 6. **English everywhere, prose `//!` header on every file.**
+
+## Accounts
+
+An account (`leon_core::Account`) is an agent id, a name and environment
+variables, kept in the settings like the custom agents (`agent_accounts`) and
+registered in `leon_core::account` so an id can be turned into a name anywhere.
+The variable that moves an agent's configuration folder is a column of the agent
+table (`AgentSpec::config_env`), filled only where it is verified: Claude Code
+and Codex.
+
+* **Deciding is pure.** `account::resolve` (agent, accounts, the
+  `default_accounts` lines) says plain, this account, or ask; `launch::account_env`
+  turns an account id into the variables for a machine (`~` is that machine's
+  home, a removed account is an error, never the agent's own setup);
+  `launch::plan_with` puts them in the terminal's `CommandSpec.env`. Locally that
+  is the shell's environment; over SSH `remote_shell_command` renders them as
+  `env 'NAME=value'` words, and a relay host receives them in the spawn
+  request.
+* **Remembered in the store** by id: `session.account`, `saved_terminal.account`
+  (and `dormant.json`), so resuming, restoring and "Resume in…" start the same
+  account. A session found in an account's folder is tagged by the importer; a
+  live session's link to its history row tags the row through the engine
+  (`Op::SetSessionAccount`).
+* **History and limits** are read for Claude Code and Codex only, on this
+  computer: `HistoryRoots::accounts` adds one source per account folder
+  (`ForAccount`), and `leon_usage::collect_accounts` reads each account's sign-in
+  from its own folder (`AccountCredentials`, never the shared keychain item). Its
+  readings are stored per account (`usage_reading.account`) and shown as
+  separate lines. Another machine's accounts and any other agent's are not read:
+  there is no line, and the UI says so. A session's header chip reads
+  `Board::get_for(machine, agent, session.account)`, so it shows the account's
+  own reading or nothing, never the agent's. Removing an account only asks the
+  engine (`Op::DropAccountUsage`), which drops its readings and the history
+  series of the plan the reading last had.
 
 ## Usage limits
 
@@ -180,6 +219,21 @@ above: the engine writes the store and the UI reads it.
   agent, one JSON document) and `usage_history` (window key, time, percentage,
   under a local hash of the account, bounded to 14 days and 300 points a series;
   `Store::forget_usage_history`). `StoreChange::Usage` announces both.
+* **Tokens and cost.** Migration 14: `token_usage` (per session, model and UTC
+  day: input, output, cache read, cache write, one-hour cache write; no text, no
+  price), and the import cursors of transcript files are cleared once so every
+  transcript is read again and counted. The pure parsers (`leon-history`:
+  `claude`, `codex`, `opencode`, `opencode_json`, with the per-agent meaning of
+  the numbers in `tokens.rs`) put the counts in `ParsedSession::tokens`; the
+  importer replaces a session's rows in the same transaction as its messages
+  and cursor (`set_session_tokens_in`), which makes a re-import idempotent. A
+  Claude Code session's sub-agent files (`<session>/subagents/agent-*.jsonl`)
+  are folded into the session's item by `ClaudeFiles` (fingerprint and load),
+  so their usage counts without becoming sessions. `Store::token_usage` sums
+  them. `leon_usage::pricing` holds the prices (the bundled `data/prices.json`,
+  with source URL and date per entry, and the user's `prices.json` next to the
+  settings laid over it) and `leon_usage::spend` the pure sums; a model without a price has tokens and no cost, never a guess. The
+  view only reads the store (`ui/usage_tokens.rs`).
 * **UI.** `agent_usage::Board` is what the window reads. `ui/usage_view.rs` holds
   the pure model (`bar_model`: one figure per agent, its logo and the window
   closest to its limit, with everything else on hover; `usage_rows`, worst first;
@@ -194,7 +248,7 @@ above: the engine writes the store and the UI reads it.
   the interval, the thresholds, the notice, the two network opt-ins (each with
   the exact text of what is read and where it is sent) and "Forget stored usage
   history".
-* **Differences from Orca, on purpose** (also in the README's Usage section): no hidden sessions, PTY scraping or `codex app-server`; no refreshing or rewriting of any CLI's credentials; no pasted cookies or multi-account switching; an honest `User-Agent: Leon/<version>` instead of imitating `claude-code` or `codex-cli` (only the protocol headers `anthropic-beta`, `OpenAI-Beta` and `ChatGPT-Account-Id` are sent); a 10 minute default refresh with a 60 second per-vendor floor; the `CLAUDE_CONFIG_DIR` keychain suffix is taken without NFC normalisation.
+* **Differences from Orca, on purpose** (also in the README's Usage section): no hidden sessions, PTY scraping or `codex app-server`; no refreshing or rewriting of any CLI's credentials; no pasted cookies or switching of an agent's sign-in (several accounts of one agent are the user's own, each read from its own configuration folder: see "Accounts"); an honest `User-Agent: Leon/<version>` instead of imitating `claude-code` or `codex-cli` (only the protocol headers `anthropic-beta`, `OpenAI-Beta` and `ChatGPT-Account-Id` are sent); a 10 minute default refresh with a 60 second per-vendor floor; the `CLAUDE_CONFIG_DIR` keychain suffix is taken without NFC normalisation.
 * **`leon --diagnose usage`** runs the real collection for this computer and
   prints no account, e-mail, token or path; its network sources follow the
   settings (on by default), overridden by `--network <agent>` and
@@ -328,8 +382,13 @@ settings (`notify`, `notify_waiting`, `notify_finished`, `notify_failed`,
   notification GPUI shows, with the session as its stable tag so a newer note
   replaces the older one in the notification centre.
 * **Where it is raised** (`ui/terminals.rs`): `Shell::set_activity` watches the
-  activity transitions, so the change *to waiting* (quiet, or the bell) is one
-  event; `ViewEvent::Exited` is the other, with the exit code. `Shell::raise`
+  activity transitions, so the change *to a state that wants the user* is one
+  event (`Activity::is_news_after`: from a state that does not, plus an answered
+  question that ended its turn). Which event it is comes from the state:
+  `TurnOver` (`finished its turn · your move`) and `NeedsAnswer` (`needs an
+  answer · ... probably a permission prompt`) when the agent's transcript is
+  followed, `Waiting` (`waiting for you · quiet, or the bell rang`) when it
+  is not; all three are governed by `notify_waiting`; `ViewEvent::Exited` is the other, with the exit code. `Shell::raise`
   drops the event when the settings do not ask for it or when the session is on
   screen with the window in front (the dot and the lion are already saying it),
   then pushes a `Banner` and/or hands the note to `Options::notify`.
@@ -379,15 +438,110 @@ expansion. The field is a text input above the list; the shell recognises that
 it has the keyboard from its focus handle.
 
 **Activity.** `ui/activity.rs` is a pure function from what a terminal says
-(exit, quiet time, foreground, bell) to `Off < Idle < Working < Waiting <
-Failed`; a worktree shows the most urgent of its terminals, a project of its
-worktrees. A session's state is refreshed on its terminal's wake-ups and by one
-coarse timer that exists only while a terminal is live; the shell repaints only
-when a state changed. Thresholds are in `Options::activity`.
+(exit, quiet time, foreground, bell) to `Off < Idle < Working < TurnOver <
+Waiting < NeedsYou < Failed` (`terminal_activity`, the heuristic); a worktree
+shows the most urgent of its terminals, a project of its worktrees. A session's
+state is refreshed on its terminal's wake-ups and by one coarse timer that
+exists only while a terminal is live; the shell repaints only when a state
+changed. Thresholds are in `Options::activity`.
+
+`session_activity` refines the heuristic with `Transcript`, what the agent's
+own transcript says (`Turn`, `Call { asks }`, `TurnOver`, from a `Pulse`), with
+the precedence documented in the module and held by table tests: the terminal
+ended, the shell in front, not an agent or a terminal that cannot tell the
+foreground (`transcript_applies`) means the heuristic; no beat read means the
+heuristic; a turn over is `TurnOver`; a question or plan among the calls in
+flight (any of them, not only the newest) is `NeedsYou`; another call without a
+result is `NeedsYou` once the terminal is quiet or rang (inferred) and
+`Working` otherwise; a turn with no call open is `Working`.
+`ui/transcript_watch.rs` keeps `LiveSession::transcript` current: one loop
+(`Shell::status_watch`, started by the coarse timer, `Thresholds::tick`, two
+seconds, and by the history sync learning an id, ended with the last followed
+session) polls a `Followers` of its own, off the window's thread, once every
+`Options::den_tick` (a second). It follows a session that runs on this
+computer, whose agent is in front as the terminal can tell
+(`transcript_applies`, so nothing is read on Windows, where the pseudo-console
+has no foreground), whose transcript Leon reads (Claude Code, Codex) and whose
+id is known for sure (`followed_id`). That id is asked again of the process
+scan (`learn::by_process_again`: the one agent below the terminal's shell that
+names another session), because the agent can move to another session in the
+terminal (`/clear`, `/resume`, a new run by hand); until the scan sees it the
+old transcript is the one read. It starts at the last `RECENT_BYTES` of the
+file, then reads what is appended, and looks again for a file it did not find
+every `LOOK_AGAIN_EVERY` polls (a Codex rollout is found by walking folders).
+A `Pulse` reports its turn over until a beat says otherwise, and a read that
+starts in the middle of a turn may only see results and numbers, so a
+`Reading` says nothing until a beat opened a turn or ended one. Nothing else is
+followed, and a report that is missing leaves the heuristic. The Den's
+followers are separate (they read from the start for the level and the past),
+and the Den is given the heuristic alone (`terminal_activity`) so that it adds
+the transcript itself, as before. What is covered is the written transcript of
+tests; the behaviour against long real sessions of either agent is not.
 
 **Agent colours** are theme tokens (`Palette::agent_*`), a deliberate exception
 to a theme's accent rule, set per theme so that each theme can choose its own
 (monochrome included). Nothing outside `theme/` assumes a particular theme.
+
+## The project file (`project.rs`, `trust.rs`, `ui/scripts.rs`)
+
+`leon.toml` at a project's root (format in [PROJECT.md](PROJECT.md)) follows the
+rules above:
+
+* **The engine reads it.** `Engine::read_project_file` reads it where the project
+  is (`std::fs` on this computer, `leon_remote::files::read_command` through the
+  runner elsewhere, so SSH and relay machines work), parses it with the pure
+  `project::parse` (errors name the line) and keeps the outcome as a
+  `ProjectState` that the window reads with `Engine::project_state`. A missing
+  file is `Absent` and says nothing. The window asks for a read when the project
+  in view changes, when **Run a script...** is used and when a worktree appears.
+* **Pure first.** `project::parse`, `ScriptKey` (the chord, and which command of
+  `keys::BINDINGS` already has it), `trust::verdict`, `launch::chain` (the line
+  that types a command and then the agent only if it succeeded) and
+  `address::worktree_location` (the path template) are functions with tests.
+* **A script key never shadows a command.** `handle_key` asks the registry first;
+  a script's chord is looked at only when no command has it, and
+  `ProjectFile::script_for` does not answer a key that collides.
+* **Nothing runs untrusted.** A command goes through `trust::verdict` (project id
+  and the SHA-256 of the exact text, in `trusted.json`); an unknown one opens
+  `Overlay::Trust` with the command in full. The card can come from a background
+  task, so `scripts::key_answer` (pure) lets only a `Cmd`/`Ctrl` chord answer it
+  and a plain Enter does nothing; questions queue (`ScriptsUi::queued`) and are
+  shown one at a time, never over a palette or a menu.
+* **Setup before the agent.** `Shell::start_live_first` starts the terminal with
+  the agent's line held back and types `sh -c '<setup>' && <agent>`, or
+  `sh -c '<setup>'` for a shell session (`launch::chain` with `First::Setup`;
+  PowerShell and `cmd.exe` have their own spelling and type a setup as written),
+  so the shell sequences it on any machine and a failed setup leaves the terminal
+  open at its prompt. A script (`First::Script`) is typed as written. A file that
+  is wrong or unreadable gives no setup, and `scripts::setup_notice` says so.
+
+## One prompt, several agents (`fanout.rs`, `ui/fanout.rs`)
+
+**One prompt, several agents…** follows the rules above:
+
+* **Pure first.** `fanout::plan` turns the request (prompt, agents, project root,
+  `worktree_location`, the branches taken, the shell's flavour) into the plan:
+  per agent a branch (`prompt_slug` and the agent's id, numbered when the
+  worktrees or git's own branches already have the name:
+  `fanout::taken_branches`), a folder (`address::worktree_location`, the
+  function the engine uses for any worktree) and the exact line typed into its
+  terminal
+  (`launch::command_line_prompted`). An agent that cannot take the prompt is in
+  `Plan::left` with the reason, never in the plan.
+* **The prompt is on the launch line.** `AgentSpec::prompt` is the form an agent
+  takes a first prompt in (`["{prompt}"]`, `["--prompt", "{prompt}"]`); it is
+  filled only for agents whose `--help` was read, and a custom agent declares it
+  as `prompt_args`. `Launch::Prompted` carries the prompt to `launch::plan_with`,
+  which types the line like any agent's. `leon_remote::sh_quote_typed` quotes
+  the prompt for typing into an interactive shell of any kind (a backslash
+  outside the quotes for fish, several lines on one physical line without a
+  `!`), and `launch::clean_prompt` refuses what a terminal would take as keys.
+* **The engine makes the worktrees.** `Engine::add_worktrees` makes them one
+  after the other through the path of `Op::AddWorktree`, and answers how each
+  went; the window first asks git for the project's branches
+  (`Engine::base_refs`), waits for the local store to list the worktrees, reads
+  `leon.toml` once, and `Shell::start_worktree_sessions` starts the sessions,
+  asking about the setup command once for the batch.
 
 ## Settings
 
@@ -640,10 +794,155 @@ and project dots still read the terminal, because the `Live` entry stays in the
 placement. A terminal resumed in another folder ("Resume in…") keeps its own
 `Live` row, in the folder it runs in, still linked to its history session.
 
+### Shelves and undo (`ui/shelf.rs`, `ui/shelving.rs`)
+
+A history session is in its list, on the **Settled** shelf or on the
+**Snoozed** shelf (until a time). Where it stands is one row in the store's
+`session_shelf` table (migration 14: `settled`, `snoozed` with a time, or
+`returned`, which is "taken back by hand" and keeps the automatic settling away),
+keyed by the session's public id and removed with the session; the engine
+writes it (`Op::SetShelves`, which writes nothing and announces nothing when a
+row already says so) and the window reads it with the rest. `shelf::section`
+decides the place from that row, whether the session runs and the time, which
+is an argument: a settled session that runs is in its list, a snooze that has
+ended is no snooze, a running snoozed session stays away until it needs you.
+`Placement::with_shelves` applies it after `with_live`; a pinned session on a
+shelf stays in `Placement::pinned` (the pin operations rewrite that whole order
+and would otherwise unpin it) and only the Pinned section leaves it out. The
+shelves are `Kind::Shelf` rows at the bottom of a machine, folded by default, and
+survive the "only active" view because the person put them there.
+
+`shelf::snooze_until` reads a length of time, `tomorrow`, `next week` or a date
+against an injected `now` and UTC offset (`local_offset`, which is UTC in a test
+build). A timer places the sessions again when the next snooze ends, looking at
+the clock at least once a minute. `shelf::woken` is the early end: the three
+notification events (`Waiting`, `Finished`, `Failed`) reach `Shell::raise`, which
+ends the snooze before its notification settings are consulted. The automatic
+settling (`sidebar_settle_merged`) is `shelf::settle_merged`, a pure choice over
+the worktrees whose pull request is merged, run when the store, a terminal or
+the engine's scans change and asked of the engine once per session. Only a
+session on a machine with a scan result is settled, and not one that scan finds
+in another terminal: without a scan nothing is known of other terminals, so
+nothing is claimed. "Running" is `history_of_live`: the link a terminal was
+started with or the session its learned id names.
+
+Undo is `shelf::Undo`: what one step changed, `Undo::restore` the pure rule for
+what puts it back, `Pending` the banner and its deadline on the toolkit's clock
+(`UNDO_WINDOW`, five seconds). Closing a whole session hides its history row in
+the window and removes it from the store only when the banner goes, so Undo has
+something to restore. `Shell::flush` finishes it on the way out
+(`Engine::forget_sessions`, called directly because a submitted operation may
+not run once the process ends); only a kill or a crash inside the window leaves
+the row in the history. An undone settle or snooze of a session with no row
+writes `Returned`, not no row, or the automatic settling would take it again.
+
 The main pane shows one of: nothing, a project, a worktree, a history
 transcript, or a live terminal. The transcript is opened read-only and starts
 nothing; it carries a line that says how to resume the session, or, when a
 resume was asked for and could not be done, why.
+
+### The state of a checkout
+
+`leon_core::WorktreeStatus` is what is known about one worktree: the changed
+files, the distance from its upstream and the open pull request of its branch
+with its review and the summary of its checks. Every part is optional, because
+every part can be unknown. It lives in the `worktree_status` table (a JSON
+value per worktree, gone with the worktree), `Store::update_worktree_status`
+edits one part without overwriting the others and wakes the listeners only when
+the result differs, and `Snapshot::status` hands it to the views. It is the
+type the changes, commit and pull request flow and the cleaning of merged
+worktrees read.
+
+The engine writes it through the `Runner`: every command is placed on the
+machine of the worktree by `run_on`, as for the rest of Leon. The git half
+(`git status --porcelain=v1 --branch --untracked-files=all`, parsed by
+`leon_remote::parse_status`) is read for every worktree of a project at each
+sync and by the timer that watches local projects with a live terminal; it
+lists untracked files one by one so that its count is the number of files the
+changes tab lists. The GitHub half (`gh pr list --state open`, parsed by
+`leon_remote::parse_open_pull_requests`) is one question per project, asked
+together with the merged one, at most once a minute per project
+(`Engine::probe_github`), and only when `origin` is on GitHub: a refresh asked
+for within a minute of the last question reads git again and keeps the
+GitHub answer of that one. A missing `gh`, a signed-out one or an offline
+machine leaves what was stored untouched.
+`ui/checkout.rs` decides, as pure functions, what a row and the worktree screen
+say.
+
+### Cleaning merged worktrees
+
+`leon_core::cleanup` decides, as pure functions, which merged worktrees may be
+removed (`offered` and `blockers`: nothing uncommitted, no commits the upstream
+lacks, no session running, the checkout read) and which just became merged
+(`newly_merged`: GitHub had been asked and its merged list did not have the
+branch, `Some(false)`, and now it does; a branch first seen merged is not
+announced). The palette flow
+`Remove merged worktrees…` (`ui/steps.rs`, `remove_merged_worktrees`) lists the
+offered worktrees, reads each tick as an answer that toggles one of them, and
+ends in `Action::RemoveWorktrees`. The shell removes the ticked ones one after
+another, each through `Engine::remove_worktree` with `force` unset, so a
+worktree git refuses is kept; a second batch asked for while one runs is
+refused (`Shell::merged_busy`), because starting it would replace the task and
+drop the rest of the first. A removed worktree takes with it the terminals
+running in its folder and its changes tab (`Shell::close_live_in`); the files
+open from it stay, as they may hold unsaved text. The banner that offers the cleanup is decided by
+`steps::merged_offer` each time the store is read, and only when the setting
+`offer_merged_cleanup` is on; showing it removes nothing.
+
+### Changes, commit and pull request
+
+A worktree's changes are a tab, a leaf like a file's: `Shell::changes` maps the
+leaf's `LiveId` to a `ChangesView` (`ui/changes.rs` holds the state, the pure
+decisions and the actions; `ui/changes_view.rs` draws it), and what treats a
+leaf as a terminal asks `Shell::live` first and finds nothing, as for
+`Shell::files`. The view keeps what the engine answered (the files, the diff of
+the selected one, the outcome of the last step) and nothing of it is stored: the
+store only has the worktree's status, which the engine writes again after a step.
+
+`leon_remote::changes` reads the changed files (`git status --porcelain=v1 -z
+--branch`: `-z` keeps names as they are, a rename is two fields, the new name
+first) and the diff of one file (`git diff HEAD -- path`, or against `/dev/null`
+for an untracked file, which git answers with status 1), and parses a diff into
+lines of a kind with the numbers of both sides; a binary file and a diff over
+`MAX_DIFF_BYTES` are answers of their own. `leon_remote::ship` builds the
+commands of a commit (`git add`, then `git commit -F -` with the message on
+standard input, naming the same paths so what else is staged stays out), a push
+(setting the upstream on `origin` when the branch has none) and a pull request
+(`gh pr create --body-file -`), the title and body a pull request starts with
+from its commits, and what an agent is asked and how its answer is cleaned. A
+failure keeps what the command printed, standard output and standard error
+together (`ShipError::Failed`), because `git commit` says "nothing to commit"
+on the first and a hook writes to either. Nothing in it can force, amend, reset
+or discard. Its tests check, with a scripted runner, that every step is placed
+on an SSH machine (one `ssh` command that changes to the folder, with the
+input piped) and carries the route of a relay machine; no real SSH or relay
+machine and no real `gh` has been tried.
+
+`Engine` (`engine/changes.rs`) is the side the view awaits, as for files:
+`read_changes`, `read_diff`, `pull_request_start`, `suggest`, and `ship`, which
+takes a `ShipRequest` (the commit, the push and the pull request that are
+wanted) in that order, stops at the first failure and answers a `ShipReport`.
+The palette's whole chain (`Shell::ship_here`) opens the tab and starts only
+when the tab has read its files and the start of the pull request, commits only
+when files changed (asking for the message when there is none), and so also
+pushes and opens a branch that is already committed.
+Afterwards it reads the worktree's checkout again and, when a pull request was
+opened, asks GitHub for it at once instead of waiting for the once-a-minute
+allowance. `ship` and `suggest` use the slow runner (`Engine::set_slow_runner`,
+ten minutes in `main.rs`), because hooks and agents outlast the thirty seconds
+of the usual one.
+
+The agent table has one optional field for this, `AgentSpec::headless`: the
+arguments, before the instruction, that make the agent answer once without a
+terminal and exit while reading standard input; the instruction that follows
+them tells the agent not to run commands or change files, and the form takes
+the means away where the agent can: Claude Code runs with no tools at all and
+Codex in its read-only sandbox, because the diff it reads is text of the
+repository and not to be trusted. It is filled only for the agents whose form
+was run against the installed CLI (`claude --tools "" -p --permission-mode
+dontAsk --no-session-persistence`, `codex exec --sandbox read-only`); the
+others have none and are never asked. Gemini's `-p` is documented but was not signed in to
+run, so it has none.
 
 ### Opening a history session
 
@@ -980,7 +1279,8 @@ documented in that module.
 **The permission prompt is inferred, and can be wrong.** A transcript holds
 the tool call but nothing about the question asked before it runs. The Den
 says "needs permission" when a call has no result **and** the terminal's
-`Activity` is `Waiting` (quiet beyond the threshold, or the bell rang): an
+own `Activity` (the heuristic) is `Waiting` (quiet beyond the threshold, or
+the bell rang): an
 agent at work redraws its status line constantly, so a quiet terminal with a
 call in flight is nearly always a question. The limits: it is late by the
 quiet threshold; a tool that runs long while the agent's interface draws

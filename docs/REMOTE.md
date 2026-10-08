@@ -256,6 +256,111 @@ No home-made cryptography: Leon composes audited crates.
 | Rekey | 2^20 messages, 1 GiB or 1 hour |
 | Shared state | at most 500 history sessions offered; transcripts read individually |
 
+## The host as a background service
+
+`leon host` runs in the foreground, and **Share this machine** runs the host
+inside the open Leon: both stop with their window or terminal. `leon host
+service` installs the same host as a service of your own session, so a computer
+stays shared with no window open:
+
+```text
+leon host service install [--linger] [--relay <url>] [--name <name>] [--data-dir <path>]
+leon host service status
+leon host service logs [--lines <n>]
+leon host service uninstall
+```
+
+* **Linux.** `install` writes the systemd user unit `leon-host.service` under
+  `$XDG_CONFIG_HOME/systemd/user` (`~/.config/systemd/user`), then runs
+  `systemctl --user daemon-reload`, `enable` and `restart`, waits two seconds
+  and asks systemd whether the host is running. If it is not (it started and
+  ended, or waits to be restarted) `install` says so, points to `logs` and
+  exits with status 1, leaving the unit in place; it does not report success
+  for a unit that is failing. A host that ends later than those two seconds is
+  not caught: `status` shows it. `logs` reads the user journal
+  (`journalctl --user --unit leon-host.service`).
+* **macOS.** `install` writes the launchd agent `dev.zavu.leon.host.plist` in
+  `~/Library/LaunchAgents`, loads it with `launchctl bootstrap gui/<uid>` and
+  checks the same way with `launchctl print`. `logs` shows the end of `~/Library/Logs/Leon/host.log`.
+* **Windows.** Not supported yet: the command says so and exits with status 1.
+  Run `leon host` in a terminal.
+
+What the service is:
+
+* **Your rights, never root.** It is a unit of your own user manager and a
+  launchd agent of your own session; the commands refuse to run as root, and
+  there is no `--allow-root` for them. A paired device gets what you have, as
+  with any host.
+* **The program that installed it.** The unit runs `leon host --data-dir <dir>`
+  (plus `--relay` and `--name` when given at `install`; the `LEON_RELAY_URL` of
+  the installing session counts as a relay) with the file that ran `install`,
+  at the path the operating system reports for it (a link is followed). When
+  an update replaces that file at the same path, the service runs the new
+  version the next time it starts (after a failure, a reboot or another
+  `leon host service install`); it does not restart itself when Leon updates,
+  since that would hang up the terminals being served. A package manager that
+  puts each version in a folder of its own (Homebrew's `Cellar`, Nix's store)
+  does not do that: the path written is the old version's, which is removed
+  sooner or later. `install` prints a note when it sees such a path; run it
+  again after each update there. Leon refuses to install
+  from a place that is gone later (an AppImage, a temporary folder, a
+  translocated application, a disk image). The installing session's `PATH` is
+  written into the definition, because the manager starts the host with a short
+  one.
+* **It restarts after a failure.** systemd: `Restart=on-failure`, 5 seconds at
+  first and longer each time (six steps up to 5 minutes; `RestartSteps` needs
+  systemd 254, an older systemd restarts every 5 seconds), with no limit on the
+  number of restarts. launchd: `KeepAlive` on a non-zero exit, at least 30
+  seconds apart; it has no growing delay. A host that was killed (`SIGKILL`,
+  out of memory) leaves its heartbeat file behind; the next start ignores it,
+  because a heartbeat counts only while it is under ten seconds old **and** its
+  process still exists, so the restart is not refused for a predecessor that is
+  gone (the one case left is a process id that the system has already given to
+  an unrelated program). A `leon host` that is really running in a terminal for
+  the same data directory makes the service exit with a failure and wait for
+  its turn; it takes over when the terminal one stops. **Share this machine**
+  in the app writes no heartbeat, so nothing keeps the service and the app's
+  sharing from running at once on one computer: use one of them. Stopping
+  with `systemctl --user stop`, `launchctl bootout` or Ctrl-C ends the host
+  cleanly (it answers `SIGTERM` as well as `SIGINT`; a test sends the signal to
+  the host's shutdown wait, but it has not been run under a real systemd or
+  launchd).
+* **Lingering (Linux).** A user's systemd manager normally stops at the last
+  logout and starts at the next login, taking the service with it. `install
+  --linger` also runs `loginctl enable-linger` for your own user (no root on
+  systemd distributions that allow it; if yours asks for authentication,
+  `install` says so and the service stays installed without it). Without the
+  flag nothing about lingering is changed, and `install` prints this
+  explanation. `uninstall` never turns lingering off (it may have been on
+  before); `loginctl disable-linger` does. macOS agents start at login.
+* **`status`** says whether the unit or agent is installed, whether it runs
+  (the manager's word) and since when (the host's own heartbeat; the
+  manager's timestamp without one), its relay and host id, whether it starts at
+  login or at boot, and how many devices are paired. It exits 0 only when the
+  service is running. On Linux "starts at login" is systemd's `enabled`; on
+  macOS it is asked of `launchctl print-disabled`, and `status` says when that
+  could not be checked.
+* **`uninstall`** stops the service (`systemctl --user disable --now`,
+  `launchctl bootout`) and, only when it is known not to be running any more,
+  removes its definition. If the stop fails and the manager still reports the
+  service running or waiting to restart, or cannot be asked, `uninstall`
+  prints why, keeps the definition so the service is not left running with no
+  unit to find it by, and exits with status 1: fix the cause and run it again.
+  The pairings (`host/devices.json`), the identity, the settings and the macOS
+  log stay.
+
+Limits. It does not make the **desktop app's own local sessions** survive the
+window: those terminals belong to the app's process, and only the terminals the
+host serves to a paired device live in the service. The app does not yet list
+and re-attach a relay machine's still-running terminals after it restarts (the
+protocol supports it). `logs` shows the end of the log, not a live follow (the
+command it prints for that is `journalctl --user --follow` or `tail -f`). The
+Linux and macOS sides are covered by tests that script the answers of
+`systemctl`, `launchctl` and `loginctl` and compare the generated text; no real
+systemd or launchd was driven by those tests (the unit text was checked once, by
+hand, with `systemd-analyze --user verify` on systemd 261, which accepted it),
+and the macOS side has not been run on a Mac here.
+
 ## Settings
 
 `Relay server` (`remote_relay_url`, default `wss://relay.getleon.dev`), `Name of this
@@ -265,8 +370,7 @@ before pairing` (`remote_require_approval`). See [SETTINGS.md](SETTINGS.md).
 
 ## Roadmap (not built)
 
-* A background service that survives the window (launchd, systemd, a Windows
-  service). Today sharing runs inside the open Leon and stops with it.
+* A Windows service (the background service is for Linux and macOS).
 * A direct connection upgrade (hole punching) so the relay carries only the
   rendezvous.
 * Accounts and plans on the relay (the opaque `token` field is reserved).

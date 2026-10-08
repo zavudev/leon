@@ -28,10 +28,10 @@ use crate::model::{AgentId, Message, NewMessage, NewSession, Role, Session};
 /// The session columns, in the order [`session_from_row`] expects them, for a
 /// `session` table aliased as `s`.
 pub(crate) const SESSION_COLUMNS: &str = "s.id, s.agent, s.external_id, s.machine_id, s.cwd, \
-     s.project_id, COALESCE(s.custom_title, s.title), s.model, s.started_at, s.updated_at, s.message_count, s.sort_order";
+     s.project_id, COALESCE(s.custom_title, s.title), s.model, s.started_at, s.updated_at, s.message_count, s.sort_order, s.account";
 
 /// How many columns [`SESSION_COLUMNS`] selects.
-pub(crate) const SESSION_COLUMN_COUNT: usize = 12;
+pub(crate) const SESSION_COLUMN_COUNT: usize = 13;
 
 /// Restricts a session listing. An absent field does not restrict.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -175,6 +175,27 @@ impl Store {
             }
             Ok(())
         })
+    }
+
+    /// Remembers which account the session ran with (`None`: the agent's own
+    /// setup), so that resuming it starts the same one. Announces nothing when
+    /// the session already has it.
+    pub fn set_session_account(&self, id: &SessionId, account: Option<&str>) -> Result<()> {
+        let current: Option<Option<String>> = self.read(|connection| {
+            Ok(connection
+                .prepare_cached("SELECT account FROM session WHERE id = ?1")?
+                .query_row([id.as_str()], |row| row.get(0))
+                .optional()?)
+        })?;
+        match current {
+            None => Err(StoreError::NotFound("session")),
+            Some(known) if known.as_deref() == account => Ok(()),
+            Some(_) => self.write(StoreChange::Sessions, |tx| {
+                tx.prepare_cached("UPDATE session SET account = ?2 WHERE id = ?1")?
+                    .execute(params![id.as_str(), account])?;
+                Ok(())
+            }),
+        }
     }
 
     /// Removes a session and its messages from the history.
@@ -474,6 +495,16 @@ pub fn upsert_session_in(
     Ok(SessionId::from_string(id))
 }
 
+/// Records, inside an open transaction, that the session `id` ran with the
+/// account `account` (an id from [`crate::Account`]). The importer calls it for
+/// the sessions it reads from an account's own folder; a session found in the
+/// agent's own folders keeps whatever it has.
+pub fn set_session_account_in(tx: &Transaction<'_>, id: &SessionId, account: &str) -> Result<()> {
+    tx.prepare_cached("UPDATE session SET account = ?2 WHERE id = ?1 AND account IS NOT ?2")?
+        .execute(params![id.as_str(), account])?;
+    Ok(())
+}
+
 /// Compares the stored transcript of a session with `messages`. Returns how
 /// many leading messages are identical and how many messages are stored.
 fn compare_with_stored(
@@ -540,6 +571,7 @@ pub(crate) fn session_from_row(row: &Row<'_>, offset: usize) -> rusqlite::Result
         updated_at: from_millis(row.get(offset + 9)?),
         message_count: row.get(offset + 10)?,
         sort_order: row.get(offset + 11)?,
+        account: row.get(offset + 12)?,
     })
 }
 

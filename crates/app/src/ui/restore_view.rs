@@ -145,6 +145,7 @@ impl Shell {
                     .clone()
                     .filter(|title| !title.ends_with(PAUSED_NOTE)),
                 started_at: session.started_ms,
+                account: session.account.clone(),
             })
             .collect();
         SavedState {
@@ -327,7 +328,7 @@ impl Shell {
     }
 
     /// What would be done with a saved terminal.
-    fn decide(&self, saved: &SavedTerminal) -> Decision {
+    fn decide(&self, saved: &SavedTerminal, cx: &gpui_kit::App) -> Decision {
         let machine_id = MachineId::from_string(saved.machine.as_str());
         let Some(machine) = self.snapshot.machine(&machine_id).cloned() else {
             return Decision::Cannot("its machine is no longer known".to_owned());
@@ -336,14 +337,16 @@ impl Shell {
             crate::engine::MachineState::Online(Some(report)) => Some(report),
             _ => None,
         };
+        let prefs = Self::launch_prefs(cx);
         let plan = |launch: &Launch| {
-            launch::plan(
+            launch::plan_with(
                 &machine,
                 report.as_ref(),
                 &saved.cwd,
                 launch,
                 &self.engine.ssh(),
                 &*self.options.system,
+                &prefs,
             )
         };
         let why = |error: LaunchError| match error {
@@ -385,6 +388,7 @@ impl Shell {
         let launch = Launch::Agent {
             kind: agent,
             resume: Some(session.clone()),
+            account: saved.account.clone(),
         };
         if let Err(error) = plan(&launch) {
             return Decision::Cannot(why(error));
@@ -461,7 +465,7 @@ impl Shell {
             if !wanted(saved.id) {
                 continue;
             }
-            match self.decide(saved) {
+            match self.decide(saved, cx) {
                 Decision::Cannot(why) => failures.push((describe(saved), why)),
                 Decision::Start { launch, title } => {
                     let machine = MachineId::from_string(saved.machine.as_str());

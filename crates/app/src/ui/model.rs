@@ -8,7 +8,7 @@
 
 use leon_core::{
     Machine, MachineId, Project, ProjectIcon, ProjectId, Result, Session, SessionFilter, Store,
-    Worktree,
+    Worktree, WorktreeId, WorktreeStatus,
 };
 use std::collections::HashMap;
 
@@ -37,6 +37,9 @@ pub struct Snapshot {
     pub icons: HashMap<ProjectId, ProjectIcon>,
     /// The folders somebody removed (projects and worktrees), by machine.
     pub dismissed: Vec<(MachineId, String)>,
+    /// What was last read about the checkout of each worktree; a worktree
+    /// nothing was read about has no entry.
+    pub statuses: HashMap<WorktreeId, WorktreeStatus>,
 }
 
 impl Snapshot {
@@ -70,18 +73,25 @@ impl Snapshot {
                 dismissed.push((machine.id.clone(), root));
             }
         }
+        let statuses = store.worktree_statuses()?;
         Ok(Self {
             machines,
             projects,
             sessions,
             icons,
             dismissed,
+            statuses,
         })
     }
 
     /// The machine with this id.
     pub fn machine(&self, id: &MachineId) -> Option<&Machine> {
         self.machines.iter().find(|machine| &machine.id == id)
+    }
+
+    /// What is known about the checkout of a worktree.
+    pub fn status(&self, worktree: &WorktreeId) -> Option<&WorktreeStatus> {
+        self.statuses.get(worktree)
     }
 
     /// The project with this id.

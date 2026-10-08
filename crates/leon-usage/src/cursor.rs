@@ -337,6 +337,7 @@ pub fn reading(
         agent: AgentId::CURSOR,
         machine: machine.to_owned(),
         account_label: summary.plan.clone(),
+        account: None,
         plan: summary.plan.clone(),
         source: Some(Source::VendorApi),
         observed_at: Some(now),

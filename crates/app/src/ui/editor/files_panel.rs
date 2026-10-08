@@ -565,7 +565,15 @@ impl Shell {
                     .flex_col()
                     .justify_center()
                     .gap(metrics::HEADER_GAP())
-                    .child(section_label("Files", colours))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(section_label("Files", colours))
+                            .child(div().flex_1())
+                            .children(self.render_changes_chip(colours, cx)),
+                    )
                     .child(
                         div()
                             .h(metrics::HEADER_TITLE_LINE())
@@ -610,6 +618,51 @@ impl Shell {
                     .text_color(colours.text_muted)
                     .child("Select a project or a worktree to see its files."),
             })
+    }
+
+    /// The chip of the panel's header that opens the changes of the folder it
+    /// shows, with how many files changed when that is known. Only for a
+    /// folder that is a worktree.
+    fn render_changes_chip(
+        &self,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let (machine, root) = self.files_target()?;
+        let (_, worktree) = super::super::tree::detail_of_root(&self.snapshot, &machine, &root)?;
+        let changed = worktree
+            .and_then(|worktree| self.snapshot.status(&worktree))
+            .and_then(|status| status.changed)
+            .filter(|changed| *changed > 0);
+        let hover = colours.surface_2;
+        let tip: SharedString = crate::ui::sidebar::tooltip_text(Command::OpenChanges).into();
+        Some(
+            div()
+                .id("files-changes")
+                .debug_selector(|| "files-changes".into())
+                .flex_none()
+                .px(px(6.))
+                .rounded(metrics::RADIUS())
+                .border_1()
+                .border_color(colours.border)
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover))
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_changes_of_files(window, cx);
+                }))
+                .child(
+                    mono(match changed {
+                        Some(count) => format!("CHANGES {count}"),
+                        None => "CHANGES".to_owned(),
+                    })
+                    .text_color(if changed.is_some() {
+                        colours.warning
+                    } else {
+                        colours.text_muted
+                    }),
+                ),
+        )
     }
 
     /// One row of the tree.

@@ -108,6 +108,9 @@ pub struct AgentView {
     pub agent: AgentId,
     /// The machine's id.
     pub machine: String,
+    /// The id of the account it is the reading of; `None` is the agent's own
+    /// setup.
+    pub account: Option<String>,
     /// The plan, when known.
     pub plan: Option<String>,
     /// Where the numbers came from.
@@ -118,7 +121,25 @@ pub struct AgentView {
     pub body: Body,
 }
 
+/// What a reading is called: the agent's name, and the account's in brackets
+/// when it is one of the user's accounts (`Claude Code (work)`).
+pub fn heading(agent: AgentId, account: Option<&str>) -> String {
+    match account {
+        Some(account) => format!(
+            "{} ({})",
+            agent.name(),
+            leon_core::account::name_of(account)
+        ),
+        None => agent.name().to_owned(),
+    }
+}
+
 impl AgentView {
+    /// What the reading is called: see [`heading`].
+    pub fn heading(&self) -> String {
+        heading(self.agent, self.account.as_deref())
+    }
+
     /// The worst level among its meters; normal when unknown.
     pub fn level(&self) -> Level {
         match &self.body {
@@ -160,6 +181,7 @@ pub fn view(usage: &AgentUsage, now: i64, thresholds: Thresholds) -> AgentView {
     AgentView {
         agent: usage.agent,
         machine: usage.machine.clone(),
+        account: usage.account.clone(),
         plan: usage.plan.clone(),
         source: usage.source,
         age: usage.observed_at.map(|at| (now - at).max(0)),
@@ -179,6 +201,7 @@ mod tests {
             agent: AgentId::CODEX,
             machine: "local".into(),
             account_label: None,
+            account: None,
             plan: Some("plus".into()),
             source: Some(Source::Local),
             observed_at: Some(NOW - 180),

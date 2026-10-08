@@ -8,7 +8,7 @@
 //! | `Asleep` | the window does not have the focus: nobody is looking |
 //! | `Error` | a session just exited with an error, for a few seconds |
 //! | `Working` | any session is working: a program is running and printing |
-//! | `Waiting` | else any session wants the user: quiet, or its bell rang |
+//! | `Waiting` | else any session wants the user: it finished its turn, it asks, or it is quiet or rang its bell |
 //! | `Idle` | otherwise |
 //!
 //! A pure function of what the shell already knows, so each rule is tested
@@ -35,7 +35,7 @@ pub fn mood(
     let (mut working, mut waiting) = (false, false);
     for activity in activities {
         working |= activity == Activity::Working;
-        waiting |= activity == Activity::Waiting;
+        waiting |= activity.wants_you();
     }
     if working {
         Mood::Working
@@ -49,7 +49,7 @@ pub fn mood(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use Activity::{Failed, Idle, Off, Waiting, Working};
+    use Activity::{Failed, Idle, NeedsYou, Off, TurnOver, Waiting, Working};
 
     #[test]
     fn with_nothing_live_the_lion_is_idle() {
@@ -66,6 +66,9 @@ mod tests {
     #[test]
     fn without_work_a_session_that_wants_the_user_makes_the_lion_wait() {
         assert_eq!(mood(true, false, [Idle, Waiting]), Mood::Waiting);
+        // Whether it finished or asks, it is the user's move.
+        assert_eq!(mood(true, false, [Idle, TurnOver]), Mood::Waiting);
+        assert_eq!(mood(true, false, [NeedsYou, Off]), Mood::Waiting);
     }
 
     #[test]

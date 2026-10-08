@@ -225,6 +225,7 @@ pub fn parse_output(output: &str, machine: &str, now: i64) -> AgentUsage {
         agent: AgentId::ANTIGRAVITY,
         machine: machine.to_owned(),
         account_label: None,
+        account: None,
         plan: None,
         source: Some(Source::Cli),
         observed_at: Some(now),

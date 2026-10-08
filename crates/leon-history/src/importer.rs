@@ -3,6 +3,7 @@
 //! An import run lists every item of every source, skips the ones whose
 //! fingerprint matches the cursor recorded by a previous run, and loads,
 //! parses and stores the rest. Each session is written together with its
+//! token counts (replaced as a whole, so a file read again counts once) and its
 //! cursor in one transaction, so a run can be interrupted at any point and
 //! simply repeated: whatever was committed is skipped next time, and whatever
 //! was not is imported again.
@@ -19,7 +20,8 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use leon_core::{
-    set_import_cursor_in, upsert_session_in, ImportRun, MachineId, Store, StoreChange,
+    set_import_cursor_in, set_session_account_in, set_session_tokens_in, upsert_session_in,
+    ImportRun, MachineId, Store, StoreChange,
 };
 
 use crate::roots::HistoryRoots;
@@ -111,7 +113,12 @@ impl Importer {
     ) -> ImportReport {
         let mut total = ImportReport::default();
         for source in roots.sources() {
-            let tag = source.agent().as_str().to_owned();
+            // An account's folder is another source of the same agent: its
+            // stamp is its own.
+            let tag = match source.account() {
+                Some(account) => format!("{}#{account}", source.agent().as_str()),
+                None => source.agent().as_str().to_owned(),
+            };
             let stamp = stamps.as_ref().and(source.stamp());
             if let (Some(known), Some(stamp)) = (stamps.as_ref(), &stamp) {
                 if known.get(&tag) == Some(stamp) {
@@ -132,8 +139,12 @@ impl Importer {
                 malformed: report.malformed as u64,
                 unsupported: report.unsupported as u64,
             };
-            if let Err(error) = store.record_import_run(machine_id, &run) {
-                tracing::debug!(%error, "cannot record an import run");
+            // The diagnosis keeps one run per agent and machine: the agent's own
+            // folders. An account's run would replace it.
+            if source.account().is_none() {
+                if let Err(error) = store.record_import_run(machine_id, &run) {
+                    tracing::debug!(%error, "cannot record an import run");
+                }
             }
             if let (Some(stamps), Some(stamp)) = (stamps.as_deref_mut(), stamp) {
                 // A source that failed is looked at again next time.
@@ -257,7 +268,12 @@ fn import_item(
     let (stored, outcome) = match &parsed {
         Some(parsed) => (
             store.write(StoreChange::Sessions, |tx| {
-                upsert_session_in(tx, &parsed.new_session(machine_id), &parsed.messages)?;
+                let stored =
+                    upsert_session_in(tx, &parsed.new_session(machine_id), &parsed.messages)?;
+                set_session_tokens_in(tx, &stored, &parsed.tokens)?;
+                if let Some(account) = source.account() {
+                    set_session_account_in(tx, &stored, account)?;
+                }
                 set_import_cursor_in(tx, machine_id, &item.key, &item.fingerprint)
             }),
             ImportReport {
@@ -325,6 +341,7 @@ mod tests {
             claude_projects: Some(home.join("claude")),
             codex_sessions: Some(home.join("codex")),
             opencode_db: Some(home.join("opencode.db")),
+            accounts: Vec::new(),
         };
         write(
             &home.join("claude/project/claude-session.jsonl"),
@@ -405,6 +422,120 @@ mod tests {
         );
     }
 
+    /// An assistant line with a usage block, as Claude Code writes it.
+    fn claude_reply(id: &str, output: u64, second: u32) -> String {
+        serde_json::json!({
+            "type": "assistant", "isSidechain": false, "cwd": "/srv/api",
+            "timestamp": format!("2026-03-01T10:00:{second:02}Z"),
+            "message": {"id": id, "role": "assistant", "model": "model-a",
+                "content": "ok",
+                "usage": {"input_tokens": 10, "output_tokens": output,
+                          "cache_read_input_tokens": 100, "cache_creation_input_tokens": 0}}
+        })
+        .to_string()
+    }
+
+    fn claude_totals(store: &Store) -> (u64, u64) {
+        let rows = store.token_usage(None).unwrap();
+        let rows: Vec<_> = rows
+            .iter()
+            .filter(|row| row.agent == AgentId::CLAUDE)
+            .collect();
+        (
+            rows.iter().map(|row| row.counts.input).sum(),
+            rows.iter().map(|row| row.counts.output).sum(),
+        )
+    }
+
+    #[test]
+    fn token_counts_are_stored_once_however_often_a_file_is_read() {
+        let home = tempfile::tempdir().unwrap();
+        let roots = fixture(home.path());
+        let file = home.path().join("claude/project/claude-session.jsonl");
+        write(
+            &file,
+            &[
+                claude_line("user", "go", 0),
+                claude_reply("m1", 5, 1),
+                claude_reply("m1", 7, 2),
+            ],
+        );
+        let store = Store::open_in_memory().unwrap();
+
+        Importer::run(&store, &MachineId::local(), &roots);
+        assert_eq!(claude_totals(&store), (10, 7));
+        // Nothing changed: not read again, and not counted again.
+        Importer::run(&store, &MachineId::local(), &roots);
+        assert_eq!(claude_totals(&store), (10, 7));
+
+        // The file grows: the session states its new total, not an addition.
+        write(
+            &file,
+            &[
+                claude_line("user", "go", 0),
+                claude_reply("m1", 5, 1),
+                claude_reply("m1", 7, 2),
+                claude_reply("m2", 3, 3),
+            ],
+        );
+        Importer::run(&store, &MachineId::local(), &roots);
+        assert_eq!(claude_totals(&store), (20, 10));
+
+        // Forgetting the cursors (as the migration does) and reading again
+        // gives the same figures.
+        store
+            .write(StoreChange::Sessions, |tx| {
+                tx.execute("DELETE FROM import_cursor", [])?;
+                Ok(())
+            })
+            .unwrap();
+        Importer::run(&store, &MachineId::local(), &roots);
+        assert_eq!(claude_totals(&store), (20, 10));
+    }
+
+    #[test]
+    fn sessions_imported_before_the_counts_existed_get_them_at_the_next_import() {
+        let home = tempfile::tempdir().unwrap();
+        let roots = fixture(home.path());
+        write(
+            &home.path().join("claude/project/claude-session.jsonl"),
+            &[claude_line("user", "go", 0), claude_reply("m1", 5, 1)],
+        );
+        let store = Store::open_in_memory().unwrap();
+        Importer::run(&store, &MachineId::local(), &roots);
+        // The state of a database from before: the session and its cursor are
+        // there, the counts are not.
+        store
+            .write(StoreChange::Sessions, |tx| {
+                tx.execute("DELETE FROM token_usage", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(claude_totals(&store), (0, 0));
+        // What the migration does to such a database.
+        store
+            .write(StoreChange::Sessions, |tx| {
+                tx.execute(
+                    "DELETE FROM import_cursor WHERE source_key NOT LIKE 'share:%'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let report = Importer::run(&store, &MachineId::local(), &roots);
+
+        assert_eq!(report.imported, 3);
+        assert_eq!(claude_totals(&store), (10, 5));
+        assert_eq!(
+            store
+                .recent_sessions(&SessionFilter::default(), 10)
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
     #[test]
     fn only_a_changed_file_is_imported_again_and_its_session_is_updated() {
         let home = tempfile::tempdir().unwrap();
@@ -459,6 +590,7 @@ mod tests {
             claude_projects: Some(home.path().join("nope")),
             codex_sessions: Some(home.path().join("nope")),
             opencode_db: Some(home.path().join("nope.db")),
+            accounts: Vec::new(),
         };
         let store = Store::open_in_memory().unwrap();
         assert_eq!(
@@ -595,6 +727,7 @@ mod tests {
             claude_projects: Some(dir.join("claude")),
             codex_sessions: None,
             opencode_db: None,
+            accounts: Vec::new(),
         };
         (roots, dir.join("claude/project/cut-session.jsonl"))
     }
@@ -724,5 +857,96 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn sessions_of_an_accounts_folder_are_stored_as_the_accounts_and_do_not_touch_the_diagnosis() {
+        let home = tempfile::tempdir().unwrap();
+        let mut roots = fixture(home.path());
+        write(
+            &home.path().join("work/projects/project/work-session.jsonl"),
+            &[claude_line("user", "rotate the staging keys", 0)],
+        );
+        write(
+            &home
+                .path()
+                .join("codex-work/sessions/2026/03/01/rollout-2026-03-01T11-00-00-codexwork.jsonl"),
+            &[codex_line("user", "bench the parser", 0)],
+        );
+        roots.accounts = vec![
+            crate::roots::AccountRoot {
+                account: "claude-work".into(),
+                claude_projects: Some(home.path().join("work/projects")),
+                codex_sessions: None,
+            },
+            crate::roots::AccountRoot {
+                account: "codex-work".into(),
+                claude_projects: None,
+                codex_sessions: Some(home.path().join("codex-work/sessions")),
+            },
+        ];
+        let store = Store::open_in_memory().unwrap();
+
+        let report = Importer::run(&store, &MachineId::local(), &roots);
+
+        assert_eq!(report.imported, 5);
+        let sessions = store
+            .recent_sessions(&SessionFilter::default(), 10)
+            .unwrap();
+        let account_of = |external: &str| {
+            sessions
+                .iter()
+                .find(|session| session.external_id == external)
+                .unwrap()
+                .account
+                .clone()
+        };
+        assert_eq!(account_of("work-session").as_deref(), Some("claude-work"));
+        assert_eq!(
+            account_of("rollout-2026-03-01T11-00-00-codexwork").as_deref(),
+            Some("codex-work")
+        );
+        // The agents' own sessions are the agents' own.
+        assert_eq!(account_of("claude-session"), None);
+        assert_eq!(account_of("rollout-2026-03-01T11-00-00-codex"), None);
+        // One recorded run per agent: the account folders did not replace it.
+        let overview = store.history_overview(&MachineId::local()).unwrap();
+        let run = overview
+            .iter()
+            .find(|agent| agent.agent == "claude")
+            .and_then(|agent| agent.last_run.as_ref())
+            .unwrap();
+        assert_eq!(run.scanned, 1);
+    }
+
+    #[test]
+    fn an_incremental_poll_keeps_one_stamp_per_account_folder() {
+        let home = tempfile::tempdir().unwrap();
+        let mut roots = fixture(home.path());
+        write(
+            &home.path().join("work/projects/project/work-session.jsonl"),
+            &[claude_line("user", "rotate the staging keys", 0)],
+        );
+        roots.accounts = vec![crate::roots::AccountRoot {
+            account: "claude-work".into(),
+            claude_projects: Some(home.path().join("work/projects")),
+            codex_sessions: None,
+        }];
+        let store = Store::open_in_memory().unwrap();
+        let mut stamps = std::collections::HashMap::new();
+        let first = Importer::run_changed(&store, &MachineId::local(), &roots, &mut stamps);
+        assert_eq!(first.imported, 4);
+        assert!(stamps.contains_key("claude"));
+        assert!(stamps.contains_key("claude#claude-work"));
+        // Nothing moved: no source is even listed.
+        let again = Importer::run_changed(&store, &MachineId::local(), &roots, &mut stamps);
+        assert_eq!(again.scanned, 0);
+        // Only the account's folder changed: only it is read.
+        write(
+            &home.path().join("work/projects/project/second.jsonl"),
+            &[claude_line("user", "and the prod ones", 5)],
+        );
+        let third = Importer::run_changed(&store, &MachineId::local(), &roots, &mut stamps);
+        assert_eq!((third.scanned, third.imported), (2, 1));
     }
 }

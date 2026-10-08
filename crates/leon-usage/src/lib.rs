@@ -9,6 +9,10 @@
 //! switched on, through the [`network::Http`] trait, with a credential that is
 //! read at the moment of the call and never stored, logged or shown.
 //!
+//! Beside the limits, [`spend`] sums the tokens the history import counted from
+//! the agents' transcripts, and [`pricing`] turns them into an estimated cost at
+//! the providers' API list prices (a data file, which the user can extend).
+//!
 //! Nothing here draws anything.
 
 #![warn(missing_docs)]
@@ -25,14 +29,19 @@ pub mod model;
 pub mod network;
 pub mod opencode;
 pub mod present;
+pub mod pricing;
 pub mod secret;
+pub mod spend;
 pub mod view;
 pub mod zcode;
 
 #[cfg(test)]
 mod providers_tests;
 
-pub use collect::{collect_machine, collect_machine_on, series_key, MachineUsage};
+pub use collect::{
+    collect_accounts, collect_machine, collect_machine_on, series_key, series_key_of,
+    AccountFolder, MachineUsage,
+};
 pub use forecast::{forecast, Forecast, Sample};
 pub use model::{
     AgentUsage, Collected, Effective, EffectiveWindow, Reason, Source, State, UsageWindow,
@@ -42,4 +51,6 @@ pub use present::{
     ago, compact_duration, countdown, percent_fixed, percent_round, Level, PercentDisplay,
     Thresholds,
 };
-pub use view::{view, AgentView, Body, Meter};
+pub use pricing::{normalize_model, PriceEntry, PriceTable};
+pub use spend::{report as spend_report, Cost, Line, Period, Report};
+pub use view::{heading, view, AgentView, Body, Meter};

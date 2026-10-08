@@ -8,7 +8,9 @@
 //! from the terminal itself: starting (nothing printed yet), running, and
 //! exited with a code.
 
-use super::activity::{terminal_activity, Activity, Signals, Thresholds};
+use super::activity::{
+    session_activity, terminal_activity, Activity, Signals, Thresholds, Transcript,
+};
 use gpui_kit::{App, Entity, Subscription};
 use leon_core::{AgentId, MachineId, SessionId};
 use leon_term::TerminalView;
@@ -100,6 +102,9 @@ pub struct LiveSession {
     pub cwd: String,
     /// The agent, or `None` for a plain shell.
     pub agent: Option<AgentId>,
+    /// The id of the account the agent was started as; `None` is the agent's
+    /// own setup.
+    pub account: Option<String>,
     /// The agent's own id of the history session it resumed.
     pub resumed: Option<String>,
     /// The history session it was started from, as the store knows it: while
@@ -125,6 +130,10 @@ pub struct LiveSession {
     /// How it is doing, as the worktree's dot reads it; kept up to date by
     /// terminal wake-ups and the coarse timer.
     pub activity: Activity,
+    /// What the agent's own transcript says it is doing, once it was read
+    /// (see `transcript_watch.rs`); `None` where it is not followed or says
+    /// nothing, and then the terminal alone decides.
+    pub transcript: Option<Transcript>,
     /// The line that resumes the agent, held back until the session is shown
     /// or the person asks: a restored session is "paused" while it is set.
     pub pending: Option<String>,
@@ -172,9 +181,15 @@ impl LiveSession {
         }
     }
 
-    /// How it is doing now.
+    /// How it is doing now: the terminal's heuristic, refined by the
+    /// transcript where there is one.
     pub fn read_activity(&self, cx: &App, thresholds: &Thresholds) -> Activity {
-        terminal_activity(&self.signals(cx), thresholds)
+        let signals = self.signals(cx);
+        session_activity(
+            terminal_activity(&signals, thresholds),
+            &signals,
+            self.transcript,
+        )
     }
 
     /// Whether the session waits for the person (or its tab) before its agent

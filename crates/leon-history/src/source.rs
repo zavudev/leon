@@ -21,6 +21,7 @@ use leon_core::AgentId;
 use rusqlite::Connection;
 use thiserror::Error;
 
+use crate::live::list_claude_subagents;
 use crate::opencode_json::{self, JsonMessage, JsonOutcome};
 use crate::session::ParsedSession;
 use crate::survey::{Place, SkipReason, Survey};
@@ -75,6 +76,13 @@ pub trait HistorySource: Send + Sync {
     /// The agent whose sessions this source provides.
     fn agent(&self) -> AgentId;
 
+    /// The id of the account whose folder this source reads, when it is not the
+    /// agent's own (see [`leon_core::Account`]). The sessions it provides are
+    /// stored as that account's.
+    fn account(&self) -> Option<&str> {
+        None
+    }
+
     /// Enumerates the items currently available. A source whose root does
     /// not exist lists nothing; that is not an error.
     fn list(&self) -> Result<Vec<SourceItem>, HistoryError>;
@@ -106,11 +114,62 @@ pub trait HistorySource: Send + Sync {
     }
 }
 
+/// A source read from the folder of one account of an agent: the sessions it
+/// provides are the account's.
+pub struct ForAccount {
+    inner: Box<dyn HistorySource>,
+    account: String,
+}
+
+impl ForAccount {
+    /// `inner`, as the source of the account with this id.
+    pub fn new(inner: Box<dyn HistorySource>, account: impl Into<String>) -> Self {
+        Self {
+            inner,
+            account: account.into(),
+        }
+    }
+}
+
+impl HistorySource for ForAccount {
+    fn agent(&self) -> AgentId {
+        self.inner.agent()
+    }
+
+    fn account(&self) -> Option<&str> {
+        Some(&self.account)
+    }
+
+    fn list(&self) -> Result<Vec<SourceItem>, HistoryError> {
+        self.inner.list()
+    }
+
+    fn load(&self, item: &SourceItem) -> Result<Option<ParsedSession>, HistoryError> {
+        self.inner.load(item)
+    }
+
+    fn stamp(&self) -> Option<String> {
+        self.inner.stamp()
+    }
+
+    fn problems(&self) -> Vec<String> {
+        self.inner.problems()
+    }
+
+    fn survey(&self) -> Survey {
+        self.inner.survey()
+    }
+}
+
 /// Claude Code transcripts on the local file system.
 ///
 /// The root is Claude Code's `projects` directory. Session files sit exactly
-/// one directory below it, `<root>/<project>/<session-id>.jsonl`; deeper
-/// files belong to sub-agents and are left alone.
+/// one directory below it, `<root>/<project>/<session-id>.jsonl`. The deeper
+/// files, `<session-id>/subagents/agent-*.jsonl`, are the sub-agents' own
+/// transcripts: they are not sessions of their own and their text is not kept,
+/// but their token usage is counted into the session that started them, and
+/// the session's fingerprint covers them so a sub-agent that works on
+/// re-imports its session.
 #[derive(Debug, Clone)]
 pub struct ClaudeFiles {
     root: PathBuf,
@@ -134,7 +193,11 @@ impl HistorySource for ClaudeFiles {
             if project.is_dir() {
                 for file in read_dir(&project)? {
                     if has_extension(&file, "jsonl") {
-                        items.extend(file_item(AgentId::CLAUDE, &file));
+                        items.extend(file_item(AgentId::CLAUDE, &file).map(|mut item| {
+                            item.fingerprint
+                                .push_str(&subagent_fingerprint(&subagent_files(&file)));
+                            item
+                        }));
                     }
                 }
             }
@@ -146,11 +209,22 @@ impl HistorySource for ClaudeFiles {
     fn load(&self, item: &SourceItem) -> Result<Option<ParsedSession>, HistoryError> {
         let path = Path::new(&item.locator);
         let bytes = read_file(path)?;
-        Ok(claude::parse_session(&file_stem(path), &bytes))
+        // The sub-agent files are read one at a time, as the parser asks for
+        // them; the first one that cannot be read fails the whole item.
+        let mut failure = None;
+        let subagents = subagent_files(path)
+            .into_iter()
+            .map_while(|file| read_file(&file).map_err(|error| failure = Some(error)).ok());
+        let parsed = claude::parse_session_with(&file_stem(path), &bytes, subagents);
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(parsed),
+        }
     }
 
     fn stamp(&self) -> Option<String> {
-        Some(tree_stamp(&self.root, 2))
+        // Down to the sub-agent files: <project>/<session>/subagents/*.jsonl.
+        Some(tree_stamp(&self.root, 3))
     }
 
     fn survey(&self) -> Survey {
@@ -171,7 +245,8 @@ impl HistorySource for ClaudeFiles {
         for project in projects {
             for entry in read_dir(&project).unwrap_or_default() {
                 if entry.is_dir() {
-                    // Sub-agent transcripts live deeper than the session files.
+                    // Sub-agent transcripts live deeper than the session files;
+                    // they are no sessions, their usage is counted into one.
                     for _ in jsonl_below(&entry, 4) {
                         survey.skip(SkipReason::ChildSession);
                     }
@@ -345,6 +420,24 @@ impl HistorySource for OpencodeDb {
     fn load(&self, item: &SourceItem) -> Result<Option<ParsedSession>, HistoryError> {
         self.with_connection(|connection| opencode::read_session(connection, &item.locator))
     }
+}
+
+/// The transcripts of the sub-agents of the Claude Code session at `session`,
+/// in a fixed order. A session without sub-agents has none.
+fn subagent_files(session: &Path) -> Vec<PathBuf> {
+    list_claude_subagents(session)
+        .into_iter()
+        .map(|file| file.path)
+        .collect()
+}
+
+/// What the sub-agent files add to their session's fingerprint: each one's
+/// name, size and modification time, or nothing when there are none.
+fn subagent_fingerprint(files: &[PathBuf]) -> String {
+    files
+        .iter()
+        .map(|file| format!("+{}={}", file_stem(file), file_stamp(file)))
+        .collect()
 }
 
 /// Every `.jsonl` file below `directory`, at most `depth` levels down.
@@ -892,6 +985,73 @@ mod tests {
         let session = source.load(&items[0]).unwrap().unwrap();
         assert_eq!(session.external_id, "session-1");
         assert_eq!(session.messages.len(), 1);
+    }
+
+    /// An assistant line of a sub-agent with a usage block.
+    fn sub_agent_reply(id: &str, output: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","isSidechain":true,"timestamp":"2026-03-01T10:00:05Z","message":{{"id":"{id}","model":"model-a","content":"secret sub-agent text","usage":{{"input_tokens":1,"output_tokens":{output}}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn the_tokens_of_a_sessions_sub_agent_files_are_counted_into_it() {
+        let root = tempfile::tempdir().unwrap();
+        let session = root.path().join("project/session-1.jsonl");
+        let reply = r#"{"type":"assistant","timestamp":"2026-03-01T10:00:01Z","message":{"id":"m1","model":"model-a","content":"ok","usage":{"input_tokens":2,"output_tokens":10}}}"#;
+        write(&session, &format!("{USER_LINE}\n{reply}\n"));
+        let agents = root.path().join("project/session-1/subagents");
+        write(&agents.join("agent-a.jsonl"), &sub_agent_reply("s1", 100));
+        write(&agents.join("agent-b.jsonl"), &sub_agent_reply("s2", 1000));
+        // Not transcripts, and a folder of a session that has no file.
+        write(&agents.join("agent-a.meta.json"), "{}");
+        write(
+            &root.path().join("project/gone/subagents/agent-c.jsonl"),
+            &sub_agent_reply("s3", 5),
+        );
+
+        let source = ClaudeFiles::new(root.path());
+        let items = source.list().unwrap();
+        assert_eq!(items.len(), 1);
+        let parsed = source.load(&items[0]).unwrap().unwrap();
+
+        assert_eq!(parsed.messages.len(), 2, "the sub-agents' text is not kept");
+        assert!(parsed.messages.iter().all(|m| !m.text.contains("secret")));
+        let tokens: Vec<_> = parsed
+            .tokens
+            .iter()
+            .map(|t| (t.counts.input, t.counts.output))
+            .collect();
+        assert_eq!(tokens, [(4, 1110)]);
+    }
+
+    #[test]
+    fn a_sub_agent_that_works_on_changes_its_sessions_fingerprint_and_stamp() {
+        let root = tempfile::tempdir().unwrap();
+        write(&root.path().join("project/session-1.jsonl"), USER_LINE);
+        let source = ClaudeFiles::new(root.path());
+        let plain = source.list().unwrap();
+        let plain_stamp = source.stamp();
+
+        let agent = root
+            .path()
+            .join("project/session-1/subagents/agent-a.jsonl");
+        write(&agent, &sub_agent_reply("s1", 1));
+        let with_one = source.list().unwrap();
+        assert_eq!(with_one[0].key, plain[0].key);
+        assert_ne!(with_one[0].fingerprint, plain[0].fingerprint);
+        assert_ne!(source.stamp(), plain_stamp);
+
+        write(
+            &agent,
+            &format!(
+                "{}\n{}\n",
+                sub_agent_reply("s1", 1),
+                sub_agent_reply("s2", 1)
+            ),
+        );
+        let grown = source.list().unwrap();
+        assert_ne!(grown[0].fingerprint, with_one[0].fingerprint);
     }
 
     #[test]

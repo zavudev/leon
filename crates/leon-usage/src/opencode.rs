@@ -147,6 +147,7 @@ pub fn parse_usage(body: &str, machine: &str, now: i64) -> AgentUsage {
         agent: AgentId::OPENCODE,
         machine: machine.to_owned(),
         account_label: Some("Go".into()),
+        account: None,
         plan: Some("Go".into()),
         source: Some(Source::VendorApi),
         observed_at: Some(now),

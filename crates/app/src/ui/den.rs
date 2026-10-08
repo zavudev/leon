@@ -158,7 +158,7 @@ fn tool_line(tool: &ToolInFlight) -> String {
 
 /// Whether a call waits for the user by its nature: a question, or a plan
 /// to approve.
-fn asks(tool: &ToolInFlight) -> bool {
+pub(super) fn asks(tool: &ToolInFlight) -> bool {
     tool.kind == ToolKind::Ask || tool.name.eq_ignore_ascii_case("ExitPlanMode")
 }
 

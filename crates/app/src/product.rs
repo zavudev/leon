@@ -226,7 +226,7 @@ mod tests {
     #[test]
     fn no_interface_text_spells_the_product_name_in_capitals_or_lower_case() {
         // Where lower case is the identifier, not the name.
-        const ALLOWED: [&str; 14] = [
+        const ALLOWED: [&str; 15] = [
             "\"leon\"",
             "LEON-ICON",
             "leon --",
@@ -241,6 +241,7 @@ mod tests {
             "theme: leon",
             "id = \\\"leon",
             "`leon`",
+            "leon host",
         ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut stack = vec![root];

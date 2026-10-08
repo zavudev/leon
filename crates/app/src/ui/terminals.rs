@@ -23,11 +23,12 @@ use super::restore;
 const TAKE_OVER_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 use super::shell::{ElsewhereNote, Main, Notice, Overlay, Pane, Shell};
-use super::steps::SessionIntent;
+use super::steps::{AccountAsk, SessionIntent};
 use super::tree::{self, NodeId};
 use super::workspace::{self, Closed};
 use crate::engine::{MachineState, Op, StatusKind, Target};
 use crate::icons::agent_icon;
+use crate::keys::Command;
 use crate::launch::{self, Launch, LaunchError};
 use crate::theme::{self, hairline, metrics, px, Palette};
 use gpui_kit::prelude::*;
@@ -94,6 +95,43 @@ pub enum Place {
     Tab(LiveId),
     /// A new pane beside or below this terminal's.
     Split(LiveId, Axis),
+}
+
+/// A new session that waits for the person to say which account of its agent
+/// it starts with: everything `start_live` needs but the account.
+pub(super) struct PendingStart {
+    launch: Launch,
+    pub(super) machine: MachineId,
+    cwd: String,
+    place: Place,
+}
+
+impl PendingStart {
+    /// What the palette needs to ask about it.
+    pub(super) fn asking(&self, machine_name: &str) -> Option<AccountAsk> {
+        match &self.launch {
+            Launch::Agent { kind, .. } => Some(AccountAsk {
+                agent: *kind,
+                machine_name: machine_name.to_owned(),
+                cwd: self.cwd.clone(),
+            }),
+            Launch::Prompted { .. } | Launch::Shell => None,
+        }
+    }
+}
+
+/// The account a session of `agent` starts as when nobody can be asked (a
+/// fan-out, a new worktree's session): the one
+/// the setting `default_accounts` names, else the agent's own setup (also when
+/// the agent has accounts and no default, or the default no longer exists).
+pub(super) fn default_account(agent: leon_core::AgentId, cx: &gpui_kit::App) -> Option<String> {
+    use leon_core::account::{resolve, Pick};
+    let accounts = crate::settings::accounts(cx);
+    let defaults = crate::settings::default_accounts(cx);
+    match resolve(agent, &accounts, &defaults) {
+        Pick::Account(account) => Some(account.id.clone()),
+        Pick::Plain | Pick::Ask(_) => None,
+    }
 }
 
 /// What a divider being dragged carries.
@@ -186,7 +224,9 @@ impl Shell {
     /// Starts `launch` in `cwd` on `machine`: a base terminal that is a new
     /// session, a tab of one or a pane, with the agent typed into its shell
     /// when one is asked for.
-    /// `history` is the history session it resumes, when it does.
+    /// `history` is the history session it resumes, when it does. Says
+    /// whether a session was started: when it was not, the status line says
+    /// why and nothing else has changed.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn start_live(
         &mut self,
@@ -197,15 +237,88 @@ impl Shell {
         history: Option<SessionId>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let agent = match &launch {
-            Launch::Agent { kind, .. } => Some(*kind),
-            Launch::Shell => None,
+    ) -> bool {
+        let (agent, account) = match &launch {
+            Launch::Agent { kind, account, .. } | Launch::Prompted { kind, account, .. } => {
+                (Some(*kind), account.clone())
+            }
+            Launch::Shell => (None, None),
         };
         let Some(id) = self.spawn_live(launch, machine, cwd, history, false, None, window, cx)
         else {
+            return false;
+        };
+        self.place_live(id, place, machine, cwd, window, cx);
+        self.warn_before_session(agent, account.as_deref(), machine, cx);
+        true
+    }
+
+    /// Like [`Shell::start_live`], with `first` typed into the shell before
+    /// anything else: the agent of `launch` follows only when `first`
+    /// succeeded (see [`launch::chain`]), and a shell has nothing after it.
+    /// When `first` fails the terminal stays open at its prompt with the
+    /// output, which is how the person sees what went wrong. `title` is what
+    /// the row says until the program sets its own.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn start_live_first(
+        &mut self,
+        first: &str,
+        kind: launch::First,
+        title: Option<String>,
+        launch: Launch,
+        machine: &MachineId,
+        cwd: &str,
+        place: Place,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (agent, account) = match &launch {
+            Launch::Agent { kind, account, .. } | Launch::Prompted { kind, account, .. } => {
+                (Some(*kind), account.clone())
+            }
+            Launch::Shell => (None, None),
+        };
+        // Deferred, the agent's line is held back in the session instead of
+        // typed; it is typed here, behind `first`.
+        let Some(id) = self.spawn_live(launch, machine, cwd, None, true, title, window, cx) else {
             return;
         };
+        let then = self
+            .live
+            .get_mut(id)
+            .and_then(|session| session.pending.take());
+        let flavor = self.shell_flavor_of(machine, cx);
+        let line = launch::chain(first, kind, then.as_deref(), flavor);
+        if let Some(session) = self.live.get(id) {
+            Self::type_when_ready(session.view.read(cx).terminal(), self.options.ready, line);
+        }
+        self.place_live(id, place, machine, cwd, window, cx);
+        self.warn_before_session(agent, account.as_deref(), machine, cx);
+    }
+
+    /// The flavour of the shell a terminal on `machine` types into.
+    pub(super) fn shell_flavor_of(
+        &self,
+        machine: &MachineId,
+        cx: &gpui_kit::App,
+    ) -> launch::Flavor {
+        let found = self.snapshot.machine(machine).cloned();
+        let prefs = Self::launch_prefs(cx);
+        found.map_or(launch::Flavor::Posix, |found| {
+            launch::shell_flavor(&found, &*self.options.system, &prefs)
+        })
+    }
+
+    /// Puts a terminal that was just started in its tab or pane and shows it.
+    fn place_live(
+        &mut self,
+        id: LiveId,
+        place: Place,
+        machine: &MachineId,
+        cwd: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match place {
             Place::Split(of, axis) if self.workspaces.locate(of).is_some() => {
                 self.workspaces.split(of, axis, id);
@@ -218,7 +331,84 @@ impl Shell {
         }
         self.refresh_live();
         self.open_live(id, window, cx);
-        self.warn_before_session(agent, machine, cx);
+    }
+
+    /// Starts a new session of `launch`, as the account the settings name for
+    /// its agent, or after asking which when the agent has accounts and the
+    /// settings name none. Everything that is not a new session of an agent
+    /// (a shell, a resume, a restore) starts at once with `start_live`: those
+    /// already know their account.
+    pub(super) fn start_new(
+        &mut self,
+        launch: Launch,
+        machine: &MachineId,
+        cwd: &str,
+        place: Place,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use leon_core::account::{resolve, Pick};
+        let mut launch = launch;
+        if let Launch::Agent {
+            kind,
+            resume: None,
+            account: account @ None,
+        } = &mut launch
+        {
+            let accounts = crate::settings::accounts(cx);
+            let defaults = crate::settings::default_accounts(cx);
+            match resolve(*kind, &accounts, &defaults) {
+                Pick::Plain => {}
+                Pick::Account(chosen) => *account = Some(chosen.id.clone()),
+                Pick::Ask(_) => {
+                    self.ask_account(
+                        PendingStart {
+                            launch,
+                            machine: machine.clone(),
+                            cwd: cwd.to_owned(),
+                            place,
+                        },
+                        window,
+                        cx,
+                    );
+                    return;
+                }
+            }
+        }
+        self.start_live(launch, machine, cwd, place, None, window, cx);
+    }
+
+    /// Asks which account the waiting session starts with, in the palette.
+    fn ask_account(&mut self, pending: PendingStart, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_start = Some(pending);
+        self.open_palette("", window, cx);
+        self.palette.world = Some(self.world(cx));
+        self.advance_flow(Command::NewSession, Vec::new(), window, cx);
+    }
+
+    /// The answer to [`Self::ask_account`]: starts the waiting session as the
+    /// account (`None`: the agent's own setup).
+    pub(super) fn start_waiting_with(
+        &mut self,
+        account: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut pending) = self.pending_start.take() else {
+            return;
+        };
+        if let Launch::Agent { account: slot, .. } = &mut pending.launch {
+            *slot = account;
+        }
+        self.start_live(
+            pending.launch,
+            &pending.machine,
+            &pending.cwd,
+            pending.place,
+            None,
+            window,
+            cx,
+        );
     }
 
     /// Makes a `#123` printed in a local terminal a link to that pull request
@@ -321,9 +511,14 @@ impl Shell {
         }
 
         let id = self.live.next_id();
-        let (agent, resumed) = match &launch {
-            Launch::Agent { kind, resume } => (Some(*kind), resume.clone()),
-            Launch::Shell => (None, None),
+        let (agent, resumed, account) = match &launch {
+            Launch::Agent {
+                kind,
+                resume,
+                account,
+            } => (Some(*kind), resume.clone(), account.clone()),
+            Launch::Prompted { kind, account, .. } => (Some(*kind), None, account.clone()),
+            Launch::Shell => (None, None, None),
         };
         // Whatever starts here is what new dialogs offer first.
         if agent.is_some() {
@@ -359,6 +554,7 @@ impl Shell {
             machine_name: found.name.clone(),
             cwd: cwd.to_owned(),
             agent,
+            account,
             resumed: resumed.clone(),
             history,
             title,
@@ -374,6 +570,7 @@ impl Shell {
             bell: false,
             failure_seen: false,
             activity: Activity::Off,
+            transcript: None,
             pending,
             learned: match (&agent, &resumed) {
                 (Some(_), Some(id)) => Some((id.clone(), "resumed".to_owned())),
@@ -451,6 +648,7 @@ impl Shell {
     fn warn_before_session(
         &mut self,
         agent: Option<leon_core::AgentId>,
+        account: Option<&str>,
         machine: &MachineId,
         cx: &mut Context<Self>,
     ) {
@@ -460,10 +658,11 @@ impl Shell {
         if !crate::settings::flag(cx, "usage_warn_before_session") {
             return;
         }
-        let notice = crate::agent_usage::start_notice(
+        let notice = crate::agent_usage::start_notice_for(
             &self.usage.board,
             machine,
             agent,
+            account,
             (self.options.now)().timestamp(),
             crate::settings::usage_thresholds(cx),
             crate::settings::usage_percent_display(cx),
@@ -483,6 +682,7 @@ impl Shell {
         let launch = Launch::Agent {
             kind: intent.agent,
             resume: None,
+            account: intent.account,
         };
         self.start_live(
             launch,
@@ -514,7 +714,11 @@ impl Shell {
         let Some(line) = spec.rename_line(name) else {
             return;
         };
-        if session.activity == Activity::Waiting && !session.is_paused() {
+        // Typed into a permission prompt it would answer it: only an agent
+        // that finished its turn, or that merely reads as waiting, is asked.
+        if matches!(session.activity, Activity::Waiting | Activity::TurnOver)
+            && !session.is_paused()
+        {
             session
                 .view
                 .read(cx)
@@ -567,8 +771,10 @@ impl Shell {
     }
 
     /// Reads a session's activity again. `true` when it changed. A change to
-    /// waiting is said the ways the settings ask for.
-    fn set_activity(
+    /// a state that wants the user (finished its turn, needs an answer, or
+    /// only waiting) is said the ways the settings ask for, once (see
+    /// [`Activity::is_news_after`]).
+    pub(super) fn set_activity(
         &mut self,
         id: LiveId,
         thresholds: &super::activity::Thresholds,
@@ -579,10 +785,14 @@ impl Shell {
         };
         let now = session.read_activity(cx, thresholds);
         let before = std::mem::replace(&mut session.activity, now);
-        if before != now && now == Activity::Waiting {
-            self.raise(notify::Event::Waiting, id, cx);
-            // The agent finished its turn: its session was written.
-            self.request_import(cx);
+        if now.is_news_after(before) {
+            if let Some(event) = notify::Event::of_activity(now) {
+                self.raise(event, id, cx);
+            }
+            if matches!(now, Activity::Waiting | Activity::TurnOver) {
+                // The agent finished its turn: its session was written.
+                self.request_import(cx);
+            }
         }
         before != now
     }
@@ -602,6 +812,13 @@ impl Shell {
     /// geek banner over the window and the desktop notification. The session
     /// the user is looking at says it itself.
     pub(super) fn raise(&mut self, event: notify::Event, id: LiveId, cx: &mut Context<Self>) {
+        // A snoozed session that needs the person, fails or finishes is back,
+        // whatever the notification settings say, and whether or not it is
+        // on screen. A restored terminal that waits to be resumed has nothing
+        // to say, and does not end a snooze either.
+        if !self.live.get(id).is_some_and(|session| session.is_paused()) {
+            self.wake_snoozed(id);
+        }
         let prefs = crate::settings::notifications(cx);
         if !prefs.enabled || !prefs.allows(event) {
             return;
@@ -673,6 +890,9 @@ impl Shell {
                     if this.refresh_activity(cx) {
                         cx.notify();
                     }
+                    // A session whose agent was just seen, or whose id was
+                    // just learned, has a transcript to follow.
+                    this.status_watch(cx);
                     turns = turns.wrapping_add(1);
                     if turns % CHECK_WORKTREES_EVERY == 0 {
                         this.check_live_worktrees();
@@ -830,6 +1050,9 @@ impl Shell {
     /// Puts the live sessions in the tree and keeps the cursor on its node.
     pub(super) fn refresh_live(&mut self) {
         self.placement = self.place(&self.snapshot);
+        // A terminal that ended may have been the last thing keeping merged
+        // work in its list.
+        self.settle_merged_now();
         self.rebuild_rows();
     }
 
@@ -838,7 +1061,7 @@ impl Shell {
     pub(super) fn open_live(&mut self, id: LiveId, window: &mut Window, cx: &mut Context<Self>) {
         // A file is a pane like the others: its tab is shown and it is
         // focused, but it has no row in the tree.
-        if self.files.contains_key(&id) {
+        if self.files.contains_key(&id) || self.changes.contains_key(&id) {
             self.workspaces.focus(id);
             self.main = Main::Live(id);
             self.pane = Pane::Main;
@@ -918,9 +1141,8 @@ impl Shell {
             vec![id]
         };
         let belonging = self.history_of_live(if whole { lead } else { id });
-        // A session with no history row to stay in the sidebar as is kept as
-        // a record of its own.
-        let remembered = (whole && keep && belonging.is_none())
+        // What a whole session is, to bring its row back if the step is undone.
+        let identity = whole
             .then(|| {
                 self.live.get(lead).map(|session| {
                     (
@@ -928,25 +1150,60 @@ impl Shell {
                         session.cwd.clone(),
                         session.shown_agent(),
                         session.name.clone().or_else(|| session.title.clone()),
+                        session.account.clone(),
                     )
                 })
             })
             .flatten();
+        // A session with no history row to stay in the sidebar as is kept as
+        // a record of its own.
+        let remembered = identity.clone().filter(|_| keep && belonging.is_none());
         for terminal in ending {
             self.close_live(terminal, window, cx);
         }
-        if let Some((machine, cwd, agent, label)) = remembered {
-            self.dormant.add(&machine, &cwd, agent, label);
+        let mut sleeper = None;
+        if let Some((machine, cwd, agent, label, account)) = remembered {
+            self.dormant.add(&machine, &cwd, agent, label, account);
+            sleeper = self.dormant.all().last().map(super::dormant::Dormant::id);
             self.save_dormant();
             self.refresh_live();
         }
-        if let Some(history) = belonging {
+        // Closing a whole session waits to remove its history until the
+        // banner that offers Undo is gone.
+        let mut forget = Vec::new();
+        if let Some(history) = belonging.clone() {
             if keep {
                 self.slept.insert(history);
             } else {
                 self.slept.remove(&history);
-                self.engine.submit(Op::ForgetSessions(vec![history]));
+                if identity.is_some() {
+                    self.shelves.hidden.insert(history.clone());
+                    forget.push(history);
+                    self.reload(cx);
+                } else {
+                    self.engine.submit(Op::ForgetSessions(vec![history]));
+                }
             }
+        }
+        if let Some((machine, cwd, agent, label, account)) = identity {
+            let title = label
+                .clone()
+                .unwrap_or_else(|| agent.map_or("Shell", crate::format::agent_name).to_owned());
+            let gone = super::shelf::Gone {
+                machine,
+                cwd,
+                agent,
+                label,
+                account,
+                history: belonging,
+                sleeper,
+            };
+            let undo = if keep {
+                super::shelf::Undo::Slept(gone)
+            } else {
+                super::shelf::Undo::Closed(gone)
+            };
+            self.offer_undo(undo, &title, forget, cx);
         }
     }
 
@@ -958,6 +1215,26 @@ impl Shell {
         }
     }
 
+    /// Closes the sleeping session the keyboard is on, and offers to undo it.
+    pub(super) fn close_dormant_here(&mut self, id: LiveId, cx: &mut Context<Self>) {
+        let Some(record) = self.dormant.get(id).cloned() else {
+            return;
+        };
+        let title = record.label.clone().unwrap_or_else(|| {
+            record
+                .agent()
+                .map_or("Shell", crate::format::agent_name)
+                .to_owned()
+        });
+        self.close_dormant(id);
+        self.offer_undo(
+            super::shelf::Undo::ClosedSleeper(record),
+            &title,
+            Vec::new(),
+            cx,
+        );
+    }
+
     /// Takes a sleeping session out of the sidebar for good.
     pub(super) fn close_dormant(&mut self, id: LiveId) {
         if self.dormant.remove(id).is_some() {
@@ -967,18 +1244,24 @@ impl Shell {
     }
 
     /// Wakes a sleeping session: a new session starts where it ran, with its
-    /// agent when it had one, and its row is the new session's.
+    /// agent and account when it had them, and its row is the new session's.
+    /// A session that cannot start (an account that was removed, an agent that
+    /// is gone) stays asleep, with the reason in the status line: adding the
+    /// account again with the same name wakes it as it was.
     pub(super) fn wake_dormant(&mut self, id: LiveId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(sleeping) = self.dormant.get(id).cloned() else {
             return;
         };
-        self.close_dormant(id);
         let launch = match sleeping.agent() {
-            Some(kind) => Launch::Agent { kind, resume: None },
+            Some(kind) => Launch::Agent {
+                kind,
+                resume: None,
+                account: sleeping.account.clone(),
+            },
             None => Launch::Shell,
         };
         let machine = sleeping.machine();
-        self.start_live(
+        if !self.start_live(
             launch,
             &machine,
             &sleeping.cwd,
@@ -986,7 +1269,10 @@ impl Shell {
             None,
             window,
             cx,
-        );
+        ) {
+            return;
+        }
+        self.close_dormant(id);
         if let (Some(label), Some(new)) = (sleeping.label, self.live.ids().last().copied()) {
             if let Some(session) = self.live.get_mut(new) {
                 session.name = Some(label);
@@ -1022,18 +1308,41 @@ impl Shell {
         else {
             return;
         };
-        if workspace.tabs.len() <= 1 {
+        // A changes tab holds nothing to keep: it just closes. The panes of
+        // the tab that are terminals go on to be closed as usual.
+        let leaves = tab.layout.leaves();
+        let single = workspace.tabs.len() <= 1;
+        let terminals: Vec<LiveId> = leaves
+            .iter()
+            .copied()
+            .filter(|leaf| !self.changes.contains_key(leaf))
+            .collect();
+        if terminals.len() != leaves.len() {
+            let mine: Vec<LiveId> = leaves
+                .iter()
+                .copied()
+                .filter(|leaf| self.changes.contains_key(leaf))
+                .collect();
+            for leaf in mine {
+                self.close_changes(leaf, window, cx);
+            }
+            if let Some(next) = terminals.first() {
+                self.close_tab(*next, window, cx);
+            }
+            return;
+        }
+        if single {
             self.end_live(id, true, true, window, cx);
             return;
         }
-        for pane in tab.layout.leaves() {
+        for pane in leaves {
             self.close_live(pane, window, cx);
         }
     }
 
     /// The history session that belongs to a live one: the link the terminal
     /// holds, else the session its learned id names, as the history knows it.
-    fn history_of_live(&self, id: LiveId) -> Option<SessionId> {
+    pub(super) fn history_of_live(&self, id: LiveId) -> Option<SessionId> {
         let session = self.live.get(id)?;
         session.history.clone().or_else(|| {
             let (external, _) = session.learned.as_ref()?;
@@ -1108,7 +1417,9 @@ impl Shell {
     /// Closes every live terminal whose folder is `root` or lies inside it on
     /// `machine`. The worktree they ran in was removed with its folder, so
     /// nothing is left for them to run in: they are closed with it instead of
-    /// staying in the tree under an unsorted folder.
+    /// staying in the tree under an unsorted folder. The changes tabs of the
+    /// folder go too, since there is nothing left to show changes of; the
+    /// files open in it stay, because they may hold text nobody saved.
     pub(super) fn close_live_in(
         &mut self,
         machine: &MachineId,
@@ -1127,6 +1438,18 @@ impl Shell {
             .collect();
         for id in inside {
             self.close_live(id, window, cx);
+        }
+        let tabs: Vec<LiveId> = self
+            .changes
+            .iter()
+            .filter(|(_, view)| {
+                &view.target.machine == machine
+                    && leon_core::path::is_within(&view.target.path, root)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in tabs {
+            self.close_changes(id, window, cx);
         }
         if self.dormant.remove_within(machine, root) {
             self.save_dormant();
@@ -1480,16 +1803,19 @@ impl Shell {
         let launch = Launch::Agent {
             kind: session.agent,
             resume: Some(session.external_id.clone()),
+            account: session.account.clone(),
         };
         // What this computer can tell at once: whether the agent is installed
-        // here (or, over SSH, in the last probe) and whether the folder is.
-        let planned = launch::plan(
+        // here (or, over SSH, in the last probe), whether the folder is, and
+        // whether the account the session ran with is still there.
+        let planned = launch::plan_with(
             &machine,
             report.as_ref(),
             &cwd,
             &launch,
             &self.engine.ssh(),
             &*self.options.system,
+            &Self::launch_prefs(cx),
         );
         match planned {
             Err(LaunchError::NoSuchFolder(_)) => {
@@ -1500,7 +1826,11 @@ impl Shell {
             Err(
                 error @ (LaunchError::NotInstalled { .. }
                 | LaunchError::UnknownAgent(_)
-                | LaunchError::CannotResume { .. }),
+                | LaunchError::CannotResume { .. }
+                | LaunchError::NoPromptForm { .. }
+                | LaunchError::PromptNeedsPosixShell
+                | LaunchError::UnknownAccount { .. }
+                | LaunchError::NoHome { .. }),
             ) => {
                 self.show_transcript_instead(session, error.to_string(), false, cx);
                 return;
@@ -1584,6 +1914,7 @@ impl Shell {
         let launch = Launch::Agent {
             kind: session.agent,
             resume: Some(session.external_id.clone()),
+            account: session.account.clone(),
         };
         self.start_live(
             launch,
@@ -1614,7 +1945,7 @@ impl Shell {
 
     /// The session the keyboard is in: the one on screen while the main pane
     /// has it, the one of the row under the cursor while the sidebar does.
-    fn session_here(&self) -> Option<LiveId> {
+    pub(super) fn session_here(&self) -> Option<LiveId> {
         match self.pane {
             Pane::Main => match self.main {
                 Main::Live(id) if self.live.get(id).is_some() => Some(id),
@@ -1660,15 +1991,17 @@ impl Shell {
             return;
         }
         match self.here().map(|place| (place.machine, place.cwd)) {
-            Some((machine, cwd)) => self.start_live(
-                Launch::Shell,
-                &machine,
-                &cwd,
-                Place::Session,
-                None,
-                window,
-                cx,
-            ),
+            Some((machine, cwd)) => {
+                self.start_live(
+                    Launch::Shell,
+                    &machine,
+                    &cwd,
+                    Place::Session,
+                    None,
+                    window,
+                    cx,
+                );
+            }
             None => self
                 .engine
                 .report(StatusKind::Info, "Select a project or a worktree first."),
@@ -1736,6 +2069,11 @@ impl Shell {
                 self.files
                     .get(&id)
                     .map(|doc| (doc.machine.clone(), doc.folder.clone()))
+                    .or_else(|| {
+                        self.changes
+                            .get(&id)
+                            .map(|view| (view.target.machine.clone(), view.target.path.clone()))
+                    })
             },
             |session| Some((session.machine.clone(), session.cwd.clone())),
         ) else {
@@ -1987,9 +2325,10 @@ impl Shell {
         for (index, tab) in workspace.tabs.iter().enumerate() {
             let focus = tab.focus;
             let active = index == workspace.active;
-            let (label, agent) = match self.files.get(&focus) {
-                Some(doc) => (Self::file_label(doc), None),
-                None => self.live.get(focus).map_or_else(
+            let (label, agent) = match (self.files.get(&focus), self.changes.get(&focus)) {
+                (Some(doc), _) => (Self::file_label(doc), None),
+                (None, Some(view)) => (Self::changes_label(view), None),
+                (None, None) => self.live.get(focus).map_or_else(
                     || (String::new(), None),
                     |session| (session.label(), session.shown_agent()),
                 ),
@@ -2092,6 +2431,9 @@ impl Shell {
     ) -> AnyElement {
         if let Some(file) = self.render_file_pane(id, marked, colours, cx) {
             return file;
+        }
+        if let Some(changes) = self.render_changes_pane(id, marked, colours, cx) {
+            return changes;
         }
         let Some(session) = self.live.get(id) else {
             return div().into_any_element();

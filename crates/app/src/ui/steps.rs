@@ -7,10 +7,12 @@
 //! world, it says what to ask next, what to do, or why it cannot be done. The
 //! palette only renders the question and feeds the answer back.
 
+use leon_core::cleanup::{self, Blocker};
 use leon_core::{
-    AgentId, AgentSpec, CustomAgent, Machine, MachineId, MachineKind, Project, ProjectId,
-    SessionId, Worktree, WorktreeId,
+    Account, AgentId, AgentSpec, CustomAgent, Machine, MachineId, MachineKind, Project, ProjectId,
+    SessionId, Worktree, WorktreeId, WorktreeStatus,
 };
+use std::collections::HashMap;
 
 use super::den_store::DenChoice;
 use super::live::LiveId;
@@ -114,6 +116,18 @@ pub struct ElsewhereTarget {
     /// Whether Leon can ask that process to end: on this computer, on a
     /// system with signals.
     pub can_take_over: bool,
+}
+
+/// A new session that waits for the person to say which account of its agent it
+/// starts with: the agent, and where it goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountAsk {
+    /// The agent about to start.
+    pub agent: AgentId,
+    /// The name of the machine it starts on.
+    pub machine_name: String,
+    /// The folder it starts in.
+    pub cwd: String,
 }
 
 /// What a rename would rename.
@@ -234,6 +248,9 @@ pub struct World {
     pub machine_row: Option<MachineId>,
     /// The history session the cursor is on, with its title.
     pub here_session: Option<(SessionId, String)>,
+    /// What time it is and the person's distance from UTC, for the questions
+    /// that take a time.
+    pub clock: Option<(chrono::DateTime<chrono::Utc>, chrono::FixedOffset)>,
     /// What "rename" would rename.
     pub rename: Option<RenameTarget>,
     /// The history session "resume in…" is about.
@@ -261,6 +278,62 @@ pub struct World {
     pub installed: Vec<(MachineId, Vec<AgentId>)>,
     /// The version of the update that is downloaded and waiting for a restart.
     pub update_ready: Option<String>,
+    /// What was last read about the checkout of each worktree.
+    pub statuses: HashMap<WorktreeId, WorktreeStatus>,
+    /// How many live sessions run in the folder of each worktree.
+    pub running: HashMap<WorktreeId, usize>,
+    /// The scripts of the project in view, when there is one.
+    pub scripts: Option<ScriptsView>,
+    /// The user's accounts of the agents.
+    pub accounts: Vec<Account>,
+    /// The default-account lines of the settings (`agent=name`).
+    pub default_accounts: Vec<String>,
+    /// A new session that waits for its account: when set, the flow of a new
+    /// session asks only which account.
+    pub account_ask: Option<AccountAsk>,
+}
+
+/// The scripts of the project the keyboard is in, and where one would run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptsView {
+    /// The project.
+    pub project: ProjectId,
+    /// Its name.
+    pub project_name: String,
+    /// The machine it is on.
+    pub machine: MachineId,
+    /// The worktree (or the project folder) a script would run in.
+    pub cwd: String,
+    /// What the project's file says.
+    pub file: ScriptsFile,
+}
+
+/// What is known of the project's `leon.toml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScriptsFile {
+    /// It was not read (the machine is away).
+    Unknown,
+    /// There is no file.
+    Absent,
+    /// The file is wrong; the text names the line.
+    Invalid(String),
+    /// The scripts it lists.
+    Scripts(Vec<ScriptEntry>),
+}
+
+/// One script as the question lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptEntry {
+    /// Its name.
+    pub name: String,
+    /// Its command.
+    pub command: String,
+    /// The icon it asked for.
+    pub icon: Option<String>,
+    /// Its shortcut as the platform writes it, when it works.
+    pub key: Option<String>,
+    /// Why its shortcut does not work, when it was asked for and does not.
+    pub key_note: Option<String>,
 }
 
 impl World {
@@ -312,6 +385,7 @@ impl World {
             unsaved: Vec::new(),
             machine_row: None,
             here_session: None,
+            clock: None,
             rename: None,
             resume: None,
             elsewhere: None,
@@ -324,7 +398,56 @@ impl World {
             repositories: Vec::new(),
             installed: Vec::new(),
             update_ready: None,
+            statuses: HashMap::new(),
+            running: HashMap::new(),
+            scripts: None,
+            accounts: Vec::new(),
+            default_accounts: Vec::new(),
+            account_ask: None,
         }
+    }
+
+    /// The same world knowing the user's accounts and the default-account
+    /// lines of the settings.
+    pub fn with_accounts(mut self, accounts: Vec<Account>, defaults: Vec<String>) -> Self {
+        self.accounts = accounts;
+        self.default_accounts = defaults;
+        self
+    }
+
+    /// The same world knowing a new session waits for its account.
+    pub fn with_account_ask(mut self, ask: Option<AccountAsk>) -> Self {
+        self.account_ask = ask;
+        self
+    }
+
+    /// The same world knowing what was read about each checkout and how many
+    /// sessions run in each worktree's folder.
+    pub fn with_checkouts(
+        mut self,
+        statuses: HashMap<WorktreeId, WorktreeStatus>,
+        running: HashMap<WorktreeId, usize>,
+    ) -> Self {
+        self.statuses = statuses;
+        self.running = running;
+        self
+    }
+
+    /// The same world knowing the scripts of the project in view.
+    pub fn with_scripts(mut self, scripts: Option<ScriptsView>) -> Self {
+        self.scripts = scripts;
+        self
+    }
+
+    /// The same world knowing what time it is, and the person's distance from
+    /// UTC.
+    pub fn with_clock(
+        mut self,
+        now: chrono::DateTime<chrono::Utc>,
+        offset: chrono::FixedOffset,
+    ) -> Self {
+        self.clock = Some((now, offset));
+        self
     }
 
     /// The same world knowing the dens there are to choose and the one in
@@ -446,6 +569,10 @@ pub struct Choice {
     /// Whether the choice is drawn dimmed: it can be picked but will say why
     /// it cannot be done (an agent that is not installed).
     pub dim: bool,
+    /// The name of the icon that leads the row (one of `icons::SCRIPT_ICONS`).
+    pub icon: Option<String>,
+    /// The chord written at the end of the row, as the platform writes it.
+    pub keys: Option<String>,
 }
 
 impl Choice {
@@ -458,6 +585,8 @@ impl Choice {
             agent: None,
             swatch: None,
             dim: false,
+            icon: None,
+            keys: None,
         }
     }
 
@@ -491,6 +620,9 @@ pub enum Validate {
     Optional,
     /// A branch name git accepts.
     Branch,
+    /// A prompt that can be typed into a terminal (see
+    /// [`crate::launch::clean_prompt`]); the answer is the cleaned text.
+    Prompt,
     /// A whole number from `min` to `max`.
     Number {
         /// The least.
@@ -510,6 +642,7 @@ pub fn validate(how: Validate, text: &str) -> Result<String, String> {
         Validate::Branch => address::validate_branch(text)
             .map(|()| text.to_owned())
             .map_err(str::to_owned),
+        Validate::Prompt => crate::launch::clean_prompt(text),
         Validate::Number { min, max } => text
             .trim_end_matches(|c: char| !c.is_ascii_digit())
             .parse::<i64>()
@@ -571,6 +704,8 @@ pub struct SessionIntent {
     pub machine_name: String,
     /// The folder to start it in.
     pub cwd: String,
+    /// The id of the account to start it as; `None` is the agent's own setup.
+    pub account: Option<String>,
 }
 
 /// What a finished flow does.
@@ -591,6 +726,8 @@ pub enum Action {
     /// Put a live session to sleep: its terminal ends, and the session stays
     /// in the sidebar to be resumed.
     SleepLive(LiveId),
+    /// Hide a session on the Snoozed shelf until this time.
+    Snooze(SessionId, chrono::DateTime<chrono::Utc>),
     /// Open the file at this path, as typed: relative to the folder the
     /// keyboard is in, or absolute.
     OpenFile(String),
@@ -618,6 +755,16 @@ pub enum Action {
         worktree: WorktreeId,
         /// Whether its local changes may be deleted with it.
         force: bool,
+    },
+    /// Remove these worktrees, one after the other, as `git worktree remove`
+    /// does: a worktree git refuses is kept and named, never forced.
+    RemoveWorktrees(Vec<(ProjectId, WorktreeId)>),
+    /// Open the changes of a worktree in a tab.
+    ShowChanges {
+        /// The project the worktree belongs to.
+        project: ProjectId,
+        /// The worktree.
+        worktree: WorktreeId,
     },
     /// Resume a history session where it ran, once confirmed.
     ResumeSession(SessionId),
@@ -665,9 +812,33 @@ pub enum Action {
         args: String,
         /// Arguments that resume a session, as typed.
         resume_args: String,
+        /// Arguments that give the agent a first prompt, as typed, with
+        /// `{prompt}` for the prompt.
+        prompt_args: String,
     },
     /// Remove an agent of the user's.
     RemoveAgent(AgentId),
+    /// Add an account of an agent: its name and the variables as typed.
+    AddAccount {
+        /// The agent.
+        agent: AgentId,
+        /// The name shown.
+        name: String,
+        /// `NAME=value` words.
+        variables: String,
+    },
+    /// Give an account another name.
+    RenameAccount {
+        /// The account's id.
+        id: String,
+        /// The new name.
+        name: String,
+    },
+    /// Remove an account.
+    RemoveAccount(String),
+    /// Start the new session that waited for its account, as this one (an id;
+    /// `None` is the agent's own setup).
+    StartWithAccount(Option<String>),
     /// Clone `url` as `name`, asking this computer for the parent folder with
     /// the system's folder dialog.
     PickCloneParent {
@@ -681,6 +852,28 @@ pub enum Action {
     PickProjectParent {
         /// The project (and folder) name.
         name: String,
+    },
+    /// Run a script of the project's `leon.toml` in a new terminal tab.
+    RunScript {
+        /// The project the script belongs to.
+        project: ProjectId,
+        /// The machine it runs on.
+        machine: MachineId,
+        /// The folder it runs in.
+        cwd: String,
+        /// The script's name.
+        name: String,
+    },
+    /// Give one prompt to several agents, each in a worktree of its own.
+    PromptAgents {
+        /// The project the worktrees are made in.
+        project: ProjectId,
+        /// The prompt, cleaned.
+        prompt: String,
+        /// The agents, two or more, in the order they were ticked.
+        agents: Vec<AgentId>,
+        /// What the branches start from; `None` is `HEAD`.
+        base: Option<String>,
     },
     /// Do nothing: the person backed out.
     Nothing,
@@ -699,15 +892,20 @@ pub enum Outcome {
 
 /// Whether a command is asked for in steps. (Restart to update is not: it is
 /// run as a command, which decides whether there is anything to ask, and then
-/// starts [`Command::RestartToUpdate`]'s questions itself.)
+/// starts [`Command::RestartToUpdate`]'s questions itself. Neither is Run a
+/// script: the project's file is read first, and then its questions start.)
 pub fn is_flow(command: Command) -> bool {
     matches!(
         command,
         Command::NewSession
             | Command::AddAgent
             | Command::RemoveAgent
+            | Command::AddAccount
+            | Command::RenameAccount
+            | Command::RemoveAccount
             | Command::CloseSession
             | Command::SleepSession
+            | Command::SnoozeSession
             | Command::OpenFile
             | Command::SaveFile
             | Command::CloseFile
@@ -719,6 +917,7 @@ pub fn is_flow(command: Command) -> bool {
             | Command::ResumeAnyway
             | Command::TakeOver
             | Command::NewWorktree
+            | Command::PromptAgents
             | Command::AddProject
             | Command::CloneProject
             | Command::NewProject
@@ -759,8 +958,12 @@ pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
         Command::NewSession => new_session(answers, world),
         Command::AddAgent => add_agent(answers),
         Command::RemoveAgent => remove_agent(answers),
+        Command::AddAccount => add_account(answers, world),
+        Command::RenameAccount => rename_account(answers, world),
+        Command::RemoveAccount => remove_account(answers, world),
         Command::CloseSession => close_session(answers, world),
         Command::SleepSession => sleep_session(answers, world),
+        Command::SnoozeSession => snooze_session(answers, world),
         Command::OpenFile => open_file(answers),
         Command::SaveFile => save_file(answers, world),
         Command::CloseFile => close_file(answers, world),
@@ -772,11 +975,15 @@ pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
         Command::ResumeAnyway => resume_anyway(answers, world),
         Command::TakeOver => take_over(answers, world),
         Command::NewWorktree => new_worktree(answers, world),
+        Command::PromptAgents => prompt_agents(answers, world),
+        Command::RunScript => run_script(answers, world),
         Command::AddProject => add_project(answers, world),
         Command::CloneProject => clone_project(answers, world),
         Command::NewProject => new_project(answers, world),
         Command::RemoveProject => remove_project(answers, world),
         Command::RemoveWorktree => remove_worktree(answers, world),
+        Command::RemoveMergedWorktrees => remove_merged_worktrees(answers, world),
+        Command::OpenChanges => show_changes(answers, world),
         Command::SetAppearance => set_appearance(answers, world),
         Command::ChooseTheme => choose_theme(answers, world),
         Command::SetInterfaceSize => set_size(answers, world),
@@ -851,12 +1058,24 @@ fn add_agent(answers: &[String]) -> Outcome {
             "e.g. --resume {id}, or --continue; empty: cannot be resumed",
             Validate::Optional,
         ),
-        [name, command, args, resume_args, ..] => {
+        [name, command, args, resume_args] => {
+            // What was typed so far is checked before the last question.
+            match CustomAgent::new(name, command, args, resume_args, &[]) {
+                Ok(_) => text(
+                    "Prompt arguments",
+                    "e.g. --prompt {prompt}; empty: not given a prompt when it starts",
+                    Validate::Optional,
+                ),
+                Err(error) => Outcome::Refuse(error.to_string()),
+            }
+        }
+        [name, command, args, resume_args, prompt_args, ..] => {
             let names: Vec<&str> = leon_core::agent::all()
                 .iter()
                 .map(|spec| spec.name.as_str())
                 .collect();
             match CustomAgent::new(name, command, args, resume_args, &[])
+                .and_then(|agent| agent.with_prompt_args(prompt_args))
                 .and_then(|agent| agent.to_spec(&names))
             {
                 Ok(_) => Outcome::Run(Action::AddAgent {
@@ -864,6 +1083,7 @@ fn add_agent(answers: &[String]) -> Outcome {
                     command: command.clone(),
                     args: args.clone(),
                     resume_args: resume_args.clone(),
+                    prompt_args: prompt_args.clone(),
                 }),
                 Err(error) => Outcome::Refuse(error.to_string()),
             }
@@ -900,6 +1120,16 @@ fn remove_agent(answers: &[String]) -> Outcome {
 }
 
 fn new_session(answers: &[String], world: &World) -> Outcome {
+    // A session that waits for its account asks only that.
+    if let Some(ask) = &world.account_ask {
+        return match answers {
+            [] => account_choices(ask.agent, &ask.machine_name, &ask.cwd, world),
+            [chosen, ..] => match chosen_account(ask.agent, chosen, world) {
+                Some(account) => Outcome::Run(Action::StartWithAccount(account)),
+                None => Outcome::Refuse(format!("Unknown account {chosen:?}.")),
+            },
+        };
+    }
     // The worktree the keyboard is on; without one, it is the first question.
     let (target, rest): (Where, &[String]) = match &world.here {
         Some(here) => (here.clone(), answers),
@@ -921,13 +1151,8 @@ fn new_session(answers: &[String], world: &World) -> Outcome {
         .default_agent
         .filter(|agent| offered.contains(agent))
     {
-        if rest.is_empty() {
-            return Outcome::Run(Action::StartSession(SessionIntent {
-                agent,
-                machine: target.machine,
-                machine_name: target.machine_name,
-                cwd: target.cwd,
-            }));
+        if rest.is_empty() || rest.len() == 1 && account_is_asked(agent, world) {
+            return start_as(agent, rest.first(), target, world);
         }
     }
     let installed = world.installed_on(&target.machine);
@@ -961,31 +1186,320 @@ fn new_session(answers: &[String], world: &World) -> Outcome {
             }));
             choices("Agent", list, Custom::No)
         }
-        [agent, ..] => match AgentId::parse(agent).filter(|agent| offered.contains(agent)) {
-            Some(agent) if !has(&agent) => {
-                let docs = agent
-                    .spec()
-                    .and_then(|spec| spec.docs.clone())
-                    .map_or(String::new(), |url| format!(" Install it from {url}."));
-                Outcome::Refuse(format!(
-                    "{} is not installed on {}.{docs}",
-                    format::agent_name(agent),
-                    target.machine_name
-                ))
+        [agent, account @ ..] => {
+            match AgentId::parse(agent).filter(|agent| offered.contains(agent)) {
+                Some(agent) if !has(&agent) => {
+                    let docs = agent
+                        .spec()
+                        .and_then(|spec| spec.docs.clone())
+                        .map_or(String::new(), |url| format!(" Install it from {url}."));
+                    Outcome::Refuse(format!(
+                        "{} is not installed on {}.{docs}",
+                        format::agent_name(agent),
+                        target.machine_name
+                    ))
+                }
+                Some(agent) => start_as(agent, account.first(), target, world),
+                None => Outcome::Refuse(format!("Unknown agent {agent:?}.")),
             }
-            Some(agent) => Outcome::Run(Action::StartSession(SessionIntent {
-                agent,
-                machine: target.machine,
-                machine_name: target.machine_name,
-                cwd: target.cwd,
-            })),
+        }
+    }
+}
+
+/// Whether a new session of `agent` has to be asked which account.
+fn account_is_asked(agent: AgentId, world: &World) -> bool {
+    matches!(
+        leon_core::account::resolve(agent, &world.accounts, &world.default_accounts),
+        leon_core::account::Pick::Ask(_)
+    )
+}
+
+/// The session of `agent` at `target`, as the account the settings name, or as
+/// the one answered (`asked`), or the question when neither is there.
+fn start_as(agent: AgentId, asked: Option<&String>, target: Where, world: &World) -> Outcome {
+    use leon_core::account::{resolve, Pick};
+    let intent = |account: Option<String>| {
+        Outcome::Run(Action::StartSession(SessionIntent {
+            agent,
+            machine: target.machine.clone(),
+            machine_name: target.machine_name.clone(),
+            cwd: target.cwd.clone(),
+            account,
+        }))
+    };
+    match resolve(agent, &world.accounts, &world.default_accounts) {
+        Pick::Plain => intent(None),
+        Pick::Account(account) => intent(Some(account.id.clone())),
+        Pick::Ask(_) => match asked {
+            None => account_choices(agent, &target.machine_name, &target.cwd, world),
+            Some(chosen) => match chosen_account(agent, chosen, world) {
+                Some(account) => intent(account),
+                None => Outcome::Refuse(format!("Unknown account {chosen:?}.")),
+            },
+        },
+    }
+}
+
+/// The question "which account": the agent's own setup first, then the
+/// accounts by name.
+fn account_choices(agent: AgentId, machine_name: &str, cwd: &str, world: &World) -> Outcome {
+    let place = format!("on {machine_name} in {cwd}");
+    let mut list = vec![Choice::new(
+        format!("{} (default)", format::agent_name(agent)),
+        format!("the agent's own setup · {place}"),
+        leon_core::account::DEFAULT_NAME,
+    )
+    .agent(agent)];
+    list.extend(
+        leon_core::account::of_agent(&world.accounts, agent)
+            .into_iter()
+            .map(|account| {
+                let detail = match account.config_dir() {
+                    Some(folder) => format!("{folder} · {place}"),
+                    None => place.clone(),
+                };
+                Choice::new(
+                    format!("{} ({})", format::agent_name(agent), account.name),
+                    detail,
+                    account.id.as_str(),
+                )
+                .agent(agent)
+            }),
+    );
+    choices("Account", list, Custom::No)
+}
+
+/// The account an answer to [`account_choices`] stands for: `Some(None)` is the
+/// agent's own setup, `None` is an answer that is not on offer.
+fn chosen_account(agent: AgentId, answer: &str, world: &World) -> Option<Option<String>> {
+    if answer == leon_core::account::DEFAULT_NAME {
+        return Some(None);
+    }
+    leon_core::account::of_agent(&world.accounts, agent)
+        .into_iter()
+        .find(|account| account.id == answer)
+        .map(|account| Some(account.id.clone()))
+}
+
+/// The flow that adds an account of an agent: which agent, a name, and the
+/// variables that make the agent another account.
+fn add_account(answers: &[String], world: &World) -> Outcome {
+    let offered = world.prefs.offered();
+    match answers {
+        [] => choices(
+            "Agent",
+            offered
+                .iter()
+                .map(|agent| {
+                    let detail = match agent.spec().and_then(|spec| spec.config_env.as_deref()) {
+                        Some(variable) => format!("{variable} moves its configuration folder"),
+                        None => {
+                            "sets any variable; its history and limits are not read per account"
+                                .to_owned()
+                        }
+                    };
+                    Choice::new(format::agent_name(*agent), detail, agent.as_str()).agent(*agent)
+                })
+                .collect(),
+            Custom::No,
+        ),
+        [agent] => match AgentId::parse(agent).filter(|agent| offered.contains(agent)) {
+            Some(_) => text("Account name", "Work", Validate::Required),
             None => Outcome::Refuse(format!("Unknown agent {agent:?}.")),
         },
+        [agent, name] => {
+            let Some(agent) = AgentId::parse(agent).filter(|agent| offered.contains(agent)) else {
+                return Outcome::Refuse(format!("Unknown agent {agent:?}."));
+            };
+            // A name that cannot be used is said before the rest is asked.
+            if let Err(error) = Account::new(agent, name, Vec::new(), &world.accounts) {
+                return Outcome::Refuse(error.to_string());
+            }
+            let placeholder = match agent.spec().and_then(|spec| spec.config_env.as_deref()) {
+                Some(variable) => format!(
+                    "{variable}=~/.{}-work; empty keeps the agent's own setup",
+                    agent.as_str()
+                ),
+                None => "NAME=value words (their history and limits are not read per account)"
+                    .to_owned(),
+            };
+            text("Variables", placeholder, Validate::Optional)
+        }
+        [agent, name, variables, ..] => {
+            let Some(agent) = AgentId::parse(agent).filter(|agent| offered.contains(agent)) else {
+                return Outcome::Refuse(format!("Unknown agent {agent:?}."));
+            };
+            let checked = leon_core::account::parse_variables(variables)
+                .and_then(|env| Account::new(agent, name, env, &world.accounts).map(|_| ()));
+            match checked {
+                Ok(()) => Outcome::Run(Action::AddAccount {
+                    agent,
+                    name: name.clone(),
+                    variables: variables.clone(),
+                }),
+                Err(error) => Outcome::Refuse(error.to_string()),
+            }
+        }
+    }
+}
+
+/// What the status line says when an account was added: what it is for, and
+/// what Leon can and cannot do per account for its agent.
+pub fn added_note(account: &Account) -> String {
+    let agent = format::agent_name(account.agent);
+    let read = match account.agent.spec().and_then(|spec| spec.config_env.as_deref()) {
+        Some(variable) if account.value_of(variable).is_some() => {
+            "its sessions are read from its own folder and its limits get a line of their own (on this computer).".to_owned()
+        }
+        Some(variable) => format!(
+            "set {variable} on it to give it a folder of its own: without it, its sessions and limits are the {agent}'s own."
+        ),
+        None => format!(
+            "{agent}'s history and limits are not read per account: only the launch uses the account."
+        ),
+    };
+    format!("The account {} of {agent} was added: {read}", account.name)
+}
+
+/// The accounts as choices of a flow that acts on one of them.
+fn account_list(world: &World) -> Vec<Choice> {
+    world
+        .accounts
+        .iter()
+        .map(|account| {
+            let detail = if account.env.is_empty() {
+                "no variables".to_owned()
+            } else {
+                leon_core::account::variables_line(&account.env)
+            };
+            Choice::new(
+                format!("{} ({})", format::agent_name(account.agent), account.name),
+                detail,
+                account.id.as_str(),
+            )
+            .agent(account.agent)
+        })
+        .collect()
+}
+
+/// The flow that gives an account another name.
+fn rename_account(answers: &[String], world: &World) -> Outcome {
+    if world.accounts.is_empty() {
+        return Outcome::Refuse("You have not added any account.".to_owned());
+    }
+    match answers {
+        [] => choices("Account", account_list(world), Custom::No),
+        [id] => match leon_core::account::by_id(&world.accounts, id) {
+            Some(account) => text("New name", account.name.clone(), Validate::Required),
+            None => Outcome::Refuse(format!("Unknown account {id:?}.")),
+        },
+        [id, name, ..] => match leon_core::account::by_id(&world.accounts, id) {
+            Some(account) => {
+                let mut renamed = account.clone();
+                renamed.name = name.trim().to_owned();
+                match renamed.check(&world.accounts) {
+                    Ok(()) => Outcome::Run(Action::RenameAccount {
+                        id: id.clone(),
+                        name: name.clone(),
+                    }),
+                    Err(error) => Outcome::Refuse(error.to_string()),
+                }
+            }
+            None => Outcome::Refuse(format!("Unknown account {id:?}.")),
+        },
+    }
+}
+
+/// The flow that removes an account, after asking.
+fn remove_account(answers: &[String], world: &World) -> Outcome {
+    if world.accounts.is_empty() {
+        return Outcome::Refuse("You have not added any account.".to_owned());
+    }
+    match answers {
+        [] => choices("Account", account_list(world), Custom::No),
+        [id] => match leon_core::account::by_id(&world.accounts, id) {
+            Some(account) => choices(
+                "Confirm",
+                vec![
+                    Choice::new(
+                        format!("Remove {}", account.name),
+                        "the sessions that ran with it stay in the history, but cannot be resumed until it is added again with the same name",
+                        "yes",
+                    ),
+                    Choice::new("Cancel", "keep it", "no"),
+                ],
+                Custom::No,
+            ),
+            None => Outcome::Refuse(format!("Unknown account {id:?}.")),
+        },
+        [id, confirmed, ..] if confirmed == "yes" => {
+            match leon_core::account::by_id(&world.accounts, id) {
+                Some(_) => Outcome::Run(Action::RemoveAccount(id.clone())),
+                None => Outcome::Refuse(format!("Unknown account {id:?}.")),
+            }
+        }
+        _ => Outcome::Run(Action::Nothing),
     }
 }
 
 /// Every worktree of every project, for a session that has nowhere to start
 /// yet.
+/// The flow that runs a script of the project in view.
+fn run_script(answers: &[String], world: &World) -> Outcome {
+    let Some(view) = &world.scripts else {
+        return Outcome::Refuse("Select a project or a worktree first.".to_owned());
+    };
+    let entries = match &view.file {
+        ScriptsFile::Unknown => {
+            return Outcome::Refuse(format!(
+                "Could not read {} of {}.",
+                crate::project::FILE_NAME,
+                view.project_name
+            ))
+        }
+        ScriptsFile::Absent => {
+            return Outcome::Refuse(format!(
+            "{} has no {}: add [[script]] entries with a name and a command to list scripts here.",
+            view.project_name,
+            crate::project::FILE_NAME
+        ))
+        }
+        ScriptsFile::Invalid(why) => return Outcome::Refuse(why.clone()),
+        ScriptsFile::Scripts(entries) if entries.is_empty() => {
+            return Outcome::Refuse(format!("{} lists no scripts.", crate::project::FILE_NAME))
+        }
+        ScriptsFile::Scripts(entries) => entries,
+    };
+    match answers {
+        [] => choices(
+            "Script",
+            entries
+                .iter()
+                .map(|entry| {
+                    let detail = match &entry.key_note {
+                        Some(note) => format!("{} ({note})", entry.command),
+                        None => entry.command.clone(),
+                    };
+                    let mut choice = Choice::new(entry.name.clone(), detail, entry.name.clone());
+                    choice.icon = entry.icon.clone();
+                    choice.keys = entry.key.clone();
+                    choice
+                })
+                .collect(),
+            Custom::No,
+        ),
+        [name, ..] => match entries.iter().find(|entry| &entry.name == name) {
+            Some(entry) => Outcome::Run(Action::RunScript {
+                project: view.project.clone(),
+                machine: view.machine.clone(),
+                cwd: view.cwd.clone(),
+                name: entry.name.clone(),
+            }),
+            None => Outcome::Refuse(format!("Unknown script {name:?}.")),
+        },
+    }
+}
+
 fn worktree_choices(world: &World) -> Outcome {
     let list: Vec<Choice> = world
         .projects
@@ -1343,6 +1857,31 @@ fn sleep_session(answers: &[String], world: &World) -> Outcome {
     }
 }
 
+/// Snoozing asks until when: a preset, or a length of time or a date typed
+/// (see `shelf::snooze_until`, which reads both).
+fn snooze_session(answers: &[String], world: &World) -> Outcome {
+    let Some((session, _)) = &world.here_session else {
+        return Outcome::Refuse("Select a session to snooze.".to_owned());
+    };
+    let Some((now, offset)) = world.clock else {
+        return Outcome::Refuse("The clock is not known.".to_owned());
+    };
+    match answers {
+        [] => choices(
+            "Snooze until",
+            super::shelf::PRESETS
+                .iter()
+                .map(|(label, detail, value)| Choice::new(*label, *detail, *value))
+                .collect(),
+            Custom::Any,
+        ),
+        [when, ..] => match super::shelf::snooze_until(when, now, offset) {
+            Ok(until) => Outcome::Run(Action::Snooze(session.clone(), until)),
+            Err(why) => Outcome::Refuse(why),
+        },
+    }
+}
+
 /// The flow that opens a file: its path is all that is asked.
 fn open_file(answers: &[String]) -> Outcome {
     match answers {
@@ -1435,46 +1974,158 @@ fn new_worktree(answers: &[String], world: &World) -> Outcome {
         return Outcome::Refuse("Add a project first.".to_owned());
     }
     match answers {
-        [] => {
-            let here = world.here.as_ref().and_then(|here| here.project.as_ref());
-            let mut list: Vec<Choice> = world
-                .projects
-                .iter()
-                .map(|info| {
-                    Choice::new(
-                        info.project.name.clone(),
-                        format!("{} {}", info.machine_name, info.project.root),
-                        info.project.id.as_str(),
-                    )
-                    .current(Some(&info.project.id) == here)
-                })
-                .collect();
-            // The project the keyboard is on comes first.
-            list.sort_by_key(|choice| !choice.current);
-            choices("Project", list, Custom::No)
-        }
+        [] => project_choices(world),
         [_] => text("Branch name", "feature/login", Validate::Branch),
-        [project, _] => {
-            let mut list = vec![Choice::new("HEAD", "the current checkout", "HEAD")];
-            if let Some(info) = world
-                .projects
-                .iter()
-                .find(|info| info.project.id.as_str() == project)
-            {
-                let mut seen = std::collections::HashSet::new();
-                for branch in info.worktrees.iter().filter_map(|w| w.branch.as_deref()) {
-                    if seen.insert(branch) {
-                        list.push(Choice::new(branch, "a branch in use", branch));
-                    }
-                }
-            }
-            choices("Base", list, Custom::Any)
-        }
+        [project, _] => base_choices(project, world),
         [project, branch, base, ..] => Outcome::Run(Action::Engine(Op::AddWorktree {
             project: ProjectId::from_string(project.as_str()),
             branch: branch.clone(),
             base: (base != "HEAD").then(|| base.clone()),
         })),
+    }
+}
+
+/// The projects to make a worktree in, the one the keyboard is on first.
+fn project_choices(world: &World) -> Outcome {
+    let here = world.here.as_ref().and_then(|here| here.project.as_ref());
+    let mut list: Vec<Choice> = world
+        .projects
+        .iter()
+        .map(|info| {
+            Choice::new(
+                info.project.name.clone(),
+                format!("{} {}", info.machine_name, info.project.root),
+                info.project.id.as_str(),
+            )
+            .current(Some(&info.project.id) == here)
+        })
+        .collect();
+    // The project the keyboard is on comes first.
+    list.sort_by_key(|choice| !choice.current);
+    choices("Project", list, Custom::No)
+}
+
+/// What a new branch of `project` can start from: `HEAD`, or a branch in use,
+/// or any name typed.
+fn base_choices(project: &str, world: &World) -> Outcome {
+    let mut list = vec![Choice::new("HEAD", "the current checkout", "HEAD")];
+    if let Some(info) = world
+        .projects
+        .iter()
+        .find(|info| info.project.id.as_str() == project)
+    {
+        let mut seen = std::collections::HashSet::new();
+        for branch in info.worktrees.iter().filter_map(|w| w.branch.as_deref()) {
+            if seen.insert(branch) {
+                list.push(Choice::new(branch, "a branch in use", branch));
+            }
+        }
+    }
+    choices("Base", list, Custom::Any)
+}
+
+/// The answer that ends the ticking of agents in [`prompt_agents`]. It is not
+/// the shape of an agent id (`parse` refuses a leading dash), so no agent can
+/// be mistaken for it.
+const START: &str = "--start";
+
+/// The agents that can be given a prompt where `info`'s project is: on, with a
+/// verified prompt form, and installed there (or not known to be missing).
+fn prompt_candidates(world: &World, machine: &MachineId) -> Vec<AgentId> {
+    let installed = world.installed_on(machine);
+    world
+        .prefs
+        .offered()
+        .into_iter()
+        .filter(|agent| agent.spec().is_some_and(|spec| spec.prompt.is_some()))
+        .filter(|agent| installed.is_none_or(|list| list.contains(agent)))
+        .collect()
+}
+
+/// "One prompt, several agents": the project, the prompt, then the agents
+/// ticked one answer at a time (choosing a ticked agent again unticks it)
+/// until `Start`, which is offered once two are ticked, and the base.
+fn prompt_agents(answers: &[String], world: &World) -> Outcome {
+    if world.projects.is_empty() {
+        return Outcome::Refuse("Add a project first.".to_owned());
+    }
+    let (project, prompt, rest) = match answers {
+        [] => return project_choices(world),
+        [_] => return text("Prompt", "what every agent should do", Validate::Prompt),
+        [project, prompt, rest @ ..] => (project, prompt, rest),
+    };
+    let Some(info) = world
+        .projects
+        .iter()
+        .find(|info| info.project.id.as_str() == project)
+    else {
+        return Outcome::Refuse(format!("Unknown project {project:?}."));
+    };
+    let candidates = prompt_candidates(world, &info.project.machine_id);
+    if candidates.len() < crate::fanout::LEAST_AGENTS {
+        return Outcome::Refuse(format!(
+            "Two agents that take a prompt are needed, and {} has {} installed and turned on.",
+            info.machine_name,
+            candidates.len()
+        ));
+    }
+    let (picks, after) = match rest.iter().position(|answer| answer == START) {
+        Some(at) => (&rest[..at], Some(&rest[at + 1..])),
+        None => (rest, None),
+    };
+    let mut ticked: Vec<AgentId> = Vec::new();
+    for pick in picks {
+        match AgentId::parse(pick).filter(|agent| candidates.contains(agent)) {
+            Some(agent) => match ticked.iter().position(|known| *known == agent) {
+                Some(at) => {
+                    ticked.remove(at);
+                }
+                None => ticked.push(agent),
+            },
+            None => return Outcome::Refuse(format!("{pick:?} cannot be given a prompt here.")),
+        }
+    }
+    match after {
+        None => {
+            let place = format!("on {}", info.machine_name);
+            let mut list = Vec::new();
+            if ticked.len() >= crate::fanout::LEAST_AGENTS {
+                let names: Vec<&str> = ticked
+                    .iter()
+                    .map(|agent| format::agent_name(*agent))
+                    .collect();
+                list.push(Choice::new(
+                    format!("Start {} agents", ticked.len()),
+                    names.join(", "),
+                    START,
+                ));
+            }
+            list.extend(candidates.iter().map(|agent| {
+                let on = ticked.contains(agent);
+                Choice::new(
+                    format::agent_name(*agent),
+                    if on {
+                        "ticked: choose it again to untick".to_owned()
+                    } else {
+                        place.clone()
+                    },
+                    agent.as_str(),
+                )
+                .agent(*agent)
+                .current(on)
+            }));
+            choices("Agents (two or more)", list, Custom::No)
+        }
+        Some([]) => base_choices(project, world),
+        Some([base, ..]) if ticked.len() >= crate::fanout::LEAST_AGENTS => {
+            Outcome::Run(Action::PromptAgents {
+                project: ProjectId::from_string(project.as_str()),
+                prompt: prompt.clone(),
+                agents: ticked,
+                base: (base != "HEAD").then(|| base.clone()),
+            })
+        }
+        Some(_) => Outcome::Refuse("Tick two agents or more.".to_owned()),
     }
 }
 
@@ -1747,6 +2398,211 @@ fn remove_project(answers: &[String], world: &World) -> Outcome {
 /// The answer the window adds when git refused a worktree for the files it
 /// holds: the question it leads to is the one about forcing them away.
 pub const REFUSED: &str = "refused";
+
+/// Which worktree to show the changes of, when none is in view: any of them,
+/// the main one of a project included.
+fn show_changes(answers: &[String], world: &World) -> Outcome {
+    let label = |worktree: &Worktree| {
+        worktree
+            .branch
+            .clone()
+            .unwrap_or_else(|| worktree.path.clone())
+    };
+    match answers {
+        [] => {
+            let list: Vec<Choice> = world
+                .projects
+                .iter()
+                .flat_map(|info| {
+                    info.worktrees.iter().map(move |worktree| {
+                        Choice::new(
+                            label(worktree),
+                            format!("{} {}", info.project.name, worktree.path),
+                            format!("{}|{}", info.project.id, worktree.id),
+                        )
+                    })
+                })
+                .collect();
+            if list.is_empty() {
+                Outcome::Refuse("There is no worktree to show the changes of.".to_owned())
+            } else {
+                choices("Worktree", list, Custom::No)
+            }
+        }
+        [chosen, ..] => match chosen.split_once('|') {
+            Some((project, worktree)) => Outcome::Run(Action::ShowChanges {
+                project: ProjectId::from_string(project),
+                worktree: WorktreeId::from_string(worktree),
+            }),
+            None => Outcome::Refuse("That worktree is not known.".to_owned()),
+        },
+    }
+}
+
+/// What the status line says to a second removal of merged worktrees asked for
+/// while the first is still going.
+pub const REMOVAL_RUNNING: &str =
+    "Merged worktrees are still being removed: ask again when that has finished.";
+
+/// The status line after a removal of merged worktrees: how many went, and
+/// which were kept and why.
+pub fn removal_words(removed: usize, kept: &[String]) -> String {
+    let noun = |count: usize| if count == 1 { "worktree" } else { "worktrees" };
+    let mut text = format!("Removed {removed} {}.", noun(removed));
+    if !kept.is_empty() {
+        text.push_str(&format!(
+            " Kept {} {}: {}.",
+            kept.len(),
+            noun(kept.len()),
+            kept.join("; ")
+        ));
+    }
+    text
+}
+
+/// The branches to offer the cleanup for, when the setting asks for it and a
+/// worktree's pull request was just seen merged. Nothing is removed by this:
+/// the answer is a banner that opens the flow.
+pub fn merged_offer(enabled: bool, before: &[Worktree], after: &[Worktree]) -> Option<Vec<String>> {
+    if !enabled {
+        return None;
+    }
+    let merged = cleanup::newly_merged(before, after);
+    let labels: Vec<String> = after
+        .iter()
+        .filter(|worktree| merged.contains(&worktree.id))
+        .map(|worktree| {
+            worktree
+                .branch
+                .clone()
+                .unwrap_or_else(|| worktree.path.clone())
+        })
+        .collect();
+    (!labels.is_empty()).then_some(labels)
+}
+
+/// What the merged-pull-request banner says, for the branches it names.
+pub fn merged_offer_words(labels: &[String]) -> String {
+    match labels {
+        [one] => format!("Pull request merged: {one}."),
+        many => format!("{} pull requests merged: {}.", many.len(), many.join(", ")),
+    }
+}
+
+/// A merged worktree the cleanup offers, and what keeps it from removal.
+struct Offer {
+    /// `project|worktree`, the answer the choice gives.
+    key: String,
+    /// The project it belongs to.
+    project: ProjectId,
+    /// The worktree.
+    worktree: WorktreeId,
+    /// Its branch, or its path when it has none.
+    label: String,
+    /// The project's name and the worktree's path.
+    detail: String,
+    /// Why it cannot be removed; empty when it can.
+    blockers: Vec<Blocker>,
+}
+
+fn offers(world: &World) -> Vec<Offer> {
+    world
+        .projects
+        .iter()
+        .flat_map(|info| {
+            info.worktrees
+                .iter()
+                .filter(|worktree| cleanup::offered(worktree))
+                .map(move |worktree| Offer {
+                    key: format!("{}|{}", info.project.id, worktree.id),
+                    project: info.project.id.clone(),
+                    worktree: worktree.id.clone(),
+                    label: worktree
+                        .branch
+                        .clone()
+                        .unwrap_or_else(|| worktree.path.clone()),
+                    detail: format!("{} {}", info.project.name, worktree.path),
+                    blockers: cleanup::blockers(
+                        world.statuses.get(&worktree.id),
+                        world.running.get(&worktree.id).copied().unwrap_or(0),
+                    ),
+                })
+        })
+        .collect()
+}
+
+/// Which offers are ticked after the answers so far. Each answer toggles the
+/// offer it names, so choosing a ticked one unticks it; an answer naming a
+/// blocked offer, or none, changes nothing.
+fn ticked(answers: &[String], offers: &[Offer]) -> Vec<bool> {
+    let mut on = vec![false; offers.len()];
+    for answer in answers {
+        if let Some(at) = offers
+            .iter()
+            .position(|offer| offer.key == *answer && offer.blockers.is_empty())
+        {
+            on[at] = !on[at];
+        }
+    }
+    on
+}
+
+/// The "Remove merged worktrees" flow: a list where each choice ticks or
+/// unticks one worktree, then "Remove" or "Cancel". The worktrees with
+/// changes, unpushed commits or a running session are listed with the reason
+/// and cannot be ticked.
+fn remove_merged_worktrees(answers: &[String], world: &World) -> Outcome {
+    let offers = offers(world);
+    if offers.is_empty() {
+        return Outcome::Refuse("No worktree's pull request is merged.".to_owned());
+    }
+    match answers.split_last() {
+        Some((last, _)) if last == "no" => Outcome::Run(Action::Nothing),
+        Some((last, before)) if last == "yes" => {
+            let on = ticked(before, &offers);
+            let removing: Vec<(ProjectId, WorktreeId)> = offers
+                .iter()
+                .zip(&on)
+                .filter(|(_, ticked)| **ticked)
+                .map(|(offer, _)| (offer.project.clone(), offer.worktree.clone()))
+                .collect();
+            if removing.is_empty() {
+                Outcome::Refuse("Tick the worktrees to remove first.".to_owned())
+            } else {
+                Outcome::Run(Action::RemoveWorktrees(removing))
+            }
+        }
+        _ => {
+            let on = ticked(answers, &offers);
+            let count = on.iter().filter(|ticked| **ticked).count();
+            let mut list: Vec<Choice> = offers
+                .iter()
+                .zip(&on)
+                .map(|(offer, ticked)| {
+                    if offer.blockers.is_empty() {
+                        Choice::new(&offer.label, &offer.detail, &offer.key).current(*ticked)
+                    } else {
+                        let why: Vec<String> = offer.blockers.iter().map(Blocker::words).collect();
+                        Choice::new(
+                            &offer.label,
+                            format!("kept: {}", why.join(", ")),
+                            &offer.key,
+                        )
+                        .dim(true)
+                    }
+                })
+                .collect();
+            let noun = if count == 1 { "worktree" } else { "worktrees" };
+            list.push(Choice::new(
+                format!("Remove {count} {noun}"),
+                "git worktree remove, and the sessions in them close",
+                "yes",
+            ));
+            list.push(Choice::new("Cancel", "keep them all", "no"));
+            choices("Merged worktrees", list, Custom::No)
+        }
+    }
+}
 
 fn remove_worktree(answers: &[String], world: &World) -> Outcome {
     let linked = || {
@@ -2216,6 +3072,8 @@ mod tests {
             root: root.to_owned(),
         };
         World {
+            statuses: HashMap::new(),
+            running: HashMap::new(),
             machines: vec![local, machine("m2", "build box")],
             folders: vec![
                 FolderInfo {
@@ -2258,6 +3116,7 @@ mod tests {
             unsaved: Vec::new(),
             machine_row: None,
             here_session: None,
+            clock: None,
             rename: None,
             resume: None,
             elsewhere: None,
@@ -2270,6 +3129,10 @@ mod tests {
             repositories: Vec::new(),
             installed: Vec::new(),
             update_ready: None,
+            scripts: None,
+            accounts: Vec::new(),
+            default_accounts: Vec::new(),
+            account_ask: None,
         }
     }
 
@@ -2379,6 +3242,7 @@ mod tests {
                 machine: MachineId::local(),
                 machine_name: "Local".into(),
                 cwd: "/srv/api".into(),
+                account: None,
             }))
         );
     }
@@ -2475,8 +3339,98 @@ mod tests {
         ));
     }
 
+    fn scripts_view(file: ScriptsFile) -> World {
+        let mut world = world();
+        world.scripts = Some(ScriptsView {
+            project: ProjectId::from_string("api"),
+            project_name: "api".into(),
+            machine: MachineId::local(),
+            cwd: "/srv/api-worktrees/x".into(),
+            file,
+        });
+        world
+    }
+
+    fn entry(name: &str, command: &str) -> ScriptEntry {
+        ScriptEntry {
+            name: name.into(),
+            command: command.into(),
+            icon: None,
+            key: None,
+            key_note: None,
+        }
+    }
+
     #[test]
-    fn adding_a_custom_agent_asks_four_questions_and_checks_the_answers() {
+    fn running_a_script_lists_the_scripts_of_the_project_in_view() {
+        let mut test = entry("Test", "cargo test");
+        test.icon = Some("terminal".into());
+        test.key = Some("Ctrl+Shift+U".into());
+        let mut shell = entry("Shell", "bash");
+        shell.key_note = Some("Ctrl+Shift+T is Leon's".into());
+        let world = scripts_view(ScriptsFile::Scripts(vec![
+            test,
+            shell,
+            entry("Lint", "make lint"),
+        ]));
+        let Outcome::Ask(step) = advance(Command::RunScript, &[], &world) else {
+            panic!("it asks which script");
+        };
+        let StepKind::Choices { choices, custom } = step.kind else {
+            panic!("it is a choice");
+        };
+        assert_eq!(custom, Custom::No);
+        let names: Vec<_> = choices.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(names, ["Test", "Shell", "Lint"]);
+        assert_eq!(choices[0].detail, "cargo test");
+        assert_eq!(choices[0].icon.as_deref(), Some("terminal"));
+        assert_eq!(choices[0].keys.as_deref(), Some("Ctrl+Shift+U"));
+        assert!(
+            choices[1].detail.contains("Ctrl+Shift+T is Leon's"),
+            "{}",
+            choices[1].detail
+        );
+        assert_eq!(choices[1].keys, None);
+    }
+
+    #[test]
+    fn the_chosen_script_runs_in_the_worktree_in_view() {
+        let world = scripts_view(ScriptsFile::Scripts(vec![entry("Test", "cargo test")]));
+        assert_eq!(
+            advance(Command::RunScript, &strings(&["Test"]), &world),
+            Outcome::Run(Action::RunScript {
+                project: ProjectId::from_string("api"),
+                machine: MachineId::local(),
+                cwd: "/srv/api-worktrees/x".into(),
+                name: "Test".into(),
+            })
+        );
+        assert!(matches!(
+            advance(Command::RunScript, &strings(&["Nope"]), &world),
+            Outcome::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn running_a_script_says_why_there_is_nothing_to_run() {
+        let refused = |world: &World| match advance(Command::RunScript, &[], world) {
+            Outcome::Refuse(why) => why,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        assert!(refused(&world()).contains("Select a project"));
+        assert!(refused(&scripts_view(ScriptsFile::Absent)).contains("leon.toml"));
+        assert!(refused(&scripts_view(ScriptsFile::Unknown)).contains("Could not read"));
+        assert!(refused(&scripts_view(ScriptsFile::Scripts(Vec::new()))).contains("no scripts"));
+        assert_eq!(
+            refused(&scripts_view(ScriptsFile::Invalid(
+                "leon.toml line 3: wrong".into()
+            ))),
+            "leon.toml line 3: wrong"
+        );
+    }
+
+    #[test]
+    fn adding_a_custom_agent_asks_five_questions_and_checks_the_answers() {
         let world = world();
         let ask = |answers: &[&str]| advance(Command::AddAgent, &strings(answers), &world);
         let prompt = |outcome: Outcome| match outcome {
@@ -2491,14 +3445,29 @@ mod tests {
             "Resume arguments"
         );
         assert_eq!(
-            ask(&["My Tool", "mytool", "--fast", "--resume {id}"]),
+            prompt(ask(&["My Tool", "mytool", "--fast", "--resume {id}"])),
+            "Prompt arguments"
+        );
+        assert_eq!(
+            ask(&[
+                "My Tool",
+                "mytool",
+                "--fast",
+                "--resume {id}",
+                "--ask {prompt}"
+            ]),
             Outcome::Run(Action::AddAgent {
                 name: "My Tool".into(),
                 command: "mytool".into(),
                 args: "--fast".into(),
                 resume_args: "--resume {id}".into(),
+                prompt_args: "--ask {prompt}".into(),
             })
         );
+        match ask(&["My Tool", "mytool", "", "", "--ask"]) {
+            Outcome::Refuse(text) => assert!(text.contains("{prompt}"), "{text}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
         // A name that is a built-in's is refused before the rest is asked.
         assert!(matches!(ask(&["claude code"]), Outcome::Refuse(_)));
         // Bad resume arguments are refused with the reason.
@@ -2531,6 +3500,7 @@ mod tests {
                 machine: MachineId::local(),
                 machine_name: "Local".into(),
                 cwd: "/srv/api-worktrees/x".into(),
+                account: None,
             }))
         );
     }
@@ -2945,6 +3915,33 @@ mod tests {
     }
 
     #[test]
+    fn showing_changes_lists_every_worktree_main_ones_included_and_runs_on_the_answer() {
+        let world = world();
+        let list = advance(Command::OpenChanges, &[], &world);
+        assert_eq!(
+            labels(&list),
+            ["main", "main", "x", "/srv/api-worktrees/detached"]
+        );
+        assert_eq!(
+            advance(Command::OpenChanges, &strings(&["api|a1"]), &world),
+            Outcome::Run(Action::ShowChanges {
+                project: ProjectId::from_string("api"),
+                worktree: WorktreeId::from_string("a1"),
+            })
+        );
+        assert!(matches!(
+            advance(Command::OpenChanges, &strings(&["nonsense"]), &world),
+            Outcome::Refuse(_)
+        ));
+        let mut empty = world;
+        empty.projects.clear();
+        assert!(matches!(
+            advance(Command::OpenChanges, &[], &empty),
+            Outcome::Refuse(_)
+        ));
+    }
+
+    #[test]
     fn confirming_removes_and_cancelling_does_nothing() {
         let world = world();
         assert_eq!(
@@ -3007,6 +4004,196 @@ mod tests {
             advance(Command::RemoveWorktree, &[], &world),
             Outcome::Refuse(_)
         ));
+    }
+
+    /// The test world with the worktrees `merged` named (by id) merged on
+    /// GitHub, and every checkout read as clean with nothing running in it.
+    fn cleanup_world(merged: &[&str]) -> World {
+        let mut world = world();
+        for info in &mut world.projects {
+            for worktree in &mut info.worktrees {
+                worktree.merged_pull_request = Some(merged.contains(&worktree.id.as_str()));
+                world.statuses.insert(
+                    worktree.id.clone(),
+                    WorktreeStatus {
+                        changed: Some(0),
+                        divergence: Some(leon_core::Divergence::default()),
+                        pull_request: None,
+                    },
+                );
+            }
+        }
+        world
+    }
+
+    #[test]
+    fn the_cleanup_offers_only_linked_worktrees_whose_merge_github_reports() {
+        let world = cleanup_world(&["a1", "a0"]);
+        let list = advance(Command::RemoveMergedWorktrees, &[], &world);
+        assert_eq!(labels(&list), ["x", "Remove 0 worktrees", "Cancel"]);
+        let mut open = cleanup_world(&[]);
+        assert!(matches!(
+            advance(Command::RemoveMergedWorktrees, &[], &open),
+            Outcome::Refuse(_)
+        ));
+        open.projects.truncate(1);
+    }
+
+    #[test]
+    fn a_worktree_with_changes_or_unread_checkout_is_listed_with_why_and_not_ticked() {
+        let mut world = cleanup_world(&["a1"]);
+        world.statuses.insert(
+            WorktreeId::from_string("a1"),
+            WorktreeStatus {
+                changed: Some(2),
+                ..WorktreeStatus::default()
+            },
+        );
+        let list = choices_of(advance(Command::RemoveMergedWorktrees, &[], &world));
+        assert!(list[0].dim);
+        assert_eq!(list[0].detail, "kept: 2 uncommitted changes");
+        assert!(!list[0].current);
+        // Nothing was read at all: that is a reason too, never a clean bill.
+        world.statuses.clear();
+        let list = choices_of(advance(Command::RemoveMergedWorktrees, &[], &world));
+        assert_eq!(list[0].detail, "kept: its checkout has not been read yet");
+    }
+
+    #[test]
+    fn a_session_running_in_a_worktree_keeps_it_out_of_the_removal() {
+        let mut world = cleanup_world(&["a1"]);
+        world.running.insert(WorktreeId::from_string("a1"), 1);
+        let list = choices_of(advance(Command::RemoveMergedWorktrees, &[], &world));
+        assert!(list[0].dim);
+        assert_eq!(list[0].detail, "kept: a session is running in it");
+    }
+
+    #[test]
+    fn choosing_a_worktree_ticks_it_and_choosing_it_again_unticks_it() {
+        let world = cleanup_world(&["a1"]);
+        let ticked = choices_of(advance(
+            Command::RemoveMergedWorktrees,
+            &strings(&["api|a1"]),
+            &world,
+        ));
+        assert!(ticked[0].current);
+        assert_eq!(ticked[1].label, "Remove 1 worktree");
+        let unticked = choices_of(advance(
+            Command::RemoveMergedWorktrees,
+            &strings(&["api|a1", "api|a1"]),
+            &world,
+        ));
+        assert!(!unticked[0].current);
+        assert_eq!(unticked[1].label, "Remove 0 worktrees");
+    }
+
+    #[test]
+    fn a_blocked_worktree_cannot_be_ticked_even_when_chosen() {
+        let mut world = cleanup_world(&["a1"]);
+        world.running.insert(WorktreeId::from_string("a1"), 1);
+        assert_eq!(
+            advance(
+                Command::RemoveMergedWorktrees,
+                &strings(&["api|a1", "yes"]),
+                &world
+            ),
+            Outcome::Refuse("Tick the worktrees to remove first.".to_owned())
+        );
+    }
+
+    #[test]
+    fn removing_runs_exactly_the_ticked_worktrees_in_their_order() {
+        let world = cleanup_world(&["a1", "a2"]);
+        assert_eq!(
+            advance(
+                Command::RemoveMergedWorktrees,
+                &strings(&["api|a2", "api|a1", "yes"]),
+                &world
+            ),
+            Outcome::Run(Action::RemoveWorktrees(vec![
+                (ProjectId::from_string("api"), WorktreeId::from_string("a1")),
+                (ProjectId::from_string("api"), WorktreeId::from_string("a2")),
+            ]))
+        );
+        assert_eq!(
+            advance(
+                Command::RemoveMergedWorktrees,
+                &strings(&["api|a2", "yes"]),
+                &world
+            ),
+            Outcome::Run(Action::RemoveWorktrees(vec![(
+                ProjectId::from_string("api"),
+                WorktreeId::from_string("a2")
+            )]))
+        );
+    }
+
+    #[test]
+    fn cancelling_and_removing_nothing_change_nothing() {
+        let world = cleanup_world(&["a1"]);
+        assert_eq!(
+            advance(
+                Command::RemoveMergedWorktrees,
+                &strings(&["api|a1", "no"]),
+                &world
+            ),
+            Outcome::Run(Action::Nothing)
+        );
+        assert!(matches!(
+            advance(Command::RemoveMergedWorktrees, &strings(&["yes"]), &world),
+            Outcome::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn the_merged_banner_is_offered_only_when_the_setting_is_on_and_a_merge_is_new() {
+        let worktree = |id: &str, merged: Option<bool>| Worktree {
+            id: WorktreeId::from_string(id),
+            project_id: ProjectId::from_string("api"),
+            path: format!("/srv/{id}"),
+            branch: Some(id.to_owned()),
+            head: None,
+            is_main: false,
+            merged_pull_request: merged,
+        };
+        let before = [worktree("x", Some(false)), worktree("y", Some(false))];
+        let after = [worktree("x", Some(true)), worktree("y", Some(false))];
+        assert_eq!(merged_offer(false, &before, &after), None, "off by default");
+        assert_eq!(
+            merged_offer(true, &before, &after),
+            Some(vec!["x".to_owned()])
+        );
+        assert_eq!(
+            merged_offer(true, &after, &after),
+            None,
+            "nothing new merged"
+        );
+        assert_eq!(
+            merged_offer(true, &[], &after),
+            None,
+            "the first read is silent"
+        );
+        assert_eq!(
+            merged_offer_words(&["x".to_owned()]),
+            "Pull request merged: x."
+        );
+        assert_eq!(
+            merged_offer_words(&["x".to_owned(), "y".to_owned()]),
+            "2 pull requests merged: x, y."
+        );
+    }
+
+    #[test]
+    fn the_status_line_counts_what_went_and_names_what_was_kept() {
+        assert_eq!(removal_words(2, &[]), "Removed 2 worktrees.");
+        assert_eq!(removal_words(1, &[]), "Removed 1 worktree.");
+        assert_eq!(
+            removal_words(
+                1,
+                &["x (git refused it: it has uncommitted files)".to_owned()]
+            ),
+            "Removed 1 worktree. Kept 1 worktree: x (git refused it: it has uncommitted files)."
+        );
     }
 
     #[test]
@@ -3876,6 +5063,582 @@ mod tests {
         assert_eq!(
             advance(Command::Quit, &[], &world()),
             Outcome::Run(Action::Quit)
+        );
+    }
+
+    // ----- one prompt, several agents --------------------------------------
+
+    fn ticked(outcome: &Outcome) -> Vec<(String, bool)> {
+        match outcome {
+            Outcome::Ask(Step {
+                kind: StepKind::Choices { choices, .. },
+                ..
+            }) => choices
+                .iter()
+                .map(|choice| (choice.value.clone(), choice.current))
+                .collect(),
+            other => panic!("expected choices, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_prompt_flow_asks_for_the_project_the_prompt_then_the_agents() {
+        let world = world();
+        assert_eq!(
+            labels(&advance(Command::PromptAgents, &[], &world)),
+            ["api", "web"],
+            "the project the keyboard is on comes first"
+        );
+        let Outcome::Ask(step) = advance(Command::PromptAgents, &strings(&["api"]), &world) else {
+            panic!("the prompt is asked");
+        };
+        assert_eq!(step.prompt, "Prompt");
+        assert!(matches!(
+            step.kind,
+            StepKind::Text {
+                validate: Validate::Prompt,
+                ..
+            }
+        ));
+        let agents = advance(Command::PromptAgents, &strings(&["api", "Fix it"]), &world);
+        let offered = ticked(&agents);
+        assert_eq!(
+            offered
+                .iter()
+                .map(|(value, _)| value.as_str())
+                .collect::<Vec<_>>(),
+            ["claude", "codex", "opencode", "grok", "cursor", "gemini"],
+            "only the agents with a verified prompt form, in the catalogue's order"
+        );
+        assert!(offered.iter().all(|(_, on)| !on));
+    }
+
+    #[test]
+    fn choosing_an_agent_ticks_it_again_unticks_it_and_start_appears_with_two() {
+        let world = world();
+        let at = |picks: &[&str]| {
+            let mut answers = strings(&["api", "Fix it"]);
+            answers.extend(picks.iter().map(|pick| (*pick).to_owned()));
+            ticked(&advance(Command::PromptAgents, &answers, &world))
+        };
+        let one = at(&["claude"]);
+        assert_eq!(one[0], ("claude".to_owned(), true), "no start with one");
+        let two = at(&["claude", "codex"]);
+        assert_eq!(two[0].0, "--start", "start is first once two are ticked");
+        let on: Vec<&str> = two
+            .iter()
+            .filter(|(_, on)| *on)
+            .map(|(value, _)| value.as_str())
+            .collect();
+        assert_eq!(on, ["claude", "codex"]);
+        let undone = at(&["claude", "codex", "claude"]);
+        assert!(
+            undone.iter().all(|(value, _)| value != "--start"),
+            "{undone:?}"
+        );
+        assert_eq!(undone.iter().filter(|(_, on)| *on).count(), 1, "{undone:?}");
+    }
+
+    #[test]
+    fn after_start_the_base_is_asked_and_then_the_work_is_done() {
+        let world = world();
+        let base = advance(
+            Command::PromptAgents,
+            &strings(&["api", "Fix it", "claude", "codex", "--start"]),
+            &world,
+        );
+        assert_eq!(labels(&base), ["HEAD", "main", "x"]);
+        assert_eq!(
+            advance(
+                Command::PromptAgents,
+                &strings(&["api", "Fix it", "claude", "codex", "--start", "main"]),
+                &world,
+            ),
+            Outcome::Run(Action::PromptAgents {
+                project: ProjectId::from_string("api"),
+                prompt: "Fix it".into(),
+                agents: vec![AgentId::CLAUDE, AgentId::CODEX],
+                base: Some("main".into()),
+            })
+        );
+        match advance(
+            Command::PromptAgents,
+            &strings(&["api", "Fix it", "codex", "claude", "--start", "HEAD"]),
+            &world,
+        ) {
+            Outcome::Run(Action::PromptAgents { agents, base, .. }) => {
+                assert_eq!(
+                    agents,
+                    [AgentId::CODEX, AgentId::CLAUDE],
+                    "in the order ticked"
+                );
+                assert_eq!(base, None, "HEAD is no base");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn starting_with_fewer_than_two_agents_or_an_unknown_one_is_refused() {
+        let world = world();
+        for answers in [
+            &["api", "Fix it", "claude", "--start", "HEAD"][..],
+            &["api", "Fix it", "--start", "HEAD"][..],
+            &["api", "Fix it", "claude", "nope"][..],
+            &["api", "Fix it", "aider"][..],
+            &["nope", "Fix it"][..],
+        ] {
+            assert!(
+                matches!(
+                    advance(Command::PromptAgents, &strings(answers), &world),
+                    Outcome::Refuse(_)
+                ),
+                "{answers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_agents_that_are_turned_on_and_installed_on_the_projects_machine_are_offered() {
+        let mut world = world();
+        world.prefs.agents_enabled = vec![AgentId::CLAUDE, AgentId::CODEX, AgentId::GROK];
+        world.installed = vec![(MachineId::local(), vec![AgentId::CLAUDE, AgentId::GROK])];
+        let offered = ticked(&advance(
+            Command::PromptAgents,
+            &strings(&["api", "Fix it"]),
+            &world,
+        ));
+        assert_eq!(
+            offered
+                .into_iter()
+                .map(|(value, _)| value)
+                .collect::<Vec<_>>(),
+            ["claude", "grok"]
+        );
+        world.installed = vec![(MachineId::local(), vec![AgentId::CLAUDE])];
+        match advance(Command::PromptAgents, &strings(&["api", "Fix it"]), &world) {
+            Outcome::Refuse(why) => assert!(why.contains("Two agents"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_prompt_that_cannot_be_typed_is_refused_where_it_is_typed() {
+        assert_eq!(
+            validate(Validate::Prompt, "  Fix it \n"),
+            Ok("Fix it".into())
+        );
+        for text in ["", "--help", "a\u{1b}b"] {
+            assert!(validate(Validate::Prompt, text).is_err(), "{text:?}");
+        }
+    }
+
+    // ----- accounts -----------------------------------------------------------
+
+    fn account(agent: AgentId, name: &str, variables: &str) -> Account {
+        Account::new(
+            agent,
+            name,
+            leon_core::account::parse_variables(variables).unwrap(),
+            &[],
+        )
+        .unwrap()
+    }
+
+    fn with_accounts(defaults: &[&str]) -> World {
+        world().with_accounts(
+            vec![
+                account(AgentId::CLAUDE, "Work", "CLAUDE_CONFIG_DIR=~/.claude-work"),
+                account(AgentId::CLAUDE, "Home", "CLAUDE_CONFIG_DIR=~/.claude-home"),
+                account(AgentId::CODEX, "Lab", "CODEX_HOME=/data/codex-lab"),
+            ],
+            defaults.iter().map(|d| (*d).to_owned()).collect(),
+        )
+    }
+
+    fn intent(agent: AgentId, account: Option<&str>) -> Outcome {
+        Outcome::Run(Action::StartSession(SessionIntent {
+            agent,
+            machine: MachineId::local(),
+            machine_name: "Local".into(),
+            cwd: "/srv/api".into(),
+            account: account.map(str::to_owned),
+        }))
+    }
+
+    #[test]
+    fn an_agent_with_accounts_asks_which_after_the_agent_and_the_default_comes_first() {
+        let world = with_accounts(&[]);
+        // An agent without accounts is not asked anything more.
+        assert_eq!(
+            advance(Command::NewSession, &strings(&["opencode"]), &world),
+            intent(AgentId::OPENCODE, None)
+        );
+        // Claude Code has two: its own setup and the accounts are the choices.
+        let asked = advance(Command::NewSession, &strings(&["claude"]), &world);
+        let Outcome::Ask(Step {
+            prompt,
+            kind: StepKind::Choices { choices, .. },
+        }) = asked
+        else {
+            panic!("expected the account question, got {asked:?}");
+        };
+        assert_eq!(prompt, "Account");
+        assert_eq!(
+            choices.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
+            [
+                "Claude Code (default)",
+                "Claude Code (Work)",
+                "Claude Code (Home)"
+            ]
+        );
+        assert_eq!(choices[0].value, "default");
+        assert_eq!(choices[1].value, "claude-work");
+        assert!(choices[1].detail.contains("~/.claude-work"));
+        assert!(choices.iter().all(|c| c.agent == Some(AgentId::CLAUDE)));
+        // Each answer starts the session as that account.
+        assert_eq!(
+            advance(
+                Command::NewSession,
+                &strings(&["claude", "claude-work"]),
+                &world
+            ),
+            intent(AgentId::CLAUDE, Some("claude-work"))
+        );
+        assert_eq!(
+            advance(
+                Command::NewSession,
+                &strings(&["claude", "default"]),
+                &world
+            ),
+            intent(AgentId::CLAUDE, None)
+        );
+        // An account of another agent is not on offer.
+        assert!(matches!(
+            advance(
+                Command::NewSession,
+                &strings(&["claude", "codex-lab"]),
+                &world
+            ),
+            Outcome::Refuse(_)
+        ));
+        // One named account is already two choices.
+        let one = with_accounts(&[]);
+        assert!(matches!(
+            advance(Command::NewSession, &strings(&["codex"]), &one),
+            Outcome::Ask(_)
+        ));
+    }
+
+    #[test]
+    fn the_default_account_setting_skips_the_question_and_a_stale_one_asks() {
+        let world = with_accounts(&["claude=work", "codex=default"]);
+        assert_eq!(
+            advance(Command::NewSession, &strings(&["claude"]), &world),
+            intent(AgentId::CLAUDE, Some("claude-work"))
+        );
+        assert_eq!(
+            advance(Command::NewSession, &strings(&["codex"]), &world),
+            intent(AgentId::CODEX, None)
+        );
+        let stale = with_accounts(&["claude=gone"]);
+        assert!(matches!(
+            advance(Command::NewSession, &strings(&["claude"]), &stale),
+            Outcome::Ask(_)
+        ));
+    }
+
+    #[test]
+    fn the_default_agent_of_the_settings_is_still_asked_its_account() {
+        let mut asking = with_accounts(&[]);
+        asking.prefs.default_agent = Some(AgentId::CLAUDE);
+        assert!(matches!(
+            advance(Command::NewSession, &[], &asking),
+            Outcome::Ask(Step {
+                prompt: "Account",
+                ..
+            })
+        ));
+        assert_eq!(
+            advance(Command::NewSession, &strings(&["claude-home"]), &asking),
+            intent(AgentId::CLAUDE, Some("claude-home"))
+        );
+        // Without accounts the default agent starts at once, as it always did.
+        let mut plain = world();
+        plain.prefs.default_agent = Some(AgentId::CLAUDE);
+        assert_eq!(
+            advance(Command::NewSession, &[], &plain),
+            intent(AgentId::CLAUDE, None)
+        );
+    }
+
+    #[test]
+    fn a_session_that_waits_for_its_account_asks_only_that_and_hands_the_answer_back() {
+        let world = with_accounts(&[]).with_account_ask(Some(AccountAsk {
+            agent: AgentId::CLAUDE,
+            machine_name: "Local".into(),
+            cwd: "/srv/web".into(),
+        }));
+        let asked = advance(Command::NewSession, &[], &world);
+        let Outcome::Ask(Step {
+            kind: StepKind::Choices { choices, .. },
+            ..
+        }) = asked
+        else {
+            panic!("expected the account question");
+        };
+        assert!(
+            choices[0].detail.contains("/srv/web"),
+            "the folder is named"
+        );
+        assert_eq!(
+            advance(Command::NewSession, &strings(&["claude-work"]), &world),
+            Outcome::Run(Action::StartWithAccount(Some("claude-work".into())))
+        );
+        assert_eq!(
+            advance(Command::NewSession, &strings(&["default"]), &world),
+            Outcome::Run(Action::StartWithAccount(None))
+        );
+        assert!(matches!(
+            advance(Command::NewSession, &strings(&["nope"]), &world),
+            Outcome::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn adding_an_account_asks_the_agent_a_name_and_the_variables_and_checks_them() {
+        let world = with_accounts(&[]);
+        let agents = advance(Command::AddAccount, &[], &world);
+        let Outcome::Ask(Step {
+            kind: StepKind::Choices { choices, .. },
+            ..
+        }) = agents
+        else {
+            panic!("expected the agents");
+        };
+        let claude = choices.iter().find(|c| c.value == "claude").unwrap();
+        assert!(claude.detail.contains("CLAUDE_CONFIG_DIR"));
+        let opencode = choices.iter().find(|c| c.value == "opencode").unwrap();
+        assert!(
+            opencode.detail.contains("not read per account"),
+            "an agent without a verified folder says so: {}",
+            opencode.detail
+        );
+        assert!(matches!(
+            advance(Command::AddAccount, &strings(&["claude"]), &world),
+            Outcome::Ask(Step {
+                prompt: "Account name",
+                ..
+            })
+        ));
+        // A taken or reserved name is said before the variables are asked.
+        for name in ["work", "WORK", "default"] {
+            assert!(
+                matches!(
+                    advance(Command::AddAccount, &strings(&["claude", name]), &world),
+                    Outcome::Refuse(_)
+                ),
+                "{name}"
+            );
+        }
+        let variables = advance(Command::AddAccount, &strings(&["claude", "Side"]), &world);
+        let Outcome::Ask(Step {
+            prompt,
+            kind: StepKind::Text { placeholder, .. },
+        }) = variables
+        else {
+            panic!("expected the variables");
+        };
+        assert_eq!(prompt, "Variables");
+        assert!(placeholder.contains("CLAUDE_CONFIG_DIR"));
+        assert_eq!(
+            advance(
+                Command::AddAccount,
+                &strings(&["claude", "Side", "CLAUDE_CONFIG_DIR=~/.side"]),
+                &world
+            ),
+            Outcome::Run(Action::AddAccount {
+                agent: AgentId::CLAUDE,
+                name: "Side".into(),
+                variables: "CLAUDE_CONFIG_DIR=~/.side".into(),
+            })
+        );
+        // No variables is allowed: the agent's own setup under another name.
+        assert!(matches!(
+            advance(
+                Command::AddAccount,
+                &strings(&["claude", "Side", ""]),
+                &world
+            ),
+            Outcome::Run(Action::AddAccount { .. })
+        ));
+        for bad in ["oops", "A B=1", "1A=x", "A=1 A=2"] {
+            assert!(
+                matches!(
+                    advance(
+                        Command::AddAccount,
+                        &strings(&["claude", "Side", bad]),
+                        &world
+                    ),
+                    Outcome::Refuse(_)
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn snoozing_offers_the_presets_and_reads_what_is_typed() {
+        use chrono::TimeZone;
+        let now = chrono::Utc.with_ymd_and_hms(2026, 10, 7, 12, 0, 0).unwrap();
+        let utc = chrono::FixedOffset::east_opt(0).unwrap();
+        let mut here = world();
+        here.here_session = Some((SessionId::from_string("s"), "build".to_owned()));
+        here.clock = Some((now, utc));
+        let Outcome::Ask(step) = advance(Command::SnoozeSession, &[], &here) else {
+            panic!("a question");
+        };
+        let StepKind::Choices { choices, custom } = step.kind else {
+            panic!("choices");
+        };
+        assert_eq!(
+            custom,
+            Custom::Any,
+            "a length of time or a date may be typed"
+        );
+        let labels: Vec<&str> = choices.iter().map(|choice| choice.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "In an hour",
+                "In three hours",
+                "Tomorrow morning",
+                "Next week"
+            ]
+        );
+        assert_eq!(
+            advance(Command::SnoozeSession, &["1h".to_owned()], &here),
+            Outcome::Run(Action::Snooze(
+                SessionId::from_string("s"),
+                now + chrono::Duration::hours(1)
+            ))
+        );
+        assert_eq!(
+            advance(
+                Command::SnoozeSession,
+                &["2026-10-12 14:00".to_owned()],
+                &here
+            ),
+            Outcome::Run(Action::Snooze(
+                SessionId::from_string("s"),
+                chrono::Utc
+                    .with_ymd_and_hms(2026, 10, 12, 14, 0, 0)
+                    .unwrap()
+            ))
+        );
+        assert_eq!(
+            advance(Command::SnoozeSession, &["soon".to_owned()], &here),
+            Outcome::Refuse(super::super::shelf::SNOOZE_HELP.to_owned())
+        );
+        assert!(matches!(
+            advance(Command::SnoozeSession, &[], &world()),
+            Outcome::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn renaming_and_removing_an_account_choose_it_check_the_name_and_confirm() {
+        let named = with_accounts(&[]);
+        let listed = advance(Command::RenameAccount, &[], &named);
+        assert_eq!(
+            labels(&listed),
+            ["Claude Code (Work)", "Claude Code (Home)", "Codex (Lab)"]
+        );
+        assert!(matches!(
+            advance(Command::RenameAccount, &strings(&["claude-work"]), &named),
+            Outcome::Ask(Step {
+                prompt: "New name",
+                ..
+            })
+        ));
+        assert_eq!(
+            advance(
+                Command::RenameAccount,
+                &strings(&["claude-work", "Job"]),
+                &named
+            ),
+            Outcome::Run(Action::RenameAccount {
+                id: "claude-work".into(),
+                name: "Job".into()
+            })
+        );
+        // Keeping its own name in another case is fine; another account's is not.
+        assert!(matches!(
+            advance(
+                Command::RenameAccount,
+                &strings(&["claude-work", "WORK"]),
+                &named
+            ),
+            Outcome::Run(_)
+        ));
+        assert!(matches!(
+            advance(
+                Command::RenameAccount,
+                &strings(&["claude-work", "home"]),
+                &named
+            ),
+            Outcome::Refuse(_)
+        ));
+        assert!(matches!(
+            advance(
+                Command::RenameAccount,
+                &strings(&["claude-work", "default"]),
+                &named
+            ),
+            Outcome::Refuse(_)
+        ));
+        assert!(matches!(
+            advance(Command::RemoveAccount, &strings(&["codex-lab"]), &named),
+            Outcome::Ask(Step {
+                prompt: "Confirm",
+                ..
+            })
+        ));
+        assert_eq!(
+            advance(
+                Command::RemoveAccount,
+                &strings(&["codex-lab", "yes"]),
+                &named
+            ),
+            Outcome::Run(Action::RemoveAccount("codex-lab".into()))
+        );
+        assert_eq!(
+            advance(
+                Command::RemoveAccount,
+                &strings(&["codex-lab", "no"]),
+                &named
+            ),
+            Outcome::Run(Action::Nothing)
+        );
+        for command in [Command::RenameAccount, Command::RemoveAccount] {
+            assert!(
+                matches!(advance(command, &[], &world()), Outcome::Refuse(_)),
+                "nothing to act on"
+            );
+        }
+    }
+
+    #[test]
+    fn adding_an_account_says_what_leon_can_do_per_account_for_its_agent() {
+        let claude = account(AgentId::CLAUDE, "Work", "CLAUDE_CONFIG_DIR=~/.w");
+        assert!(added_note(&claude).contains("limits get a line of their own"));
+        let bare = account(AgentId::CODEX, "Bare", "");
+        assert!(added_note(&bare).contains("CODEX_HOME"));
+        let other = account(AgentId::OPENCODE, "Side", "XDG_DATA_HOME=/d");
+        assert!(
+            added_note(&other).contains("history and limits are not read per account"),
+            "{}",
+            added_note(&other)
         );
     }
 }

@@ -1800,11 +1800,10 @@ mod foreground_tests {
     #[test]
     fn a_terminal_is_quiet_after_its_prompt() {
         let terminal = shell();
-        assert_eq!(
-            terminal.quiet_for(),
-            None,
-            "nothing printed yet or just now"
-        );
+        // Whether the shell has already printed when the terminal is first
+        // looked at depends on the machine's load, so nothing is asserted
+        // before the output exists.
+        wait_for("the first output", || terminal.quiet_for().is_some());
         wait_for("a quiet prompt", || {
             terminal
                 .quiet_for()

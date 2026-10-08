@@ -181,6 +181,9 @@ pub struct Session {
     /// user pinned it; `None` means not pinned. The sidebar's Pinned section
     /// shows the pinned sessions of a machine in this order.
     pub sort_order: Option<i64>,
+    /// The id of the account the session ran with (see [`crate::Account`]);
+    /// `None` is the agent's own setup. Resuming the session uses the same one.
+    pub account: Option<String>,
 }
 
 /// What holds sessions in the sidebar: the parent whose pinned order a

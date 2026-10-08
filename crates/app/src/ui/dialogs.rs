@@ -7,7 +7,6 @@
 //! is behind each door.
 
 use super::shell::{Overlay, Shell};
-use super::terminals::Place;
 use super::widgets::{key_cap, mono, section_label};
 use crate::engine::Op;
 use crate::format;
@@ -764,7 +763,11 @@ impl Shell {
             branch: branch.clone(),
             base,
         });
-        let launch = agent.map_or(Launch::Shell, |kind| Launch::Agent { kind, resume: None });
+        let launch = agent.map_or(Launch::Shell, |kind| Launch::Agent {
+            kind,
+            resume: None,
+            account: None,
+        });
         self.start_when_worktree_appears(project, machine, branch, launch, window, cx);
         let keep_open = self
             .new_worktree_ui
@@ -801,6 +804,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let engine = self.engine.clone();
         self.worktree_task = Some(cx.spawn_in(window, async move |this, cx| {
             for _ in 0..75 {
                 cx.background_executor()
@@ -817,15 +821,16 @@ impl Shell {
                 });
                 match found {
                     Ok(Some(path)) => {
+                        // The project's file is read now: the setup it names
+                        // is the one that runs, not one from before an edit.
+                        let state = engine
+                            .read_project_file(project.clone())
+                            .await
+                            .ok()
+                            .and_then(Result::ok);
                         this.update_in(cx, |this, window, cx| {
-                            this.start_live(
-                                launch,
-                                &machine,
-                                &path,
-                                Place::Session,
-                                None,
-                                window,
-                                cx,
+                            this.start_worktree_session(
+                                &project, &machine, &path, launch, state, window, cx,
                             );
                         })
                         .ok();
@@ -852,7 +857,11 @@ impl Shell {
             .default_agent
             .filter(|agent| prefs.offered().contains(agent))
             .filter(|agent| installed.as_ref().is_none_or(|list| list.contains(agent)))
-            .map_or(Launch::Shell, |kind| Launch::Agent { kind, resume: None })
+            .map_or(Launch::Shell, |kind| Launch::Agent {
+                kind,
+                resume: None,
+                account: None,
+            })
     }
 
     /// Whether the "Create from" list is open (and the row has the

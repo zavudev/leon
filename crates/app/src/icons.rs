@@ -80,6 +80,37 @@ impl AssetSource for Assets {
     }
 }
 
+/// The icons a script of `leon.toml` can ask for by name: ones already
+/// compiled in, so a project file never needs an asset.
+pub const SCRIPT_ICONS: &[(&str, IconName)] = &[
+    ("terminal", IconName::Terminal),
+    ("bot", IconName::Bot),
+    ("git-branch", IconName::GitBranch),
+    ("folder", IconName::Folder),
+    ("file", IconName::File),
+    ("hash", IconName::Hash),
+    ("check", IconName::Check),
+    ("refresh", IconName::RefreshCw),
+    ("server", IconName::Server),
+    ("settings", IconName::Settings),
+    ("search", IconName::Search),
+    ("trash", IconName::Trash),
+    ("plus", IconName::Plus),
+    ("command", IconName::Command),
+    ("pin", IconName::Pin),
+    ("paw", IconName::PawPrint),
+    ("laptop", IconName::Laptop),
+    ("house", IconName::House),
+];
+
+/// The icon a script calls `name`, when it is one of [`SCRIPT_ICONS`].
+pub fn script_icon(name: &str) -> Option<IconName> {
+    SCRIPT_ICONS
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, icon)| *icon)
+}
+
 /// An icon of the given size and colour.
 pub fn icon(name: IconName, size: Pixels, colour: Hsla) -> Icon {
     Icon::new(name).size(size).text_color(colour)

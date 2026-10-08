@@ -13,12 +13,17 @@
 //!    terminal of that agent in the folder, its newest one; with several, a
 //!    session is only linked when exactly one of them could own it, because
 //!    guessing would put two terminals on one session. Likely, not certain.
-//! 3. **The title** ([`by_title`]) for a terminal that already has a link:
+//! 3. **The process again** ([`by_process_again`]): a terminal that holds an id
+//!    learned for sure is asked again, because the agent can move to another
+//!    session without the terminal noticing (`/clear`, `/resume`, quitting
+//!    it and starting it anew by hand). Only a single agent below the shell
+//!    that names another session counts.
+//! 4. **The title** ([`by_title`]) for a terminal that already has a link:
 //!    the title the program puts on the terminal is its session's own
 //!    (opencode's `OC | <title>`), so when the agent moves to another session
 //!    inside one terminal the link follows it, where the folder alone cannot.
 //!
-//! A session is never linked to two terminals. All three functions are pure;
+//! A session is never linked to two terminals. All the functions are pure;
 //! the window feeds them and applies what they return.
 
 use crate::elsewhere::{Found, Signal};
@@ -87,6 +92,19 @@ pub struct Learned {
     pub how: &'static str,
 }
 
+/// A terminal that holds an id learned for sure, for [`by_process_again`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Holding {
+    /// The live session's id.
+    pub id: u64,
+    /// Its agent.
+    pub agent: AgentId,
+    /// The pid of the shell in the terminal, when it is known.
+    pub shell_pid: Option<u32>,
+    /// The agent's own session id it holds.
+    pub external: String,
+}
+
 /// The session ids that cannot be given again: those other terminals hold.
 pub type Taken = HashSet<(AgentId, String)>;
 
@@ -116,12 +134,59 @@ pub fn by_process(fresh: &[Fresh], found: &[Found], taken: &Taken) -> Vec<Learne
                 id: terminal.id,
                 external,
                 history: found.session.clone(),
-                how: match found.link.as_ref().map(|link| link.signal) {
-                    Some(Signal::Arguments) => "arguments",
-                    _ => "state-file",
-                },
+                how: how_of(found),
             });
         }
+    }
+    learned
+}
+
+/// How sure a process's session id is: what told the scan.
+fn how_of(found: &Found) -> &'static str {
+    match found.link.as_ref().map(|link| link.signal) {
+        Some(Signal::Arguments) => "arguments",
+        _ => "state-file",
+    }
+}
+
+/// Finds the terminals whose agent now holds another session than the one
+/// they learned: the one agent below the terminal's shell, named by its state
+/// file or arguments, whose id is not the terminal's and not another's. With
+/// no agent found, or several (a second one the agent started, say), nothing
+/// is concluded and the terminal keeps its id.
+pub fn by_process_again(holding: &[Holding], found: &[Found], taken: &Taken) -> Vec<Learned> {
+    let mut claimed = taken.clone();
+    let mut learned = Vec::new();
+    for terminal in holding {
+        let Some(shell) = terminal.shell_pid else {
+            continue;
+        };
+        let below: Vec<&Found> = found
+            .iter()
+            .filter(|f| {
+                f.agent == terminal.agent
+                    && f.ancestors.contains(&shell)
+                    && f.external_id.is_some()
+                    && matches!(
+                        f.link.as_ref().map(|link| link.signal),
+                        Some(Signal::StateFile | Signal::Arguments)
+                    )
+            })
+            .collect();
+        let [found] = below[..] else {
+            continue;
+        };
+        let external = found.external_id.clone().expect("checked above");
+        if external == terminal.external || claimed.contains(&(found.agent, external.clone())) {
+            continue;
+        }
+        claimed.insert((found.agent, external.clone()));
+        learned.push(Learned {
+            id: terminal.id,
+            external,
+            history: found.session.clone(),
+            how: how_of(found),
+        });
     }
     learned
 }
@@ -312,6 +377,7 @@ mod tests {
             updated_at: started,
             message_count: 1,
             sort_order: None,
+            account: None,
         }
     }
 
@@ -350,6 +416,69 @@ mod tests {
         assert_eq!((learned[0].id, learned[0].external.as_str()), (1, "sid-a"));
         assert_eq!((learned[1].id, learned[1].external.as_str()), (2, "sid-b"));
         assert!(learned.iter().all(|l| l.how == "state-file"));
+    }
+
+    fn holding(id: u64, external: &str) -> Holding {
+        Holding {
+            id,
+            agent: AgentId::CLAUDE,
+            shell_pid: Some(1000 + id as u32),
+            external: external.to_owned(),
+        }
+    }
+
+    #[test]
+    fn an_agent_that_moved_to_another_session_in_its_terminal_is_followed_there() {
+        let moved = process(AgentId::CLAUDE, 5001, 1001, "sid-new", Signal::StateFile);
+        let learned = by_process_again(&[holding(1, "sid-old")], &[moved], &Taken::new());
+        assert_eq!(learned.len(), 1);
+        assert_eq!(
+            (learned[0].id, learned[0].external.as_str()),
+            (1, "sid-new")
+        );
+        assert_eq!(learned[0].how, "state-file");
+        // Told by its arguments, it says so.
+        let resumed = process(AgentId::CLAUDE, 5001, 1001, "sid-new", Signal::Arguments);
+        let learned = by_process_again(&[holding(1, "sid-old")], &[resumed], &Taken::new());
+        assert_eq!(learned[0].how, "arguments");
+    }
+
+    #[test]
+    fn an_agent_that_did_not_move_or_cannot_be_told_from_another_changes_nothing() {
+        let taken = Taken::new();
+        let same = process(AgentId::CLAUDE, 5001, 1001, "sid-old", Signal::StateFile);
+        assert!(by_process_again(
+            &[holding(1, "sid-old")],
+            std::slice::from_ref(&same),
+            &taken
+        )
+        .is_empty());
+        // Nothing below the shell: the scan saw nothing, which is no news.
+        assert!(by_process_again(&[holding(1, "sid-old")], &[], &taken).is_empty());
+        // Another terminal's agent.
+        let other = process(AgentId::CLAUDE, 5002, 1002, "sid-new", Signal::StateFile);
+        assert!(by_process_again(&[holding(1, "sid-old")], &[other], &taken).is_empty());
+        // Two agents below the shell: which one is on screen is not known.
+        let second = process(AgentId::CLAUDE, 5003, 1001, "sid-new", Signal::StateFile);
+        assert!(by_process_again(&[holding(1, "sid-old")], &[same, second], &taken).is_empty());
+        // A guess from "the latest session" is not a signal.
+        let guessed = process(
+            AgentId::CLAUDE,
+            5001,
+            1001,
+            "sid-new",
+            Signal::RecentInFolder,
+        );
+        assert!(by_process_again(&[holding(1, "sid-old")], &[guessed], &taken).is_empty());
+        // An id another terminal holds is not given away.
+        let theirs = process(AgentId::CLAUDE, 5001, 1001, "sid-new", Signal::StateFile);
+        let taken: Taken = [(AgentId::CLAUDE, "sid-new".to_owned())].into();
+        assert!(by_process_again(&[holding(1, "sid-old")], &[theirs], &taken).is_empty());
+        // A terminal whose shell is unknown cannot be matched.
+        let mut unknown = holding(1, "sid-old");
+        unknown.shell_pid = None;
+        let any = process(AgentId::CLAUDE, 5001, 1001, "sid-new", Signal::StateFile);
+        assert!(by_process_again(&[unknown], &[any], &Taken::new()).is_empty());
     }
 
     #[test]

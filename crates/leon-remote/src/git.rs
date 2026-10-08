@@ -22,7 +22,7 @@
 //! The first block is always the main worktree. A block may also carry
 //! `bare`, `locked [reason]` and `prunable [reason]` lines.
 
-use leon_core::{Machine, NewWorktree, Project};
+use leon_core::{Divergence, Machine, NewWorktree, Project};
 use thiserror::Error;
 
 use crate::command::{run_on, CommandSpec, SshOptions};
@@ -104,6 +104,52 @@ pub fn parse_worktree_list(porcelain: &str) -> Vec<GitWorktree> {
     worktrees
 }
 
+/// What `git status --porcelain=v1 --branch` says about one checkout.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CheckoutState {
+    /// How many paths are modified, added, removed, renamed or untracked.
+    pub changed: u32,
+    /// Distance from the upstream branch; `None` for a branch without one (or
+    /// whose upstream is gone) and for a detached head.
+    pub divergence: Option<Divergence>,
+}
+
+/// Reads the output of `git status --porcelain=v1 --branch`. The first line
+/// (`## main...origin/main [ahead 1, behind 2]`) is the branch, every other
+/// non-empty line is one changed path. Pure, so the shapes git prints are
+/// tested on recorded outputs.
+pub fn parse_status(porcelain: &str) -> CheckoutState {
+    let mut state = CheckoutState::default();
+    for line in porcelain.lines().filter(|line| !line.trim().is_empty()) {
+        match line.strip_prefix("## ") {
+            Some(header) => state.divergence = parse_branch_header(header),
+            None => state.changed += 1,
+        }
+    }
+    state
+}
+
+/// The distance in a branch header, or `None` without an upstream.
+fn parse_branch_header(header: &str) -> Option<Divergence> {
+    // `main...origin/main [ahead 1, behind 2]`: no `...` means no upstream
+    // (and `No commits yet on main` or `HEAD (no branch)` have none either).
+    let (_, upstream) = header.split_once("...")?;
+    let Some((_, counts)) = upstream.split_once(" [") else {
+        return Some(Divergence::default());
+    };
+    let counts = counts.trim_end().strip_suffix(']')?;
+    let mut divergence = Divergence::default();
+    for part in counts.split(", ") {
+        match part.split_once(' ') {
+            Some(("ahead", n)) => divergence.ahead = n.parse().ok()?,
+            Some(("behind", n)) => divergence.behind = n.parse().ok()?,
+            // `gone`: the upstream was deleted, there is nothing to compare to.
+            _ => return None,
+        }
+    }
+    Some(divergence)
+}
+
 /// Why a git operation failed.
 #[derive(Debug, Error)]
 pub enum GitError {
@@ -128,9 +174,9 @@ pub enum GitError {
 /// Git operations bound to one machine.
 #[derive(Debug)]
 pub struct Git<'a, R> {
-    runner: &'a R,
-    machine: &'a Machine,
-    ssh: &'a SshOptions,
+    pub(crate) runner: &'a R,
+    pub(crate) machine: &'a Machine,
+    pub(crate) ssh: &'a SshOptions,
 }
 
 impl<'a, R: Runner> Git<'a, R> {
@@ -207,6 +253,31 @@ impl<'a, R: Runner> Git<'a, R> {
             .run("status", git(path, ["status", "--porcelain"]))
             .await?;
         Ok(!stdout.trim().is_empty())
+    }
+
+    /// The state of the checkout at `path`: changed paths and the distance from
+    /// its upstream, from one `git status`. Optional locks are off, so asking
+    /// on a timer never makes a git command the person types wait. Untracked
+    /// files are listed one by one, as the changes tab lists them, so the
+    /// number a row shows is the number of files that tab has.
+    pub async fn checkout_state(&self, path: &str) -> Result<CheckoutState, GitError> {
+        reject_option_like("path", path)?;
+        let stdout = self
+            .run(
+                "status",
+                git(
+                    path,
+                    [
+                        "--no-optional-locks",
+                        "status",
+                        "--porcelain=v1",
+                        "--branch",
+                        "--untracked-files=all",
+                    ],
+                ),
+            )
+            .await?;
+        Ok(parse_status(&stdout))
     }
 
     /// The branch checked out in `cwd`, or `None` when the head is detached.
@@ -287,7 +358,11 @@ impl<'a, R: Runner> Git<'a, R> {
         .map(drop)
     }
 
-    async fn run(&self, operation: &'static str, command: CommandSpec) -> Result<String, GitError> {
+    pub(crate) async fn run(
+        &self,
+        operation: &'static str,
+        command: CommandSpec,
+    ) -> Result<String, GitError> {
         let placed = run_on(self.machine, &command, self.ssh);
         let output = self.runner.run(&placed).await?;
         if output.success() {
@@ -305,7 +380,7 @@ impl<'a, R: Runner> Git<'a, R> {
 /// A git command run in `cwd`. Terminal prompts are disabled so that a
 /// command needing credentials fails instead of waiting for input nobody can
 /// give.
-fn git<const N: usize>(cwd: &str, args: [&str; N]) -> CommandSpec {
+pub(crate) fn git<const N: usize>(cwd: &str, args: [&str; N]) -> CommandSpec {
     CommandSpec::new("git")
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -314,7 +389,7 @@ fn git<const N: usize>(cwd: &str, args: [&str; N]) -> CommandSpec {
 
 /// Refuses a value git would read as an option. Branch names and paths come
 /// from user input and must never be able to change what the command does.
-fn reject_option_like(what: &str, value: &str) -> Result<(), GitError> {
+pub(crate) fn reject_option_like(what: &str, value: &str) -> Result<(), GitError> {
     if value.is_empty() || value.starts_with('-') {
         return Err(GitError::InvalidArgument(format!(
             "{what} must not be empty or start with a dash: {value:?}"
@@ -446,6 +521,77 @@ prunable gitdir file points to non-existent location
         assert_eq!(worktrees.len(), 1);
         assert_eq!(worktrees[0].path, "C:/code/api");
         assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn the_status_header_gives_the_distance_from_the_upstream() {
+        let of = |text: &str| parse_status(text).divergence;
+        let moved = |ahead, behind| Some(Divergence { ahead, behind });
+        assert_eq!(of("## main...origin/main\n"), moved(0, 0));
+        assert_eq!(of("## main...origin/main [ahead 2]\n"), moved(2, 0));
+        assert_eq!(of("## main...origin/main [behind 14]\n"), moved(0, 14));
+        assert_eq!(
+            of("## feature/login...origin/feature/login [ahead 1, behind 3]\n"),
+            moved(1, 3)
+        );
+        assert_eq!(of("## main...origin/main [gone]\n"), None);
+        assert_eq!(of("## main\n"), None, "no upstream is not level");
+        assert_eq!(of("## HEAD (no branch)\n"), None);
+        assert_eq!(of("## No commits yet on main\n"), None);
+        assert_eq!(of(""), None);
+    }
+
+    #[test]
+    fn every_line_after_the_header_is_one_changed_path() {
+        let recorded = "## main...origin/main [ahead 1]\n M src/lib.rs\nA  new.rs\nR  old.rs -> renamed.rs\n?? notes.md\n?? dir/one.rs\n";
+        let state = parse_status(recorded);
+        assert_eq!(state.changed, 5);
+        assert_eq!(
+            state.divergence,
+            Some(Divergence {
+                ahead: 1,
+                behind: 0
+            })
+        );
+        assert_eq!(parse_status("## main\n").changed, 0);
+        assert_eq!(parse_status("").changed, 0);
+        // Without `--branch` (an old git) there is no header: still counted.
+        assert_eq!(parse_status(" M a\n").changed, 1);
+    }
+
+    #[tokio::test]
+    async fn the_state_of_a_checkout_is_one_status_without_optional_locks() {
+        let runner =
+            ScriptedRunner::new().reply(Output::ok("## main...origin/main [behind 2]\n M a.rs\n"));
+        let machine = local();
+        let ssh = SshOptions::default();
+        let state = Git::new(&runner, &machine, &ssh)
+            .checkout_state("/srv/wt")
+            .await
+            .unwrap();
+        assert_eq!(state.changed, 1);
+        assert_eq!(
+            state.divergence,
+            Some(Divergence {
+                ahead: 0,
+                behind: 2
+            })
+        );
+        let call = &runner.calls()[0];
+        assert_eq!(call.program, "git");
+        assert_eq!(
+            call.args,
+            [
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "--branch",
+                "--untracked-files=all"
+            ]
+        );
+        assert_eq!(call.cwd.as_deref(), Some("/srv/wt"));
+        let refused = Git::new(&runner, &machine, &ssh).checkout_state("-x").await;
+        assert!(matches!(refused, Err(GitError::InvalidArgument(_))));
     }
 
     #[test]

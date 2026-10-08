@@ -1,10 +1,11 @@
 //! Sharing this computer from inside the application.
 //!
 //! "Share this machine" runs the host service of `leon-host` in this process,
-//! on the engine's runtime, for as long as Leon is open and the switch is on.
-//! A background service that survives the window (launchd, systemd, a Windows
-//! service) is the next stage and is not built: closing Leon stops sharing and
-//! hangs up the terminals it was serving.
+//! on the engine's runtime, for as long as Leon is open and the switch is on:
+//! closing Leon stops sharing and hangs up the terminals it was serving. A host
+//! that outlives the window is the separate background service of
+//! `leon host service install` (`host_service`), which runs `leon host` under
+//! systemd or launchd.
 //!
 //! What this installation's own Leon shares with its paired devices is read
 //! straight from this process's store ([`StoreShare`]): the projects and

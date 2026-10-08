@@ -53,6 +53,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    let mut tokens: std::collections::BTreeMap<&str, leon_core::TokenCounts> = Default::default();
+    for row in store.token_usage(None)? {
+        tokens
+            .entry(row.agent.as_str())
+            .or_default()
+            .add(&row.counts);
+    }
+    for (agent, counts) in &tokens {
+        println!(
+            "{agent:<9} tokens: input {} output {} cache read {} cache write {} (1h {})",
+            counts.input,
+            counts.output,
+            counts.cache_read,
+            counts.cache_write,
+            counts.cache_write_1h
+        );
+    }
+
     for word in ["error", "test", "refactor the"] {
         let started = Instant::now();
         let hits = store.search(&SearchQuery::new(word))?;

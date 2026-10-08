@@ -21,12 +21,14 @@ mod connect;
 mod diagnose;
 mod elsewhere;
 mod engine;
+mod fanout;
 // The editor is the first caller of the file engine.
 #[allow(dead_code)]
 mod files;
 mod format;
 mod fuzzy;
 mod history_report;
+mod host_service;
 mod icons;
 mod keys;
 mod launch;
@@ -36,12 +38,14 @@ mod menus;
 mod pair;
 mod platform;
 mod product;
+mod project;
 mod remote;
 mod schema;
 mod search;
 mod settings;
 mod share;
 mod theme;
+mod trust;
 mod ui;
 mod updates;
 mod usage;
@@ -59,6 +63,10 @@ use std::time::Duration;
 /// that does not answer cannot hold the engine up.
 const COMMAND_TIME_LIMIT: Duration = Duration::from_secs(30);
 
+/// The same for the commands that may take minutes by their nature: a commit
+/// whose hooks run the project's checks, a push, an agent asked for a message.
+const SLOW_COMMAND_TIME_LIMIT: Duration = Duration::from_secs(600);
+
 fn main() {
     // Before anything else: the platform names the application from this.
     brand::set_process_name();
@@ -67,6 +75,14 @@ fn main() {
     // `leon host ...` runs the sharing service without a window.
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.first().map(String::as_str) == Some("host") {
+        // `leon host service ...` installs and watches it as a background
+        // service of the user's session.
+        if arguments.get(1).map(String::as_str) == Some("service") {
+            std::process::exit(host_service::run(
+                arguments[2..].to_vec(),
+                product::data_dir(),
+            ));
+        }
         std::process::exit(leon_host::cli::run(
             arguments[1..].to_vec(),
             product::data_dir(),
@@ -208,6 +224,13 @@ fn main() {
         leon_history::default_roots(),
         runtime.handle().clone(),
     );
+    engine.set_slow_runner(Arc::new(
+        leon_remote::RoutingRunner::new(
+            ProcessRunner::with_time_limit(SLOW_COMMAND_TIME_LIMIT),
+            hub.clone(),
+        )
+        .with_time_limit(SLOW_COMMAND_TIME_LIMIT),
+    ));
     engine.set_icon_fetcher(Arc::new(avatar::CurlFetcher));
     // What the computers paired with this one share of their own Leon: pulled
     // from their Leon through the relay into this one's store.

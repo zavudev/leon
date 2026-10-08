@@ -27,6 +27,12 @@
 //!   items are dropped.
 //! * Unparseable lines, including a final line cut short, are counted and
 //!   skipped.
+//!
+//! Token counts come from the `token_count` events, read apart from the
+//! messages. Their running totals are turned into what each call used (see
+//! [`CodexMeter`]) and put under the model the latest `turn_context` named.
+//! A rollout forked from another repeats the parent's records, its token
+//! events included, so a forked session counts what its parent counted again.
 
 use leon_core::{AgentId, Role};
 use serde::Deserialize;
@@ -35,6 +41,7 @@ use serde_json::Value;
 
 use crate::normalize::{parse_timestamp, tool_line, Content};
 use crate::session::{ParsedSession, SessionBuilder};
+use crate::tokens::{CodexMeter, CodexRaw};
 
 /// The envelope around a record. The payload is kept as raw JSON so that the
 /// many record types Leon does not read are skipped without being decoded.
@@ -65,6 +72,14 @@ struct Record {
     input: Option<Value>,
 }
 
+/// The payload of an `event_msg`, of which only the token counts are read.
+#[derive(Debug, Deserialize)]
+struct Event {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    info: Option<Value>,
+}
+
 /// Parses the bytes of one Codex rollout file.
 ///
 /// `fallback_id` is used as the session id when the file does not state one;
@@ -73,6 +88,8 @@ struct Record {
 pub fn parse_session(fallback_id: &str, bytes: &[u8]) -> Option<ParsedSession> {
     let mut session = SessionBuilder::new(AgentId::CODEX, fallback_id);
     let mut named = false;
+    let mut meter = CodexMeter::default();
+    let mut model: Option<String> = None;
 
     for raw in bytes.split(|byte| *byte == b'\n') {
         if raw.iter().all(u8::is_ascii_whitespace) {
@@ -84,6 +101,20 @@ pub fn parse_session(fallback_id: &str, bytes: &[u8]) -> Option<ParsedSession> {
         };
         let at = envelope.timestamp.as_deref().and_then(parse_timestamp);
         let kind = envelope.kind.as_deref();
+        if let (Some("event_msg"), Some(payload)) = (kind, envelope.payload) {
+            let counted = serde_json::from_str::<Event>(payload.get())
+                .ok()
+                .filter(|event| event.kind.as_deref() == Some("token_count"))
+                .and_then(|event| event.info)
+                .map(|info| {
+                    let part = |key: &str| info.get(key).and_then(CodexRaw::of);
+                    meter.observe(part("total_token_usage"), part("last_token_usage"))
+                });
+            if let Some(counts) = counted {
+                session.see_tokens(model.as_deref(), at, counts);
+            }
+            continue;
+        }
         let record = match (kind, envelope.payload) {
             (Some("session_meta" | "turn_context" | "response_item"), Some(payload)) => {
                 serde_json::from_str::<Record>(payload.get())
@@ -102,11 +133,13 @@ pub fn parse_session(fallback_id: &str, bytes: &[u8]) -> Option<ParsedSession> {
                 // header after its own, so only the first header that names
                 // a session is read.
                 if !named {
+                    model = record.model.clone().or(model);
                     read_meta(&mut session, &record);
                     named = record.id.is_some() || record.session_id.is_some();
                 }
             }
             (Some("turn_context"), true) => {
+                model = record.model.clone().or(model);
                 session.see_model(record.model.as_deref());
                 session.see_cwd(record.cwd.as_deref());
             }
@@ -493,5 +526,118 @@ mod tests {
     fn a_rollout_without_messages_yields_nothing() {
         assert!(parse_session("x", &lines(&[meta()])).is_none());
         assert!(parse_session("x", b"").is_none());
+    }
+
+    /// A recorded `token_count` event, with the running totals and the last
+    /// call.
+    fn token_count(timestamp: &str, total: (u64, u64, u64), last: (u64, u64, u64)) -> Value {
+        let usage = |(input, cached, output): (u64, u64, u64)| {
+            json!({"input_tokens": input, "cached_input_tokens": cached,
+                   "cache_write_input_tokens": 0, "output_tokens": output,
+                   "reasoning_output_tokens": 77, "total_tokens": input + output})
+        };
+        envelope(
+            "event_msg",
+            timestamp,
+            json!({"type": "token_count",
+                   "info": {"total_token_usage": usage(total), "last_token_usage": usage(last),
+                            "model_context_window": 258400},
+                   "rate_limits": {"limit_id": "codex", "plan_type": "plus"}}),
+            2,
+        )
+    }
+
+    fn turn_context(model: &str, timestamp: &str) -> Value {
+        envelope(
+            "turn_context",
+            timestamp,
+            json!({"cwd": "/srv/api", "model": model}),
+            1,
+        )
+    }
+
+    #[test]
+    fn token_counts_become_per_call_figures_under_the_model_of_their_turn() {
+        let first = (23881, 11520, 326);
+        let second = (54578, 23040, 877);
+        let third = (92755, 53504, 1042);
+        let bytes = lines(&[
+            meta(),
+            turn_context("model-x", "2026-03-01T10:00:01Z"),
+            message("user", "input_text", "go", "2026-03-01T10:00:02Z"),
+            token_count("2026-03-01T10:00:03Z", first, first),
+            // Written twice, as Codex sometimes does.
+            token_count("2026-03-01T10:00:03Z", first, first),
+            token_count("2026-03-01T10:00:09Z", second, (30697, 11520, 551)),
+            turn_context("model-y", "2026-03-02T00:00:00Z"),
+            token_count("2026-03-02T00:00:01Z", third, (38177, 30464, 165)),
+        ]);
+        let session = parse_session("x", &bytes).unwrap();
+        let got: Vec<_> = session
+            .tokens
+            .iter()
+            .map(|t| {
+                (
+                    t.model.as_str(),
+                    t.day.as_str(),
+                    t.counts.input,
+                    t.counts.output,
+                    t.counts.cache_read,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                // 54578 - 23040 = 31538 input of which 53504-... see below.
+                ("model-x", "2026-03-01", 54578 - 23040, 877, 23040),
+                (
+                    "model-y",
+                    "2026-03-02",
+                    (92755 - 53504) - (54578 - 23040),
+                    1042 - 877,
+                    53504 - 23040
+                ),
+            ]
+        );
+        // Together they are exactly what the last totals say.
+        let sum: u64 = session.tokens.iter().map(|t| t.counts.total()).sum();
+        assert_eq!(sum, 92755 + 1042);
+    }
+
+    #[test]
+    fn token_events_without_numbers_count_as_nothing_and_are_not_malformed() {
+        let bytes = lines(&[
+            meta(),
+            message("user", "input_text", "go", "2026-03-01T10:00:02Z"),
+            envelope(
+                "event_msg",
+                "2026-03-01T10:00:03Z",
+                json!({"type": "token_count", "info": null, "rate_limits": null}),
+                2,
+            ),
+            envelope(
+                "event_msg",
+                "2026-03-01T10:00:04Z",
+                json!({"type": "agent_message", "info": {"total_token_usage": {"input_tokens": 9}}}),
+                3,
+            ),
+        ]);
+        let session = parse_session("x", &bytes).unwrap();
+        assert!(session.tokens.is_empty());
+        assert_eq!(session.malformed, 0);
+    }
+
+    #[test]
+    fn a_count_before_any_turn_is_put_under_the_model_the_session_names() {
+        let mut header = meta();
+        header["payload"]["model"] = json!("model-meta");
+        let bytes = lines(&[
+            header,
+            message("user", "input_text", "go", "2026-03-01T10:00:02Z"),
+            token_count("2026-03-01T10:00:03Z", (10, 0, 2), (10, 0, 2)),
+        ]);
+        let session = parse_session("x", &bytes).unwrap();
+        assert_eq!(session.tokens[0].model, "model-meta");
     }
 }

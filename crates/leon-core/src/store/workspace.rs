@@ -117,6 +117,8 @@ pub struct SavedTerminal {
     pub title: Option<String>,
     /// When it was started, in milliseconds since the epoch.
     pub started_at: i64,
+    /// The id of the account it ran with; `None` is the agent's own setup.
+    pub account: Option<String>,
 }
 
 /// Everything remembered about the open terminals.
@@ -193,8 +195,8 @@ impl Store {
             for (position, t) in state.terminals.iter().enumerate() {
                 tx.execute(
                     "INSERT INTO saved_terminal (slot, position, id, machine, cwd, agent, session,
-                         confidence, history, name, title, started_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                         confidence, history, name, title, started_at, account)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                     params![
                         s,
                         position as i64,
@@ -207,7 +209,8 @@ impl Store {
                         t.history,
                         t.name,
                         t.title,
-                        t.started_at
+                        t.started_at,
+                        t.account
                     ],
                 )?;
             }
@@ -271,7 +274,8 @@ impl Store {
                 });
             }
             let mut statement = connection.prepare(
-                "SELECT id, machine, cwd, agent, session, confidence, history, name, title, started_at
+                "SELECT id, machine, cwd, agent, session, confidence, history, name, title, started_at,
+                        account
                  FROM saved_terminal WHERE slot = ?1 ORDER BY position",
             )?;
             let terminals = statement
@@ -287,6 +291,7 @@ impl Store {
                         name: row.get(7)?,
                         title: row.get(8)?,
                         started_at: row.get(9)?,
+                        account: row.get(10)?,
                     })
                 })?
                 .collect::<rusqlite::Result<_>>()?;
@@ -340,6 +345,8 @@ mod tests {
             name: Some("my name".into()),
             title: None,
             started_at: 1_000 + id as i64,
+            // One of the three runs with an account, which must come back.
+            account: (id == 2).then(|| "claude-work".to_owned()),
         }
     }
 

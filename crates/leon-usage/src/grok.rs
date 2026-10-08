@@ -225,6 +225,7 @@ pub fn reading(billing: &Billing, machine: &str, now: i64) -> AgentUsage {
         agent: AgentId::GROK,
         machine: machine.to_owned(),
         account_label: billing.tier.clone(),
+        account: None,
         plan: billing.tier.clone(),
         source: Some(Source::VendorApi),
         observed_at: Some(now),

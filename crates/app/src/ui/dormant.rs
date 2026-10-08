@@ -29,6 +29,9 @@ pub struct Dormant {
     pub agent: Option<String>,
     /// What its row says: the name or title it had.
     pub label: Option<String>,
+    /// The id of the account it ran with; `None` is the agent's own setup.
+    #[serde(default)]
+    pub account: Option<String>,
 }
 
 impl Dormant {
@@ -90,15 +93,35 @@ impl Dormants {
         cwd: &str,
         agent: Option<AgentId>,
         label: Option<String>,
+        account: Option<String>,
     ) {
-        let number = self.items.iter().map(|d| d.number + 1).max().unwrap_or(0);
+        let number = self.next_number();
         self.items.push(Dormant {
             number,
             machine: machine.as_str().to_owned(),
             cwd: cwd.to_owned(),
             agent: agent.map(|agent| agent.as_str().to_owned()),
             label,
+            account,
         });
+    }
+
+    /// The number a session put to sleep now gets: above every one in use.
+    fn next_number(&self) -> u64 {
+        self.items.iter().map(|d| d.number + 1).max().unwrap_or(0)
+    }
+
+    /// Puts a record back (closing one was undone) with the number it had, so
+    /// its row keeps its id and its place among the others; a number another
+    /// record took meanwhile is not given twice. The id its row goes by.
+    pub fn restore(&mut self, mut record: Dormant) -> LiveId {
+        if self.items.iter().any(|d| d.number == record.number) {
+            record.number = self.next_number();
+        }
+        let id = record.id();
+        let at = self.items.partition_point(|d| d.number < record.number);
+        self.items.insert(at, record);
+        id
     }
 
     /// The sleeping session whose row goes by `id`.
@@ -130,8 +153,14 @@ mod tests {
     fn a_sleeping_session_keeps_where_it_ran_and_leaves_when_woken_or_closed() {
         let mut all = Dormants::default();
         let local = MachineId::local();
-        all.add(&local, "/srv/api", None, Some("build".into()));
-        all.add(&local, "/srv/web", Some(AgentId::CLAUDE), None);
+        all.add(&local, "/srv/api", None, Some("build".into()), None);
+        all.add(
+            &local,
+            "/srv/web",
+            Some(AgentId::CLAUDE),
+            None,
+            Some("claude-work".into()),
+        );
         let first = all.all()[0].id();
         let second = all.all()[1].id();
         assert_ne!(first, second);
@@ -139,10 +168,28 @@ mod tests {
         assert_eq!(all.get(first).unwrap().machine(), local);
         assert!(all.remove(first).is_some());
         assert!(all.remove(first).is_none());
-        all.add(&local, "/srv/x", None, None);
+        all.add(&local, "/srv/x", None, None, None);
         assert_ne!(all.all()[1].id(), second, "a number is not reused");
         assert!(all.remove_within(&local, "/srv/web"));
         assert_eq!(all.all().len(), 1);
+    }
+
+    #[test]
+    fn a_record_put_back_keeps_its_number_and_its_place_unless_the_number_is_taken() {
+        let mut all = Dormants::default();
+        let local = MachineId::local();
+        for cwd in ["/a", "/b", "/c"] {
+            all.add(&local, cwd, None, None, None);
+        }
+        let middle = all.all()[1].clone();
+        assert!(all.remove(middle.id()).is_some());
+        assert_eq!(all.restore(middle.clone()), middle.id());
+        let order: Vec<&str> = all.all().iter().map(|d| d.cwd.as_str()).collect();
+        assert_eq!(order, ["/a", "/b", "/c"]);
+        // Put back twice, the second one gets a number of its own.
+        let again = all.restore(middle.clone());
+        assert_ne!(again, middle.id());
+        assert_eq!(all.all().len(), 4);
     }
 
     #[test]
@@ -150,7 +197,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);
         let mut all = Dormants::default();
-        all.add(&MachineId::local(), "/a", None, Some("x".into()));
+        all.add(&MachineId::local(), "/a", None, Some("x".into()), None);
         all.save(&path).unwrap();
         assert_eq!(Dormants::load(&path), all);
         std::fs::write(&path, b"not json").unwrap();

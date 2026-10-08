@@ -441,6 +441,17 @@ pub trait Credentials: Send + Sync {
     fn zcode(&self) -> Read<zcode::Credential> {
         Read::Missing
     }
+    /// The credentials of another account of `agent`, kept in `folder` (the
+    /// agent's configuration folder as that account sets it). `None` where the
+    /// source cannot read an account's folder, which is every source but the
+    /// system's own and only for the agents whose folder is a verified variable.
+    fn for_folder(
+        &self,
+        _agent: AgentId,
+        _folder: &std::path::Path,
+    ) -> Option<Box<dyn Credentials>> {
+        None
+    }
 }
 
 /// The credentials of this computer's user.
@@ -471,6 +482,99 @@ fn env_dir(name: &str) -> Option<PathBuf> {
 fn parse_file<T>(path: PathBuf, parse: impl FnOnce(&str) -> Option<T>) -> Read<T> {
     match read_file(&path) {
         Read::Found(text) => parse(&text).map_or(Read::Missing, Read::Found),
+        Read::Missing => Read::Missing,
+        Read::Unavailable | Read::Denied => Read::Unavailable,
+        Read::Not(reason) => Read::Not(reason),
+    }
+}
+
+/// Claude Code's OAuth credential in the configuration folder `config_dir`
+/// (`~/.claude` without one).
+///
+/// `shared_fallback` lets the macOS keychain item that is not scoped to a folder
+/// stand in when the folder's own is absent: right for the agent's own setup,
+/// wrong for an account, whose sign-in is its folder's and nobody else's.
+/// `api_key_billing` says the environment the agent runs in has an API key,
+/// which has no limits to read.
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+fn claude_credential(
+    home: &std::path::Path,
+    config_dir: Option<PathBuf>,
+    shared_fallback: bool,
+    api_key_billing: bool,
+) -> Read<claude::Credential> {
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut denied = false;
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut refresh_only = false;
+    #[cfg(target_os = "macos")]
+    {
+        // The keychain item the CLI itself writes: scoped by the config
+        // folder when `CLAUDE_CONFIG_DIR` is set, then the shared one.
+        // The first read may make macOS ask the user for permission.
+        let mut services = Vec::new();
+        if let Some(dir) = &config_dir {
+            services.push(claude::scoped_service(&dir.to_string_lossy()));
+        }
+        if shared_fallback {
+            services.push(claude::SERVICE.to_owned());
+        }
+        for service in services {
+            let output = leon_remote::spawn::std_child("security")
+                .args(["find-generic-password", "-s", &service, "-w"])
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .output();
+            let Ok(output) = output else { continue };
+            match classify_security(
+                output.status.code(),
+                &String::from_utf8_lossy(&output.stderr),
+            ) {
+                KeychainOutcome::Found => {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    if let Some(found) = claude::parse_credential(&text) {
+                        return Read::Found(found);
+                    }
+                    refresh_only |= claude::refresh_only(&text);
+                }
+                KeychainOutcome::Denied => denied = true,
+                KeychainOutcome::NotFound | KeychainOutcome::Other => {}
+            }
+        }
+    }
+    let dir = config_dir.unwrap_or_else(|| home.join(".claude"));
+    let file = read_file(&dir.join(".credentials.json"));
+    if let Read::Found(text) = &file {
+        if let Some(found) = claude::parse_credential(text) {
+            return Read::Found(found);
+        }
+        refresh_only |= claude::refresh_only(text);
+    }
+    if matches!(file, Read::Unavailable | Read::Denied) {
+        return Read::Unavailable;
+    }
+    if denied {
+        Read::Denied
+    } else if refresh_only {
+        Read::Not(Reason::SessionExpired)
+    } else if api_key_billing {
+        // No subscription sign-in and an API key in the environment: the
+        // account is billed by use and has no usage limits to read.
+        Read::Not(Reason::ApiKeyBilling)
+    } else {
+        Read::Missing
+    }
+}
+
+/// Codex's ChatGPT sign-in in the folder `dir`.
+fn codex_credential(dir: PathBuf) -> Read<codex::Credential> {
+    let path = dir.join("auth.json");
+    match read_file(&path) {
+        Read::Found(text) => match codex::parse_credential(&text) {
+            Some(found) => Read::Found(found),
+            None if codex::is_api_key_login(&text) => Read::Not(Reason::ApiKeyBilling),
+            None => Read::Missing,
+        },
         Read::Missing => Read::Missing,
         Read::Unavailable | Read::Denied => Read::Unavailable,
         Read::Not(reason) => Read::Not(reason),
@@ -550,66 +654,12 @@ impl SystemCredentials {
 
 impl Credentials for SystemCredentials {
     fn claude(&self) -> Read<claude::Credential> {
-        let config_dir = env_dir("CLAUDE_CONFIG_DIR");
-        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
-        let mut denied = false;
-        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
-        let mut refresh_only = false;
-        #[cfg(target_os = "macos")]
-        {
-            // The keychain item the CLI itself writes: scoped by the config
-            // folder when `CLAUDE_CONFIG_DIR` is set, then the shared one.
-            // The first read may make macOS ask the user for permission.
-            let mut services = Vec::new();
-            if let Some(dir) = &config_dir {
-                services.push(claude::scoped_service(&dir.to_string_lossy()));
-            }
-            services.push(claude::SERVICE.to_owned());
-            for service in services {
-                let output = leon_remote::spawn::std_child("security")
-                    .args(["find-generic-password", "-s", &service, "-w"])
-                    .stdin(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::piped())
-                    .output();
-                let Ok(output) = output else { continue };
-                match classify_security(
-                    output.status.code(),
-                    &String::from_utf8_lossy(&output.stderr),
-                ) {
-                    KeychainOutcome::Found => {
-                        let text = String::from_utf8_lossy(&output.stdout);
-                        if let Some(found) = claude::parse_credential(&text) {
-                            return Read::Found(found);
-                        }
-                        refresh_only |= claude::refresh_only(&text);
-                    }
-                    KeychainOutcome::Denied => denied = true,
-                    KeychainOutcome::NotFound | KeychainOutcome::Other => {}
-                }
-            }
-        }
-        let dir = config_dir.unwrap_or_else(|| self.home.join(".claude"));
-        let file = read_file(&dir.join(".credentials.json"));
-        if let Read::Found(text) = &file {
-            if let Some(found) = claude::parse_credential(text) {
-                return Read::Found(found);
-            }
-            refresh_only |= claude::refresh_only(text);
-        }
-        if matches!(file, Read::Unavailable | Read::Denied) {
-            return Read::Unavailable;
-        }
-        if denied {
-            Read::Denied
-        } else if refresh_only {
-            Read::Not(Reason::SessionExpired)
-        } else if env_dir("ANTHROPIC_API_KEY").is_some() {
-            // No subscription sign-in and an API key in the environment: the
-            // account is billed by use and has no usage limits to read.
-            Read::Not(Reason::ApiKeyBilling)
-        } else {
-            Read::Missing
-        }
+        claude_credential(
+            &self.home,
+            env_dir("CLAUDE_CONFIG_DIR"),
+            true,
+            env_dir("ANTHROPIC_API_KEY").is_some(),
+        )
     }
 
     fn opencode_go(&self) -> Read<Secret> {
@@ -644,18 +694,7 @@ impl Credentials for SystemCredentials {
     }
 
     fn codex(&self) -> Read<codex::Credential> {
-        let dir = env_dir("CODEX_HOME").unwrap_or_else(|| self.home.join(".codex"));
-        let path = dir.join("auth.json");
-        match read_file(&path) {
-            Read::Found(text) => match codex::parse_credential(&text) {
-                Some(found) => Read::Found(found),
-                None if codex::is_api_key_login(&text) => Read::Not(Reason::ApiKeyBilling),
-                None => Read::Missing,
-            },
-            Read::Missing => Read::Missing,
-            Read::Unavailable | Read::Denied => Read::Unavailable,
-            Read::Not(reason) => Read::Not(reason),
-        }
+        codex_credential(env_dir("CODEX_HOME").unwrap_or_else(|| self.home.join(".codex")))
     }
 
     fn grok(&self, now: i64) -> Read<grok::Credential> {
@@ -713,6 +752,46 @@ impl Credentials for SystemCredentials {
             self.home.join(".zcode").join("cli").join("config.json"),
             zcode::parse_credential,
         )
+    }
+    fn for_folder(&self, agent: AgentId, folder: &std::path::Path) -> Option<Box<dyn Credentials>> {
+        matches!(agent, AgentId::CLAUDE | AgentId::CODEX).then(|| {
+            Box::new(AccountCredentials {
+                home: self.home.clone(),
+                agent,
+                folder: folder.to_path_buf(),
+            }) as Box<dyn Credentials>
+        })
+    }
+}
+
+/// The credentials of one account of Claude Code or Codex: the sign-in kept in
+/// the account's own configuration folder, and nothing of the agent's own
+/// setup. On macOS Claude Code's keychain item is the one scoped to the folder,
+/// never the shared one, so an account is never read as another account.
+#[derive(Debug, Clone)]
+pub struct AccountCredentials {
+    home: PathBuf,
+    agent: AgentId,
+    folder: PathBuf,
+}
+
+impl Credentials for AccountCredentials {
+    fn claude(&self) -> Read<claude::Credential> {
+        if self.agent != AgentId::CLAUDE {
+            return Read::Missing;
+        }
+        claude_credential(&self.home, Some(self.folder.clone()), false, false)
+    }
+
+    fn opencode_go(&self) -> Read<Secret> {
+        Read::Missing
+    }
+
+    fn codex(&self) -> Read<codex::Credential> {
+        if self.agent != AgentId::CODEX {
+            return Read::Missing;
+        }
+        codex_credential(self.folder.clone())
     }
 }
 

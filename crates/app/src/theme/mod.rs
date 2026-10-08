@@ -79,6 +79,13 @@ pub const SIDEBAR_DEFAULT: u16 = 320;
 pub const SIDEBAR_MIN: u16 = 220;
 /// See [`SIDEBAR_MIN`].
 pub const SIDEBAR_MAX: u16 = 560;
+/// The sidebar width (at 100 %) from which a worktree row has room for the
+/// state of its checkout in full; narrower, it keeps only the first part.
+pub const SIDEBAR_ROOMY: u16 = 300;
+/// How much of its colour the background of an added or removed line of a diff
+/// (and of a hunk's header) takes: enough to read as a band, little enough to
+/// leave the text its contrast in every theme.
+pub const DIFF_TINT: f32 = 0.14;
 /// How much one step of the keyboard widens or narrows the sidebar.
 pub const SIDEBAR_STEP: u16 = 24;
 /// How far below [`SIDEBAR_MIN`] (at 100 %) a drag has to go to close it.

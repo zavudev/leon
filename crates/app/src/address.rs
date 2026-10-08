@@ -190,14 +190,82 @@ pub fn validate_branch(name: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Where a new worktree for `branch` goes: next to the project, in
-/// `<name>-worktrees/<branch>`, with the branch's slashes turned into dashes.
+/// The setting `worktree_location` as it is when nothing was chosen: next to
+/// the project, in `<name>-worktrees/<branch>`.
+pub const DEFAULT_WORKTREE_LOCATION: &str = "{root}-worktrees/{branch}";
+
+/// Where a new worktree for `branch` goes with the default location: next to
+/// the project, in `<name>-worktrees/<branch>`, with the branch's slashes
+/// turned into dashes. The engine reads the setting; this is the default, for
+/// the tests that must know where a worktree lands.
+#[cfg(test)]
 pub fn worktree_path(root: &str, branch: &str) -> String {
+    // The default template has only names it knows.
+    expand_location(DEFAULT_WORKTREE_LOCATION, root, branch).unwrap_or_default()
+}
+
+/// Where a new worktree for `branch` goes under a location template: the text
+/// of the setting `worktree_location`, in which `{root}` is the project's root
+/// (without a trailing separator) and `{branch}` the branch with its slashes
+/// turned into dashes. A slash written in the template follows the root's own
+/// separator, so a Windows project stays a Windows path. An empty template is
+/// the default. The template must name `{branch}` (two worktrees cannot share
+/// a folder) and give an absolute path.
+pub fn worktree_location(template: &str, root: &str, branch: &str) -> Result<String, String> {
+    let template = match template.trim() {
+        "" => DEFAULT_WORKTREE_LOCATION,
+        given => given,
+    };
+    if !template.contains("{branch}") {
+        return Err(format!(
+            "The worktree location {template:?} must contain {{branch}}, or every worktree would be in the same folder."
+        ));
+    }
+    let path = expand_location(template, root, branch)?;
+    if !is_absolute_path(&path) {
+        return Err(format!(
+            "The worktree location {template:?} gives {path:?}, which is not an absolute path: start it with {{root}} or a full path."
+        ));
+    }
+    Ok(path)
+}
+
+fn expand_location(template: &str, root: &str, branch: &str) -> Result<String, String> {
     let windows = root.contains('\\') && !root.contains('/');
     let separator = if windows { '\\' } else { '/' };
     let trimmed = root.trim_end_matches(['/', '\\']);
     let folder = branch.replace('/', "-");
-    format!("{trimmed}-worktrees{separator}{folder}")
+    let mut path = String::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        push_literal(&mut path, &rest[..open], separator);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else {
+            return Err(format!(
+                "The worktree location {template:?} has a {{ without a }}."
+            ));
+        };
+        match &after[..close] {
+            "root" => path.push_str(trimmed),
+            "branch" => path.push_str(&folder),
+            other => {
+                return Err(format!(
+                    "The worktree location has {{{other}}}; only {{root}} and {{branch}} are known."
+                ))
+            }
+        }
+        rest = &after[close + 1..];
+    }
+    push_literal(&mut path, rest, separator);
+    Ok(path)
+}
+
+fn push_literal(path: &mut String, literal: &str, separator: char) {
+    path.extend(
+        literal
+            .chars()
+            .map(|c| if c == '/' { separator } else { c }),
+    );
 }
 
 /// The address a `#123` in a terminal opens for a git remote on GitHub: the
@@ -435,5 +503,75 @@ mod tests {
             worktree_path("C:\\code\\api", "fix"),
             "C:\\code\\api-worktrees\\fix"
         );
+    }
+
+    #[test]
+    fn the_default_location_is_exactly_the_path_of_before() {
+        // What `worktree_path` was before it read a template.
+        fn before(root: &str, branch: &str) -> String {
+            let windows = root.contains('\\') && !root.contains('/');
+            let separator = if windows { '\\' } else { '/' };
+            let trimmed = root.trim_end_matches(['/', '\\']);
+            let folder = branch.replace('/', "-");
+            format!("{trimmed}-worktrees{separator}{folder}")
+        }
+        for root in [
+            "/srv/api",
+            "/srv/api/",
+            "/home/me/my project",
+            "C:\\code\\api",
+            "C:\\code\\api\\",
+            "D:/code/api",
+            "//server/share/api",
+        ] {
+            for branch in ["fix", "feature/login", "a/b/c", "release_1.2"] {
+                assert_eq!(
+                    worktree_path(root, branch),
+                    before(root, branch),
+                    "{root} {branch}"
+                );
+                assert_eq!(
+                    worktree_location(DEFAULT_WORKTREE_LOCATION, root, branch).unwrap(),
+                    before(root, branch),
+                    "{root} {branch}"
+                );
+                assert_eq!(
+                    worktree_location("", root, branch).unwrap(),
+                    before(root, branch),
+                    "an empty setting is the default"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_location_template_puts_worktrees_where_it_says() {
+        assert_eq!(
+            worktree_location("{root}/.worktrees/{branch}", "/srv/api/", "feature/login").unwrap(),
+            "/srv/api/.worktrees/feature-login"
+        );
+        assert_eq!(
+            worktree_location("/work/trees/{branch}", "/srv/api", "fix").unwrap(),
+            "/work/trees/fix"
+        );
+        assert_eq!(
+            worktree_location("{root}/../wt/{branch}", "C:\\code\\api", "fix").unwrap(),
+            "C:\\code\\api\\..\\wt\\fix",
+            "slashes of the template follow the root"
+        );
+    }
+
+    #[test]
+    fn a_location_template_that_cannot_work_says_why() {
+        for (template, mentions) in [
+            ("{root}-worktrees", "{branch}"),
+            ("{root}/{name}/{branch}", "{name}"),
+            ("{root}/{branch}/{oops", "without"),
+            ("wt/{branch}", "absolute"),
+            ("~/wt/{branch}", "absolute"),
+        ] {
+            let why = worktree_location(template, "/srv/api", "fix").expect_err(template);
+            assert!(why.contains(mentions), "{template}: {why}");
+        }
     }
 }

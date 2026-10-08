@@ -21,7 +21,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::DateTime;
 use leon_core::icon::{IconImage, IconKind, NewIcon};
@@ -47,6 +47,10 @@ use crate::address;
 use crate::avatar::{Fetched, IconFetcher, NoFetch};
 use crate::elsewhere::{self, Found};
 use crate::files::{self, FileContent, FileEntry, FileError, FileRevision, GitMarks, WriteOutcome};
+use crate::project::{self, ProjectState};
+
+mod changes;
+pub use changes::{CommitRequest, ShipReport, ShipRequest};
 
 /// How many folders are resolved with git at the same time while projects are
 /// being discovered.
@@ -54,6 +58,19 @@ const DISCOVERY_PARALLELISM: usize = 8;
 
 /// How many of a machine's sessions a scan reads to tie processes to them.
 const SCAN_SESSIONS: usize = 50_000;
+
+/// The least time between two questions to GitHub about one project. The
+/// answers are kept in the store, so asking again sooner would only spend the
+/// person's rate limit.
+const GITHUB_ASK_EVERY: Duration = Duration::from_secs(60);
+
+/// How many open pull requests one question asks for.
+const OPEN_PULL_REQUESTS: usize = 100;
+
+/// Whether a project last asked GitHub at `last` may ask again at `now`.
+fn github_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= GITHUB_ASK_EVERY)
+}
 
 /// How long a search of a machine's files may take before it is given up.
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -215,6 +232,15 @@ pub enum Op {
         /// What the status line says once it is done.
         done: &'static str,
     },
+    /// Put sessions on the sidebar's shelves, or take them off: the Settled
+    /// shelf, the Snoozed shelf until a time, or neither (`None`). A session
+    /// that is already as asked, or is gone, is left alone.
+    SetShelves {
+        /// The sessions and where each goes.
+        changes: Vec<(leon_core::SessionId, Option<leon_core::Shelf>)>,
+        /// What the status line says once it is done; nothing when `None`.
+        done: Option<String>,
+    },
     /// Give an SSH machine another name.
     RenameMachine {
         /// The machine.
@@ -231,6 +257,14 @@ pub enum Op {
         session: leon_core::SessionId,
         /// Its new name; blank gives the agent's own title back.
         name: String,
+    },
+    /// Remember that a history session ran with an account of its agent (an
+    /// id), so that resuming it starts the same one. Says nothing.
+    SetSessionAccount {
+        /// The session.
+        session: leon_core::SessionId,
+        /// The account's id.
+        account: String,
     },
     /// Remove one session from the history (the agent's own file is left
     /// alone).
@@ -277,6 +311,14 @@ pub enum Op {
     CollectUsageNow(Vec<leon_core::AgentId>),
     /// Delete the stored usage observations.
     ForgetUsageHistory,
+    /// Drop the readings and the history of every account of an agent whose id
+    /// is not in `keep`: what a removed account leaves behind. The ids are
+    /// sent with the request because the engine reads the settings only when
+    /// the window has applied them.
+    DropAccountUsage {
+        /// The ids of the accounts that are still in the settings.
+        keep: Vec<String>,
+    },
 }
 
 /// Whether the status line reports something done, something under way or
@@ -459,6 +501,8 @@ struct State {
     status: Option<StatusLine>,
     machines: HashMap<MachineId, MachineState>,
     elsewhere: HashMap<MachineId, Arc<Elsewhere>>,
+    /// What each project's `leon.toml` said when it was last read.
+    project_files: HashMap<ProjectId, ProjectState>,
 }
 
 /// What the user's settings change in the engine, live: how SSH is called,
@@ -480,6 +524,13 @@ pub struct Prefs {
     pub detect_logos: bool,
     /// Whether the owner's avatar may be downloaded from the Git host.
     pub fetch_avatars: bool,
+    /// Where a new worktree goes: the setting `worktree_location`, a template
+    /// of the project's folder and the branch (see
+    /// [`address::worktree_location`]).
+    pub worktree_location: String,
+    /// The user's accounts of the agents: whose limits are read beside the
+    /// agents' own, and whose readings stay when they are in this list.
+    pub accounts: Vec<leon_core::Account>,
 }
 
 struct Inner {
@@ -516,6 +567,13 @@ struct Inner {
     /// where its usage is not collected and its processes are listed with
     /// PowerShell. Decided once from the platform; only tests change it.
     local_posix_shell: std::sync::atomic::AtomicBool,
+    /// When each project last asked GitHub about its pull requests, so that a
+    /// refresh, the timer and a new worktree together ask once a minute.
+    github_asked: Mutex<HashMap<ProjectId, Instant>>,
+    /// The runner of commands that may take minutes (a commit with its hooks,
+    /// a push, an agent asked for a message); the usual one stops a command
+    /// after thirty seconds. The usual runner serves when none was set.
+    slow_runner: Mutex<Option<Arc<dyn Exec>>>,
 }
 
 /// The background half of the application. Cheap to clone.
@@ -549,6 +607,8 @@ impl Engine {
                     discover_projects: false,
                     detect_logos: true,
                     fetch_avatars: true,
+                    worktree_location: address::DEFAULT_WORKTREE_LOCATION.to_owned(),
+                    accounts: Vec::new(),
                 }),
                 handle,
                 state: Mutex::new(State {
@@ -556,6 +616,7 @@ impl Engine {
                     status: None,
                     machines: HashMap::new(),
                     elsewhere: HashMap::new(),
+                    project_files: HashMap::new(),
                 }),
                 events,
                 fetcher: Mutex::new(Arc::new(NoFetch)),
@@ -570,6 +631,8 @@ impl Engine {
                 local_posix_shell: std::sync::atomic::AtomicBool::new(
                     crate::platform::local_has_posix_shell(),
                 ),
+                github_asked: Mutex::new(HashMap::new()),
+                slow_runner: Mutex::new(None),
             }),
         }
     }
@@ -627,6 +690,17 @@ impl Engine {
             exec: runner,
             leon_pid,
         }));
+    }
+
+    /// Gives the engine a runner with a longer time limit for the commands
+    /// that may take minutes: committing (hooks run), pushing and asking an
+    /// agent to word a message.
+    pub fn set_slow_runner<R: Runner + 'static>(&self, runner: Arc<R>) {
+        *self
+            .inner
+            .slow_runner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(runner);
     }
 
     /// Lets the engine ask the computers paired with this one what they are
@@ -1012,16 +1086,33 @@ impl Engine {
         }
         let now = clock();
         let runner = SharedRunner(self.inner.runner.clone());
+        let local_posix = self
+            .inner
+            .local_posix_shell
+            .load(std::sync::atomic::Ordering::Relaxed);
         let mut collected = leon_usage::collect_machine_on(
             &runner,
             machine,
-            self.inner
-                .local_posix_shell
-                .load(std::sync::atomic::Ordering::Relaxed),
+            local_posix,
             &self.ssh(),
             &policy,
             credentials.as_ref(),
             http.as_ref(),
+            now,
+        )
+        .await;
+        // The user's other accounts of Claude Code and Codex, read from their
+        // own folders on this computer, each as a reading of its own.
+        let folders = crate::agent_usage::account_folders(&self.prefs().roots);
+        let accounts = leon_usage::collect_accounts(
+            &runner,
+            machine,
+            local_posix,
+            &self.ssh(),
+            &policy,
+            credentials.as_ref(),
+            http.as_ref(),
+            &folders,
             now,
         )
         .await;
@@ -1031,7 +1122,7 @@ impl Engine {
             .usage_readings()
             .unwrap_or_default()
             .into_iter()
-            .filter(|row| row.machine == machine.id)
+            .filter(|row| row.machine == machine.id && row.account.is_empty())
             .filter_map(|row| {
                 serde_json::from_str::<leon_usage::AgentUsage>(&row.payload)
                     .ok()
@@ -1039,11 +1130,19 @@ impl Engine {
             })
             .collect();
         let local = machine.kind == MachineKind::Local;
-        // Back-off bookkeeping for the sources that were really called.
+        // Back-off bookkeeping for the sources that were really called. An
+        // account's read counts for its agent: one failure backs the agent's
+        // source off, whichever account it was.
         if local {
             let mut usage = self.usage_setup();
             if let Some(setup) = usage.as_mut() {
-                for (agent, reason) in collected.called.clone() {
+                let called = crate::agent_usage::fold_called(
+                    collected
+                        .called
+                        .iter()
+                        .chain(accounts.iter().flat_map(|one| one.called.iter())),
+                );
+                for (agent, reason) in called {
                     setup.last_called.insert(agent, now);
                     match reason {
                         Some(reason) if reason.is_failure() => {
@@ -1107,6 +1206,9 @@ impl Engine {
                 }
             }
         }
+        if local {
+            self.store_account_usage(machine, &asked, &held, &refused, &accounts, now);
+        }
         for (agent, account, points) in
             crate::agent_usage::history_points(&collected, machine.id.as_str())
         {
@@ -1118,6 +1220,116 @@ impl Engine {
                 now - crate::agent_usage::HISTORY_HORIZON,
             ) {
                 tracing::warn!(%error, "could not store usage history");
+            }
+        }
+    }
+
+    /// Drops the latest reading and the stored history of every account that is
+    /// not in `keep` (ids), on every machine. The history is stored under a
+    /// hash of the machine, agent, plan and account, so the series dropped is
+    /// the one of the plan the reading last had: points stored under an earlier
+    /// plan are not shown any more and age out with the rest of the history.
+    fn drop_removed_accounts(&self, keep: &[String]) {
+        let store = &self.inner.store;
+        let rows = store.usage_readings().unwrap_or_default();
+        for row in rows
+            .iter()
+            .filter(|row| !row.account.is_empty() && !keep.contains(&row.account))
+        {
+            let plan = serde_json::from_str::<leon_usage::AgentUsage>(&row.payload)
+                .ok()
+                .and_then(|usage| usage.plan);
+            let series = leon_usage::series_key_of(
+                row.machine.as_str(),
+                row.agent,
+                plan.as_deref(),
+                Some(&row.account),
+            );
+            if let Err(error) = store.forget_usage_series(&row.machine, row.agent, &series) {
+                tracing::warn!(%error, "could not drop the history of a removed account");
+            }
+        }
+        if let Err(error) = store.retain_usage_accounts(keep) {
+            tracing::warn!(%error, "could not drop the usage of removed accounts");
+        }
+    }
+
+    /// Stores the readings of the user's accounts of the agents the way the
+    /// agents' own are stored (a source held back keeps what it showed, a
+    /// refused sign-in is said), each under its account, with its history; and
+    /// drops the readings of accounts that are not in the settings any more.
+    fn store_account_usage(
+        &self,
+        machine: &Machine,
+        asked: &leon_usage::network::NetworkPolicy,
+        held: &[leon_core::AgentId],
+        refused: &std::collections::HashSet<leon_core::AgentId>,
+        accounts: &[leon_usage::MachineUsage],
+        now: i64,
+    ) {
+        let store = &self.inner.store;
+        let current: Vec<String> = self
+            .prefs()
+            .accounts
+            .iter()
+            .map(|account| account.id.clone())
+            .collect();
+        self.drop_removed_accounts(&current);
+        let previous: HashMap<String, leon_usage::AgentUsage> = store
+            .usage_readings()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| row.machine == machine.id && !row.account.is_empty())
+            .filter_map(|row| {
+                serde_json::from_str::<leon_usage::AgentUsage>(&row.payload)
+                    .ok()
+                    .map(|usage| (row.account, usage))
+            })
+            .collect();
+        for one in accounts {
+            for reading in &one.readings {
+                let Some(account) = reading.account.clone() else {
+                    continue;
+                };
+                let agent = reading.agent;
+                let mut reading = reading.clone();
+                if asked_on(asked, agent) && refused.contains(&agent) {
+                    reading = leon_usage::AgentUsage::unknown(
+                        agent,
+                        &reading.machine,
+                        leon_usage::Reason::KeychainDenied,
+                    )
+                    .for_account(&account);
+                }
+                let merged = crate::agent_usage::merge(previous.get(&account).cloned(), reading);
+                let merged = if asked_on(asked, agent)
+                    && held.contains(&agent)
+                    && matches!(merged.state, leon_usage::State::Unknown { .. })
+                {
+                    previous.get(&account).cloned().unwrap_or(merged)
+                } else {
+                    merged
+                };
+                if let Ok(json) = serde_json::to_string(&merged) {
+                    if let Err(error) =
+                        store.put_usage_reading_for(&machine.id, agent, &account, &json, now)
+                    {
+                        tracing::warn!(%error, "could not store an account's usage reading");
+                    }
+                }
+            }
+            for (agent, account, points) in
+                crate::agent_usage::history_points(one, machine.id.as_str())
+            {
+                if let Err(error) = store.record_usage_points(
+                    &machine.id,
+                    agent,
+                    &account,
+                    &points,
+                    now - crate::agent_usage::HISTORY_HORIZON,
+                ) {
+                    tracing::warn!(%error, "could not store an account's usage history");
+                }
             }
         }
     }
@@ -1287,6 +1499,11 @@ impl Engine {
                 self.inner.store.pin_sessions(&parent, &pinned)?;
                 Ok(Some(done.to_owned()))
             }
+            Op::SetShelves { changes, done } => {
+                // Nothing is said of a change that changed nothing.
+                let changed = self.inner.store.set_shelves(&changes)?;
+                Ok(done.filter(|_| changed))
+            }
             Op::RenameMachine { machine, name } => self.rename_machine(&machine, &name).map(Some),
             Op::RemoveMachine(machine) => self.remove_machine(&machine).map(Some),
             Op::RenameSession { session, name } => {
@@ -1298,16 +1515,19 @@ impl Engine {
                     format!("Renamed the session to {name}.")
                 }))
             }
-            Op::RemoveSession(session) => self.remove_session(&session).map(Some),
-            Op::ForgetSessions(sessions) => {
-                for id in &sessions {
-                    match self.inner.store.remove_session(id) {
-                        Ok(()) | Err(StoreError::NotFound(_)) => {}
-                        Err(error) => return Err(error.into()),
-                    }
+            Op::SetSessionAccount { session, account } => {
+                match self
+                    .inner
+                    .store
+                    .set_session_account(&session, Some(&account))
+                {
+                    // A session the history no longer has needs no account.
+                    Ok(()) | Err(StoreError::NotFound(_)) => Ok(None),
+                    Err(error) => Err(error.into()),
                 }
-                Ok(None)
             }
+            Op::RemoveSession(session) => self.remove_session(&session).map(Some),
+            Op::ForgetSessions(sessions) => self.forget_sessions(&sessions).map(|()| None),
             Op::RestoreRoot { machine, root } => self.restore_root(&machine, &root).map(Some),
             Op::AddWorktree {
                 project,
@@ -1326,6 +1546,10 @@ impl Engine {
             }
             Op::CollectUsageNow(agents) => {
                 self.collect_usage_now(&agents).await;
+                Ok(None)
+            }
+            Op::DropAccountUsage { keep } => {
+                self.drop_removed_accounts(&keep);
                 Ok(None)
             }
             Op::ForgetUsageHistory => {
@@ -1684,9 +1908,9 @@ impl Engine {
             .len();
         // A sync is somebody asking about the project (opening it, refreshing
         // it, finding it again), so it is also when the sidebar gets to know
-        // what is merged: the pull requests included, which the timer asks
-        // for far less often.
-        self.probe_merged(&project, true).await?;
+        // the state of each checkout and what GitHub says: the pull requests
+        // included, which the timer asks for far less often.
+        self.probe_github(&project).await?;
         Ok(count)
     }
 
@@ -1721,10 +1945,164 @@ impl Engine {
         if !same {
             self.inner.store.replace_worktrees(project_id, listed)?;
         }
-        // The timer that watches a project's worktrees does not also leave
-        // the machine for GitHub; `check_pull_requests` does, on its own
-        // slower cadence.
+        // The timer that watches a project's worktrees reads the checkouts
+        // but does not also leave the machine for GitHub;
+        // `check_pull_requests` does, on its own slower cadence.
+        self.refresh_checkouts(&project).await?;
         self.probe_merged(&project, false).await
+    }
+
+    /// [`Self::refresh_checkouts`] for a refresh the person asked for: quiet,
+    /// because the worktrees were just synced and a checkout that cannot be
+    /// read is not worth a line in the status.
+    async fn refresh_checkouts_of(&self, project: &ProjectId) {
+        let read = match self.inner.store.project(project) {
+            Ok(project) => self.refresh_checkouts(&project).await,
+            Err(error) => Err(error.into()),
+        };
+        if let Err(error) = read {
+            tracing::debug!(%error, "could not read the state of the checkouts");
+        }
+    }
+
+    /// Reads, for every stored worktree of `project`, how many files changed
+    /// and how far it is from its upstream, and stores it as the git half of
+    /// its [`WorktreeStatus`]. A worktree git cannot answer for (its folder is
+    /// gone, git is missing) keeps what it had: the rest still get theirs.
+    async fn refresh_checkouts(&self, project: &Project) -> Result<(), EngineError> {
+        let worktrees = self.inner.store.worktrees(&project.id)?;
+        let machine = self.inner.store.machine(&project.machine_id)?;
+        let runner = SharedRunner(self.inner.runner.clone());
+        let ssh = self.ssh();
+        let git = Git::new(&runner, &machine, &ssh);
+        for worktree in &worktrees {
+            match git.checkout_state(&worktree.path).await {
+                Ok(state) => {
+                    self.inner
+                        .store
+                        .update_worktree_status(&worktree.id, |status| {
+                            status.changed = Some(state.changed);
+                            status.divergence = state.divergence;
+                        })?;
+                }
+                Err(error) => {
+                    tracing::debug!(%error, path = %worktree.path, "could not read the state of a checkout");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Asks GitHub about the pull requests of `project`, merged and open,
+    /// unless it was asked less than [`GITHUB_ASK_EVERY`] ago.
+    async fn probe_github(&self, project: &Project) -> Result<(), EngineError> {
+        let due = {
+            let mut asked = self
+                .inner
+                .github_asked
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let now = Instant::now();
+            let due = github_due(asked.get(&project.id).copied(), now);
+            if due {
+                asked.insert(project.id.clone(), now);
+            }
+            due
+        };
+        if !due {
+            return Ok(());
+        }
+        // One reading of the remote serves both questions.
+        let on_github = if self
+            .inner
+            .store
+            .worktrees(&project.id)?
+            .iter()
+            .any(|w| w.branch.is_some())
+        {
+            let machine = self.inner.store.machine(&project.machine_id)?;
+            let runner = SharedRunner(self.inner.runner.clone());
+            Some(
+                self.origin_is_github(&runner, &machine, &self.ssh(), &project.root)
+                    .await,
+            )
+        } else {
+            None
+        };
+        self.probe_merged_on(project, true, on_github).await?;
+        self.probe_open_pull_requests(project, on_github).await
+    }
+
+    /// Asks GitHub for the open pull requests of the repository and stores,
+    /// as the GitHub half of each worktree's status, the one of its branch
+    /// (or none). One question for the whole project. When GitHub cannot be
+    /// asked (not a GitHub repository, no `gh`, not signed in, offline) every
+    /// worktree keeps what it had, and nothing is said.
+    async fn probe_open_pull_requests(
+        &self,
+        project: &Project,
+        on_github: Option<bool>,
+    ) -> Result<(), EngineError> {
+        let worktrees = self.inner.store.worktrees(&project.id)?;
+        if worktrees.iter().all(|worktree| worktree.branch.is_none()) {
+            return Ok(());
+        }
+        let machine = self.inner.store.machine(&project.machine_id)?;
+        let runner = SharedRunner(self.inner.runner.clone());
+        let ssh = self.ssh();
+        let on_github = match on_github {
+            Some(known) => known,
+            None => {
+                self.origin_is_github(&runner, &machine, &ssh, &project.root)
+                    .await
+            }
+        };
+        if !on_github {
+            return Ok(());
+        }
+        let open = match Github::new(&runner, &machine, &ssh)
+            .open_pull_requests(&project.root, OPEN_PULL_REQUESTS)
+            .await
+        {
+            Ok(Some(open)) => open,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                tracing::debug!(%error, "could not read the open pull requests");
+                return Ok(());
+            }
+        };
+        for worktree in &worktrees {
+            let found = worktree
+                .branch
+                .as_ref()
+                .and_then(|branch| open.get(branch))
+                .cloned();
+            self.inner
+                .store
+                .update_worktree_status(&worktree.id, |status| status.pull_request = found)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the `origin` of the repository at `root` is on GitHub.
+    async fn origin_is_github(
+        &self,
+        runner: &SharedRunner,
+        machine: &Machine,
+        ssh: &SshOptions,
+        root: &str,
+    ) -> bool {
+        match Git::new(runner, machine, ssh)
+            .remote_url(root, "origin")
+            .await
+        {
+            Ok(Some(url)) => github::is_github_url(&url),
+            Ok(None) => false,
+            Err(error) => {
+                tracing::debug!(%error, "could not read the remote of the project");
+                false
+            }
+        }
     }
 
     /// Asks GitHub what is merged and writes it on the worktrees whose answer
@@ -1745,6 +2123,18 @@ impl Engine {
         project: &Project,
         pull_requests: bool,
     ) -> Result<(), EngineError> {
+        self.probe_merged_on(project, pull_requests, None).await
+    }
+
+    /// [`Engine::probe_merged`] for a caller that already knows whether the
+    /// origin is on GitHub (`Some`), so the remote is read once for both
+    /// questions.
+    async fn probe_merged_on(
+        &self,
+        project: &Project,
+        pull_requests: bool,
+        on_github: Option<bool>,
+    ) -> Result<(), EngineError> {
         let worktrees = self.inner.store.worktrees(&project.id)?;
         // Nothing but the main worktree: there is no pull request that could
         // be merged, so GitHub is not asked about this project.
@@ -1755,7 +2145,7 @@ impl Engine {
         let runner = SharedRunner(self.inner.runner.clone());
         let ssh = self.ssh();
         let merged: Option<HashSet<String>> = self
-            .merged_pull_requests(&runner, &machine, &ssh, &project.root)
+            .merged_pull_requests(&runner, &machine, &ssh, &project.root, on_github)
             .await;
 
         for worktree in worktrees.iter().filter(|worktree| !worktree.is_main) {
@@ -1781,17 +2171,13 @@ impl Engine {
         machine: &Machine,
         ssh: &SshOptions,
         root: &str,
+        on_github: Option<bool>,
     ) -> Option<HashSet<String>> {
-        let git = Git::new(runner, machine, ssh);
-        let url = match git.remote_url(root, "origin").await {
-            Ok(Some(url)) => url,
-            Ok(None) => return None,
-            Err(error) => {
-                tracing::debug!(%error, "could not read the remote of the project");
-                return None;
-            }
+        let on_github = match on_github {
+            Some(known) => known,
+            None => self.origin_is_github(runner, machine, ssh, root).await,
         };
-        if !github::is_github_url(&url) {
+        if !on_github {
             return None;
         }
         match Github::new(runner, machine, ssh)
@@ -1816,8 +2202,8 @@ impl Engine {
             let Ok(project) = engine.inner.store.project(&project) else {
                 return;
             };
-            if let Err(error) = engine.probe_merged(&project, true).await {
-                tracing::debug!(%error, "could not check the merged pull requests");
+            if let Err(error) = engine.probe_github(&project).await {
+                tracing::debug!(%error, "could not check the pull requests");
             }
         })
     }
@@ -1845,10 +2231,24 @@ impl Engine {
         branch: &str,
         base: Option<&str>,
     ) -> Result<String, EngineError> {
+        let path = self.create_worktree(project_id, branch, base).await?;
+        Ok(format!("Added worktree {branch} at {path}."))
+    }
+
+    /// Makes the worktree `branch` and lists the project's worktrees again.
+    /// Answers where it is.
+    async fn create_worktree(
+        &self,
+        project_id: &ProjectId,
+        branch: &str,
+        base: Option<&str>,
+    ) -> Result<String, EngineError> {
         address::validate_branch(branch).map_err(|why| EngineError::Invalid(why.to_owned()))?;
         let project = self.inner.store.project(project_id)?;
         let machine = self.inner.store.machine(&project.machine_id)?;
-        let path = address::worktree_path(&project.root, branch);
+        let path =
+            address::worktree_location(&self.prefs().worktree_location, &project.root, branch)
+                .map_err(EngineError::Invalid)?;
         let base = base
             .map(str::trim)
             .filter(|base| !base.is_empty())
@@ -1859,7 +2259,137 @@ impl Engine {
             .add_worktree(&project, branch, &path, Some(base))
             .await?;
         self.sync_worktrees(project_id).await?;
-        Ok(format!("Added worktree {branch} at {path}."))
+        Ok(path)
+    }
+
+    /// Makes several worktrees of `project`, one after the other (git takes
+    /// the repository's lock for each), and answers how each one went, in the
+    /// order of `branches`: where it is, or why it was not made. One that
+    /// fails does not stop the rest.
+    pub fn add_worktrees(
+        &self,
+        project: ProjectId,
+        branches: Vec<String>,
+        base: Option<String>,
+    ) -> JoinHandle<Vec<Result<String, EngineError>>> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            let mut done = Vec::with_capacity(branches.len());
+            for branch in &branches {
+                done.push(
+                    engine
+                        .create_worktree(&project, branch, base.as_deref())
+                        .await,
+                );
+            }
+            done
+        })
+    }
+
+    /// Reads the project's `leon.toml` where the project is (this computer,
+    /// over SSH or through the relay), keeps what it says for
+    /// [`Engine::project_state`] and answers it. A project without the file
+    /// is [`ProjectState::Absent`], quietly. A file that is wrong, or that
+    /// cannot be read, is told on the status line once, when what is known of
+    /// it changes; so are the shortcuts that collide with a command of Leon.
+    pub fn read_project_file(
+        &self,
+        project: ProjectId,
+    ) -> JoinHandle<Result<ProjectState, EngineError>> {
+        let engine = self.clone();
+        self.inner
+            .handle
+            .spawn(async move { engine.read_project_file_now(&project).await })
+    }
+
+    /// What the last reading of the project's `leon.toml` found; `None` before
+    /// the first.
+    pub fn project_state(&self, project: &ProjectId) -> Option<ProjectState> {
+        self.state().project_files.get(project).cloned()
+    }
+
+    async fn read_project_file_now(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<ProjectState, EngineError> {
+        let project = self.inner.store.project(project_id)?;
+        let path = address::join_path(&project.root, project::FILE_NAME);
+        let state = match self
+            .read_optional_file_now(&project.machine_id, &path)
+            .await
+        {
+            Ok(None) => ProjectState::Absent,
+            Ok(Some(FileContent::Text { text, .. })) => match project::parse(&text) {
+                Ok(file) => ProjectState::Loaded(Arc::new(file)),
+                Err(error) => ProjectState::Invalid(error),
+            },
+            Ok(Some(_)) => ProjectState::Invalid(project::ProjectError {
+                line: 0,
+                message: format!(
+                    "It is not a text file of at most {} bytes.",
+                    remote_files::MAX_FILE_BYTES
+                ),
+            }),
+            // The machine is away or the folder unreadable: what was known
+            // stays, and the reason goes to the log.
+            Err(error) => {
+                tracing::debug!(%error, "could not read the project file");
+                return self.project_state(project_id).ok_or(error);
+            }
+        };
+        let before = self
+            .state()
+            .project_files
+            .insert(project_id.clone(), state.clone());
+        if before.as_ref() != Some(&state) {
+            match &state {
+                ProjectState::Invalid(error) => {
+                    self.set_status(StatusKind::Error, format!("{}: {error}", project.name));
+                }
+                ProjectState::Loaded(file) => {
+                    if let Some(notice) = file.notices(crate::platform::is_mac()).into_iter().next()
+                    {
+                        self.set_status(StatusKind::Info, notice);
+                    }
+                }
+                ProjectState::Absent => {}
+            }
+        }
+        Ok(state)
+    }
+
+    /// [`Engine::read_file_now`] for a file that may not be there: `None`
+    /// then, where that one is an error.
+    async fn read_optional_file_now(
+        &self,
+        machine_id: &MachineId,
+        path: &str,
+    ) -> Result<Option<FileContent>, EngineError> {
+        let machine = self.inner.store.machine(machine_id)?;
+        if machine.kind == MachineKind::Local {
+            let path = std::path::PathBuf::from(path);
+            return match self.blocking(move || files::read(&path)).await? {
+                Ok(content) => Ok(Some(content)),
+                Err(FileError::Missing(_)) => Ok(None),
+                Err(FileError::Io { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    Ok(None)
+                }
+                Err(error) => Err(error.into()),
+            };
+        }
+        let output = self
+            .run_file_command(&machine, remote_files::read_command(path))
+            .await?;
+        match remote_files::parse_read(&output.stdout) {
+            Some(remote_files::ReadOutcome::Found(content)) => Ok(Some(content)),
+            Some(remote_files::ReadOutcome::Missing) => Ok(None),
+            Some(remote_files::ReadOutcome::NotAFile) => {
+                Err(file_error(format!("{path} is not a file.")))
+            }
+            None => Err(file_error(unanswered("read", path, &output))),
+        }
     }
 
     /// Removes a worktree on the machine that holds it, in the background.
@@ -2286,6 +2816,19 @@ impl Engine {
         Ok(format!("Removed machine {}.", machine.name))
     }
 
+    /// Takes sessions out of the history; ones it no longer has are skipped.
+    /// Public and not async so the window can finish this on the way out of
+    /// the application, where a submitted operation might never run.
+    pub fn forget_sessions(&self, sessions: &[leon_core::SessionId]) -> Result<(), EngineError> {
+        for id in sessions {
+            match self.inner.store.remove_session(id) {
+                Ok(()) | Err(StoreError::NotFound(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
     fn remove_session(&self, id: &leon_core::SessionId) -> Result<String, EngineError> {
         let session = self.inner.store.session(id)?;
         self.inner.store.remove_session(id)?;
@@ -2662,10 +3205,14 @@ impl Engine {
             // Discovery has just listed the worktrees of these.
             if discovery.synced.contains(&project.id) {
                 done.synced += 1;
+                self.refresh_checkouts_of(&project.id).await;
                 continue;
             }
             match self.sync_worktrees(&project.id).await {
-                Ok(_) => done.synced += 1,
+                Ok(_) => {
+                    done.synced += 1;
+                    self.refresh_checkouts_of(&project.id).await;
+                }
                 Err(error) => {
                     tracing::warn!(project = %project.name, %error, "worktree sync failed");
                     done.failed += 1;
@@ -3472,7 +4019,10 @@ branch refs/heads/feature/login
     async fn github_is_asked_when_somebody_looks_and_not_when_the_timer_watches() {
         let rig = rig(ScriptedRunner::new()
             .reply(Output::ok(LISTING))
+            .reply(Output::ok("## main\n"))
+            .reply(Output::ok("## feature/login\n"))
             .reply(Output::ok("git@github.com:zavudev/leon.git\n"))
+            .reply(Output::ok("[]"))
             .reply(Output::ok("[]")));
         let project = local_project(&rig.store);
         rig.engine
@@ -3492,6 +4042,193 @@ branch refs/heads/feature/login
             rig.runner.calls().iter().any(|call| call.program == "gh"),
             "the slower cadence does ask, and keeps the worktrees it found"
         );
+    }
+
+    /// What the store says about the checkout of the worktree of `branch`.
+    fn status_of(store: &Store, project: &ProjectId, branch: &str) -> leon_core::WorktreeStatus {
+        store
+            .worktree_statuses()
+            .unwrap()
+            .remove(&worktree_of(store, project, branch))
+            .unwrap_or_default()
+    }
+
+    const ORIGIN: &str = "git@github.com:zavudev/leon.git\n";
+
+    #[test]
+    fn github_is_asked_again_only_after_a_minute() {
+        let start = Instant::now();
+        assert!(github_due(None, start), "never asked is due");
+        assert!(!github_due(Some(start), start));
+        assert!(!github_due(Some(start), start + Duration::from_secs(59)));
+        assert!(github_due(Some(start), start + Duration::from_secs(60)));
+        // A clock that went back is not a reason to ask.
+        assert!(!github_due(Some(start + Duration::from_secs(5)), start));
+    }
+
+    #[tokio::test]
+    async fn the_timer_reads_the_state_of_every_checkout_and_still_leaves_github_alone() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok(LISTING))
+            .reply(Output::ok(
+                "## main...origin/main [ahead 1]\n M src/lib.rs\n?? notes.md\n",
+            ))
+            .reply(Output::ok("## feature/login\n")));
+        let project = local_project(&rig.store);
+        rig.engine
+            .check_worktrees(project.id.clone())
+            .await
+            .unwrap();
+        let main = status_of(&rig.store, &project.id, "main");
+        assert_eq!(main.changed, Some(2));
+        assert_eq!(
+            main.divergence,
+            Some(leon_core::Divergence {
+                ahead: 1,
+                behind: 0
+            })
+        );
+        let linked = status_of(&rig.store, &project.id, "feature/login");
+        assert_eq!(linked.changed, Some(0), "clean is known, not unknown");
+        assert_eq!(linked.divergence, None, "no upstream is not level");
+        let calls = rig.runner.calls();
+        assert_eq!(calls[1].cwd.as_deref(), Some(PROJECT_ROOT));
+        assert_eq!(
+            calls[2].cwd.as_deref(),
+            Some("/srv/api-worktrees/feature-login")
+        );
+        assert!(calls.iter().all(|call| call.program == "git"));
+    }
+
+    #[tokio::test]
+    async fn a_checkout_git_cannot_read_keeps_what_it_had_and_the_others_still_update() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::failed(128, "fatal: not a git repository"))
+            .reply(Output::ok("## feature/login\n M a\n")));
+        let project = project_with_worktrees(&rig.store);
+        let main = worktree_of(&rig.store, &project.id, "main");
+        rig.store
+            .update_worktree_status(&main, |status| status.changed = Some(9))
+            .unwrap();
+        rig.engine.refresh_checkouts(&project).await.unwrap();
+        assert_eq!(status_of(&rig.store, &project.id, "main").changed, Some(9));
+        assert_eq!(
+            status_of(&rig.store, &project.id, "feature/login").changed,
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_open_pull_request_of_a_branch_is_stored_on_its_worktree() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok(ORIGIN))
+            .reply(Output::ok(
+                r#"[{"number":31,"url":"https://github.com/zavudev/leon/pull/31",
+                "headRefName":"feature/login","isDraft":false,
+                "reviewDecision":"APPROVED","statusCheckRollup":[
+                  {"status":"COMPLETED","conclusion":"SUCCESS"}]}]"#,
+            )));
+        let project = project_with_worktrees(&rig.store);
+        rig.store
+            .update_worktree_status(&worktree_of(&rig.store, &project.id, "main"), |status| {
+                status.pull_request = Some(leon_core::PullRequest {
+                    number: 1,
+                    url: String::new(),
+                    draft: false,
+                    review: leon_core::Review::None,
+                    checks: leon_core::Checks::None,
+                })
+            })
+            .unwrap();
+        rig.engine
+            .probe_open_pull_requests(&project, None)
+            .await
+            .unwrap();
+        let linked = status_of(&rig.store, &project.id, "feature/login");
+        let pull_request = linked
+            .pull_request
+            .expect("the branch has an open pull request");
+        assert_eq!(pull_request.number, 31);
+        assert_eq!(pull_request.review, leon_core::Review::Approved);
+        assert_eq!(pull_request.checks, leon_core::Checks::Passing);
+        assert_eq!(
+            status_of(&rig.store, &project.id, "main").pull_request,
+            None,
+            "GitHub answered and the branch has none any more"
+        );
+        let gh = &rig.runner.calls()[1];
+        assert_eq!(gh.program, "gh");
+        assert_eq!(gh.cwd.as_deref(), Some(PROJECT_ROOT));
+    }
+
+    #[tokio::test]
+    async fn when_github_cannot_be_asked_every_worktree_keeps_what_it_had() {
+        let known = leon_core::PullRequest {
+            number: 7,
+            url: "https://github.com/zavudev/leon/pull/7".into(),
+            draft: true,
+            review: leon_core::Review::None,
+            checks: leon_core::Checks::None,
+        };
+        // No gh, gh signed out, and a repository that is not on GitHub.
+        let silences = [
+            ScriptedRunner::new()
+                .reply(Output::ok(ORIGIN))
+                .fail(RunError::Spawn {
+                    program: "gh".into(),
+                    source: std::io::Error::other("no gh"),
+                }),
+            ScriptedRunner::new()
+                .reply(Output::ok(ORIGIN))
+                .reply(Output::failed(4, "run gh auth login")),
+            ScriptedRunner::new().reply(Output::ok("git@gitlab.com:zavudev/leon.git\n")),
+        ];
+        for runner in silences {
+            let rig = rig(runner);
+            let project = project_with_worktrees(&rig.store);
+            let linked = worktree_of(&rig.store, &project.id, "feature/login");
+            rig.store
+                .update_worktree_status(&linked, |status| status.pull_request = Some(known.clone()))
+                .unwrap();
+            rig.engine
+                .probe_open_pull_requests(&project, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                status_of(&rig.store, &project.id, "feature/login").pull_request,
+                Some(known.clone())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn github_is_asked_once_a_minute_per_project_whoever_asks() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok(ORIGIN))
+            .reply(Output::ok("[]"))
+            .reply(Output::ok(ORIGIN))
+            .reply(Output::ok("[]")));
+        let project = project_with_worktrees(&rig.store);
+        rig.engine
+            .check_pull_requests(project.id.clone())
+            .await
+            .unwrap();
+        let asked = rig.runner.calls().len();
+        assert_eq!(
+            rig.runner
+                .calls()
+                .iter()
+                .filter(|call| call.program == "gh")
+                .count(),
+            2,
+            "the merged ones and the open ones"
+        );
+        rig.engine
+            .check_pull_requests(project.id.clone())
+            .await
+            .unwrap();
+        rig.engine.probe_github(&project).await.unwrap();
+        assert_eq!(rig.runner.calls().len(), asked, "a minute has not passed");
     }
 
     #[tokio::test]
@@ -3761,6 +4498,211 @@ branch refs/heads/feature/login
             })
             .await;
         assert_eq!(rig.runner.calls()[0].args.last().unwrap(), "HEAD");
+    }
+
+    #[tokio::test]
+    async fn the_location_setting_decides_where_the_worktree_goes() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok(""))
+            .reply(Output::ok(LISTING)));
+        let project = local_project(&rig.store);
+        prefs_of(&rig.engine, |prefs| {
+            prefs.worktree_location = "{root}/.worktrees/{branch}".into();
+        });
+        rig.engine
+            .run(Op::AddWorktree {
+                project: project.id,
+                branch: "feature/login".into(),
+                base: None,
+            })
+            .await;
+        assert_eq!(
+            rig.runner.calls()[0].args,
+            [
+                "worktree",
+                "add",
+                "-b",
+                "feature/login",
+                "/srv/api/.worktrees/feature-login",
+                "HEAD"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_location_that_cannot_work_is_refused_before_git_runs() {
+        let rig = rig(ScriptedRunner::new());
+        let project = local_project(&rig.store);
+        prefs_of(&rig.engine, |prefs| {
+            prefs.worktree_location = "{root}-worktrees".into();
+        });
+        rig.engine
+            .run(Op::AddWorktree {
+                project: project.id,
+                branch: "fix".into(),
+                base: None,
+            })
+            .await;
+        assert!(rig.runner.calls().is_empty());
+        let line = status(&rig.engine);
+        assert_eq!(line.kind, StatusKind::Error);
+        assert!(line.text.contains("{branch}"), "{}", line.text);
+    }
+
+    fn project_in(rig: &Rig, root: &str) -> Project {
+        rig.store
+            .add_project(&MachineId::local(), "api", root)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_project_file_is_read_from_the_projects_folder() {
+        let rig = rig(ScriptedRunner::new());
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let project = project_in(&rig, &root);
+        assert_eq!(rig.engine.project_state(&project.id), None, "not read yet");
+
+        // No file: nothing to say, on the status line or anywhere.
+        let state = rig
+            .engine
+            .read_project_file(project.id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state, ProjectState::Absent);
+        assert!(rig.engine.status().is_none(), "a missing file is not news");
+
+        std::fs::write(
+            dir.path().join("leon.toml"),
+            "[worktree]\nsetup = \"make\"\n\n[[script]]\nname = \"Test\"\ncommand = \"make test\"\n",
+        )
+        .unwrap();
+        let state = rig
+            .engine
+            .read_project_file(project.id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let ProjectState::Loaded(file) = &state else {
+            panic!("expected a file, got {state:?}");
+        };
+        assert_eq!(
+            file.setup.as_ref().map(|s| s.command.as_str()),
+            Some("make")
+        );
+        assert_eq!(file.scripts[0].name, "Test");
+        assert_eq!(rig.engine.project_state(&project.id), Some(state));
+        assert!(
+            rig.runner.calls().is_empty(),
+            "this computer needs no command"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wrong_project_file_is_told_with_its_line_and_offers_nothing() {
+        let rig = rig(ScriptedRunner::new());
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_in(&rig, &dir.path().to_string_lossy());
+        std::fs::write(
+            dir.path().join("leon.toml"),
+            "[[script]]\nname = \"Test\"\ncommand = \"one\\ntwo\"\n",
+        )
+        .unwrap();
+        let state = rig
+            .engine
+            .read_project_file(project.id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let ProjectState::Invalid(error) = &state else {
+            panic!("expected an error, got {state:?}");
+        };
+        assert_eq!(error.line, 3);
+        assert!(state.file().is_none());
+        let line = status(&rig.engine);
+        assert_eq!(line.kind, StatusKind::Error);
+        assert!(line.text.contains("leon.toml line 3"), "{}", line.text);
+    }
+
+    #[tokio::test]
+    async fn a_project_file_on_another_machine_is_read_through_the_runner() {
+        // `[worktree]\nsetup = "make"\n`
+        let reply = "banner\nLEON-FILE 1\nTEXT 26 1\nW3dvcmt0cmVlXQpzZXR1cCA9ICJtYWtlIgo=\n";
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok(reply))
+            .reply(Output::ok("LEON-FILE 1\nMISSING\n")));
+        let machine = ssh_machine(&rig.store);
+        let project = rig
+            .store
+            .add_project(&machine.id, "api", "/home/dev/api")
+            .unwrap();
+        let state = rig
+            .engine
+            .read_project_file(project.id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state
+                .file()
+                .and_then(|file| file.setup.as_ref())
+                .map(|s| s.command.as_str()),
+            Some("make")
+        );
+        let call = &rig.runner.calls()[0];
+        assert_eq!(call.program, "ssh");
+        assert!(
+            call.args
+                .last()
+                .unwrap()
+                .ends_with(" sh /home/dev/api/leon.toml"),
+            "{:?}",
+            call.args
+        );
+        // The file is gone on the next look: nothing is left of it, quietly.
+        let state = rig
+            .engine
+            .read_project_file(project.id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state, ProjectState::Absent);
+        assert!(rig.engine.status().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_machine_that_cannot_be_reached_keeps_what_was_known_of_the_file() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok(
+                "LEON-FILE 1\nTEXT 26 1\nW3dvcmt0cmVlXQpzZXR1cCA9ICJtYWtlIgo=\n",
+            ))
+            .reply(Output::failed(
+                255,
+                "ssh: connect to host box.example: refused\n",
+            )));
+        let machine = ssh_machine(&rig.store);
+        let project = rig
+            .store
+            .add_project(&machine.id, "api", "/home/dev/api")
+            .unwrap();
+        let known = rig
+            .engine
+            .read_project_file(project.id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let after = rig
+            .engine
+            .read_project_file(project.id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after, known, "the setup is still there");
+        assert!(
+            rig.engine.status().is_none(),
+            "nobody asked: the log has the reason"
+        );
     }
 
     #[tokio::test]
@@ -4620,6 +5562,7 @@ branch refs/heads/feature/login
             .runner
             .calls()
             .into_iter()
+            .filter(|call| call.args.iter().any(|arg| arg == "worktree"))
             .filter_map(|call| call.cwd)
             .collect();
         assert!(
@@ -4819,6 +5762,35 @@ branch refs/heads/feature/login
         assert!(rig.store.session(&id).is_err());
     }
 
+    #[tokio::test]
+    async fn forgetting_sessions_is_done_when_the_call_returns_and_skips_the_missing() {
+        let rig = rig(ScriptedRunner::new());
+        session_in(
+            &rig.store,
+            &MachineId::local(),
+            "/srv/api",
+            "closed a moment ago",
+        );
+        let id = rig
+            .store
+            .recent_sessions(&leon_core::SessionFilter::default(), 5)
+            .unwrap()
+            .remove(0)
+            .id;
+        let missing = leon_core::SessionId::from_string("no-such-session");
+        // No await: this is what the window calls as the application ends.
+        rig.engine
+            .forget_sessions(&[missing.clone(), id.clone()])
+            .unwrap();
+        assert!(rig.store.session(&id).is_err());
+        // Asking again, or through the operation, is not an error.
+        rig.engine
+            .forget_sessions(std::slice::from_ref(&id))
+            .unwrap();
+        rig.engine.run(Op::ForgetSessions(vec![id, missing])).await;
+        assert!(rig.engine.status().is_none(), "forgetting says nothing");
+    }
+
     // ----- logos ---------------------------------------------------------
 
     use crate::avatar::BoxFuture;
@@ -4983,6 +5955,8 @@ branch refs/heads/feature/login
         let rig = rig(ScriptedRunner::new()
             .reply(Output::ok(LISTING))
             .reply(Output::ok(""))
+            .reply(Output::ok("## main\n"))
+            .reply(Output::ok("## feature/login\n"))
             .reply(Output::ok(scan_with_logo())));
         let project = local_project(&rig.store);
         rig.engine.run(Op::Refresh).await;
@@ -5842,6 +6816,8 @@ branch refs/heads/feature/login
         let rig = rig(ScriptedRunner::new()
             .reply(Output::ok(LISTING))
             .reply(Output::ok(""))
+            .reply(Output::ok("## main\n"))
+            .reply(Output::ok("## feature/login\n"))
             .reply(Output::ok(scan_with_logo())));
         let project = local_project(&rig.store);
         prefs_of(&rig.engine, |prefs| prefs.detect_logos = false);

@@ -31,6 +31,7 @@ fn reading(agent: AgentId, machine: &MachineId, windows: &[(WindowKind, f64, i64
         agent,
         machine: machine.as_str().to_owned(),
         account_label: None,
+        account: None,
         plan: Some("plus".into()),
         source: Some(Source::Local),
         observed_at: Some(now() - 180),
@@ -693,6 +694,65 @@ fn the_header_of_a_live_agent_session_shows_its_primary_window(cx: &mut TestAppC
 }
 
 #[gpui_kit::test]
+fn the_header_of_a_session_of_an_account_shows_that_accounts_reading_and_never_the_agents_own(
+    cx: &mut TestAppContext,
+) {
+    let (h, _) = open_usage(cx);
+    let (_dir, _) = real_worktree(&h, cx);
+    cx.update(|cx| {
+        settings::add_account(cx, AgentId::CLAUDE, "Work", "CLAUDE_CONFIG_DIR=/acct/work")
+    })
+    .unwrap();
+    put(
+        &h,
+        &reading(
+            AgentId::CLAUDE,
+            &local(),
+            &[(WindowKind::FiveHour, 20.0, 3600)],
+        ),
+        cx,
+    );
+    cx.update_window(h.window.into(), |_, window, cx| {
+        h.shell.update(cx, |shell, cx| {
+            shell.new_session_with(AgentId::CLAUDE, window, cx)
+        })
+    })
+    .unwrap();
+    h.settle(cx);
+    h.set_palette_text("work", cx);
+    h.press("enter", cx);
+    wait_until(&h, cx, "the session", |h, cx| {
+        h.shell(cx, |s| s.live.ids().len()) == 1
+    });
+    assert_eq!(
+        h.shell(cx, |s| s.live.all()[0].account.clone()).as_deref(),
+        Some("claude-work")
+    );
+    // The agent's own setup has a reading and the account has none: the
+    // header says nothing, not the figure of somebody else's account.
+    assert!(!h.shows("header-usage", cx));
+
+    // Once the account has a reading of its own the header shows it.
+    let own = reading(
+        AgentId::CLAUDE,
+        &local(),
+        &[(WindowKind::FiveHour, 77.0, 3600)],
+    )
+    .for_account("claude-work");
+    h.store
+        .put_usage_reading_for(
+            &local(),
+            AgentId::CLAUDE,
+            "claude-work",
+            &serde_json::to_string(&own).unwrap(),
+            now() - 180,
+        )
+        .unwrap();
+    h.settle(cx);
+    assert!(h.shows("header-usage", cx));
+}
+
+#[gpui_kit::test]
 fn the_settings_link_opens_settings_on_the_usage_section(cx: &mut TestAppContext) {
     let (h, _) = open_usage(cx);
     h.press_chord("cmd-shift-u", "ctrl-shift-alt-u", cx);
@@ -1135,7 +1195,7 @@ fn a_custom_agent_is_added_validated_kept_and_offered_like_a_built_in_one(cx: &m
     let _h = open_with(cx, ScriptedRunner::new(), Some(file.clone()));
     let id = cx
         .update(|cx| {
-            settings::add_custom_agent(cx, "Zed Zeta Tool", "zzt", "--fast", "--resume {id}")
+            settings::add_custom_agent(cx, "Zed Zeta Tool", "zzt", "--fast", "--resume {id}", "")
         })
         .unwrap();
     assert_eq!(id.as_str(), "custom-zed-zeta-tool");
@@ -1167,7 +1227,7 @@ fn a_custom_agent_is_added_validated_kept_and_offered_like_a_built_in_one(cx: &m
         ("Bad Tool", "", ""),
         ("Bad Tool", "x", "{nope}"),
     ] {
-        let refused = cx.update(|cx| settings::add_custom_agent(cx, name, command, "", resume));
+        let refused = cx.update(|cx| settings::add_custom_agent(cx, name, command, "", resume, ""));
         assert!(refused.is_err(), "{name} {command} {resume}");
     }
     cx.update(|cx| settings::remove_custom_agent(cx, id));
@@ -1234,6 +1294,7 @@ fn known_reading(agent: AgentId, used: f64) -> AgentUsage {
         agent,
         machine: "local".into(),
         account_label: None,
+        account: None,
         plan: None,
         source: Some(Source::VendorApi),
         observed_at: Some(1_790_000_000),
@@ -1283,4 +1344,223 @@ fn the_view_tells_the_agents_with_numbers_from_those_not_installed_or_without_da
         [AgentId::CODEX, AgentId::CLAUDE],
         "signed out is not inactive: it needs you, after the agents with numbers"
     );
+}
+
+// ----- tokens and estimated cost ---------------------------------------------------------
+
+mod tokens {
+    use super::*;
+    use crate::ui::usage_tokens::{load_prices, token_section, ESTIMATE_NOTE};
+    use leon_core::{
+        set_session_tokens_in, NewMessage, NewSession, Role, SessionTokens, TokenCounts, TokenRow,
+    };
+    use leon_usage::{spend_report, Period, PriceTable};
+
+    const PRICES: &str = r#"{"models": [
+        {"id": "model-a", "name": "Model A", "input": 5, "output": 25, "cache_read": 0.5,
+         "source": "https://example.test/a", "recorded": "2026-10-01"}
+    ]}"#;
+
+    fn prices() -> PriceTable {
+        PriceTable::empty().with_overrides(PRICES).unwrap().0
+    }
+
+    fn row(agent: AgentId, model: &str, day: &str, input: u64, read: u64) -> TokenRow {
+        TokenRow {
+            agent,
+            machine: local(),
+            model: model.to_owned(),
+            day: day.to_owned(),
+            counts: TokenCounts {
+                input,
+                output: 1_000_000,
+                cache_read: read,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Stores a session of `agent` that used `counts` of `model` on `day`.
+    fn counted(h: &Harness, agent: AgentId, id: &str, model: &str, day: &str, input: u64) {
+        let at = fixed_now();
+        h.store
+            .write(leon_core::StoreChange::Sessions, |tx| {
+                let stored = leon_core::upsert_session_in(
+                    tx,
+                    &NewSession {
+                        agent,
+                        external_id: id.to_owned(),
+                        machine_id: local(),
+                        cwd: "/srv/api".to_owned(),
+                        title: "t".to_owned(),
+                        model: None,
+                        started_at: at,
+                        updated_at: at,
+                    },
+                    &[NewMessage {
+                        role: Role::User,
+                        text: "hi".to_owned(),
+                        at,
+                    }],
+                )?;
+                set_session_tokens_in(
+                    tx,
+                    &stored,
+                    &[SessionTokens {
+                        model: model.to_owned(),
+                        day: day.to_owned(),
+                        counts: TokenCounts {
+                            input,
+                            output: 1_000_000,
+                            cache_read: 3 * input,
+                            ..Default::default()
+                        },
+                    }],
+                )
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn the_section_gives_the_totals_the_lists_and_says_the_cost_is_an_estimate() {
+        let rows = [
+            row(
+                AgentId::CLAUDE,
+                "model-a",
+                "2026-10-03",
+                1_000_000,
+                3_000_000,
+            ),
+            row(AgentId::CODEX, "mystery", "2026-10-04", 500_000, 0),
+        ];
+        let report = spend_report(&rows, &prices(), None, Period::Month, now());
+        let section = token_section(&report, "This machine", true, &[]);
+
+        assert_eq!(section.scope, "last 30 days · This machine");
+        // 1M in + 1M out + 3M cache read + 0.5M in + 1M out.
+        assert_eq!(
+            section.summary.as_deref(),
+            Some("6.50M tokens · 67% of input from cache · est. $31.50 + unpriced")
+        );
+        let agents: Vec<_> = section.groups[0]
+            .lines
+            .iter()
+            .map(|l| l.label.as_str())
+            .collect();
+        assert_eq!(agents, ["Claude Code", "Codex"]);
+        assert_eq!(section.groups[0].lines[0].cost, "$31.50");
+        assert_eq!(
+            section.groups[0].lines[0].detail,
+            "in 4.00M · out 1.00M · cache 75%"
+        );
+        assert_eq!(section.groups[0].lines[1].cost, "no price");
+        let models: Vec<_> = section.groups[1]
+            .lines
+            .iter()
+            .map(|l| l.label.as_str())
+            .collect();
+        assert_eq!(models, ["model-a", "mystery"]);
+        let days: Vec<_> = section.groups[2]
+            .lines
+            .iter()
+            .map(|l| l.label.as_str())
+            .collect();
+        assert_eq!(days, ["2026-10-04", "2026-10-03"]);
+        assert!(section.notes[0].contains("no price"), "{:?}", section.notes);
+        assert!(ESTIMATE_NOTE.contains("Not what a subscription is billed"));
+
+        // Compact keeps the agents only.
+        let compact = token_section(&report, "This machine", false, &[]);
+        assert_eq!(compact.groups.len(), 1);
+    }
+
+    #[test]
+    fn nothing_counted_says_so_and_a_bad_price_file_is_told_not_hidden() {
+        let report = spend_report(&[], &prices(), None, Period::Week, now());
+        let section = token_section(&report, "All machines", true, &["prices.json: x.".into()]);
+        assert!(section.summary.is_none() && section.groups.is_empty());
+        assert!(section.empty.unwrap().contains("No tokens counted yet"));
+        assert_eq!(section.notes, ["prices.json: x."]);
+
+        let (bundled, notes) = load_prices(None);
+        assert!(notes.is_empty());
+        assert!(bundled.lookup("claude-opus-5").is_some());
+        let (kept, notes) = load_prices(Some("{not json"));
+        assert_eq!(kept, bundled);
+        assert!(notes[0].contains("bundled prices are in use"), "{notes:?}");
+        let (extended, notes) = load_prices(Some(
+            r#"{"models": [{"id": "my-model", "input": 1, "output": 2}, {"id": "bad"}]}"#,
+        ));
+        assert!(extended.lookup("my-model").is_some());
+        assert!(extended.lookup("claude-opus-5").is_some());
+        assert_eq!(notes.len(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn the_view_lists_the_counted_tokens_and_t_changes_the_span(cx: &mut TestAppContext) {
+        let (h, _) = open_usage(cx);
+        counted(
+            &h,
+            AgentId::CLAUDE,
+            "recent",
+            "claude-opus-5",
+            "2026-10-03",
+            1_000_000,
+        );
+        counted(
+            &h,
+            AgentId::CODEX,
+            "old",
+            "gpt-5.6-sol",
+            "2026-07-01",
+            2_000_000,
+        );
+        h.settle(cx);
+
+        h.press_chord("cmd-shift-u", "ctrl-shift-alt-u", cx);
+        assert!(h.shows("usage-tokens", cx));
+        assert!(h.shows("usage-tokens-summary", cx));
+        assert!(
+            h.shows("usage-tokens-estimate", cx),
+            "the cost says it is an estimate"
+        );
+        assert!(!h.shows("usage-tokens-empty", cx));
+        let section = cx.update(|cx| h.shell.read(cx).usage_tokens_section());
+        // Thirty days back from 2026-10-04: only the recent session.
+        assert_eq!(section.groups[0].lines.len(), 1);
+        assert_eq!(section.groups[0].lines[0].label, "Claude Code");
+        assert!(section.groups[0].lines[0].cost.starts_with('$'));
+        assert!(h.shows("usage-tokens-0-0", cx));
+        assert!(!h.shows("usage-tokens-0-1", cx));
+
+        h.press("t", cx); // 90 days: the July session is older still
+        assert_eq!(h.shell(cx, |s| s.usage.period), Period::Quarter);
+        assert!(!h.shows("usage-tokens-0-1", cx));
+        h.press("t", cx); // all time
+        assert_eq!(h.shell(cx, |s| s.usage.period), Period::All);
+        assert!(h.shows("usage-tokens-0-1", cx), "the older session joins");
+        h.press("t", cx);
+        assert_eq!(h.shell(cx, |s| s.usage.period), Period::Week);
+        h.mouse_on("usage-period".to_owned(), gpui_kit::MouseButton::Left, cx);
+        assert_eq!(h.shell(cx, |s| s.usage.period), Period::Month);
+    }
+
+    #[gpui_kit::test]
+    fn without_counts_the_view_says_none_were_counted(cx: &mut TestAppContext) {
+        let (h, _) = open_usage(cx);
+        h.press_chord("cmd-shift-u", "ctrl-shift-alt-u", cx);
+        assert!(h.shows("usage-tokens", cx));
+        assert!(h.shows("usage-tokens-empty", cx));
+        assert!(!h.shows("usage-tokens-summary", cx));
+    }
+
+    #[gpui_kit::test]
+    fn counts_that_arrive_while_the_view_is_open_appear(cx: &mut TestAppContext) {
+        let (h, _) = open_usage(cx);
+        h.press_chord("cmd-shift-u", "ctrl-shift-alt-u", cx);
+        assert!(h.shows("usage-tokens-empty", cx));
+        counted(&h, AgentId::CLAUDE, "s", "claude-opus-5", "2026-10-04", 10);
+        h.settle(cx);
+        assert!(h.shows("usage-tokens-summary", cx));
+    }
 }
