@@ -19,6 +19,7 @@ mod brand;
 mod cli;
 mod connect;
 mod diagnose;
+mod durable;
 mod elsewhere;
 mod engine;
 mod fanout;
@@ -74,6 +75,15 @@ fn main() {
 
     // `leon host ...` runs the sharing service without a window.
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    // `leon keeper --data-dir <path>` is the process that holds the terminals
+    // of durable local sessions. It is not for people: the window starts it,
+    // detached, when a session is opened with the setting on. It comes before
+    // everything that can end or relaunch the process (the updater, the
+    // store), and logs nothing: its standard streams are closed.
+    #[cfg(unix)]
+    if arguments.first().map(String::as_str) == Some("keeper") {
+        std::process::exit(leon_host::keeper::run(arguments[1..].to_vec()));
+    }
     if arguments.first().map(String::as_str) == Some("host") {
         // `leon host service ...` installs and watches it as a background
         // service of the user's session.
@@ -139,6 +149,9 @@ fn main() {
     leon_update::launch::wait_for_parent(Duration::from_secs(20));
 
     let data_dir = options.data_dir.clone().unwrap_or_else(product::data_dir);
+    // Absolute, once: the keeper of durable sessions runs in `/`, where a
+    // relative path names another folder (and another keeper).
+    let data_dir = std::path::absolute(&data_dir).unwrap_or(data_dir);
     if let Err(error) = std::fs::create_dir_all(&data_dir) {
         eprintln!(
             "{}: cannot create {}: {error}",
@@ -261,6 +274,23 @@ fn main() {
         handle: runtime.handle().clone(),
     });
     let backend = Rc::new(remote::RoutingBackend::new(hub, runtime.handle().clone()));
+    // The keeper of durable local sessions, started the first time a session
+    // is opened with the setting on. Where there are no POSIX terminals there
+    // is none.
+    #[cfg(unix)]
+    let durable: Option<Arc<dyn durable::Durable>> = std::env::current_exe().ok().map(|exe| {
+        Arc::new(durable::LocalKeeper::new(
+            leon_host::keeper::paths_here(&data_dir),
+            exe,
+            data_dir.clone(),
+            runtime.handle().clone(),
+        )) as Arc<dyn durable::Durable>
+    });
+    #[cfg(not(unix))]
+    let durable: Option<Arc<dyn durable::Durable>> = None;
+    // Agents the keeper holds are this Leon's own, wherever they are in the
+    // process tree.
+    engine.set_keeper(durable.clone());
     let update_service = updates::Service::with_updater(updater, runtime.handle().clone());
     let update_service_in = update_service.clone();
     // What the store holds is shown at once; once the settings are read (they
@@ -330,6 +360,7 @@ fn main() {
                         backend: backend.clone(),
                         remote: Some(remote_services.clone()),
                         updates: Some(update_service_in.clone()),
+                        durable: durable.clone(),
                         ..ui::Options::default()
                     };
                     ui::Shell::new(engine, options, window, cx)

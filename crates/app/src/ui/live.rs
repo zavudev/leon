@@ -11,6 +11,7 @@
 use super::activity::{
     session_activity, terminal_activity, Activity, Signals, Thresholds, Transcript,
 };
+use crate::durable::KeeperSlot;
 use gpui_kit::{App, Entity, Subscription};
 use leon_core::{AgentId, MachineId, SessionId};
 use leon_term::TerminalView;
@@ -143,6 +144,11 @@ pub struct LiveSession {
     pub learned: Option<(String, String)>,
     /// When it was started, in milliseconds since the epoch.
     pub started_ms: i64,
+    /// The terminal the keeper holds for it, when it is a durable session:
+    /// what the saved layout needs to attach to it at the next start. A new
+    /// terminal's is filled in when the keeper has opened it; until then the
+    /// session is held but not yet remembered.
+    pub keeper: Option<KeeperSlot>,
     /// What keeps the shell told about the terminal.
     pub _subscriptions: Vec<Subscription>,
 }

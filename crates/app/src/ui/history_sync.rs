@@ -87,6 +87,12 @@ impl Shell {
                     && s.shown_agent().is_some()
                     && s.learned.is_none()
                     && !s.is_paused()
+                    // A terminal the keeper holds has no pid until its first
+                    // answer (half a second): it is looked at again at the
+                    // next pass, instead of being given the less sure
+                    // folder match in the meantime.
+                    && !(s.view.read(cx).terminal().is_held()
+                        && s.view.read(cx).terminal().process_id().is_none())
             })
             .filter_map(|s| {
                 Some(Fresh {

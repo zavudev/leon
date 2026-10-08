@@ -4,6 +4,49 @@
 
 ### Added
 
+* **Keep local sessions running** (setting `durable_sessions`, off by default;
+  macOS and Linux only). The terminals, and the agents in them, that Leon opens
+  on this computer are held by a small background process (`leon keeper`, the
+  same program started in a session of its own the first time one is needed), so
+  they keep running when the window closes, when Leon quits and when it crashes.
+  The next start attaches to them again, in their saved tab, pane and focus,
+  with the output they printed meanwhile, and does not ask about them or type
+  anything into them. Quitting no longer types `/exit` or signals anything to
+  them; the quit question says that those sessions keep running. Closing or
+  putting a session to sleep still ends it, and the palette's **Quit and end
+  every session** is the old quit for all of them. The activity light and
+  transcript status, the "running in another terminal" scan, learning an
+  agent's session id, file and `#123` links and image paste work for these
+  sessions as for the others; the keeper is asked who is in front of each
+  terminal twice a second. A running terminal the saved layout does not know
+  appears in a session of its own. A session whose terminal is gone (the computer
+  restarted, the program ended) is restored the usual way, with a paused resume
+  line, and Leon says so; a keeper that is killed takes its terminals with it,
+  which is printed in them. Limits: only the last 2 MiB of each terminal's
+  output is kept, so older scrollback is not restored; sessions on SSH or relay
+  machines are not held; the keeper ends 30 seconds after its last program ended
+  with no window connected, runs the Leon it was started from until then (an
+  update is picked up by the next keeper), and can be ended with its launcher or
+  by logging out; turning it off leaves the sessions already kept running
+  until they are closed; with it off from the start, and on Windows, everything
+  is as before. It is
+  tested with a scripted keeper over a real socket and a scripted window; closing
+  the window and reopening Leon on a real machine has not been tried.
+  Before it talks to the keeper the window checks the socket's folder (a real
+  folder of its own, closed to other users: the fallback folder under `/tmp` has a
+  predictable name another user could create first) and, once connected, that
+  the other end is its own user, and sends nothing otherwise; the session then
+  starts in the window. New terminals appear at once and are filled in as the
+  keeper answers (nothing waits more than a second and a half, and a keeper that
+  did not answer is not tried again for 20 seconds); keystrokes and hang-ups are
+  never dropped on a full queue; "Quit and end every session" ends only what
+  this window holds and says when the keeper did not confirm it. A saved tab
+  with a surviving and a gone terminal is restored in one piece; a session
+  another window of the same data directory is attached to is left to it; a
+  keeper found with the setting off is not left stranded. Also fixed for relay
+  machines: the terminal's answers to a program's questions (where is the cursor,
+  which colours) now reach the program. A replay can start mid-escape-sequence
+  and look garbled until the program draws again.
 * The light of a session now says what the agent is doing, not only that its
   terminal went quiet. For Claude Code and Codex sessions of this computer
   Leon reads the agent's own transcript while it grows, **whether or not the

@@ -30,6 +30,7 @@ use crate::engine::{MachineState, Op, StatusKind, Target};
 use crate::icons::agent_icon;
 use crate::keys::Command;
 use crate::launch::{self, Launch, LaunchError};
+use crate::settings;
 use crate::theme::{self, hairline, metrics, px, Palette};
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -37,7 +38,7 @@ use gpui_kit::{
     Window,
 };
 use leon_core::{MachineId, MachineKind, ProjectId, Session, SessionId};
-use leon_term::{GridSize, TerminalView, ViewEvent};
+use leon_term::{GridSize, SpawnSpec, TerminalView, ViewEvent};
 use std::time::{Duration, Instant};
 
 /// The grid a terminal starts with, before the first paint measures the pane
@@ -454,6 +455,47 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<LiveId> {
+        self.spawn_live_as(
+            launch, machine, cwd, history, deferred, title, None, window, cx,
+        )
+    }
+
+    /// The keeper, when a terminal of a session on `machine` is to be held by
+    /// it: the setting is on, this system has POSIX terminals, the session
+    /// runs on this computer and there is a keeper to ask.
+    fn keeper_for(
+        &self,
+        found: &leon_core::Machine,
+        plan: &launch::Plan,
+        cx: &gpui_kit::App,
+    ) -> Option<std::sync::Arc<dyn crate::durable::Durable>> {
+        let service = self.options.durable.clone()?;
+        super::keeping::use_keeper(
+            settings::flag(cx, "durable_sessions"),
+            crate::schema::Platform::Unix.here(),
+            found.kind == MachineKind::Local && plan.spawn.route.is_none(),
+            true,
+        )
+        .then_some(service)
+    }
+
+    /// [`Shell::spawn_live`], or, with `attach`, the terminal the keeper
+    /// already holds for the session: nothing is started and nothing is typed
+    /// (the program is running), the screen is rebuilt from what the keeper
+    /// kept, and the session is what `launch` says it was.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn spawn_live_as(
+        &mut self,
+        launch: Launch,
+        machine: &MachineId,
+        cwd: &str,
+        history: Option<SessionId>,
+        deferred: bool,
+        title: Option<String>,
+        attach: Option<crate::durable::Held>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<LiveId> {
         let Some(found) = self.snapshot.machine(machine).cloned() else {
             self.engine
                 .report(StatusKind::Error, "That machine is not known.");
@@ -471,37 +513,97 @@ impl Shell {
             self.engine.submit(Op::Probe(machine.clone()));
         }
         let prefs = Self::launch_prefs(cx);
-        let plan = match launch::plan_with(
-            &found,
-            report.as_ref(),
-            cwd,
-            &launch,
-            &self.engine.ssh(),
-            &*self.options.system,
-            &prefs,
-        ) {
-            Ok(plan) => plan,
-            Err(error) => {
-                self.engine.report(StatusKind::Error, error.to_string());
-                cx.notify();
-                return None;
+        let plan = if attach.is_some() {
+            // Already running: there is nothing to plan, and a folder that
+            // went away since is not a reason to lose the session.
+            launch::Plan {
+                spawn: SpawnSpec {
+                    cwd: Some(cwd.to_owned()),
+                    ..SpawnSpec::default()
+                },
+                send: None,
+                can_detect_foreground: true,
+            }
+        } else {
+            match launch::plan_with(
+                &found,
+                report.as_ref(),
+                cwd,
+                &launch,
+                &self.engine.ssh(),
+                &*self.options.system,
+                &prefs,
+            ) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    self.engine.report(StatusKind::Error, error.to_string());
+                    cx.notify();
+                    return None;
+                }
             }
         };
         let colours = theme::palette(cx);
-        let view = match TerminalView::spawn_with(
-            &*self.options.backend,
-            &plan.spawn,
-            GridSize::new(START_COLS, START_ROWS),
-            colours.terminal,
-            Self::terminal_font(cx),
-            cx,
-        ) {
-            Ok(view) => view,
-            Err(error) => {
-                self.engine.report(StatusKind::Error, error.to_string());
-                cx.notify();
-                return None;
+        let spawn = |backend: &dyn leon_term::Backend, cx: &mut Context<Self>| {
+            TerminalView::spawn_with(
+                backend,
+                &plan.spawn,
+                GridSize::new(START_COLS, START_ROWS),
+                colours.terminal,
+                Self::terminal_font(cx),
+                cx,
+            )
+        };
+        // Held by the keeper, when the setting asks for it and it can be
+        // reached; otherwise in this window, as ever.
+        let mut keeper = None;
+        let mut held_view = None;
+        if let Some(held) = &attach {
+            let service = self.options.durable.clone()?;
+            let backend = crate::durable::DurableBackend::new(
+                service,
+                crate::durable::How::Attach(held.clone()),
+            );
+            match spawn(&backend, cx) {
+                Ok(view) => {
+                    keeper = backend.slot();
+                    held_view = Some(view);
+                }
+                Err(error) => {
+                    self.engine.report(StatusKind::Error, error.to_string());
+                    cx.notify();
+                    return None;
+                }
             }
+        } else if let Some(service) = self.keeper_for(&found, &plan, cx) {
+            let backend = crate::durable::DurableBackend::new(
+                service.clone(),
+                crate::durable::How::Open(service.token()),
+            );
+            match spawn(&backend, cx) {
+                Ok(view) => {
+                    keeper = backend.slot();
+                    held_view = Some(view);
+                }
+                // The session lives in the window instead, and says so.
+                Err(error) => self.engine.report(
+                    StatusKind::Error,
+                    format!(
+                        "Sessions are set to keep running, but the keeper is not available ({error}). \
+                         This one lives in the window and ends with it."
+                    ),
+                ),
+            }
+        }
+        let view = match held_view {
+            Some(view) => view,
+            None => match spawn(&*self.options.backend, cx) {
+                Ok(view) => view,
+                Err(error) => {
+                    self.engine.report(StatusKind::Error, error.to_string());
+                    cx.notify();
+                    return None;
+                }
+            },
         };
         view.update(cx, |view, _| view.set_padding(metrics::TERMINAL_PADDING()));
         super::prefs::apply_terminal_prefs(&view, cx);
@@ -559,10 +661,13 @@ impl Shell {
             history,
             title,
             name: None,
-            phase: if agent.is_some() {
-                AgentPhase::Launched
-            } else {
-                AgentPhase::Shell
+            phase: match (agent.is_some(), attach.is_some()) {
+                (false, _) => AgentPhase::Shell,
+                // Already running: the first look at the foreground says
+                // whether it still is (running) or the shell has the
+                // terminal back (returned).
+                (true, true) => AgentPhase::Running,
+                (true, false) => AgentPhase::Launched,
             },
             can_detect: plan.can_detect_foreground,
             view,
@@ -577,6 +682,7 @@ impl Shell {
                 _ => None,
             },
             started_ms: (self.options.now)().timestamp_millis(),
+            keeper,
             _subscriptions: subscriptions,
         });
         self.refresh_activity(cx);
@@ -1375,8 +1481,10 @@ impl Shell {
         let closed = self.workspaces.close(id);
         if let Some(session) = self.live.get(id) {
             let terminal = session.view.read(cx).terminal();
-            if terminal.is_remote() {
-                // Closing is an explicit end: hang the program up over there.
+            if terminal.is_remote() || terminal.is_held() {
+                // Closing is an explicit end: hang the program up over there,
+                // or under the keeper. Dropping the terminal would only let
+                // go of it.
                 terminal.kill();
             }
         }

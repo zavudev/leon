@@ -361,6 +361,35 @@ systemd or launchd was driven by those tests (the unit text was checked once, by
 hand, with `systemd-analyze --user verify` on systemd 261, which accepted it),
 and the macOS side has not been run on a Mac here.
 
+## The keeper of local sessions is not the host
+
+With the setting `durable_sessions`, Leon holds the terminals of this computer's
+own sessions in `leon keeper`, a background process that outlives the window.
+It looks like a host (it reuses the host's terminal table and replay ring and
+speaks the same terminal messages) and is a different thing:
+
+| | the host (`leon host`, `leon host service`, Share this machine) | the keeper (`leon keeper`) |
+| --- | --- | --- |
+| Serves | devices you paired, through the relay | this user's own Leon window, on this computer |
+| Reached by | the relay, end-to-end encrypted (Noise) | a Unix socket in a 0700 directory; the keeper checks every peer's uid and the window checks the directory (a real directory of its own, closed to others) and the keeper's uid before sending anything; no encryption, no relay, no pairing |
+| Identity | its keys and the device registry in the data directory | none; file permissions are the authentication |
+| Started by | you, or the service | the window, on demand; ends by itself when idle |
+| Terminals | for the devices; run as the host's user | for the window; run as the same user |
+
+They are separate processes and share nothing but the code of the terminal
+table: the keeper does not read or write the data directory's keys or registry
+and the host does not open the keeper's socket, so they do not contend. A
+computer can run both; a session opened here is held by the keeper, and a
+session a paired device opens is held by the host. The keeper does not accept
+`Exec` or the sharing requests, only terminals. It uses the same messages, and
+adds three at the end (`PtyProbe`, `PtyProbed`, `PtyTerminate`: who is in front
+of a terminal, which a client that does not hold the pseudo-terminal cannot see
+for itself); the host answers them too, so a relay machine can list its
+terminals, attach after a restart and read their foreground with the same code,
+but a client does not send them to a host it has not checked knows them (an
+older host drops a connection that sends a message it does not know), and Leon
+does not yet list or re-attach a relay machine's terminals after a restart.
+
 ## Settings
 
 `Relay server` (`remote_relay_url`, default `wss://relay.getleon.dev`), `Name of this

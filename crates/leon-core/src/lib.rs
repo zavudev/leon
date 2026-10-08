@@ -41,9 +41,9 @@ pub use store::search::{
 };
 pub use store::{
     history_overview_at, import_cursors_at, set_import_cursor_in, set_session_account_in,
-    set_session_tokens_in, upsert_session_in, AgentOverview, ImportRun, SavedLayout, SavedState,
-    SavedTab, SavedTerminal, SavedWorkspace, SessionFilter, SessionTokens, Shelf, Slot, Store,
-    TokenCounts, TokenRow, UsagePoint, UsageRow,
+    set_session_tokens_in, upsert_session_in, AgentOverview, ImportRun, KeeperRef, SavedLayout,
+    SavedState, SavedTab, SavedTerminal, SavedWorkspace, SessionFilter, SessionTokens, Shelf, Slot,
+    Store, TokenCounts, TokenRow, UsagePoint, UsageRow,
 };
 
 /// The SQLite binding the store is built on, re-exported so that code using

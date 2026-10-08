@@ -237,6 +237,7 @@ What is imported and shown of the agents' history.
 | Detection interval | `elsewhere_interval` | 2 to 120s | `5` | How often, in seconds, this computer is looked at while the window is focused. |
 | Re-import now |  | button |  | Read the agents' history again and sync every project's worktrees. |
 | Restore the last sessions | `restore_sessions` | `ask`, `always`, `never` | `ask` | At start, offer the terminals that were open last time (ask), reopen them (always) or leave them (never; the palette's "Restore last sessions" still brings them back). Agents are resumed where they can be; scrollback is not restored. |
+| Keep local sessions running | `durable_sessions` | on, off | `off` | The terminals (and the agents in them) that Leon opens on this computer keep running when the window closes, when Leon quits and when it crashes, and the next start attaches to them again with the output it missed. A separate background process holds them. Only the last 2 MiB of each terminal's output is kept for that, so older scrollback is not restored; a session that ended meanwhile, or that was lost with the computer's restart, is resumed as before. Takes effect for sessions opened after it is turned on; turning it off leaves the sessions already kept running until they are closed. (macOS and Linux only.) |
 | Resume restored agents | `restore_resume` | `shown`, `all` | `shown` | When a restored agent session is resumed: when its tab is first shown (nothing is spent until you look) or all at once, a few at a time. |
 
 ## Projects

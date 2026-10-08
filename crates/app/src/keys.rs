@@ -379,7 +379,11 @@ pub enum Command {
     /// Closes what is open over the panes, or goes back one step.
     Close,
     /// Quits the application, after asking while a program runs in a terminal.
+    /// The sessions kept by the keeper of durable sessions keep running.
     Quit,
+    /// Quits the application and ends every session, the ones the keeper
+    /// holds too.
+    QuitAndEnd,
     /// Closes the window, which is the application's only one: the same as
     /// quitting.
     CloseWindow,
@@ -2162,6 +2166,14 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::QuitAndEnd,
+        "Quit and end every session",
+        S::Application,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::CloseWindow,
         "Close the window",
         S::Application,
@@ -2263,6 +2275,7 @@ pub fn keywords(command: Command) -> &'static str {
         C::ReloadThemes => "refresh themes custom files toml",
         C::ShowThemeProblems => "errors warnings invalid validation themes report debug",
         C::Quit => "exit close application",
+        C::QuitAndEnd => "exit close application end stop kill sessions terminals keep running durable keeper hang up",
         C::CheckForUpdates => "update upgrade new version latest release github",
         C::RestartToUpdate => "update upgrade install relaunch restart new version",
         C::ShowReleaseNotes => "changelog what's new changes update version",
@@ -2595,6 +2608,7 @@ mod tests {
             C::Shortcuts,
             C::Close,
             C::Quit,
+            C::QuitAndEnd,
             C::CloseWindow,
             C::About,
             C::CheckForUpdates,
@@ -2759,6 +2773,7 @@ mod tests {
                 | C::Shortcuts
                 | C::Close
                 | C::Quit
+                | C::QuitAndEnd
                 | C::CloseWindow
                 | C::About
                 | C::CheckForUpdates

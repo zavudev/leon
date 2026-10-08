@@ -1282,6 +1282,13 @@ impl Shell {
                 None => crate::settings::set_theme_id(cx, id),
             },
             Action::Quit => self.quit_now(cx),
+            Action::QuitAndEnd => self.end_sessions_and_quit(None, window, cx),
+            Action::SaveAllEndAndQuit => {
+                self.end_sessions_and_quit(Some(true), window, cx);
+            }
+            Action::DiscardEndAndQuit => {
+                self.end_sessions_and_quit(Some(false), window, cx);
+            }
             Action::SaveAllAndQuit => self.save_all_and_quit(window, cx),
             Action::DiscardAndQuit => self.discard_and_quit(cx),
             Action::RestartToUpdate => self.restart_now(cx),

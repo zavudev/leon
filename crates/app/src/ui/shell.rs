@@ -281,6 +281,10 @@ pub struct Options {
     pub update_timer: bool,
     /// Opens an address in the browser.
     pub open_url: OpenUrl,
+    /// The keeper of durable local sessions (see `durable.rs`); absent where
+    /// there is none (Windows, and tests that do not need it). The setting
+    /// `durable_sessions` decides whether it is used.
+    pub durable: Option<Arc<dyn crate::durable::Durable>>,
 }
 
 /// A `~/.ssh` that is not there: the home folder is unknown.
@@ -346,6 +350,7 @@ impl Default for Options {
             },
             remote: None,
             updates: None,
+            durable: None,
             update_timer: true,
             open_url: Rc::new(|cx, url| cx.open_url(url)),
             terminate_process: Rc::new(crate::elsewhere::terminate),
@@ -1910,6 +1915,7 @@ impl Shell {
             .map(|session| LiveInfo {
                 id: session.id,
                 label: session.label(),
+                keeps: session.view.read(cx).terminal().is_held(),
                 // Closing a session ends its tabs' programs too.
                 busy: session.busy(cx)
                     || (self.workspaces.lead_of(session.id) == Some(session.id)
@@ -2928,6 +2934,7 @@ impl Shell {
             C::SaveOutput => self.save_terminal(false, cx),
             C::SaveOutputAnsi => self.save_terminal(true, cx),
             C::Quit | C::CloseWindow => self.request_quit(window, cx),
+            C::QuitAndEnd => self.begin_flow(Command::QuitAndEnd, window, cx),
             C::OpenSettingsFile => self.open_settings_file(cx),
             C::RevealSettingsFolder => self.reveal_settings_folder(cx),
             C::About => {
@@ -3498,12 +3505,13 @@ impl Shell {
     // ----- quitting ------------------------------------------------------------------------------
 
     /// How many live sessions have a program running that quitting would end
-    /// (or may: over SSH nothing can be told).
+    /// (or may: over SSH nothing can be told). A program the keeper of durable
+    /// sessions holds keeps running through a quit, so it is not counted.
     pub(super) fn busy_sessions(&self, cx: &App) -> usize {
         self.live
             .all()
             .iter()
-            .filter(|session| session.busy(cx))
+            .filter(|session| session.busy(cx) && !session.view.read(cx).terminal().is_held())
             .count()
     }
 
@@ -3528,9 +3536,9 @@ impl Shell {
         false
     }
 
-    /// Hangs every terminal up (those on other computers are let go of: their
-    /// programs keep running there), saves what is kept, and ends the
-    /// application.
+    /// Hangs every terminal up (those on other computers, and those the keeper
+    /// holds, are let go of: their programs keep running), saves what is kept,
+    /// and ends the application.
     pub(super) fn quit_now(&mut self, cx: &mut Context<Self>) {
         // A ready update is put in place on the way out when the settings
         // say so and nothing is running: the next start is the new version.
@@ -3560,13 +3568,31 @@ impl Shell {
         for id in self.live.ids() {
             if let Some(session) = self.live.get(id) {
                 let terminal = session.view.read(cx).terminal();
-                if terminal.is_remote() {
-                    // The program on the other computer keeps running; it can
-                    // be attached to again.
+                if self.fate_of(session, cx) == super::keeping::Fate::Detach {
+                    // The program keeps running where it runs (the other
+                    // computer, or under the keeper) and can be attached to
+                    // again.
                     terminal.detach();
                 } else {
                     terminal.kill();
                 }
+            }
+        }
+        // What the keeper has been told must have reached it before this
+        // process ends. Ending everything also asks it to hang up what this
+        // window holds and to confirm that it did; a hang-up that cannot be
+        // confirmed is said, since a program that survives it comes back as
+        // an unknown running session at the next start.
+        if let Some(durable) = &self.options.durable {
+            let confirmed = if self.leaving() == super::keeping::Leaving::EndAll {
+                durable.end_all()
+            } else {
+                durable.settle()
+            };
+            if !confirmed {
+                let note = "The keeper did not confirm in time that it was told to end the closed sessions; some may still be running, and will be listed at the next start.";
+                tracing::warn!("{note}");
+                self.engine.report(StatusKind::Error, note);
             }
         }
         // A closed session whose banner is still up is closed for good, and

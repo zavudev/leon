@@ -392,6 +392,13 @@ fn set_clock(now: chrono::DateTime<Utc>) {
     CLOCK.with(|clock| clock.set(Some(now)));
 }
 
+thread_local! {
+    /// The keeper the next window opened is given: set by
+    /// [`tests_durable::open_with_keeper`] just before it opens one.
+    static DURABLE: std::cell::RefCell<Option<Arc<dyn crate::durable::Durable>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Opens the window; `picked` is what the folder picker answers and `before`
 /// changes the store before the window reads it.
 fn open_full(
@@ -496,6 +503,7 @@ fn open_core(
         ssh_dir: ssh.clone(),
         remote: None,
         updates,
+        durable: DURABLE.with(|slot| slot.borrow_mut().take()),
         update_timer: false,
         open_url: Rc::new(move |_, url| urls_in.borrow_mut().push(url.to_owned())),
     };
@@ -7903,6 +7911,10 @@ mod tests_shelf;
 #[cfg(leon_posix_tests)]
 #[path = "tests_restore.rs"]
 mod tests_restore;
+
+#[cfg(leon_posix_tests)]
+#[path = "tests_durable.rs"]
+mod tests_durable;
 
 #[path = "tests_settings_layout.rs"]
 mod tests_settings_layout;

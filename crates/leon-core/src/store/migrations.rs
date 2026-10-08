@@ -26,7 +26,7 @@ use crate::error::{Result, StoreError};
 /// public schema is version 3, so version 4 never existed in the wild and this
 /// order (usage, then relay) is the one every database goes through.
 const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18,
 ];
 
 const V1: &str = r#"
@@ -388,6 +388,17 @@ DROP TABLE usage_reading;
 ALTER TABLE usage_reading_by_account RENAME TO usage_reading;
 "#;
 
+/// Version 18: durable local sessions. An open terminal remembers the
+/// terminal the keeper holds for it (the keeper's number for it and the
+/// token it was opened under, which names it among the keeper's terminals),
+/// so the next start can attach to it instead of resuming an agent. Both are
+/// `NULL` for every terminal that lives in the application, as every existing
+/// row does.
+const V18: &str = r#"
+ALTER TABLE saved_terminal ADD COLUMN keeper_pty INTEGER;
+ALTER TABLE saved_terminal ADD COLUMN keeper_token TEXT;
+"#;
+
 /// Brings the database up to the latest schema version.
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     let supported = MIGRATIONS.len() as u32;
@@ -672,6 +683,36 @@ mod tests {
                 [],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn a_version_17_database_keeps_its_terminals_and_gains_the_keepers_reference() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        for (index, sql) in MIGRATIONS[..17].iter().enumerate() {
+            connection.execute_batch(sql).unwrap();
+            connection
+                .pragma_update(None, "user_version", index as u32 + 1)
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO saved_terminal (slot, position, id, machine, cwd, started_at)
+                 VALUES (0, 0, 1, 'local', '/srv/api', 5)",
+                [],
+            )
+            .unwrap();
+
+        migrate(&mut connection).unwrap();
+
+        assert_eq!(version(&connection), MIGRATIONS.len() as u32);
+        let (pty, token, cwd): (Option<i64>, Option<String>, String) = connection
+            .query_row(
+                "SELECT keeper_pty, keeper_token, cwd FROM saved_terminal WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((pty, token, cwd.as_str()), (None, None, "/srv/api"));
     }
 
     #[test]

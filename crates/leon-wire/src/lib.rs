@@ -31,7 +31,7 @@ pub mod id;
 pub mod message;
 pub mod relay;
 
-pub use frame::{decode_frame, encode_frame, FrameDecoder, FrameError, MAX_FRAME_LEN};
+pub use frame::{decode_frame, encode_frame, FrameDecoder, FrameError, HEADER_LEN, MAX_FRAME_LEN};
 pub use id::{base32, HostId, IdError};
 pub use message::{
     ErrorCode, ExecOutput, ExecSpec, Exit, Grid, Message, PtyInfo, SharedEntry, SharedProject,

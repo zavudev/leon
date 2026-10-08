@@ -19,6 +19,9 @@
 //!   list of known hosts.
 //! * [`client`]: a durable connection to one host, with reconnection and
 //!   exact terminal re-attach.
+//! * [`local`]: the same protocol as plain frames on this computer's own
+//!   socket, for the terminal keeper, where the file permissions are the
+//!   authentication and the durable client is reused as it is.
 //! * [`pipe`]: a transport-independent ordered message pipe, [`channel`]: the
 //!   async handshakes and the encrypted message channel over it, and
 //!   [`relay_client`]: the WebSocket adapter that dials a relay and yields
@@ -34,6 +37,7 @@ pub mod channel;
 pub mod client;
 pub mod code;
 pub mod identity;
+pub mod local;
 pub mod pairing;
 pub mod pipe;
 pub mod registry;

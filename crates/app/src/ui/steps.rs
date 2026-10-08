@@ -72,6 +72,9 @@ pub struct LiveInfo {
     pub label: String,
     /// Whether closing it would end a program that is running in it.
     pub busy: bool,
+    /// Whether its terminal is held by the keeper of durable sessions, so a
+    /// plain quit leaves its program running.
+    pub keeps: bool,
 }
 
 /// The file the keyboard is on, as the flows need to know it.
@@ -797,6 +800,12 @@ pub enum Action {
     Button(&'static str),
     /// Quit the application.
     Quit,
+    /// Quit and end every session, the held ones too: the old behaviour.
+    QuitAndEnd,
+    /// Save every file with changes, then quit and end every session.
+    SaveAllEndAndQuit,
+    /// Quit and end every session without saving the files with changes.
+    DiscardEndAndQuit,
     /// Restart into the update that is ready.
     RestartToUpdate,
     /// Write a theme file with this name that extends the theme in use.
@@ -927,6 +936,7 @@ pub fn is_flow(command: Command) -> bool {
             | Command::ChooseTheme
             | Command::SetInterfaceSize
             | Command::Quit
+            | Command::QuitAndEnd
             | Command::NewThemeFromCurrent
             | Command::ChooseDen
             | Command::SaveDenAs
@@ -988,6 +998,7 @@ pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
         Command::ChooseTheme => choose_theme(answers, world),
         Command::SetInterfaceSize => set_size(answers, world),
         Command::Quit => quit(answers, world),
+        Command::QuitAndEnd => quit_and_end(answers, world),
         Command::RestartToUpdate => restart_update(answers, world),
         Command::NewThemeFromCurrent => match answers {
             [] => text("Theme name", "My theme", Validate::Required),
@@ -2748,11 +2759,35 @@ fn choose_theme(answers: &[String], world: &World) -> Outcome {
     }
 }
 
+/// How many running sessions a plain quit closes and how many it leaves
+/// running (the ones the keeper holds).
+fn quit_counts(world: &World) -> (usize, usize) {
+    let counts = super::keeping::summary(
+        super::keeping::Leaving::Keep,
+        world
+            .live
+            .iter()
+            .filter(|session| session.busy)
+            .map(|session| session.keeps),
+    );
+    (counts.closed, counts.kept)
+}
+
+/// The sessions a quit leaves running, in words.
+fn keep_running(kept: usize) -> String {
+    match kept {
+        1 => "1 running session keeps running.".to_owned(),
+        n => format!("{n} running sessions keep running."),
+    }
+}
+
 /// Whether to quit while programs run in terminals: it is asked only then
 /// (with nothing running the shell quits without a question), and the first
-/// answer, which `Enter` takes, is to quit.
+/// answer, which `Enter` takes, is to quit. A program held by the keeper of
+/// durable sessions keeps running through a quit, so it is not a reason to
+/// ask, and the question says that it keeps running.
 fn quit(answers: &[String], world: &World) -> Outcome {
-    let busy = world.live.iter().filter(|session| session.busy).count();
+    let (busy, kept) = quit_counts(world);
     let unsaved = world.unsaved.len();
     let ask =
         world.prefs.quit.asks(busy) || (unsaved > 0 && world.prefs.quit != QuitConfirm::Never);
@@ -2760,50 +2795,44 @@ fn quit(answers: &[String], world: &World) -> Outcome {
         [] if !ask => Outcome::Run(Action::Quit),
         // Files with unsaved changes come first: saving them is the way out
         // that loses nothing, so it is the first choice and Enter takes it.
-        [] if unsaved > 0 => choices(
-            "Unsaved changes",
-            vec![
-                Choice::new(
-                    if unsaved == 1 {
-                        format!("Save {} and quit", world.unsaved[0])
-                    } else {
-                        format!("Save all {unsaved} files and quit")
-                    },
-                    "writes the changes, then quits",
-                    "save",
-                ),
-                Choice::new(
-                    "Quit without saving",
-                    if busy > 0 {
-                        format!(
-                            "the changes are lost and {busy} running session{} closed",
-                            if busy == 1 { " is" } else { "s are" }
-                        )
-                    } else {
-                        "the changes are lost".to_owned()
-                    },
-                    "discard",
-                ),
-                Choice::new("Cancel", "keep working", "no"),
-            ],
-            Custom::No,
-        ),
+        [] if unsaved > 0 => unsaved_choices(unsaved, &world.unsaved[0], busy),
         [] => choices(
             "Quit Leon?",
             vec![
                 Choice::new(
-                    match busy {
-                        0 => format!("Quit {}", crate::product::PRODUCT_NAME),
-                        1 => format!(
-                            "Quit {}: 1 running session will be closed.",
-                            crate::product::PRODUCT_NAME
+                    match (busy, kept) {
+                        (0, 0) => format!("Quit {}", crate::product::PRODUCT_NAME),
+                        (0, kept) => {
+                            format!(
+                                "Quit {}: {}",
+                                crate::product::PRODUCT_NAME,
+                                keep_running(kept)
+                            )
+                        }
+                        (1, kept) => format!(
+                            "Quit {}: 1 running session will be closed.{}",
+                            crate::product::PRODUCT_NAME,
+                            if kept > 0 {
+                                format!(" {}", keep_running(kept))
+                            } else {
+                                String::new()
+                            }
                         ),
-                        busy => format!(
-                            "Quit {}: {busy} running sessions will be closed.",
-                            crate::product::PRODUCT_NAME
+                        (busy, kept) => format!(
+                            "Quit {}: {busy} running sessions will be closed.{}",
+                            crate::product::PRODUCT_NAME,
+                            if kept > 0 {
+                                format!(" {}", keep_running(kept))
+                            } else {
+                                String::new()
+                            }
                         ),
                     },
-                    "hangs the terminals up",
+                    if busy == 0 && kept > 0 {
+                        "lets go of the terminals; they keep running"
+                    } else {
+                        "hangs the terminals up"
+                    },
                     "yes",
                 ),
                 Choice::new("Cancel", "keep working", "no"),
@@ -2817,14 +2846,89 @@ fn quit(answers: &[String], world: &World) -> Outcome {
     }
 }
 
+/// The question about files with changes that were not saved, before a quit.
+fn unsaved_choices(unsaved: usize, first: &str, closing: usize) -> Outcome {
+    choices(
+        "Unsaved changes",
+        vec![
+            Choice::new(
+                if unsaved == 1 {
+                    format!("Save {first} and quit")
+                } else {
+                    format!("Save all {unsaved} files and quit")
+                },
+                "writes the changes, then quits",
+                "save",
+            ),
+            Choice::new(
+                "Quit without saving",
+                if closing > 0 {
+                    format!(
+                        "the changes are lost and {closing} running session{} closed",
+                        if closing == 1 { " is" } else { "s are" }
+                    )
+                } else {
+                    "the changes are lost".to_owned()
+                },
+                "discard",
+            ),
+            Choice::new("Cancel", "keep working", "no"),
+        ],
+        Custom::No,
+    )
+}
+
+/// Quit and end every session: what quitting did before durable sessions, for
+/// the terminals the keeper holds as well. Asked by the same setting, on all
+/// the running sessions, since all of them end.
+fn quit_and_end(answers: &[String], world: &World) -> Outcome {
+    let busy = world.live.iter().filter(|session| session.busy).count();
+    let unsaved = world.unsaved.len();
+    let ask =
+        world.prefs.quit.asks(busy) || (unsaved > 0 && world.prefs.quit != QuitConfirm::Never);
+    match answers {
+        [] if !ask => Outcome::Run(Action::QuitAndEnd),
+        [] if unsaved > 0 => unsaved_choices(unsaved, &world.unsaved[0], busy),
+        [] => choices(
+            "End every session and quit?",
+            vec![
+                Choice::new(
+                    match busy {
+                        0 => format!(
+                            "End every session and quit {}",
+                            crate::product::PRODUCT_NAME
+                        ),
+                        1 => "End 1 running session and quit.".to_owned(),
+                        busy => format!("End {busy} running sessions and quit."),
+                    },
+                    "hangs the terminals up, the ones that outlive the window too",
+                    "yes",
+                ),
+                Choice::new("Cancel", "keep working", "no"),
+            ],
+            Custom::No,
+        ),
+        [chosen, ..] if chosen == "yes" => Outcome::Run(Action::QuitAndEnd),
+        [chosen, ..] if chosen == "save" && unsaved > 0 => Outcome::Run(Action::SaveAllEndAndQuit),
+        [chosen, ..] if chosen == "discard" => Outcome::Run(Action::DiscardEndAndQuit),
+        _ => Outcome::Run(Action::Nothing),
+    }
+}
+
 /// Whether to restart into the update: always asked, because a restart ends
 /// every terminal, and it says how many that is.
 fn restart_update(answers: &[String], world: &World) -> Outcome {
     let Some(version) = &world.update_ready else {
         return Outcome::Refuse("No update is ready to install yet.".to_owned());
     };
-    let busy = world.live.iter().filter(|session| session.busy).count();
-    let open = world.live.len();
+    // What the keeper of durable sessions holds keeps running through the
+    // restart: only the rest is closed.
+    let busy = world
+        .live
+        .iter()
+        .filter(|session| session.busy && !session.keeps)
+        .count();
+    let open = world.live.iter().filter(|session| !session.keeps).count();
     match answers {
         [] => choices(
             "Restart to update?",
@@ -3528,6 +3632,7 @@ mod tests {
                 id: LiveId(7),
                 label: "Claude Code".into(),
                 busy,
+                keeps: false,
             }],
             Some(LiveId(7)),
         )
@@ -4820,6 +4925,7 @@ mod tests {
             id: LiveId(1),
             label: "Claude Code".into(),
             busy: true,
+            keeps: false,
         }];
         assert!(matches!(
             advance(Command::Quit, &[], &busy),
@@ -4845,11 +4951,104 @@ mod tests {
         );
     }
 
+    fn held_session(id: u64, busy: bool) -> LiveInfo {
+        LiveInfo {
+            keeps: true,
+            ..session(id, busy)
+        }
+    }
+
+    #[test]
+    fn sessions_the_keeper_holds_are_no_reason_to_ask_before_quitting() {
+        let mut all_held = with(Prefs::default());
+        all_held.live = vec![held_session(1, true), held_session(2, true)];
+        assert_eq!(
+            advance(Command::Quit, &[], &all_held),
+            Outcome::Run(Action::Quit),
+            "nothing is lost: they keep running"
+        );
+        // One that lives in the window is.
+        all_held.live.push(session(3, true));
+        assert!(matches!(
+            advance(Command::Quit, &[], &all_held),
+            Outcome::Ask(_)
+        ));
+    }
+
+    #[test]
+    fn the_quit_question_says_which_sessions_keep_running() {
+        let mut world = with(Prefs {
+            quit: QuitConfirm::Always,
+            ..Prefs::default()
+        });
+        world.live = vec![held_session(1, true), held_session(2, true)];
+        let text = labels(&advance(Command::Quit, &[], &world));
+        assert!(
+            text[0].contains("2 running sessions keep running"),
+            "{text:?}"
+        );
+        world.live.push(session(3, true));
+        let text = labels(&advance(Command::Quit, &[], &world));
+        assert!(
+            text[0].contains("1 running session will be closed"),
+            "{text:?}"
+        );
+        assert!(
+            text[0].contains("2 running sessions keep running"),
+            "{text:?}"
+        );
+        world.live = vec![held_session(1, true)];
+        let text = labels(&advance(Command::Quit, &[], &world));
+        assert!(
+            text[0].contains("1 running session keeps running"),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn quit_and_end_closes_everything_and_says_so() {
+        let mut world = with(Prefs::default());
+        world.live = vec![held_session(1, true), session(2, true)];
+        let text = labels(&advance(Command::QuitAndEnd, &[], &world));
+        assert!(text[0].contains("End 2 running sessions"), "{text:?}");
+        assert_eq!(
+            advance(Command::QuitAndEnd, &strings(&["yes"]), &world),
+            Outcome::Run(Action::QuitAndEnd)
+        );
+        assert_eq!(
+            advance(Command::QuitAndEnd, &strings(&["no"]), &world),
+            Outcome::Run(Action::Nothing)
+        );
+        // With nothing running and no question asked it just goes.
+        let idle = with(Prefs::default());
+        assert_eq!(
+            advance(Command::QuitAndEnd, &[], &idle),
+            Outcome::Run(Action::QuitAndEnd)
+        );
+        // Held sessions ask here, unlike a plain quit: they are ended.
+        let mut only_held = with(Prefs::default());
+        only_held.live = vec![held_session(1, true)];
+        assert!(matches!(
+            advance(Command::QuitAndEnd, &[], &only_held),
+            Outcome::Ask(_)
+        ));
+    }
+
+    #[test]
+    fn the_restart_for_an_update_does_not_count_what_the_keeper_holds() {
+        let mut world = with(Prefs::default());
+        world.update_ready = Some("0.7.0".into());
+        world.live = vec![held_session(1, true)];
+        let text = labels(&advance(Command::RestartToUpdate, &[], &world));
+        assert!(!text[0].contains("will be closed"), "{text:?}");
+    }
+
     fn session(id: u64, busy: bool) -> LiveInfo {
         LiveInfo {
             id: LiveId(id),
             label: "Claude Code".into(),
             busy,
+            keeps: false,
         }
     }
 
@@ -4924,6 +5123,7 @@ mod tests {
             id: LiveId(1),
             label: "Claude Code".into(),
             busy: true,
+            keeps: false,
         }];
         world.here_live = Some(LiveId(1));
         assert!(matches!(

@@ -43,7 +43,9 @@ pub use history::{
 pub use shelf::Shelf;
 pub use tokens::{set_session_tokens_in, SessionTokens, TokenCounts, TokenRow};
 pub use usage::{UsagePoint, UsageRow};
-pub use workspace::{SavedLayout, SavedState, SavedTab, SavedTerminal, SavedWorkspace, Slot};
+pub use workspace::{
+    KeeperRef, SavedLayout, SavedState, SavedTab, SavedTerminal, SavedWorkspace, Slot,
+};
 
 /// How long a connection waits for a lock held by another connection before
 /// giving up.

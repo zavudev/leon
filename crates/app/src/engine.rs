@@ -546,6 +546,9 @@ struct Inner {
     events: broadcast::Sender<EngineEvent>,
     fetcher: Mutex<Arc<dyn IconFetcher>>,
     scanner: Mutex<Option<Arc<Scanner>>>,
+    /// The keeper of durable local sessions: what runs below it is this
+    /// Leon's own, like what runs below this process.
+    keeper: Mutex<Option<Arc<dyn crate::durable::Durable>>>,
     usage: Mutex<Option<UsageSetup>>,
     /// The connections to the computers paired with this one. `None` in the
     /// parts of the engine's life before the window, and in tests without a
@@ -621,6 +624,7 @@ impl Engine {
                 events,
                 fetcher: Mutex::new(Arc::new(NoFetch)),
                 scanner: Mutex::new(None),
+                keeper: Mutex::new(None),
                 usage: Mutex::new(None),
                 hub: Mutex::new(None),
                 history_stamps: Mutex::new(HashMap::new()),
@@ -690,6 +694,28 @@ impl Engine {
             exec: runner,
             leon_pid,
         }));
+    }
+
+    /// Tells the engine which keeper holds this Leon's durable sessions, so
+    /// the agents running in its terminals are not mistaken for sessions
+    /// running somewhere else (and never offered to be taken over).
+    pub fn set_keeper(&self, keeper: Option<Arc<dyn crate::durable::Durable>>) {
+        *self
+            .inner
+            .keeper
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = keeper;
+    }
+
+    /// The pid of the keeper, when one runs.
+    fn keeper_pid(&self) -> Option<u32> {
+        let keeper = self
+            .inner
+            .keeper
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        keeper?.keeper_pid()
     }
 
     /// Gives the engine a runner with a longer time limit for the commands
@@ -787,8 +813,18 @@ impl Engine {
                         .recent_sessions(&filter, SCAN_SESSIONS)
                         .unwrap_or_default()
                 };
-                let leon_pid = scanner.leon_pid.filter(|_| local);
-                Some(elsewhere::resolve(&scan, &sessions, leon_pid))
+                // This process and the keeper it started: what runs below
+                // either is this Leon's own.
+                let ours: Vec<u32> = if local {
+                    scanner
+                        .leon_pid
+                        .into_iter()
+                        .chain(self.keeper_pid())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                Some(elsewhere::resolve_with(&scan, &sessions, &ours))
             }
             Ok(output) => {
                 tracing::debug!(machine = %machine.name, status = ?output.status, "the process scan failed");
@@ -6679,6 +6715,71 @@ branch refs/heads/feature/login
             "sh"
         };
         assert_eq!(rig.runner.calls()[0].program, program);
+    }
+
+    /// A keeper that only has a pid.
+    struct PidOnly(u32);
+
+    impl crate::durable::Durable for PidOnly {
+        fn held(&self) -> Result<Vec<crate::durable::Held>, String> {
+            Ok(Vec::new())
+        }
+        fn open(
+            &self,
+            _: &leon_term::SpawnSpec,
+            _: leon_term::GridSize,
+            _: leon_term::TerminalTheme,
+            _: leon_term::Wake,
+            _: &str,
+        ) -> Result<(leon_term::Terminal, crate::durable::KeeperSlot), leon_term::SpawnError>
+        {
+            Err(leon_term::SpawnError("not here".into()))
+        }
+        fn attach(
+            &self,
+            _: &crate::durable::Held,
+            _: leon_term::TerminalTheme,
+            _: leon_term::Wake,
+        ) -> Result<leon_term::Terminal, leon_term::SpawnError> {
+            Err(leon_term::SpawnError("not here".into()))
+        }
+        fn end_all(&self) -> bool {
+            true
+        }
+        fn settle(&self) -> bool {
+            true
+        }
+        fn keeper_pid(&self) -> Option<u32> {
+            Some(self.0)
+        }
+        fn token(&self) -> String {
+            String::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_agent_below_the_keeper_is_this_leons_own_in_the_scan() {
+        // The keeper is a `leon` of its own (500) next to the window (100); a
+        // stranger's Leon (600) holds another session.
+        let other = "0a1b2c3d-2222-4222-8333-444455556666";
+        let output = format!(
+            "now=1000000\nT 1 0 /sbin/launchd\nT 100 1 leon\nT 500 1 leon\nT 501 500 zsh\nT 502 501 claude\n\
+             T 600 1 leon\nT 601 600 claude\n\
+             A 502 501 pts/1 00:30 claude --resume {HELD}\nA 601 600 pts/2 00:30 claude --resume {other}\n"
+        );
+        let rig = scanning_rig(vec![Output::ok(output.clone()), Output::ok(output)]);
+        history(&rig);
+        // Without the keeper being known, its agent looks like another Leon's.
+        rig.engine.run(Op::Scan(MachineId::local())).await;
+        let report = rig.engine.elsewhere(&MachineId::local()).unwrap();
+        let ours: Vec<(u32, bool)> = report.found.iter().map(|f| (f.pid, f.leon_child)).collect();
+        assert_eq!(ours, [(502, false), (601, false)]);
+        // Told about it, the scan counts what runs below it as this Leon's own.
+        rig.engine.set_keeper(Some(Arc::new(PidOnly(500))));
+        rig.engine.run(Op::Scan(MachineId::local())).await;
+        let report = rig.engine.elsewhere(&MachineId::local()).unwrap();
+        let ours: Vec<(u32, bool)> = report.found.iter().map(|f| (f.pid, f.leon_child)).collect();
+        assert_eq!(ours, [(502, true), (601, false)]);
     }
 
     #[tokio::test]

@@ -34,7 +34,7 @@ leon-den ── gpui-kit and image only (no other Leon crate)
 | `leon-wire` | The wire protocol: versioned length-prefixed frames, the application messages (run a command, terminals, re-attach) and the relay rendezvous messages. Pure (`postcard` over `serde`); every decoder is bounded and fuzz-style tested. |
 | `leon-link` | Everything that keeps a remote session private: identity, the short pairing code (SPAKE2 then Noise `XXpsk3`), the Noise `IK` session with fragmentation and rekeying, the device registry, the relay WebSocket adapter, the durable `Client` (reconnection, exact terminal re-attach) and, behind `test-support`, an in-process test relay. |
 | `leon-pty` | The GPUI-free part of terminals: `SpawnSpec`, grid maths and `PtyProcess` (a child in a pseudo-terminal driven by channels). `leon-term` re-exports it. |
-| `leon-host` | The sharing service: executes commands, owns durable terminals with a replay ring, serves pairing and sessions through a relay, reconnects, cuts off revoked devices; the `leon host` command line. |
+| `leon-host` | The sharing service: executes commands, owns durable terminals with a replay ring, serves pairing and sessions through a relay, reconnects, cuts off revoked devices; the `leon host` command line. Also the keeper of durable local sessions (`keeper`): the same terminal table behind a Unix socket instead of a relay (see "Durable local sessions"). |
 | `leon-term` | A terminal for GPUI: `Terminal` (PTY, emulator, child) and `TerminalView` (the GPUI entity). Depends on `gpui-kit` and nothing of Leon; the application maps its own command type onto `SpawnSpec`. |
 | `leon-mark` | The Leon lion, always animated: `geometry` (the glare's four contours as point lists, exactly the owner's SVG at rest), `motion` (a pure, deterministic time-to-pose function: blink, glare, glance, breath, nose twitch, intro, and a `Mood` that biases them), `element` (`AnimatedMark`, a GPUI element painted from vector paths) and `svg` (the same gestures written as animated SVG for the web). Depends on `gpui-kit` and nothing of Leon. |
 | `app` (`leon`) | The window (`ui/`, with `panes.rs` and `workspace.rs` for the terminal layout and `menu.rs` for the context menu), the engine that keeps the store fresh (`engine.rs`), the one shortcut registry (`keys.rs`), the themes and their design tokens (`theme/`), what a live session runs (`launch.rs`), the hidden `--diagnose` run (`diagnose.rs`). |
@@ -323,8 +323,9 @@ already running in another terminal per the elsewhere scan) is listed with its
 reason. A paused session has no agent for the activity dot and sends no
 notification. Known limits: the sidebar selection is restored only as the
 terminal that was on screen; relay terminals are not re-attached yet (the host
-keeps them: `Client::pty_list` / `pty_attach`); scrollback is not stored (the
-seam is `SavedTerminal`, which can carry a screen snapshot later).
+keeps them: `Client::pty_list` / `pty_attach`; local terminals are, with the
+setting `durable_sessions`, see "Durable local sessions"); scrollback is not
+stored (the seam is `SavedTerminal`, which can carry a screen snapshot later).
 
 ### Learning a fresh session's id, and importing promptly
 
@@ -365,6 +366,175 @@ nothing can hold the quit longer than the grace. Terminals on other computers
 are let go of (their program keeps running there), as before. Windows cannot
 tell the foreground program, so there is no gesture or signal there: the
 hang-up is as before.
+
+With `durable_sessions` on, the terminals the keeper holds are let go of too:
+no exit line is typed, nothing is signalled, the programs keep running, and the
+status line is not "Closing N sessions…". `keeping::fate` decides per session
+(`Detach`, `Gently`, `Hang`), and the quit question counts the sessions that
+keep running apart from the ones it closes (a plain quit asks only for the
+latter). The palette's **Quit and end every session** (`Command::QuitAndEnd`)
+is the old behaviour for all of them: the agents are given their chance, the
+terminals are hung up, and the keeper is told to hang up whatever else it holds
+and answers before the process ends.
+
+### Durable local sessions
+
+`durable.rs`, `ui/keeping.rs`, `remote.rs` (the pump) and `leon-host`'s
+`keeper.rs`. With the setting `durable_sessions` on (macOS and Linux only; it
+does not exist on Windows, where nothing here applies) the terminals of
+sessions opened on this computer are held by a **keeper**, not by the window, so
+they survive the window, a quit and a crash.
+
+* **The keeper** is the hidden subcommand `leon keeper --data-dir <dir>` of the
+  same binary, started on demand by the window in a session of its own
+  (`setsid`), with nothing on its standard streams, and outside the window's
+  process group. It is `leon-host`'s `PtyTable` (terminals, replay ring of
+  2 MiB, exit retention of 10 minutes) behind a Unix domain socket, speaking
+  plain `leon-wire` frames. One keeper per data directory: an exclusive `flock`
+  on a file beside the socket is held for its whole life and holds its pid, so
+  a stale socket of a keeper that died is replaced by the one holding the lock
+  and never by a second keeper racing it. It ends by itself 30 s after its last
+  program ended with no client connected. Its terminals are numbered from a
+  random base so a number never names a terminal of another keeper. Each client is served by a task that reads and a
+  task that writes, so a window that sends a flood (a large paste) while the
+  program prints one cannot make both ends wait for the other to read; the
+  host that serves paired devices through a relay still has one task for both
+  and is not changed here.
+* **Where, and who may connect.** The socket is
+  `$XDG_RUNTIME_DIR/leon-keeper/<hash of the data directory>.sock`, or
+  `/tmp/leon-keeper-<uid>/…` where that is unset or too long for the 104-byte
+  `sun_path`; the directory is made 0700, the socket is 0600, and every
+  connection's peer uid is read (`SO_PEERCRED`, `getpeereid` on macOS) and
+  turned away unless it is ours. Anyone who could connect would have a shell as
+  the user, so a peer whose uid cannot be read is refused too. **The client
+  checks the keeper just as strictly** (`leon_link::local`: `judge_dir`,
+  `check_private_dir`, `peer_uid`, `peer_allowed`, shared with the keeper's own
+  check of the directory it makes), because the fallback directory under `/tmp`
+  has a predictable name another user could create first and listen in, and
+  would then receive the whole environment of a new terminal and every
+  keystroke. Before every dial the directory is `lstat`ed: it must be a real
+  directory (not a link), owned by this user, with no permission for anyone
+  else; otherwise it is refused, never repaired (the keeper itself closes a
+  directory of its own that is open, but refuses one that is not its own).
+  After connecting, and before a single byte is sent, the other end's uid must
+  be ours. The same checks stand before reading the keeper's pid for the
+  sessions scan. A refused keeper leaves the session in the window, with the
+  reason. An instance started with `--data-dir` has a
+  keeper of its own and never touches another's. The keeper's name is derived
+  with a stable hash, so an updated build finds the keeper an older one started.
+* **The transport.** The durable `Client` of `leon-link` was bound to Noise and
+  the relay only in `establish`; that step is now a choice (`Security::Noise` or
+  `Security::Plain`) and the rest (re-attach from the last offset, gaps,
+  reconnection with quick retries) is shared, so a local keeper and a relay
+  machine use the same list-and-attach code. Locally there is no Noise and no
+  relay: the file permissions and the peer check are the authentication.
+* **What the window loses and the keeper gives back.** The window no longer holds
+  the pseudo-terminal, so who is in front of it is asked of the keeper: the new
+  messages `PtyProbe` / `PtyProbed` (the shell's pid, whether the shell leads
+  the foreground process group, the program in front) and `PtyTerminate`
+  (SIGTERM to the foreground group), appended to the protocol so that every
+  existing message keeps its encoding and the version stays 2. The window probes
+  twice a second and wakes the view when the answer changes. Until the first
+  answer nothing is claimed (`shell_is_foreground` is `None`). With it the
+  transcript status (`transcript_applies`), `follow_foreground`, learning an
+  agent's session id by its shell's pid (`learn`), the quit gesture and "is a
+  program running" work as for an in-process terminal. The sessions scan treats
+  the keeper's pid as this Leon's own (`elsewhere::resolve_with`): what runs
+  below it is never badged as running elsewhere, never offered to be taken over.
+  The gates that decide by machine (file links, `#123` links, image paste,
+  dropped files) already see a local terminal. Project setup scripts and "One
+  prompt, several agents" start their terminals through the same path
+  (`start_live` and `start_live_first`, the only callers of `spawn_live_as`), so
+  they are held too. Until the first answer (up to half a second) a held
+  terminal has no pid and no foreground: `shell_is_foreground` is `None`, the
+  agent's phase does not move (`AgentPhase::observe(None)` changes nothing),
+  the transcript status is not applied (the light is the terminal's own), and
+  learning the agent's session id leaves the terminal out of that pass instead
+  of giving it the less sure match by folder; the next pass (the agent going
+  quiet, the window regaining the focus, once a minute) retries it. The
+  keeper's answers to the emulator's questions are the window's to give, and
+  they reach the program: a cursor position report, a device attributes query or
+  a colour query is answered through the link as it is for an in-process
+  terminal (this also fixes relay terminals). The questions inside a replay are
+  not answered, since the program asked them long ago and would be typed stale
+  answers.
+* **The terminal** is a remote terminal (`Terminal::remote`) whose link says it
+  is local (`RemoteLink::is_local`): `is_remote()` is false, `is_held()` true.
+  Dropping it only lets go; ending it is `kill`, and `close_live` does that, so
+  closing and sleeping a session end its program. The environment, folder and
+  shell are the ones an in-process terminal gets: the window sends the whole
+  environment of its own process with the plan's on top (`wire_spec`), the
+  keeper starts the program with exactly that and nothing of its own, and an
+  environment over the wire's limits starts the terminal in the window instead.
+  Opening and attaching do not wait for the keeper: the terminal is on screen at
+  once and filled in as the keeper answers (a new terminal's number is known a
+  moment later, `KeeperSlot`, and the layout names it from then on). What is
+  waited for is bounded: listing at start 1.5 s, the quit 1.5 s in all, and a
+  keeper that did not come up or did not answer is not tried again for 20 s (the
+  next sessions start in the window). When the first try fails the terminal says
+  so and ends. Keystrokes and hang-ups wait for room in the connection's queue
+  instead of being dropped when it is full, a quit waits until the hang-ups of
+  sessions closed just before it have reached the keeper, and "Quit and end
+  every session" confirms by listing that its terminals ended; when that cannot
+  be confirmed the status line says so. The keeper is started with every
+  descriptor above the standard three marked close-on-exec, so nothing the
+  window holds open is inherited by a process that outlives it. A relative
+  `--data-dir` is made absolute once at start (the keeper runs in `/`).
+* **Start.** Before the usual restore the keeper is asked for its terminals
+  (`Durable::held`, which never starts one). A saved terminal carries the
+  keeper's number and the token it was opened under (migration 18); it attaches
+  only to the terminal with both (`keeping::reattach_plan`), in its saved tab
+  and pane, with its agent, session id, account, history row, name, focus and
+  pin; the replay rebuilds the screen without ringing the bell or touching the
+  clipboard (nor does a title but the last one change, nor are the questions in
+  it answered). Running terminals are not a question, whatever
+  `restore_sessions` says, and the keeper is asked whatever the setting says. A
+  running terminal the layout does not know appears as a session of its own. A
+  saved terminal whose terminal is gone (restart, keeper stopped, program ended)
+  is restored the usual way (a paused resume line), and the status line says the
+  keeper no longer held it. The layout is restored in **one pass**: a saved
+  workspace with a survivor brings its other terminals back with it, in their
+  panes (so a tab holding a survivor and a gone terminal keeps its split, focus
+  and active tab), as paused resume lines even under `restore_sessions` = ask or
+  never; workspaces with no survivor follow the setting. A replay can start in
+  the middle of an escape sequence, and then looks garbled until the program
+  draws again; Leon does not nudge the program to redraw (resizing it up and
+  down to force a redraw would flicker a shell for the sake of a TUI).
+* **Two windows on one data directory.** There is no single-instance guard, so
+  the keeper tells them apart: a terminal another window is attached to is left
+  to it (neither attached nor resumed beside it, nor adopted; the status line
+  says so), and "Quit and end every session" ends only the terminals this window
+  opened or attached to, never another's.
+* **Failure.** A keeper that cannot be started, reached or trusted leaves the
+  new session in the window, with a plain message. A terminal is declared lost
+  only when its connection has failed several times in a row **and** the
+  keeper's socket no longer answers (a keeper that is slow, full or restarting
+  is not gone, and the connection is shared and mended, never closed under the
+  terminals that hold it), or the keeper reports that it does not have the
+  terminal: it then prints that and exits, is still remembered (marked
+  `KEEPER_LOST`), and the next start says that the keeper no longer held it and
+  resumes it the usual way. A ninth window is told the keeper is full (`Busy`),
+  not dropped silently.
+* **Turning the setting off** affects sessions opened afterwards. Terminals the
+  keeper already holds stay held until they are closed, and a start with the
+  setting off still attaches to the ones the layout remembers, since starting
+  the same agent again beside a running one would be two agents on one session.
+  A keeper that answers at a start with the setting off, and holds running
+  terminals the layout does not know, has them added as sessions (the status
+  line says the setting is off and that they end when closed): leaving them
+  would strand programs nobody could reach.
+
+Limits: only the last 2 MiB of each terminal's output is kept, so older
+scrollback is not restored (the screen is rebuilt from what is kept); a keeper
+runs the binary it was started from until its terminals end (an update replaces
+the file, not the running process); a keeper started by a launcher whose
+service stops with the app (a systemd user service with `KillMode=control-group`)
+or ended by logging out is not outside that; sessions on SSH and relay machines
+are not held by it. Not verified on a real machine: closing the window and
+reopening Leon, the real process start, macOS. `leon host service` and **Share this machine** are a different thing and
+stay separate processes: they serve paired devices through the relay, with the
+device registry; the keeper serves this user's window on a socket. They share
+nothing but the terminal table's code.
 
 ## Notifications
 
@@ -1540,10 +1710,14 @@ child <-> PTY <-> reader thread --chunks--> parser thread --> Term (grid, scroll
   button and the chord do it), and a sparse dotted grid in empty states (they
   are framed by corner ticks and a dimension line instead).
 * Dragging a pane to rearrange it, broadcasting input to several panes, saved layouts.
-* Local sessions do not survive quitting Leon (the processes are hung up with
-  the window). Terminals on a relay machine do survive on the host, and
-  `Client::pty_list`/`pty_attach` can re-attach to them, but listing the ones
-  still alive in the tree after a restart is not built.
+* Local sessions survive quitting Leon only with the setting
+  `durable_sessions` (see "Durable local sessions"); otherwise their processes
+  are hung up with the window. Terminals on a relay machine survive on the host,
+  and `Client::pty_list`/`pty_attach` can re-attach to them (the list-and-attach
+  code the keeper uses is the same), but listing the ones still alive in the
+  tree after a restart is not built. The keeper does not restore scrollback
+  beyond its 2 MiB per terminal, does not cover SSH or relay sessions, and is
+  not verified by a test of the real thing (closing the window, reopening Leon).
 * Sharing runs inside the open application; a background service that survives
   the window (launchd, systemd, a Windows service) is the next stage.
 * Remote Windows hosts (a POSIX shell is assumed).

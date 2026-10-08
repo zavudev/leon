@@ -16,7 +16,13 @@
 //! The terminals are handled in parallel, the wait ends as soon as every agent
 //! is gone, and nothing here can wait longer than the grace: quitting never
 //! hangs. Terminals on other computers are let go of, not closed, as ever.
+//!
+//! With durable sessions on, the terminals the keeper holds are let go of too,
+//! and none of the above happens to them: no exit line is typed, nothing is
+//! signalled, and the programs keep running. "Quit and end every session"
+//! asks for the whole of it, for those as well (see `keeping::fate`).
 
+use super::keeping::{self, Fate, Leaving, Seen};
 use super::shell::Shell;
 use crate::engine::StatusKind;
 use gpui_kit::{Context, Task};
@@ -30,6 +36,9 @@ pub const POLL: Duration = Duration::from_millis(50);
 pub struct Closing {
     /// Whether a quit has begun: the state is not written again.
     pub quitting: bool,
+    /// Whether this quit ends the terminals the keeper holds too ("Quit and
+    /// end every session"); a plain quit lets go of them.
+    pub end_held: bool,
     task: Option<Task<()>>,
     terminated: bool,
     /// When the quit began, by the executor's clock (the one tests advance).
@@ -37,21 +46,64 @@ pub struct Closing {
 }
 
 impl Shell {
-    /// The sessions with an agent in front of the shell, that is, running.
+    /// What this quit asks of the terminals the keeper holds.
+    pub(super) fn leaving(&self) -> Leaving {
+        if self.closing.end_held {
+            Leaving::EndAll
+        } else {
+            Leaving::Keep
+        }
+    }
+
+    /// What becomes of a session's terminal when the application quits.
+    pub(super) fn fate_of(&self, session: &super::live::LiveSession, cx: &gpui_kit::App) -> Fate {
+        let terminal = session.view.read(cx).terminal();
+        keeping::fate(
+            self.leaving(),
+            Seen {
+                held: terminal.is_held(),
+                remote: terminal.is_remote(),
+                agent_running: terminal.exit_info().is_none()
+                    && session.shown_agent().is_some()
+                    && !session.is_paused()
+                    && terminal.shell_is_foreground() == Some(false),
+            },
+        )
+    }
+
+    /// The sessions with an agent in front of the shell, that is, running,
+    /// and that this quit gives the chance to save: not those let go of.
     fn agents_running(&self, cx: &gpui_kit::App) -> Vec<super::live::LiveId> {
         self.live
             .all()
             .iter()
-            .filter(|session| {
-                let terminal = session.view.read(cx).terminal();
-                !terminal.is_remote()
-                    && terminal.exit_info().is_none()
-                    && session.shown_agent().is_some()
-                    && !session.is_paused()
-                    && terminal.shell_is_foreground() == Some(false)
-            })
+            .filter(|session| self.fate_of(session, cx) == Fate::Gently)
             .map(|session| session.id)
             .collect()
+    }
+
+    /// "Quit and end every session": the quit that hangs up the terminals the
+    /// keeper holds as well. `files` says what to do with files that have
+    /// changes: `Some(true)` saves them first, `Some(false)` discards them, and
+    /// `None` has none to decide about.
+    pub(super) fn end_sessions_and_quit(
+        &mut self,
+        files: Option<bool>,
+        window: &mut gpui_kit::Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.closing.end_held = true;
+        match files {
+            None => self.quit_now(cx),
+            Some(true) => self.save_all_and_quit(window, cx),
+            Some(false) => self.discard_and_quit(cx),
+        }
+        // Saving the files can take a moment, and the quit that follows it
+        // is still this one: the choice is kept until the quit goes ahead and
+        // dropped when it is given up (`continue_quit`).
+        if !self.closing.quitting && !self.quit_pending_saves() {
+            self.closing.end_held = false;
+        }
     }
 
     /// Begins quitting. `true` when there was nothing to wait for and

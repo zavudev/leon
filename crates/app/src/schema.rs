@@ -1165,6 +1165,18 @@ const BASE: &[Def] = &[
         K::Choice(RESTORE),
         D::Text("ask"),
     ),
+    only(
+        def(
+            "durable_sessions",
+            S::Sessions,
+            "Keep local sessions running",
+            "The terminals (and the agents in them) that Leon opens on this computer keep running when the window closes, when Leon quits and when it crashes, and the next start attaches to them again with the output it missed. A separate background process holds them. Only the last 2 MiB of each terminal's output is kept for that, so older scrollback is not restored; a session that ended meanwhile, or that was lost with the computer's restart, is resumed as before. Takes effect for sessions opened after it is turned on; turning it off leaves the sessions already kept running until they are closed.",
+            "durable persistent background keeper survive close quit crash detach reattach tmux daemon keep running",
+            K::Toggle,
+            D::Bool(false),
+        ),
+        Platform::Unix,
+    ),
     def(
         "restore_resume",
         S::Sessions,

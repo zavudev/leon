@@ -44,6 +44,21 @@ switching to one never restarts it.
   reopen them (setting *Restore the last sessions*: ask, always, never).
   Agents resume paused until you open their tab or press Enter. Scrollback is
   not restored.
+  **Keep local sessions running** (setting `durable_sessions`, off by default,
+  macOS and Linux) goes further: the terminals, and the agents in them, that Leon
+  opens on this computer are held by a small background process (`leon keeper`)
+  and keep running when the window closes, when Leon quits and when it crashes.
+  The next start attaches to them again, in their saved place, with the output
+  they printed meanwhile, and asks nothing about them. Only the last 2 MiB of each
+  terminal's output is kept for that, so older scrollback is not restored. A
+  session whose terminal is gone (the computer restarted, the program ended) is
+  restored as above, and a keeper that dies takes its terminals with it, which
+  Leon says. Closing or sleeping a session still ends it; the palette's
+  **Quit and end every session** ends all of them. The keeper ends by itself 30
+  seconds after its last program ended with no window connected, and keeps the
+  Leon binary it was started from until then, so an update is picked up by the
+  next keeper. Two windows of one data directory leave each other's sessions
+  alone. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#durable-local-sessions).
 * **History**: Claude Code, Codex and opencode sessions are imported from
   their own files into a local SQLite database and searched from the palette.
   A session missing from the tree? The palette's **Why is a session missing?**

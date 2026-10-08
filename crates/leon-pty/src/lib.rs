@@ -18,6 +18,6 @@ pub mod runner;
 pub mod size;
 pub mod spec;
 
-pub use runner::{PtyEvent, PtyExit, PtyProcess};
+pub use runner::{event_channel, EventSender, Events, Foreground, PtyEvent, PtyExit, PtyProcess};
 pub use size::GridSize;
 pub use spec::SpawnSpec;

@@ -65,7 +65,8 @@ pub use colors::TerminalTheme;
 pub use find::{FindOptions, FindState, Highlights};
 pub use leon_pty::{GridSize, SpawnSpec};
 pub use terminal::{
-    feed, Backend, EventProxy, ExitInfo, GridPoint, Headless, Pty, RemoteFeed, RemoteLink, Script,
-    Scripted, SpawnError, Terminal, TerminalEvent, Timings, Wake, SCROLLBACK_LINES,
+    feed, Backend, EventProxy, ExitInfo, GridPoint, Headless, HeldForeground, Pty, RemoteFeed,
+    RemoteLink, Script, Scripted, SpawnError, Terminal, TerminalEvent, Timings, Wake,
+    SCROLLBACK_LINES,
 };
 pub use view::{FontSettings, TerminalView, ViewEvent};

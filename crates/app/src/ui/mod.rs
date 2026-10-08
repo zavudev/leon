@@ -34,6 +34,7 @@ mod find;
 mod history_sync;
 mod history_view;
 mod home;
+mod keeping;
 mod lines;
 mod lion;
 mod live;

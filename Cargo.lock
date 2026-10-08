@@ -4042,6 +4042,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "leon-wire",
+ "libc",
  "postcard",
  "rand_core 0.6.4",
  "rcgen",

@@ -191,6 +191,7 @@ mod tests {
                     title: Some("ignored".into()),
                     started_at: 0,
                     account: None,
+                    keeper: None,
                 },
                 SavedTerminal {
                     id: 2,
@@ -204,6 +205,7 @@ mod tests {
                     title: None,
                     started_at: 0,
                     account: None,
+                    keeper: None,
                 },
             ],
             ..Default::default()

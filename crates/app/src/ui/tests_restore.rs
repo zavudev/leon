@@ -11,13 +11,13 @@ use crate::ui::live::LiveId;
 use crate::ui::panes::Layout;
 use leon_core::{SavedState, SavedTerminal, Slot};
 
-fn settings_with(dir: &tempfile::TempDir, json: &str) -> std::path::PathBuf {
+pub(super) fn settings_with(dir: &tempfile::TempDir, json: &str) -> std::path::PathBuf {
     let file = dir.path().join("settings.json");
     std::fs::write(&file, json).unwrap();
     file
 }
 
-fn saved_of(h: &Harness, cx: &mut TestAppContext) -> SavedState {
+pub(super) fn saved_of(h: &Harness, cx: &mut TestAppContext) -> SavedState {
     cx.run_until_parked();
     h.store
         .load_workspace(Slot::Current)
@@ -26,7 +26,7 @@ fn saved_of(h: &Harness, cx: &mut TestAppContext) -> SavedState {
 }
 
 /// A second window whose store holds `state` as the previous run's.
-fn restart(
+pub(super) fn restart(
     cx: &mut TestAppContext,
     settings: Option<std::path::PathBuf>,
     state: &SavedState,
@@ -42,7 +42,12 @@ fn restart(
     )
 }
 
-fn terminal(id: u64, cwd: &str, agent: Option<&str>, session: Option<&str>) -> SavedTerminal {
+pub(super) fn terminal(
+    id: u64,
+    cwd: &str,
+    agent: Option<&str>,
+    session: Option<&str>,
+) -> SavedTerminal {
     SavedTerminal {
         id,
         machine: MachineId::local().as_str().to_owned(),
@@ -55,10 +60,16 @@ fn terminal(id: u64, cwd: &str, agent: Option<&str>, session: Option<&str>) -> S
         title: None,
         started_at: 0,
         account: None,
+        keeper: None,
     }
 }
 
-fn one_tab_each(cwd: &str, agent: &str, session: Option<&str>, ids: &[u64]) -> SavedState {
+pub(super) fn one_tab_each(
+    cwd: &str,
+    agent: &str,
+    session: Option<&str>,
+    ids: &[u64],
+) -> SavedState {
     use leon_core::{SavedLayout, SavedTab, SavedWorkspace};
     SavedState {
         saved_at: 1,
@@ -88,7 +99,7 @@ fn click(h: &Harness, selector: String, cx: &mut TestAppContext) {
     h.mouse_on(selector, gpui_kit::MouseButton::Left, cx);
 }
 
-fn live_count(h: &Harness, cx: &mut TestAppContext) -> usize {
+pub(super) fn live_count(h: &Harness, cx: &mut TestAppContext) -> usize {
     h.shell(cx, |s| s.live.ids().len())
 }
 
@@ -462,7 +473,12 @@ fn a_paused_session_never_notifies(cx: &mut TestAppContext) {
 use crate::launch::Launch;
 use crate::ui::terminals::Place;
 
-fn start_fresh(h: &Harness, cx: &mut TestAppContext, agent: leon_core::AgentId, cwd: &str) {
+pub(super) fn start_fresh(
+    h: &Harness,
+    cx: &mut TestAppContext,
+    agent: leon_core::AgentId,
+    cwd: &str,
+) {
     start_fresh_as(h, cx, agent, cwd, None);
 }
 
@@ -497,7 +513,13 @@ fn start_fresh_as(
     cx.run_until_parked();
 }
 
-fn new_session(h: &Harness, agent: leon_core::AgentId, external: &str, cwd: &str, minute: u32) {
+pub(super) fn new_session(
+    h: &Harness,
+    agent: leon_core::AgentId,
+    external: &str,
+    cwd: &str,
+    minute: u32,
+) {
     new_session_titled(h, agent, external, cwd, "t", minute);
 }
 
@@ -843,7 +865,7 @@ fn an_agent_started_in_leon_is_imported_without_a_refresh(cx: &mut TestAppContex
 
 // ----- quitting gently --------------------------------------------------------------------------
 
-fn agent_in_front(cx: &mut TestAppContext) -> (Harness, tempfile::TempDir, String) {
+pub(super) fn agent_in_front(cx: &mut TestAppContext) -> (Harness, tempfile::TempDir, String) {
     let h = open_live(cx);
     let (dir, path) = real_worktree(&h, cx);
     start_fresh(&h, cx, leon_core::AgentId::CLAUDE, &path);
@@ -855,12 +877,12 @@ fn agent_in_front(cx: &mut TestAppContext) -> (Harness, tempfile::TempDir, Strin
 /// Asks to quit and lets the watcher it started register its timer: the
 /// clock is only advanced after that, so no stage depends on whether some
 /// other thread's wake-up happened to run the executor first.
-fn quit(h: &Harness, cx: &mut TestAppContext) {
+pub(super) fn quit(h: &Harness, cx: &mut TestAppContext) {
     cx.update(|cx| h.shell.update(cx, |s, cx| s.quit_now(cx)));
     cx.run_until_parked();
 }
 
-fn pass(cx: &mut TestAppContext, millis: u64) {
+pub(super) fn pass(cx: &mut TestAppContext, millis: u64) {
     cx.executor()
         .advance_clock(std::time::Duration::from_millis(millis));
     cx.run_until_parked();
