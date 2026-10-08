@@ -71,6 +71,19 @@ pub struct LiveInfo {
     pub busy: bool,
 }
 
+/// The file the keyboard is on, as the flows need to know it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileInfo {
+    /// Its leaf.
+    pub id: LiveId,
+    /// Its name.
+    pub name: String,
+    /// Whether it has changes that were not saved.
+    pub dirty: bool,
+    /// Whether a save found it changed by somebody else.
+    pub conflict: bool,
+}
+
 /// The history session a "resume in…" is about, and where it ran.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeTarget {
@@ -212,6 +225,10 @@ pub struct World {
     pub live: Vec<LiveInfo>,
     /// The live session the keyboard is on or that is on screen.
     pub here_live: Option<LiveId>,
+    /// The file the keyboard is on.
+    pub file: Option<FileInfo>,
+    /// The names of the files with changes that were not saved.
+    pub unsaved: Vec<String>,
     /// The machine the cursor is on, when it is on a machine's row.
     pub machine_row: Option<MachineId>,
     /// The history session the cursor is on, with its title.
@@ -286,6 +303,8 @@ impl World {
             here,
             live: Vec::new(),
             here_live: None,
+            file: None,
+            unsaved: Vec::new(),
             machine_row: None,
             here_session: None,
             rename: None,
@@ -337,6 +356,14 @@ impl World {
     pub fn with_live(mut self, live: Vec<LiveInfo>, here_live: Option<LiveId>) -> Self {
         self.live = live;
         self.here_live = here_live;
+        self
+    }
+
+    /// The same world knowing the file the keyboard is on and which files
+    /// have unsaved changes.
+    pub fn with_files(mut self, file: Option<FileInfo>, unsaved: Vec<String>) -> Self {
+        self.file = file;
+        self.unsaved = unsaved;
         self
     }
 
@@ -544,6 +571,23 @@ pub enum Action {
     /// Put a live session to sleep: its terminal ends, and the session stays
     /// in the sidebar to be resumed.
     SleepLive(LiveId),
+    /// Open the file at this path, as typed: relative to the folder the
+    /// keyboard is in, or absolute.
+    OpenFile(String),
+    /// Save a file.
+    SaveFile(LiveId),
+    /// Save a file, then close it.
+    SaveAndCloseFile(LiveId),
+    /// Close a file, its changes thrown away.
+    CloseFile(LiveId),
+    /// Save every file with changes, then quit.
+    SaveAllAndQuit,
+    /// Quit without saving the files with changes; their drafts go too.
+    DiscardAndQuit,
+    /// Save a file over what somebody else wrote there.
+    OverwriteFile(LiveId),
+    /// Read a file again, the changes in the editor thrown away.
+    ReloadFile(LiveId),
     /// Remove a worktree, its confirmation already answered. `force` passes
     /// `--force` to git, which deletes its uncommitted and untracked files:
     /// the window asks for it when git refused the worktree for them.
@@ -636,6 +680,9 @@ pub fn is_flow(command: Command) -> bool {
             | Command::RemoveAgent
             | Command::CloseSession
             | Command::SleepSession
+            | Command::OpenFile
+            | Command::SaveFile
+            | Command::CloseFile
             | Command::Rename
             | Command::RemoveMachine
             | Command::RemoveFromHistory
@@ -682,6 +729,9 @@ pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
         Command::RemoveAgent => remove_agent(answers),
         Command::CloseSession => close_session(answers, world),
         Command::SleepSession => sleep_session(answers, world),
+        Command::OpenFile => open_file(answers),
+        Command::SaveFile => save_file(answers, world),
+        Command::CloseFile => close_file(answers, world),
         Command::Rename => rename(answers, world),
         Command::RemoveMachine => remove_machine(answers, world),
         Command::RemoveFromHistory => remove_from_history(answers, world),
@@ -1227,6 +1277,87 @@ fn sleep_session(answers: &[String], world: &World) -> Outcome {
     }
 }
 
+/// The flow that opens a file: its path is all that is asked.
+fn open_file(answers: &[String]) -> Outcome {
+    match answers {
+        [] => text(
+            "Open file",
+            "a path, relative to this folder or absolute",
+            Validate::Required,
+        ),
+        [path, ..] => Outcome::Run(Action::OpenFile(path.clone())),
+    }
+}
+
+/// Saving is not asked about, unless the file changed on disk since it was
+/// read: then what to do with the two versions is.
+fn save_file(answers: &[String], world: &World) -> Outcome {
+    let Some(file) = &world.file else {
+        return Outcome::Refuse("There is no file to save.".to_owned());
+    };
+    if !file.conflict {
+        return Outcome::Run(Action::SaveFile(file.id));
+    }
+    match answers {
+        [] => choices(
+            "Changed on disk",
+            vec![
+                Choice::new(
+                    "Cancel",
+                    format!("{} stays as it is, here and on disk", file.name),
+                    "cancel",
+                ),
+                Choice::new(
+                    format!("Overwrite {}", file.name),
+                    "saves what is in the editor over the other version",
+                    "overwrite",
+                ),
+                Choice::new(
+                    format!("Reload {}", file.name),
+                    "reads the other version; the changes in the editor are lost",
+                    "reload",
+                ),
+            ],
+            Custom::No,
+        ),
+        [chosen, ..] if chosen == "overwrite" => Outcome::Run(Action::OverwriteFile(file.id)),
+        [chosen, ..] if chosen == "reload" => Outcome::Run(Action::ReloadFile(file.id)),
+        _ => Outcome::Run(Action::Nothing),
+    }
+}
+
+/// Closing a file asks only when it has changes that were not saved.
+fn close_file(answers: &[String], world: &World) -> Outcome {
+    let Some(file) = &world.file else {
+        return Outcome::Refuse("There is no file to close.".to_owned());
+    };
+    if !file.dirty {
+        return Outcome::Run(Action::CloseFile(file.id));
+    }
+    match answers {
+        [] => choices(
+            "Unsaved changes",
+            vec![
+                Choice::new(
+                    format!("Save {}", file.name),
+                    "writes the changes, then closes it",
+                    "save",
+                ),
+                Choice::new(
+                    format!("Discard the changes to {}", file.name),
+                    "closes it without saving",
+                    "discard",
+                ),
+                Choice::new("Cancel", "keep it open", "cancel"),
+            ],
+            Custom::No,
+        ),
+        [chosen, ..] if chosen == "save" => Outcome::Run(Action::SaveAndCloseFile(file.id)),
+        [chosen, ..] if chosen == "discard" => Outcome::Run(Action::CloseFile(file.id)),
+        _ => Outcome::Run(Action::Nothing),
+    }
+}
+
 /// The live session the keyboard or the menu is on.
 fn live_here(world: &World) -> Option<&LiveInfo> {
     let id = world.here_live?;
@@ -1678,9 +1809,41 @@ fn choose_theme(answers: &[String], world: &World) -> Outcome {
 /// answer, which `Enter` takes, is to quit.
 fn quit(answers: &[String], world: &World) -> Outcome {
     let busy = world.live.iter().filter(|session| session.busy).count();
-    let ask = world.prefs.quit.asks(busy);
+    let unsaved = world.unsaved.len();
+    let ask =
+        world.prefs.quit.asks(busy) || (unsaved > 0 && world.prefs.quit != QuitConfirm::Never);
     match answers {
         [] if !ask => Outcome::Run(Action::Quit),
+        // Files with unsaved changes come first: saving them is the way out
+        // that loses nothing, so it is the first choice and Enter takes it.
+        [] if unsaved > 0 => choices(
+            "Unsaved changes",
+            vec![
+                Choice::new(
+                    if unsaved == 1 {
+                        format!("Save {} and quit", world.unsaved[0])
+                    } else {
+                        format!("Save all {unsaved} files and quit")
+                    },
+                    "writes the changes, then quits",
+                    "save",
+                ),
+                Choice::new(
+                    "Quit without saving",
+                    if busy > 0 {
+                        format!(
+                            "the changes are lost and {busy} running session{} closed",
+                            if busy == 1 { " is" } else { "s are" }
+                        )
+                    } else {
+                        "the changes are lost".to_owned()
+                    },
+                    "discard",
+                ),
+                Choice::new("Cancel", "keep working", "no"),
+            ],
+            Custom::No,
+        ),
         [] => choices(
             "Quit Leon?",
             vec![
@@ -1704,6 +1867,8 @@ fn quit(answers: &[String], world: &World) -> Outcome {
             Custom::No,
         ),
         [chosen, ..] if chosen == "yes" => Outcome::Run(Action::Quit),
+        [chosen, ..] if chosen == "save" && unsaved > 0 => Outcome::Run(Action::SaveAllAndQuit),
+        [chosen, ..] if chosen == "discard" => Outcome::Run(Action::DiscardAndQuit),
         _ => Outcome::Run(Action::Nothing),
     }
 }
@@ -2001,6 +2166,8 @@ mod tests {
             }),
             live: Vec::new(),
             here_live: None,
+            file: None,
+            unsaved: Vec::new(),
             machine_row: None,
             here_session: None,
             rename: None,
@@ -3490,6 +3657,135 @@ mod tests {
         assert_eq!(
             advance(Command::CloseSession, &[], &world),
             Outcome::Run(Action::CloseLive(LiveId(1)))
+        );
+    }
+
+    // ----- files -----------------------------------------------------------------------
+
+    fn with_file(dirty: bool, conflict: bool) -> World {
+        world().with_files(
+            Some(FileInfo {
+                id: LiveId(4),
+                name: "main.rs".into(),
+                dirty,
+                conflict,
+            }),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn opening_a_file_asks_for_its_path_and_opens_what_was_typed() {
+        let Outcome::Ask(step) = advance(Command::OpenFile, &[], &world()) else {
+            panic!("a question");
+        };
+        assert!(matches!(
+            step.kind,
+            StepKind::Text {
+                validate: Validate::Required,
+                ..
+            }
+        ));
+        assert_eq!(
+            advance(Command::OpenFile, &strings(&["src/main.rs"]), &world()),
+            Outcome::Run(Action::OpenFile("src/main.rs".into()))
+        );
+    }
+
+    #[test]
+    fn closing_a_clean_file_asks_nothing_and_a_dirty_one_asks_three_ways() {
+        assert_eq!(
+            advance(Command::CloseFile, &[], &with_file(false, false)),
+            Outcome::Run(Action::CloseFile(LiveId(4)))
+        );
+        let dirty = with_file(true, false);
+        let Outcome::Ask(step) = advance(Command::CloseFile, &[], &dirty) else {
+            panic!("a question");
+        };
+        let StepKind::Choices { choices, .. } = step.kind else {
+            panic!("choices");
+        };
+        let values: Vec<&str> = choices.iter().map(|c| c.value.as_str()).collect();
+        assert_eq!(values, ["save", "discard", "cancel"]);
+        for (answer, action) in [
+            ("save", Action::SaveAndCloseFile(LiveId(4))),
+            ("discard", Action::CloseFile(LiveId(4))),
+            ("cancel", Action::Nothing),
+        ] {
+            assert_eq!(
+                advance(Command::CloseFile, &strings(&[answer]), &dirty),
+                Outcome::Run(action)
+            );
+        }
+        assert!(matches!(
+            advance(Command::CloseFile, &[], &world()),
+            Outcome::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn saving_asks_only_when_the_file_changed_on_disk() {
+        assert_eq!(
+            advance(Command::SaveFile, &[], &with_file(true, false)),
+            Outcome::Run(Action::SaveFile(LiveId(4)))
+        );
+        let conflict = with_file(true, true);
+        let Outcome::Ask(step) = advance(Command::SaveFile, &[], &conflict) else {
+            panic!("a question");
+        };
+        let StepKind::Choices { choices, .. } = step.kind else {
+            panic!("choices");
+        };
+        assert_eq!(
+            choices[0].value, "cancel",
+            "the first answer changes nothing"
+        );
+        for (answer, action) in [
+            ("overwrite", Action::OverwriteFile(LiveId(4))),
+            ("reload", Action::ReloadFile(LiveId(4))),
+            ("cancel", Action::Nothing),
+        ] {
+            assert_eq!(
+                advance(Command::SaveFile, &strings(&[answer]), &conflict),
+                Outcome::Run(action)
+            );
+        }
+        assert!(matches!(
+            advance(Command::SaveFile, &[], &world()),
+            Outcome::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn quitting_asks_for_unsaved_files_unless_the_setting_says_never() {
+        let unsaved = world().with_files(None, vec!["a.rs".into(), "b.rs".into()]);
+        let Outcome::Ask(step) = advance(Command::Quit, &[], &unsaved) else {
+            panic!("a question");
+        };
+        let StepKind::Choices { choices, .. } = step.kind else {
+            panic!("choices");
+        };
+        assert!(choices[0].label.contains("2 files"), "{}", choices[0].label);
+        assert_eq!(choices.len(), 3, "save, quit without saving, cancel");
+        for (answer, action) in [
+            ("save", Action::SaveAllAndQuit),
+            ("discard", Action::DiscardAndQuit),
+            ("no", Action::Nothing),
+        ] {
+            assert_eq!(
+                advance(Command::Quit, &strings(&[answer]), &unsaved),
+                Outcome::Run(action)
+            );
+        }
+        let mut never = unsaved.clone();
+        never.prefs.quit = QuitConfirm::Never;
+        assert_eq!(
+            advance(Command::Quit, &[], &never),
+            Outcome::Run(Action::Quit)
+        );
+        assert_eq!(
+            advance(Command::Quit, &[], &world()),
+            Outcome::Run(Action::Quit)
         );
     }
 }

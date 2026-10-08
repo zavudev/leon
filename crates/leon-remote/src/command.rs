@@ -42,6 +42,9 @@ pub struct CommandSpec {
     pub env: Vec<(String, String)>,
     /// Working directory; the default of the machine when absent.
     pub cwd: Option<String>,
+    /// Standard input, closed after it is written; the command gets none
+    /// (end of file at once) when absent.
+    pub stdin: Option<Vec<u8>>,
     /// For a machine reached through a relay: where to send the command (see
     /// [`crate::relay::route`]). The runner that starts the process routes on
     /// it; `None` means "start it here".
@@ -82,6 +85,12 @@ impl CommandSpec {
     /// Sets the working directory.
     pub fn cwd(mut self, cwd: impl Into<String>) -> Self {
         self.cwd = Some(cwd.into());
+        self
+    }
+
+    /// Sets the standard input the command reads.
+    pub fn stdin(mut self, input: impl Into<Vec<u8>>) -> Self {
+        self.stdin = Some(input.into());
         self
     }
 }
@@ -210,6 +219,8 @@ fn place(
         args,
         env: Vec::new(),
         cwd: None,
+        // `ssh` hands its own standard input to the remote command.
+        stdin: command.stdin.clone(),
         route: None,
     }
 }
@@ -297,6 +308,17 @@ mod tests {
         assert_eq!(spec.args, ["log", "-n", "1"]);
         assert_eq!(spec.env, [("LC_ALL".to_owned(), "C".to_owned())]);
         assert_eq!(spec.cwd.as_deref(), Some("/srv/api"));
+    }
+
+    #[test]
+    fn standard_input_reaches_the_process_that_is_started() {
+        let command = git_status().stdin("data");
+        assert_eq!(command.stdin.as_deref(), Some(b"data".as_slice()));
+        let ssh = ssh_machine("build.example", None, None, None);
+        let placed = run_on(&ssh, &command, &SshOptions::without_multiplexing());
+        assert_eq!(placed.stdin, command.stdin);
+        let placed = run_on(&local(), &command, &SshOptions::without_multiplexing());
+        assert_eq!(placed.stdin, command.stdin);
     }
 
     #[test]

@@ -394,6 +394,9 @@ fn open_core(
         notify: Rc::new(move |note, _| notes_in.borrow_mut().push(note.clone())),
         banner_duration: std::time::Duration::from_secs(30),
         save_debounce: std::time::Duration::ZERO,
+        editor_debounce: std::time::Duration::ZERO,
+        draft_debounce: std::time::Duration::ZERO,
+        files_interval: std::time::Duration::ZERO,
         import_debounce: std::time::Duration::ZERO,
         import_interval: std::time::Duration::ZERO,
         quit_gesture_wait: std::time::Duration::from_millis(200),
@@ -638,6 +641,10 @@ impl Harness {
                     Item::Custom(text) => format!("custom:{text}"),
                     Item::Mode(place) => super::palette::MODES[*place].0.to_owned(),
                     Item::Line(name, _) => format!("line:{name}"),
+                    Item::File(path, Some(line)) => format!("file:{path}:{line}"),
+                    Item::File(path, None) => format!("file:{path}"),
+                    Item::FileHeading(path) => format!("[{path}]"),
+                    Item::Match(hit) => format!("match:{}:{}", hit.path, hit.line),
                 })
                 .collect()
         })
@@ -1769,7 +1776,7 @@ fn the_question_mark_prefix_lists_the_prefixes(cx: &mut TestAppContext) {
     h.type_text("?", cx);
     let titles = h.palette_titles(cx);
     assert_eq!(titles[0], "[What to type]");
-    assert_eq!(&titles[1..], ["", ">", "@", "#", "/", "?"]);
+    assert_eq!(&titles[1..], ["", ">", "@", "#", "/", "~", "%", "?"]);
     // Choosing a prefix types it.
     h.press("down", cx);
     h.press("enter", cx);
@@ -4263,7 +4270,15 @@ mod live {
         h: &Harness,
         cx: &mut TestAppContext,
     ) -> (tempfile::TempDir, String) {
-        let dir = tempfile::tempdir().unwrap();
+        real_worktree_in(h, cx, tempfile::tempdir().unwrap())
+    }
+
+    /// [`real_worktree`] in a folder that exists already.
+    pub(super) fn real_worktree_in(
+        h: &Harness,
+        cx: &mut TestAppContext,
+        dir: tempfile::TempDir,
+    ) -> (tempfile::TempDir, String) {
         let path = dir
             .path()
             .canonicalize()
@@ -7247,6 +7262,26 @@ fn the_toolkit_decodes_every_format_a_logo_may_have(cx: &mut TestAppContext) {
 #[cfg(leon_posix_tests)]
 #[path = "tests_tools.rs"]
 mod tools;
+
+#[cfg(leon_posix_tests)]
+#[path = "tests_editor.rs"]
+mod tests_editor;
+
+#[cfg(leon_posix_tests)]
+#[path = "tests_guard.rs"]
+mod tests_guard;
+
+#[cfg(leon_posix_tests)]
+#[path = "tests_session.rs"]
+mod tests_session;
+
+#[cfg(leon_posix_tests)]
+#[path = "tests_files.rs"]
+mod tests_files;
+
+#[cfg(leon_posix_tests)]
+#[path = "tests_search.rs"]
+mod tests_search;
 
 #[cfg(leon_posix_tests)]
 #[path = "tests_lines.rs"]

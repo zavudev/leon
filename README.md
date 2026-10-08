@@ -389,6 +389,7 @@ platform (see below).
 | Jump to machine 1 to 9 | `⌘1` | `Ctrl+1` |
 | Focus the sidebar | `⌘L` `⇧⌘B` | `Ctrl+L` `Ctrl+Shift+S` |
 | Show or hide the sidebar | `⌘B` | `Ctrl+Shift+B` |
+| Show or hide the file tree | `⇧⌘E` | `Ctrl+Shift+Alt+E` |
 | Show only active sessions | palette only | palette only |
 | Make the sidebar wider | palette only | palette only |
 | Make the sidebar narrower | palette only | palette only |
@@ -443,6 +444,16 @@ platform (see below).
 | Reveal in the file manager | palette only | palette only |
 | Open the transcript | `⇧⌘L` | `Ctrl+Shift+L` |
 | Remove from history | palette only | palette only |
+| **Files** | | |
+| Find in the file… | `⌘F` | `Ctrl+F` |
+| Replace in the file… | `⌥⌘F` | `Ctrl+H` |
+| Open a file… | `⇧⌘O` | `Ctrl+Shift+Alt+O` |
+| Save the file | `⌘S` | `Ctrl+S` |
+| Close the file | palette only | palette only |
+| Reveal the file in the file tree | palette only | palette only |
+| Preview the Markdown file | `⌥⌘V` | `Ctrl+Shift+Alt+V` |
+| Open a file of the project by name… | `⌥⌘P` | `Ctrl+Shift+Alt+P` |
+| Search the text of the project… | `⌥⇧⌘F` | `Ctrl+Shift+Alt+F` |
 | **Terminal** | | |
 | Find in the terminal… | `⌘F` | `Ctrl+Shift+F` |
 | Find next | `⌘G` | `Ctrl+Shift+E` |
@@ -565,6 +576,7 @@ macOS:
 * Focus the sidebar `⌘B`
 * Focus the sidebar `⌘L`
 * Focus the sidebar `⇧⌘B`
+* Show or hide the file tree `⇧⌘E`
 * Focus the main pane `⌘J`
 * New agent session `⌘N`
 * New agent session `⇧⌘A`
@@ -575,6 +587,10 @@ macOS:
 * Share this machine… palette only
 * Open project… `⌘O`
 * Open the transcript `⇧⌘L`
+* Open a file… `⇧⌘O`
+* Save the file `⌘S`
+* Open a file of the project by name… `⌥⌘P`
+* Search the text of the project… `⌥⇧⌘F`
 * Focus the terminal `⌘E`
 * Split the pane to the right `⌘D`
 * Split the pane downwards `⇧⌘D`
@@ -626,12 +642,16 @@ Linux and Windows:
 * Command palette `Ctrl+Shift+P`
 * Search the session history `Ctrl+Shift+F`
 * Focus the sidebar `Ctrl+Shift+B`
+* Show or hide the file tree `Ctrl+Shift+Alt+E`
 * New agent session `Ctrl+Shift+A`
 * Open a shell here `Ctrl+Shift+T`
 * New worktree `Ctrl+Shift+N`
 * Connect a machine… `Ctrl+Shift+M`
 * Share this machine… palette only
 * Open the transcript `Ctrl+Shift+L`
+* Open a file… `Ctrl+Shift+Alt+O`
+* Open a file of the project by name… `Ctrl+Shift+Alt+P`
+* Search the text of the project… `Ctrl+Shift+Alt+F`
 * Split the pane to the right `Ctrl+Shift+D`
 * Split the pane downwards `Ctrl+Shift+O`
 * Focus the pane on the left `Ctrl+Shift+←`
@@ -669,6 +689,94 @@ Linux and Windows:
 * Toggle light and dark `Ctrl+Shift+Y`
 * Next theme `Ctrl+Shift+J`
 * Previous theme `Ctrl+Shift+H`
+
+### Files
+
+`Open a file…` asks for a path (relative to the folder you are in, or
+absolute) and opens it in a tab beside the terminals of its project, on this
+computer or on any machine you connected. It is a code editor: highlighting for
+the common languages, line numbers, undo, tabs. `Save the file` writes it;
+closing, or quitting, with unsaved changes asks first (quitting offers to save
+them all), and a file somebody else changed meanwhile is never overwritten
+without asking. A file is a pane like a terminal: split, focus and close work
+the same.
+
+Unsaved text is also kept in a draft beside the settings, so a crash or a power
+cut loses nothing: open the file again and the text is back as unsaved changes
+(if the file changed on disk meanwhile, saving asks what to do). When the
+window comes to the front, a file that changed on disk is read again if you had
+not touched it; if you had, a banner above the editor offers `Reload` or `Keep
+mine`. The files that were open (with the cursor and the Markdown view) are
+opened again at the next start, and the file tree is as you left it; a file
+that is gone is skipped. A file that is not text, or is over 2 MiB, can be
+shown read only with `Open anyway` when it is on this computer. `Reveal the
+file in the file tree` selects the file that has the keyboard in the tree.
+
+A Markdown file (`.md`, `.markdown`) has a preview: `Preview the Markdown file`
+(`Cmd+Opt+V`, `Ctrl+Shift+Alt+V`, or the buttons above the file) goes from the
+text to text and page side by side to the page alone. The page follows the text
+as you type, shows tables, task lists and highlighted code blocks, opens web
+links in the browser and links to other files in a tab (on the same machine as
+the document), and shows relative images when the document is on this computer
+(on another machine their description is shown).
+
+The Editor section of the settings has the tab size, wrapping, line numbers,
+indent guides, syntax highlighting, font size (the family is the terminal's) and
+whether files are reopened at start; they apply to the files that are open.
+
+`Find in the file…` (`Cmd+F`, `Ctrl+F`) opens the editor's search bar and
+`Replace in the file…` (`Cmd+Opt+F`, `Ctrl+H`) the same with the replacement
+field; both apply only while a file has the keyboard (in a terminal `Cmd+F` /
+`Ctrl+Shift+F` is still the terminal's own find, and in the sidebar `Cmd+F`
+still filters the projects). `Esc` closes the bar. The bar has the case
+switch, `Enter` / `Shift+Enter` for the next and the previous match, and
+replace one or all.
+
+`Open a file of the project by name…` (`Cmd+Opt+P`, `Ctrl+Shift+Alt+P`; or
+type `~` in the palette) lists the files of the project in view, the ones git
+tracks and has not ignored, and ranks them by what you type, the file's own name
+before its folders: `mrs` finds `src/main.rs`, and `ui/tree` finds the path.
+`Enter` opens it, `Esc` closes; a `:42` after the name (`main.rs:42`) goes to
+that line. The list is asked for again each time it opens, on the machine the
+project is on.
+
+`Search the text of the project…` (`Cmd+Opt+Shift+F`, `Ctrl+Shift+Alt+F`; or `%`
+in the palette) looks inside those files. The lines found are grouped under
+their file, `Enter` or a click opens the file at the line with the cursor on it,
+and every new query stops the search before it. `Aa` (`Alt+C`) makes the case
+matter and `.*` (`Alt+R`) makes the text a regular expression. Binary files and
+files above 1 MiB are skipped, `.gitignore` is honoured, and it keeps the first
+1000 lines (the list shows 300 of them: narrow the query for the rest). On this
+computer the search runs inside Leon; on another machine it runs there, with
+`rg` if it has it, else `git grep` in a repository, else `grep -r`. Replacing in
+all the files is not built.
+
+### The file tree
+
+`Show or hide the file tree` (`Cmd+Shift+E`, `Ctrl+Shift+Alt+E`; the folder
+button in the main header, View > Show or hide the file tree, or the palette)
+opens a column between the sidebar and the main pane with the files of the
+project or worktree in view: the one under the sidebar's cursor, or the one the
+focused terminal or file belongs to, else the first project of the machine in
+view. It is hidden until you ask for it and remembered in `settings.json`
+(`files_visible`). Folders are listed when they are opened, on the machine the
+project is on, and again every five seconds, when the window gets the focus and
+after a save; the open folders and the selection are kept for each project, so
+coming back finds the tree as you left it.
+
+Showing it gives it the keyboard; `Tab` and `Shift+Tab` go through the sidebar,
+the tree and the main pane. `j`/`k` or the arrows move, `l`/`Right` opens a folder
+(and goes into an open one), `h`/`Left` closes it (and goes to the folder that
+holds the row), `Enter` opens a file in a tab or opens and closes a folder,
+`Esc` gives the keyboard to the main pane. With the mouse a click selects a row
+(and opens or closes a folder) and a double click opens a file.
+
+Icons are glyphs of a bundled symbols font, coloured with the theme's palette
+(by file name first, then by extension). Git's state is drawn at the right of
+the row: `M` modified, `A` added, `D` deleted, `R` renamed, `U` in conflict and
+`?` not tracked, in the theme's colours; a folder that holds changes carries a
+dot, and what git ignores is dimmed. When the project's folder is inside a
+larger repository, only the paths inside it are marked.
 
 ### Panes and tabs
 

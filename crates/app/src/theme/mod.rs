@@ -63,6 +63,8 @@ thread_local! {
     static SCALE: Cell<u16> = const { Cell::new(100) };
     /// The sidebar: its width in design pixels, and whether it is showing.
     static SIDEBAR: Cell<(u16, bool)> = const { Cell::new((SIDEBAR_DEFAULT, true)) };
+    /// Whether the file tree column is showing.
+    static FILES: Cell<bool> = const { Cell::new(false) };
     /// The typography, shape and mark of the active theme. Per thread for the
     /// same reason: [`fonts`] and [`metrics`] are read from views that have no
     /// handle on the application.
@@ -90,6 +92,11 @@ pub fn clamp_sidebar(width: u16) -> u16 {
 /// Sets the sidebar's width (at 100 %) and whether it is showing.
 pub fn set_sidebar(width: u16, visible: bool) {
     SIDEBAR.with(|sidebar| sidebar.set((clamp_sidebar(width), visible)));
+}
+
+/// Sets whether the file tree column is showing.
+pub fn set_files(visible: bool) {
+    FILES.with(|files| files.set(visible));
 }
 
 /// Sets the interface size, in percent, to the nearest step on offer.
@@ -538,6 +545,15 @@ pub mod metrics {
         let (width, visible) = super::SIDEBAR.with(std::cell::Cell::get);
         if visible {
             token(f32::from(width))
+        } else {
+            gpui_kit::px(0.)
+        }
+    }
+    /// Width of the file tree column, between the sidebar and the main pane;
+    /// nothing while it is hidden.
+    pub fn FILES_WIDTH() -> Pixels {
+        if super::FILES.with(std::cell::Cell::get) {
+            token(260.0)
         } else {
             gpui_kit::px(0.)
         }

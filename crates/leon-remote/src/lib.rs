@@ -18,6 +18,10 @@
 //!   and a scripted fake for tests.
 //! * [`git`]: git worktree operations expressed through a runner, so they
 //!   behave identically on local and remote machines.
+//! * [`files`]: reading, writing and listing files, and git marks, as short
+//!   POSIX scripts and the parsers of their answers.
+//! * [`search`]: text search in the files of a project, as a script that uses
+//!   ripgrep, `git grep` or `grep`, and the parsers of their answers.
 //! * [`agent`]: how each coding agent is started and resumed.
 //! * [`relay`]: machines reached through a relay: a hub of durable
 //!   connections and a runner that sends commands to them.
@@ -32,6 +36,7 @@ pub mod agent;
 pub mod command;
 pub mod connect;
 pub mod diagnosis;
+pub mod files;
 pub mod git;
 pub mod github;
 pub mod icon;
@@ -40,6 +45,7 @@ pub mod processes;
 pub mod quote;
 pub mod relay;
 pub mod runner;
+pub mod search;
 pub mod spawn;
 
 pub use agent::{agent_launch, session_command};

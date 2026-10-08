@@ -25,8 +25,10 @@ Leon (client) ── wss ──────────►  pairs, forwards  ◄
 
 The host offers exactly two primitives, over the encrypted channel:
 
-* **run a command** (`Exec`): inherited environment plus the request's, no
-  standard input, a time limit, output capped at 4 MiB per stream;
+* **run a command** (`Exec`): inherited environment plus the request's, the
+  request's standard input if it carries any (at most 4 MiB, written while the
+  output is read and closed after it; none otherwise, so the command sees end
+  of file), a time limit, output capped at 4 MiB per stream;
 * **a terminal** (`PtyOpen`, `PtyData`, `PtyResize`, `PtyClose`, `PtyList`,
   `PtyAttach`): a pseudo-terminal owned by the host. It keeps running when
   every client disconnects. The host keeps the last 2 MiB of its output in a
@@ -48,6 +50,46 @@ For Leon hosts it adds a third, opt-out-free but read-only primitive:
 
 Everything above those (git, probing, agents) is unchanged: a relay machine is
 just another machine.
+
+Files are no exception. The engine reads, saves and lists a file on any machine
+with a short POSIX `sh` script run as an `Exec` (or over SSH), and `std::fs` on
+the local one; both answer in the same shapes. Every script prints a
+`LEON-FILE 1` line first, so a login banner before it is skipped, and takes the
+path as an argument, never inside its text. A read is capped at 2 MiB, reports a
+binary file instead of sending it and returns the `cksum` of the bytes as the
+file's revision. A save sends the new bytes as the command's standard input,
+checks in the shell that the revision is still the one that was read (otherwise
+it prints `CONFLICT` and writes nothing), writes a temporary file next to the
+file with its mode and renames it over it. Folders are listed one level at a
+time, the files of a project come from `git ls-files` (a bounded `find`
+outside a repository) and the git marks from `git status`. For a folder inside
+a larger repository, `git status` names paths from the work tree's root, so the
+script prints `git rev-parse --show-prefix` on the line after `GIT` and the
+marks are made relative to the folder by that prefix. The remote machine needs
+`sh`, `cksum`, `base64` and `wc`; none of this works on a remote Windows host.
+
+**Searching the text of a project** is one more script of the same kind
+(`leon_remote::search`), run as one execute that the engine gives up after
+30 s. The root, the query and two switches (`F` plain or `E` regular
+expression, `i` or `s` for case) are its arguments `$1` to `$4`; the query is
+passed after `-e`, so it is never part of the script's text and a leading dash
+is only text. It uses the first tool the machine has, and prints its name after
+the marker:
+
+| Tool | Command | Output read |
+| --- | --- | --- |
+| `RG` | `rg --null --line-number --column --hidden -g '!.git' --max-filesize 1M` | `path NUL line:col:text` |
+| `GIT` | `git grep -n -I -z --column --untracked --exclude-standard` (inside a work tree) | `path NUL line NUL col NUL text` |
+| `GREP` | `grep -rnI --null --exclude-dir=.git` and the usual dependency and build folders | `path NUL line:text` (`path:line:text` for a grep without `--null`) |
+
+Each is cut by `head -c` at 3.5 MB, below the 4 MiB `MAX_EXEC_OUTPUT`, and a
+line cut by it is dropped. The parsers turn the three formats into
+`SearchHit { path, line, col, text }`, at most 1000 of them with a `truncated`
+flag, text clipped at 400 characters; paths that leave the root are ignored. A
+regular expression is the tool's own dialect (POSIX extended for `git grep` and
+`grep`); a tool that finds nothing and complains on standard error (a pattern
+that is none) is reported with its last line. `git grep` needs git 2.19 for
+`--column`.
 
 ## Threat model
 
@@ -176,6 +218,13 @@ everything after.
 `postcard` was chosen over JSON (terminal bytes would need base64) and over a
 schema compiler (a build step for a few dozen messages). Frames and messages are
 bounded and decoding never panics (fuzz-style and truncation tests).
+
+The version byte of every frame is the protocol version, and `Hello` / `Welcome`
+carry it too. It is **2** since `Exec` can carry standard input (the `stdin` field
+of its command, a change to the message layout that `postcard` cannot read around).
+A peer speaking 1.x and one speaking 2.x refuse each other at the version check:
+the frame is rejected and the connection closes, and the client reports a version
+mismatch instead of misreading messages. Update both ends together.
 
 ## Cryptography and dependencies
 

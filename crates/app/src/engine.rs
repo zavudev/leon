@@ -19,6 +19,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -31,9 +32,11 @@ use leon_core::{
 use leon_history::{HistoryRoots, ImportReport, Importer};
 use leon_link::client::ConnState;
 use leon_remote::connect::{self, Checklist, Target as Login};
+use leon_remote::files as remote_files;
+use leon_remote::search as remote_search;
 use leon_remote::{
-    github, probe, CommandSpec, Git, GitError, Github, Output, ProbeError, ProbeReport, RelayHub,
-    RunError, Runner, SshOptions,
+    github, probe, run_on, CommandSpec, Git, GitError, Github, Output, ProbeError, ProbeReport,
+    RelayHub, RunError, Runner, SshOptions,
 };
 use thiserror::Error;
 use tokio::runtime::Handle;
@@ -43,6 +46,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use crate::address;
 use crate::avatar::{Fetched, IconFetcher, NoFetch};
 use crate::elsewhere::{self, Found};
+use crate::files::{self, FileContent, FileEntry, FileError, FileRevision, GitMarks, WriteOutcome};
 
 /// How many folders are resolved with git at the same time while projects are
 /// being discovered.
@@ -50,6 +54,9 @@ const DISCOVERY_PARALLELISM: usize = 8;
 
 /// How many of a machine's sessions a scan reads to tie processes to them.
 const SCAN_SESSIONS: usize = 50_000;
+
+/// How long a search of a machine's files may take before it is given up.
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A boxed, sendable future.
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -350,6 +357,9 @@ pub enum EngineError {
     /// The request was refused before anything ran.
     #[error("{0}")]
     Invalid(String),
+    /// A file could not be read, saved or listed.
+    #[error("{0}")]
+    File(String),
     /// A background job did not finish.
     #[error("A background job failed: {0}")]
     Job(String),
@@ -2839,6 +2849,350 @@ impl Engine {
         Ok(format!("Logo of {name} is back to what was detected."))
     }
 
+    // ----- files -----------------------------------------------------------
+    //
+    // The same five operations on any machine: the local one answers with
+    // `std::fs` (and git through the runner, so no shell is needed), any other
+    // runs a script of `leon_remote::files` where the files are. Reading and
+    // saving say what went wrong on the status line, because somebody is
+    // waiting for them; the rest runs quietly like the checks on a timer.
+
+    /// Reads a file. Text comes with the revision a save must find again;
+    /// a binary file and one above [`files::MAX_FILE_BYTES`] are answers too,
+    /// not failures.
+    #[allow(dead_code)] // The editor is the first caller.
+    pub fn read_file(
+        &self,
+        machine: MachineId,
+        path: String,
+    ) -> JoinHandle<Result<FileContent, EngineError>> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            let read = engine.read_file_now(&machine, &path).await;
+            engine.reported(read)
+        })
+    }
+
+    /// [`Engine::read_file`] for a look nobody waits for: a failure (the file
+    /// was deleted, the machine is away) goes to the log, not the status line.
+    pub fn check_file(
+        &self,
+        machine: MachineId,
+        path: String,
+    ) -> JoinHandle<Result<FileContent, EngineError>> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            let read = engine.read_file_now(&machine, &path).await;
+            engine.quiet("look at a file", read)
+        })
+    }
+
+    async fn read_file_now(
+        &self,
+        machine_id: &MachineId,
+        path: &str,
+    ) -> Result<FileContent, EngineError> {
+        let machine = self.inner.store.machine(machine_id)?;
+        if machine.kind == MachineKind::Local {
+            let path = std::path::PathBuf::from(path);
+            return Ok(self.blocking(move || files::read(&path)).await??);
+        }
+        let output = self
+            .run_file_command(&machine, remote_files::read_command(path))
+            .await?;
+        match remote_files::parse_read(&output.stdout) {
+            Some(remote_files::ReadOutcome::Found(content)) => Ok(content),
+            Some(remote_files::ReadOutcome::Missing) => Err(file_error(format!(
+                "{path} does not exist on {}.",
+                machine.name
+            ))),
+            Some(remote_files::ReadOutcome::NotAFile) => {
+                Err(file_error(format!("{path} is not a file.")))
+            }
+            None => Err(file_error(unanswered("read", path, &output))),
+        }
+    }
+
+    /// Saves `contents` to `path`. `expected` is the revision the file was
+    /// read with, and a file that has another is left alone and answered
+    /// [`WriteOutcome::Conflict`]; `None` creates a file that must not exist.
+    /// A symbolic link is followed to its target. The handle yields the
+    /// revision the file has after the save.
+    #[allow(dead_code)] // The editor is the first caller.
+    pub fn write_file(
+        &self,
+        machine: MachineId,
+        path: String,
+        contents: String,
+        expected: Option<FileRevision>,
+    ) -> JoinHandle<Result<WriteOutcome, EngineError>> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            let saved = engine
+                .write_file_now(&machine, &path, contents, expected.as_ref())
+                .await;
+            match &saved {
+                Ok(WriteOutcome::Saved(_)) => {
+                    engine.set_status(StatusKind::Info, format!("Saved {}.", file_name(&path)));
+                }
+                Ok(WriteOutcome::Conflict) => engine.set_status(
+                    StatusKind::Error,
+                    format!(
+                        "{} changed since you read it; nothing was saved.",
+                        file_name(&path)
+                    ),
+                ),
+                Err(_) => {}
+            }
+            engine.reported(saved)
+        })
+    }
+
+    async fn write_file_now(
+        &self,
+        machine_id: &MachineId,
+        path: &str,
+        contents: String,
+        expected: Option<&FileRevision>,
+    ) -> Result<WriteOutcome, EngineError> {
+        let machine = self.inner.store.machine(machine_id)?;
+        if machine.kind == MachineKind::Local {
+            let path = std::path::PathBuf::from(path);
+            let expected = expected.cloned();
+            return Ok(self
+                .blocking(move || files::write(&path, expected.as_ref(), contents.as_bytes()))
+                .await??);
+        }
+        if contents.len() > remote_files::MAX_FILE_BYTES {
+            return Err(file_error(FileError::TooBig(path.to_owned()).to_string()));
+        }
+        let command = remote_files::write_command(path, expected, contents.as_bytes());
+        let output = self.run_file_command(&machine, command).await?;
+        remote_files::parse_write(&output.stdout)
+            .ok_or_else(|| file_error(unanswered("save", path, &output)))
+    }
+
+    /// Lists the entries of one folder, folders first: what a tree asks for
+    /// as a folder is opened.
+    pub fn list_dir(
+        &self,
+        machine: MachineId,
+        path: String,
+    ) -> JoinHandle<Result<Vec<FileEntry>, EngineError>> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            let listed = engine.list_dir_now(&machine, &path).await;
+            engine.quiet("list a folder", listed)
+        })
+    }
+
+    async fn list_dir_now(
+        &self,
+        machine_id: &MachineId,
+        path: &str,
+    ) -> Result<Vec<FileEntry>, EngineError> {
+        let machine = self.inner.store.machine(machine_id)?;
+        if machine.kind == MachineKind::Local {
+            let path = std::path::PathBuf::from(path);
+            return Ok(self.blocking(move || files::list_dir(&path)).await??);
+        }
+        let output = self
+            .run_file_command(&machine, remote_files::list_command(path))
+            .await?;
+        match remote_files::parse_dir(&output.stdout) {
+            Some(remote_files::DirListing::Entries(entries)) => Ok(entries),
+            Some(remote_files::DirListing::Missing) => Err(file_error(format!(
+                "{path} does not exist on {}.",
+                machine.name
+            ))),
+            Some(remote_files::DirListing::NotADir) => {
+                Err(file_error(format!("{path} is not a folder.")))
+            }
+            None => Err(file_error(unanswered("list", path, &output))),
+        }
+    }
+
+    /// Lists every file under a project's `root` as relative paths with `/`
+    /// separators: what git tracks and has not ignored, or a bounded walk of
+    /// the folder when it is not a repository.
+    #[allow(dead_code)] // The editor is the first caller.
+    pub fn project_files(
+        &self,
+        machine: MachineId,
+        root: String,
+    ) -> JoinHandle<Result<Vec<String>, EngineError>> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            let listed = engine.project_files_now(&machine, &root).await;
+            engine.quiet("list the files of a project", listed)
+        })
+    }
+
+    async fn project_files_now(
+        &self,
+        machine_id: &MachineId,
+        root: &str,
+    ) -> Result<Vec<String>, EngineError> {
+        let machine = self.inner.store.machine(machine_id)?;
+        if machine.kind == MachineKind::Local {
+            let runner = SharedRunner(self.inner.runner.clone());
+            if let Ok(output) = runner.run(&files::project_files_command(root)).await {
+                if output.success() {
+                    return Ok(remote_files::parse_paths(&output.stdout, '\0'));
+                }
+            }
+            // Not a repository, or no git: walk the folder.
+            let root = std::path::PathBuf::from(root);
+            return Ok(self.blocking(move || files::walk(&root)).await??);
+        }
+        let output = self
+            .run_file_command(&machine, remote_files::project_files_command(root))
+            .await?;
+        remote_files::parse_project_files(&output.stdout)
+            .ok_or_else(|| file_error(unanswered("list the files of", root, &output)))
+    }
+
+    /// Looks for `query` in the files under a project's `root`, and says what
+    /// it found: at most [`remote_search::MAX_HITS`] lines, with a flag for
+    /// more. On this computer it reads the project's file list (so what git
+    /// ignores is not searched) in-process; `cancel` ends it early. On any
+    /// other machine it is one command there (ripgrep, `git grep` or `grep`)
+    /// that is given up after 30 s. Dropping or aborting the handle stops it.
+    /// A failure, a regular expression that is not one included, is the
+    /// error: nobody is told on the status line, the search view says it.
+    pub fn search_project(
+        &self,
+        machine: MachineId,
+        root: String,
+        query: remote_search::ProjectQuery,
+        cancel: Arc<AtomicBool>,
+    ) -> JoinHandle<Result<remote_search::SearchOutcome, EngineError>> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            let found = engine
+                .search_project_now(&machine, &root, query, cancel)
+                .await;
+            engine.quiet("search the files of a project", found)
+        })
+    }
+
+    async fn search_project_now(
+        &self,
+        machine_id: &MachineId,
+        root: &str,
+        query: remote_search::ProjectQuery,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<remote_search::SearchOutcome, EngineError> {
+        let machine = self.inner.store.machine(machine_id)?;
+        if machine.kind == MachineKind::Local {
+            let matcher = crate::search::Matcher::new(&query).map_err(file_error)?;
+            let files = self.project_files_now(machine_id, root).await?;
+            let root = std::path::PathBuf::from(root);
+            return self
+                .blocking(move || crate::search::search_files(&root, &files, &matcher, &cancel))
+                .await;
+        }
+        let command = remote_search::search_command(root, &query);
+        let output = tokio::time::timeout(SEARCH_TIMEOUT, self.run_file_command(&machine, command))
+            .await
+            .map_err(|_| {
+                file_error(format!(
+                    "The search on {} took longer than {} s and was stopped.",
+                    machine.name,
+                    SEARCH_TIMEOUT.as_secs()
+                ))
+            })??;
+        match remote_search::parse_search(&output.stdout) {
+            Some(remote_search::SearchReply::Found(found)) => {
+                // A tool that found nothing and complained (the script always
+                // exits 0, its pipe hides the tool's status): a bad pattern.
+                match last_line(&output.stderr) {
+                    Some(why) if found.hits.is_empty() => Err(file_error(why.to_owned())),
+                    _ => Ok(found),
+                }
+            }
+            Some(remote_search::SearchReply::Missing) => Err(file_error(format!(
+                "{root} does not exist on {}.",
+                machine.name
+            ))),
+            None => Err(file_error(unanswered("search", root, &output))),
+        }
+    }
+
+    /// Asks git what changed under `root`, a work tree's root or a folder
+    /// inside one: a mark for each path (relative to `root`), rolled up to its
+    /// folders. A folder that is not in a
+    /// repository has no marks.
+    pub fn git_marks(
+        &self,
+        machine: MachineId,
+        root: String,
+    ) -> JoinHandle<Result<GitMarks, EngineError>> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            let marks = engine.git_marks_now(&machine, &root).await;
+            engine.quiet("read the git marks", marks)
+        })
+    }
+
+    async fn git_marks_now(
+        &self,
+        machine_id: &MachineId,
+        root: &str,
+    ) -> Result<GitMarks, EngineError> {
+        let machine = self.inner.store.machine(machine_id)?;
+        if machine.kind == MachineKind::Local {
+            let runner = SharedRunner(self.inner.runner.clone());
+            let status = match runner.run(&files::git_marks_command(root)).await {
+                Ok(output) if output.success() => output.stdout,
+                // Not a repository, or no git: nothing to mark.
+                _ => return Ok(GitMarks::default()),
+            };
+            // Git names paths from the work tree's root; `root` may be a
+            // folder inside it.
+            let prefix = match runner.run(&files::git_prefix_command(root)).await {
+                Ok(output) if output.success() => output.stdout,
+                _ => String::new(),
+            };
+            return Ok(GitMarks::from_status_in(&status, &prefix));
+        }
+        let output = self
+            .run_file_command(&machine, remote_files::git_marks_command(root))
+            .await?;
+        remote_files::parse_marks(&output.stdout)
+            .ok_or_else(|| file_error(unanswered("read the git marks of", root, &output)))
+    }
+
+    /// Runs one file command where the machine is, through the shared runner.
+    async fn run_file_command(
+        &self,
+        machine: &Machine,
+        command: CommandSpec,
+    ) -> Result<Output, EngineError> {
+        let runner = SharedRunner(self.inner.runner.clone());
+        let placed = run_on(machine, &command, &self.ssh());
+        runner
+            .run(&placed)
+            .await
+            .map_err(|error| file_error(error.to_string()))
+    }
+
+    /// Says a failure on the status line, and passes the result on.
+    fn reported<T>(&self, result: Result<T, EngineError>) -> Result<T, EngineError> {
+        if let Err(error) = &result {
+            self.set_status(StatusKind::Error, error.to_string());
+        }
+        result
+    }
+
+    /// Logs a failure and passes the result on, for what nobody waits for.
+    fn quiet<T>(&self, what: &str, result: Result<T, EngineError>) -> Result<T, EngineError> {
+        if let Err(error) = &result {
+            tracing::debug!(%error, "could not {what}");
+        }
+        result
+    }
+
     // ----- state -----------------------------------------------------------
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -2856,6 +3210,47 @@ impl Engine {
     fn set_machine(&self, id: &MachineId, state: MachineState) {
         self.state().machines.insert(id.clone(), state);
         let _ = self.inner.events.send(EngineEvent::Machines);
+    }
+}
+
+fn file_error(text: String) -> EngineError {
+    EngineError::File(text)
+}
+
+impl From<FileError> for EngineError {
+    fn from(error: FileError) -> Self {
+        EngineError::File(error.to_string())
+    }
+}
+
+/// The last name of a path, for the status line.
+fn file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// The last line of a command's standard error that says something.
+fn last_line(text: &str) -> Option<&str> {
+    text.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+}
+
+/// What a file command that gave no answer says: the last line it wrote to
+/// standard error, or its exit status.
+fn unanswered(action: &str, path: &str, output: &Output) -> String {
+    let why = output
+        .stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty());
+    match why {
+        Some(why) => format!("Could not {action} {path}: {why}"),
+        None => format!(
+            "Could not {action} {path}: the machine answered with status {:?}.",
+            output.status
+        ),
     }
 }
 
@@ -4775,6 +5170,494 @@ branch refs/heads/feature/login
             .await;
         assert!(status(&rig.engine).text.contains("larger than 256 KiB"));
         assert!(rig.store.project_icons().unwrap().is_empty());
+    }
+
+    // ----- files -------------------------------------------------------------
+
+    use crate::files::EntryKind;
+    use leon_remote::files::GitMark;
+    fn local_path(dir: &tempfile::TempDir, name: &str) -> String {
+        dir.path().join(name).to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn a_local_file_is_read_and_saved_with_its_revision_and_runs_no_command() {
+        let rig = rig(ScriptedRunner::new());
+        let dir = tempfile::tempdir().unwrap();
+        let path = local_path(&dir, "a b.txt");
+        std::fs::write(&path, "\u{feff}one\r\n").unwrap();
+        let engine = &rig.engine;
+
+        let FileContent::Text { text, revision } = engine
+            .read_file(MachineId::local(), path.clone())
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("text");
+        };
+        assert_eq!(text, "\u{feff}one\r\n");
+
+        let saved = engine
+            .write_file(
+                MachineId::local(),
+                path.clone(),
+                "two\n".into(),
+                Some(revision.clone()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(saved, WriteOutcome::Saved(_)));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two\n");
+        assert_eq!(status(engine).text, "Saved a b.txt.");
+
+        // The revision that was read is stale now.
+        let again = engine
+            .write_file(
+                MachineId::local(),
+                path.clone(),
+                "mine\n".into(),
+                Some(revision),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(again, WriteOutcome::Conflict);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two\n");
+        assert_eq!(status(engine).kind, StatusKind::Error);
+        assert!(status(engine).text.contains("changed since"));
+        assert!(rig.runner.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_local_read_that_fails_says_so_on_the_status_line() {
+        let rig = rig(ScriptedRunner::new());
+        let dir = tempfile::tempdir().unwrap();
+        let mut events = rig.engine.subscribe();
+        let error = rig
+            .engine
+            .read_file(MachineId::local(), local_path(&dir, "nope.txt"))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("does not exist"), "{error}");
+        assert_eq!(status(&rig.engine).kind, StatusKind::Error);
+        assert_eq!(events.try_recv().unwrap(), EngineEvent::Status);
+
+        let big = local_path(&dir, "big.bin");
+        std::fs::write(&big, vec![b'x'; remote_files::MAX_FILE_BYTES + 1]).unwrap();
+        let content = rig
+            .engine
+            .read_file(MachineId::local(), big)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            content,
+            FileContent::TooBig {
+                size: remote_files::MAX_FILE_BYTES as u64 + 1
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_local_folder_is_listed_one_level_at_a_time() {
+        let rig = rig(ScriptedRunner::new());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "x").unwrap();
+        std::fs::write(dir.path().join("README.md"), "12").unwrap();
+        let entries = rig
+            .engine
+            .list_dir(MachineId::local(), local_path(&dir, ""))
+            .await
+            .unwrap()
+            .unwrap();
+        let shown: Vec<_> = entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.kind, entry.size))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("src", EntryKind::Dir, None),
+                ("README.md", EntryKind::File, Some(2))
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_files_of_a_local_project_come_from_git_and_from_a_walk_without_it() {
+        let rig = rig(ScriptedRunner::new().reply(Output::ok("docs/A b.md\0src/lib.rs\0")));
+        let paths = rig
+            .engine
+            .project_files(MachineId::local(), "/srv/api".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(paths, ["docs/A b.md", "src/lib.rs"]);
+        let call = &rig.runner.calls()[0];
+        assert_eq!(call.program, "git");
+        assert_eq!(call.cwd.as_deref(), Some("/srv/api"));
+        assert_eq!(call.args, ["ls-files", "-co", "--exclude-standard", "-z"]);
+
+        // Git says it is not a repository: the folder is walked.
+        let rig = rig_with(
+            ScriptedRunner::new().reply(Output::failed(128, "fatal: not a git repository")),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        for path in ["a.md", "sub/b.md", "target/skip.md"] {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        }
+        let paths = rig
+            .engine
+            .project_files(MachineId::local(), local_path(&dir, ""))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(paths, ["a.md", "sub/b.md"]);
+    }
+
+    #[tokio::test]
+    async fn local_git_marks_are_rolled_up_and_a_plain_folder_has_none() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok(" M src/lib.rs\0?? notes/\0!! target/\0"))
+            .reply(Output::ok("\n"))
+            .reply(Output::failed(128, "fatal: not a git repository")));
+        let marks = rig
+            .engine
+            .git_marks(MachineId::local(), "/srv/api".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(marks.get("src/lib.rs"), Some(GitMark::Modified));
+        assert_eq!(marks.get("src"), Some(GitMark::Modified));
+        assert_eq!(marks.get("notes/a.md"), Some(GitMark::Untracked));
+        assert_eq!(marks.get("target/x"), Some(GitMark::Ignored));
+        let call = &rig.runner.calls()[0];
+        assert_eq!(call.program, "git");
+        assert_eq!(call.args, ["status", "--porcelain=v1", "-z", "--ignored"]);
+
+        // A folder inside the repository: paths are made relative to it.
+        let inside = rig_with(
+            ScriptedRunner::new()
+                .reply(Output::ok(" M app/src/lib.rs\0 M other.rs\0"))
+                .reply(Output::ok("app/\n")),
+        );
+        let inner = inside
+            .engine
+            .git_marks(MachineId::local(), "/srv/api/app".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inner.get("src/lib.rs"), Some(GitMark::Modified));
+        assert_eq!(inner.get("other.rs"), None);
+        assert_eq!(
+            inside.runner.calls()[1].args,
+            ["rev-parse", "--show-prefix"]
+        );
+
+        let none = rig
+            .engine
+            .git_marks(MachineId::local(), "/tmp/plain".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reading_a_remote_file_runs_a_script_over_ssh_and_skips_a_banner() {
+        // "# Hi\n" in base64.
+        let reply = "Welcome!\nLEON-FILE 1\nTEXT 9 5\nIyBIaQo=\n";
+        let rig = rig(ScriptedRunner::new().reply(Output::ok(reply)));
+        let machine = ssh_machine(&rig.store);
+        let content = rig
+            .engine
+            .read_file(machine.id.clone(), "/home/dev/my docs/it's.md".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            content,
+            FileContent::Text {
+                text: "# Hi\n".into(),
+                revision: FileRevision::new("9 5"),
+            }
+        );
+        let call = &rig.runner.calls()[0];
+        assert_eq!(call.program, "ssh");
+        let line = call.args.last().unwrap();
+        assert!(line.contains(r"'/home/dev/my docs/it'\''s.md'"), "{line}");
+    }
+
+    #[tokio::test]
+    async fn a_remote_file_that_is_missing_or_unreachable_is_an_error_with_a_reason() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok("LEON-FILE 1\nMISSING\n"))
+            .reply(Output::failed(
+                255,
+                "ssh: connect to host box.example: refused\n",
+            )));
+        let machine = ssh_machine(&rig.store);
+        let error = rig
+            .engine
+            .read_file(machine.id.clone(), "/home/dev/x".into())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.to_string(), "/home/dev/x does not exist on box.");
+        let error = rig
+            .engine
+            .read_file(machine.id.clone(), "/home/dev/x".into())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("refused"), "{error}");
+        assert_eq!(status(&rig.engine).kind, StatusKind::Error);
+    }
+
+    #[tokio::test]
+    async fn saving_a_remote_file_sends_the_bytes_as_stdin_with_the_expected_revision() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok("LEON-FILE 1\nOK 10 6\n"))
+            .reply(Output::ok("LEON-FILE 1\nCONFLICT\n")));
+        let machine = ssh_machine(&rig.store);
+        let saved = rig
+            .engine
+            .write_file(
+                machine.id.clone(),
+                "/home/dev/README.md".into(),
+                "\u{feff}# Hi\r\n".into(),
+                Some(FileRevision::new("9 5")),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved, WriteOutcome::Saved(FileRevision::new("10 6")));
+        let call = &rig.runner.calls()[0];
+        assert_eq!(call.program, "ssh");
+        assert_eq!(call.stdin.as_deref(), Some("\u{feff}# Hi\r\n".as_bytes()));
+        assert!(call.args.last().unwrap().contains("'9 5'"));
+        assert_eq!(status(&rig.engine).text, "Saved README.md.");
+
+        let conflict = rig
+            .engine
+            .write_file(
+                machine.id.clone(),
+                "/home/dev/README.md".into(),
+                "x".into(),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(conflict, WriteOutcome::Conflict);
+        assert!(status(&rig.engine).text.contains("changed since"));
+
+        // Too much text is refused before anything is sent.
+        let error = rig
+            .engine
+            .write_file(
+                machine.id,
+                "/home/dev/big".into(),
+                "x".repeat(remote_files::MAX_FILE_BYTES + 1),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("too big"), "{error}");
+        assert_eq!(rig.runner.calls().len(), 2);
+    }
+
+    fn flag() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
+    #[tokio::test]
+    async fn a_local_search_reads_the_files_git_lists_and_runs_no_search_command() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, text) in [
+            ("src/a.rs", "fn main() {}\nlet Needle = 1;\n"),
+            ("ignored.log", "needle\n"),
+            ("b.md", "no\n"),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        // git lists two of the three: the third is ignored, so not searched.
+        let rig = rig(ScriptedRunner::new().reply(Output::ok("src/a.rs\0b.md\0")));
+        let found = rig
+            .engine
+            .search_project(
+                MachineId::local(),
+                local_path(&dir, ""),
+                remote_search::ProjectQuery::literal("needle"),
+                flag(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!found.truncated);
+        assert_eq!(found.hits.len(), 1);
+        assert_eq!(found.hits[0].path, "src/a.rs");
+        assert_eq!(found.hits[0].line, 2);
+        assert_eq!(rig.runner.calls().len(), 1, "only the file list was asked");
+        assert_eq!(rig.runner.calls()[0].program, "git");
+
+        // A regular expression that is none is an error, not an empty answer,
+        // and git is not even asked.
+        let error = rig
+            .engine
+            .search_project(
+                MachineId::local(),
+                local_path(&dir, ""),
+                remote_search::ProjectQuery {
+                    text: "(".into(),
+                    regex: true,
+                    case_sensitive: false,
+                },
+                flag(),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("unclosed group"), "{error}");
+        assert_eq!(rig.runner.calls().len(), 1);
+        assert!(rig.engine.status().is_none(), "a search failure is quiet");
+    }
+
+    #[tokio::test]
+    async fn a_remote_search_is_one_command_there_and_reads_each_tools_format() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok(
+                "motd\nLEON-FILE 1\nRG\n./src/a.rs\u{0}2:5:let foo = 1; foo\n",
+            ))
+            .reply(Output::ok(
+                "LEON-FILE 1\nGIT\nsrc/a.rs\u{0}2\u{0}5\u{0}let foo = 1; foo\n",
+            ))
+            .reply(Output::ok(
+                "LEON-FILE 1\nGREP\n./src/a.rs\u{0}2:let foo = 1; foo\n",
+            )));
+        let machine = ssh_machine(&rig.store);
+        let query = remote_search::ProjectQuery {
+            text: "$(rm -rf /) 'x'".into(),
+            regex: false,
+            case_sensitive: true,
+        };
+        let mut columns = Vec::new();
+        for _ in 0..3 {
+            let found = rig
+                .engine
+                .search_project(
+                    machine.id.clone(),
+                    "/opt/my app".into(),
+                    query.clone(),
+                    flag(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(found.hits.len(), 1);
+            assert_eq!(found.hits[0].path, "src/a.rs");
+            assert_eq!(found.hits[0].line, 2);
+            columns.push(found.hits[0].col);
+        }
+        assert_eq!(columns, [Some(5), Some(5), None]);
+        let calls = rig.runner.calls();
+        assert_eq!(calls.len(), 3, "one command each");
+        assert_eq!(calls[0].program, "ssh");
+        // The query and the root are quoted arguments of the remote shell
+        // line, and not in the script that is run.
+        let line = calls[0].args.last().unwrap();
+        assert!(line.contains("'/opt/my app'"), "{line}");
+        assert!(line.contains(r"'$(rm -rf /) '\''x'\'''"), "{line}");
+        assert!(
+            line.ends_with(" F s") || line.ends_with(" 'F' 's'"),
+            "{line}"
+        );
+        assert!(rig.engine.status().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_remote_search_that_fails_says_why_and_one_without_hits_is_an_empty_answer() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output {
+                status: Some(0),
+                stdout: "LEON-FILE 1\nRG\n".into(),
+                stderr: "rg: regex parse error:\n    (?:()\n    ^\nerror: unclosed group\n".into(),
+            })
+            .reply(Output::ok("LEON-FILE 1\nRG\n"))
+            .reply(Output::ok("LEON-FILE 1\nMISSING\n"))
+            .reply(Output::failed(
+                255,
+                "ssh: connect to host box.example: refused\n",
+            )));
+        let machine = ssh_machine(&rig.store);
+        let search = |text: &str| {
+            rig.engine.search_project(
+                machine.id.clone(),
+                "/w".into(),
+                remote_search::ProjectQuery::literal(text),
+                flag(),
+            )
+        };
+        let error = search("(").await.unwrap().unwrap_err();
+        assert_eq!(error.to_string(), "error: unclosed group");
+        let found = search("zzz").await.unwrap().unwrap();
+        assert!(found.hits.is_empty() && !found.truncated);
+        let error = search("x").await.unwrap().unwrap_err();
+        assert_eq!(error.to_string(), "/w does not exist on box.");
+        let error = search("x").await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("refused"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_remote_folder_its_files_and_its_git_marks_are_asked_where_they_are() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok(
+                "motd\nLEON-FILE 1\nDIR\nd- src\nf- a b.rs\nSIZES\n  7 /w/a b.rs\n",
+            ))
+            .reply(Output::ok("hi\nLEON-FILE 1\nGIT\nsrc/a b.rs\0README.md\0"))
+            .reply(Output::ok("LEON-FILE 1\nGIT\n\n M src/a b.rs\0")));
+        let machine = ssh_machine(&rig.store);
+
+        let entries = rig
+            .engine
+            .list_dir(machine.id.clone(), "/w".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "src");
+        assert_eq!(entries[1].size, Some(7));
+
+        let paths = rig
+            .engine
+            .project_files(machine.id.clone(), "/w".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(paths, ["src/a b.rs", "README.md"]);
+
+        let marks = rig
+            .engine
+            .git_marks(machine.id.clone(), "/w".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(marks.get("src"), Some(GitMark::Modified));
+
+        let calls = rig.runner.calls();
+        assert_eq!(calls.len(), 3);
+        assert!(calls.iter().all(|call| call.program == "ssh"));
+        // Quiet operations leave the status line alone.
+        assert!(rig.engine.status().is_none());
     }
 
     // ----- sessions running in another terminal ------------------------------

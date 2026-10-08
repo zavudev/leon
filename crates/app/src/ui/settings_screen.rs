@@ -1549,6 +1549,7 @@ mod tests {
                 "sidebar_visible",
                 "sidebar_active_only",
                 "sidebar_width",
+                "files_visible",
                 "quit_confirmation"
             ]
         );
