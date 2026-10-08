@@ -420,10 +420,16 @@ impl Shell {
     }
 
     /// How many lions the Den has to show, and whether one of them waits
-    /// for the user: this window's terminals and the sessions elsewhere
+    /// for the user: this window's terminals with an agent in front of
+    /// their shell (a plain shell has no lion) and the sessions elsewhere
     /// that the Den follows.
     pub(super) fn den_glance(&self, cx: &gpui_kit::App) -> (usize, bool) {
-        let live = self.live.all();
+        let live: Vec<_> = self
+            .live
+            .all()
+            .iter()
+            .filter(|session| session.shown_agent().is_some())
+            .collect();
         let waits = live
             .iter()
             .any(|session| matches!(session.activity, Activity::Waiting | Activity::Failed))

@@ -15,9 +15,7 @@
 //! | the terminal ended, code not 0 | `Fainted` | the exit code |
 //! | the terminal ended, code 0 | `Gone` | |
 //! | restored and paused (its agent is not resumed yet) | `Asleep` | that it is paused |
-//! | no agent in front (a plain shell, or the agent returned to the shell), a program printing | `Running` | that a program runs; which is not known |
-//! | the same, a program quiet or the bell rang | `WaitingForUser` | as the sidebar's dot says |
-//! | the same, at the prompt | `Idle`, or `Asleep` after [`ASLEEP_AFTER`] of silence | |
+//! | no agent in front (a plain shell, or the agent returned to the shell) | **no lion**: see below | |
 //! | an agent, **no transcript** (a remote session, an agent Leon cannot follow, an id not learned yet): printing | `Mystery` | nothing: only working or quiet is known |
 //! | the same, quiet or the bell rang | `WaitingForUser` | |
 //! | the same, at the prompt | `Idle` | |
@@ -28,6 +26,16 @@
 //! | no tool in flight, the turn not over | `Thinking` | reading the message, thinking, writing, or reading a result |
 //! | the turn over, background sub-agents alive | `Delegating` | how many |
 //! | the turn over | `WaitingForUser`, or `Asleep` after [`ASLEEP_AFTER`] of silence | |
+//!
+//! # A terminal without an agent has no lion
+//!
+//! The Den is where the agents are. A plain shell is not one, and neither is
+//! a terminal whose agent was quit and that is back at its prompt: [`cubs`]
+//! gives no lion for them, so a lion that was there goes home. A session
+//! that was restored and waits to be resumed is an agent's and keeps its
+//! lion, asleep. [`state`] still answers for a terminal without an agent
+//! (running, waiting, idle): it is the plain truth of the terminal, shown by
+//! nobody.
 //!
 //! # A session that runs elsewhere
 //!
@@ -457,8 +465,12 @@ fn little(parent: u64, tint: Hsla, sub: &SubAgent, own: Option<&Pulse>) -> Cub {
     }
 }
 
-/// The lion of a session and its little ones: the session first.
+/// The lion of a session and its little ones: the session first. A
+/// terminal with no agent in front of its shell has none.
 pub fn cubs(facts: &Facts, reading: Option<&Reading>) -> Vec<Cub> {
+    if !facts.agent {
+        return Vec::new();
+    }
     let pulse = reading.map(|reading| &reading.pulse);
     let (state, detail) = state(facts, pulse);
     let mut out = vec![Cub {
@@ -842,17 +854,40 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_shell_says_what_its_terminal_says_and_is_no_mystery() {
+    fn a_plain_shell_has_no_lion_whatever_its_terminal_does() {
         let mut shell = facts(Activity::Working);
         shell.agent = false;
+        // The terminal's own truth is still told to whoever asks.
         assert_eq!(state(&shell, None).0, CubState::Running);
         shell.activity = Activity::Waiting;
         assert_eq!(state(&shell, None).0, CubState::WaitingForUser);
         shell.activity = Activity::Idle;
         assert_eq!(state(&shell, None).0, CubState::Idle);
-        let lion = &cubs(&shell, None)[0];
-        assert!(!lion.mystery);
-        assert_eq!(lion.level, 0);
+        for activity in [Activity::Working, Activity::Waiting, Activity::Idle] {
+            shell.activity = activity;
+            assert!(cubs(&shell, None).is_empty(), "{activity:?}");
+        }
+        // Not even with a transcript left over from the agent that was quit,
+        // nor once the terminal ended.
+        let reading = Reading {
+            pulse: pulse(&[Beat::Prompt, started("t1", "Agent", "look")]),
+            subs: HashMap::new(),
+        };
+        assert!(cubs(&shell, Some(&reading)).is_empty());
+        shell.exit = Some(1);
+        assert!(cubs(&shell, None).is_empty());
+    }
+
+    #[test]
+    fn an_agent_that_returned_to_its_shell_goes_home() {
+        let agent = facts(Activity::Idle);
+        let before = cubs(&agent, None);
+        let mut shell = agent.clone();
+        shell.agent = false;
+        let after = cubs(&shell, None);
+        let told = changes(&before, &after, |_| None, |_| false);
+        assert_eq!(told.len(), 1);
+        assert_eq!(told[0].event, Event::WentHome);
     }
 
     #[test]

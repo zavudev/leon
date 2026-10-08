@@ -874,7 +874,8 @@ exactly as there (a session held elsewhere asks before anything starts).
 
 ## The Den (`leon-den`, `ui/den*.rs`)
 
-The Den shows every live session as a lion in a pixel-art office. It is a
+The Den shows every live agent session as a lion in a pixel-art office (a
+terminal with no agent in front of its shell has no lion). It is a
 `Main` variant (`Main::Den`): it takes the main pane and leaves the sidebar;
 `Shell::toggle_den` keeps what the main pane showed and `close_den` puts it
 back. Three layers, each pure where it can be:
@@ -917,7 +918,9 @@ back. Three layers, each pure where it can be:
   `atelier` derives from its character sheets (`cargo run -p leon-den
   --example make_lions`; a test fails when the committed sheets differ). The
   mane is drawn in key colours and dyed per agent, clamped so that any tint
-  stays a mane.
+  stays a mane. A lion's seed picks its `paint::Look`: one of five bodies,
+  six head styles (`atelier::STYLES`), six coats and nine shades of its
+  agent's colour, so the sessions of one agent are different lions.
 * **`ui/den.rs`** is the mapping, pure and tested: `Facts` (what the terminal
   says: the `Activity` of the sidebar's dot, paused, exit code, how long it
   has been quiet) and an optional `Pulse` (what the transcript says) give the

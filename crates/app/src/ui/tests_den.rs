@@ -1,5 +1,5 @@
 //! Tests of the Den in the window: how it opens and closes, which keys it
-//! takes, that every live session is a lion, and that a session whose
+//! takes, that every live agent is a lion and a plain shell is none, and that a session whose
 //! transcript is on this computer shows what the transcript says. The
 //! scripted terminals of `tests.rs` stand in for real ones; the transcript
 //! is a file the test writes.
@@ -27,6 +27,21 @@ fn shell_session(h: &Harness, cx: &mut TestAppContext) -> tempfile::TempDir {
         h.shell(cx, |shell| shell.live.get(LiveId(1)).is_some())
     });
     dir
+}
+
+/// Makes a live session an agent's, as if it had been started as one where
+/// what runs in front of its shell cannot be told: the scripted shell stands
+/// in for the agent. Only an agent has a lion.
+fn agent_in(h: &Harness, cx: &mut TestAppContext, id: u64) {
+    cx.update(|cx| {
+        h.shell.update(cx, |shell, cx| {
+            let session = shell.live.get_mut(LiveId(id)).expect("a live session");
+            session.agent = Some(leon_core::AgentId::CLAUDE);
+            session.phase = crate::ui::live::AgentPhase::Launched;
+            session.can_detect = false;
+            cx.notify();
+        })
+    });
 }
 
 /// Waits as [`wait_until`] does, with the clock of the window moving on:
@@ -161,7 +176,7 @@ fn an_empty_den_says_so_and_follows_nothing(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn every_live_session_is_a_lion_and_enter_opens_its_terminal(cx: &mut TestAppContext) {
+fn a_plain_shell_is_no_lion_and_becomes_one_when_an_agent_is_in_it(cx: &mut TestAppContext) {
     let h = open_live(cx);
     let _dir = shell_session(&h, cx);
     h.press_chord("cmd-d", "ctrl-shift-d", cx);
@@ -169,10 +184,55 @@ fn every_live_session_is_a_lion_and_enter_opens_its_terminal(cx: &mut TestAppCon
         h.shell(cx, |shell| shell.live.get(LiveId(2)).is_some())
     });
     toggle(&h, cx);
+    // Two terminals, no agent: nobody is in the den, and its row of the
+    // sidebar counts nobody.
+    assert!(lions(&h, cx).is_empty(), "{:?}", lions(&h, cx));
+    assert_eq!(cx.update(|cx| h.shell.read(cx).den_glance(cx)), (0, false));
+    assert!(!h.shows("sidebar-den-count", cx));
+    // A shell that is quiet or that rang its bell is nobody waiting.
+    cx.update(|cx| {
+        h.shell.update(cx, |shell, cx| {
+            shell.live.get_mut(LiveId(1)).unwrap().activity =
+                crate::ui::activity::Activity::Waiting;
+            cx.notify();
+        })
+    });
+    assert_eq!(cx.update(|cx| h.shell.read(cx).den_glance(cx)), (0, false));
+
+    // An agent in one of them: that one is a lion, the other still is not.
+    agent_in(&h, cx, 2);
+    tick_until(&h, cx, "the agent's lion", |h, cx| lions(h, cx).len() == 1);
+    assert_eq!(cx.update(|cx| h.shell.read(cx).den_glance(cx)).0, 1);
+    let only = h.shell(cx, |shell| shell.den.cubs[0].id);
+    assert_eq!(only, 2);
+
+    // The agent is quit and its terminal is back at the prompt: it goes
+    // home, and the terminal stays.
+    cx.update(|cx| {
+        h.shell.update(cx, |shell, cx| {
+            shell.live.get_mut(LiveId(2)).unwrap().phase = crate::ui::live::AgentPhase::Returned;
+            cx.notify();
+        })
+    });
+    tick_until(&h, cx, "the lion to go home", |h, cx| {
+        lions(h, cx).is_empty()
+    });
+    assert_eq!(h.shell(cx, |shell| shell.live.all().len()), 2);
+}
+
+#[gpui_kit::test]
+fn every_live_agent_is_a_lion_and_enter_opens_its_terminal(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let _dir = shell_session(&h, cx);
+    h.press_chord("cmd-d", "ctrl-shift-d", cx);
+    wait_until(&h, cx, "the second shell", |h, cx| {
+        h.shell(cx, |shell| shell.live.get(LiveId(2)).is_some())
+    });
+    agent_in(&h, cx, 1);
+    agent_in(&h, cx, 2);
+    toggle(&h, cx);
     let names: Vec<String> = lions(&h, cx).into_iter().map(|(name, _, _)| name).collect();
     assert_eq!(names.len(), 2, "{names:?}");
-    // A plain shell is no mystery: its terminal says all there is to say.
-    assert!(h.shell(cx, |shell| shell.den.cubs.iter().all(|cub| !cub.mystery)));
 
     // Down selects the first, down again the second; Enter opens it.
     h.press("down", cx);
@@ -233,6 +293,7 @@ fn opening_something_from_the_sidebar_leaves_the_den(cx: &mut TestAppContext) {
 fn the_narrator_can_be_turned_off_for_a_plain_count(cx: &mut TestAppContext) {
     let h = open_live(cx);
     let _dir = shell_session(&h, cx);
+    agent_in(&h, cx, 1);
     cx.update(|cx| {
         crate::settings::set_value(
             cx,
@@ -624,6 +685,8 @@ fn going_home_closes_no_terminal_and_the_home_counts_them_and_opens_the_one_that
         h.shell(cx, |shell| shell.live.get(LiveId(2)).is_some())
     });
     assert_eq!(h.main_kind(cx), "live:2");
+    agent_in(&h, cx, 1);
+    agent_in(&h, cx, 2);
     let before = screen(&h, cx, 1);
 
     // Home, by its chord: both terminals are alive and in the sidebar.

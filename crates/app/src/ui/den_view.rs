@@ -12,7 +12,8 @@
 //!
 //! # Where the facts come from
 //!
-//! Every live session is a lion. What it does is decided by [`super::den`]
+//! Every live session with an agent in front of its shell is a lion; a
+//! plain shell is none ([`super::den::cubs`]). What it does is decided by [`super::den`]
 //! from two things: what its terminal says (the same [`Activity`] the
 //! sidebar's dot shows) and, for a session of this computer whose agent
 //! Leon can follow and whose own session id was learned, its transcript,

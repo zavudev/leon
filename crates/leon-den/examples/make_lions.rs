@@ -5,7 +5,7 @@
 //! ```
 //!
 //! It reads `assets/source/characters/char_N.png` and writes
-//! `assets/lions/lion_N.png`, `assets/lions/cub.png` and the props of
+//! `assets/lions/lion_B_S.png` (body `B` in style `S`), `assets/lions/cub.png` and the props of
 //! `assets/props/`, all drawn by [`leon_den::atelier`]. The files are
 //! committed: run this again only after changing a drawing of the workshop,
 //! and a test will say so if you forget. With `--preview DIR` it also writes
