@@ -649,6 +649,12 @@ impl Terminal {
         }
     }
 
+    /// Whether the program asked for pasted text to be bracketed: only then
+    /// do the line breaks of a paste not act as the Enter key.
+    pub fn bracketed_paste(&self) -> bool {
+        self.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
     /// Sends pasted text, bracketed when the program asked for that.
     pub fn paste(&self, text: &str) {
         let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);

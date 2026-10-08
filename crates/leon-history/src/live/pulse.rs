@@ -23,6 +23,11 @@ pub struct ToolInFlight {
     pub kind: ToolKind,
     /// The short subject of the call; may be empty.
     pub detail: String,
+    /// The whole subject, when the transcript told more than the caption
+    /// holds ([`Beat::Brief`]): the command, the path, the question.
+    pub brief: Option<String>,
+    /// The answers a question offers, by their labels.
+    pub options: Vec<String>,
 }
 
 /// A sub-agent that was started and has not ended.
@@ -107,6 +112,16 @@ impl Pulse {
             self.turn_over = false;
         }
         match beat {
+            // Words and details: they say more of a beat that came before
+            // and move nothing, so they are not the last thing that happened.
+            Beat::Heard { .. } => return,
+            Beat::Brief { id, text, options } => {
+                if let Some(tool) = self.tools.iter_mut().find(|tool| tool.id == *id) {
+                    tool.brief = Some(text.clone());
+                    tool.options = options.clone();
+                }
+                return;
+            }
             Beat::Prompt | Beat::Woken => self.resting = Phase::Prompted,
             Beat::Thinking => self.resting = Phase::Thinking,
             Beat::Said { .. } => self.resting = Phase::Speaking,
@@ -123,6 +138,8 @@ impl Pulse {
                     name: name.clone(),
                     kind: *kind,
                     detail: detail.clone(),
+                    brief: None,
+                    options: Vec::new(),
                 });
                 if *kind == ToolKind::Delegate {
                     self.subagents.retain(|agent| agent.tool != *id);
@@ -217,7 +234,15 @@ impl Pulse {
                     name: name.clone(),
                     kind: *kind,
                     detail: detail.clone(),
+                    brief: None,
+                    options: Vec::new(),
                 });
+            }
+            Beat::Brief { id, text, options } => {
+                if let Some(tool) = found.current.as_mut().filter(|tool| tool.id == *id) {
+                    tool.brief = Some(text.clone());
+                    tool.options = options.clone();
+                }
             }
             Beat::ToolFinished { id, .. } | Beat::Detached { id, .. } => {
                 if found.current.as_ref().is_some_and(|tool| tool.id == *id) {
@@ -607,5 +632,54 @@ mod tests {
         let pulse = pulse_of(&[started("t1", "Agent", "one"), started("t1", "Agent", "one")]);
         assert_eq!(pulse.tools().len(), 1);
         assert_eq!(pulse.subagents().len(), 1);
+    }
+
+    #[test]
+    fn a_brief_is_kept_with_its_call_and_the_words_of_a_prompt_move_nothing() {
+        let brief = |id: &str| Beat::Brief {
+            id: id.into(),
+            text: "Which crate first?".into(),
+            options: vec!["api".into(), "web".into()],
+        };
+        let mut pulse = pulse_of(&[
+            Beat::Prompt,
+            Beat::Heard {
+                text: "ask me".into(),
+                at: None,
+            },
+        ]);
+        // The words of the prompt are not what happened last, and open
+        // nothing a prompt did not open.
+        assert_eq!(pulse.last(), Some(&Beat::Prompt));
+        assert_eq!(pulse.phase(), Phase::Prompted);
+        pulse.apply(&started("t1", "AskUserQuestion", "Scope"));
+        pulse.apply(&brief("t1"));
+        let tool = &pulse.tools()[0];
+        assert_eq!(tool.brief.as_deref(), Some("Which crate first?"));
+        assert_eq!(tool.options, ["api", "web"]);
+        assert!(matches!(pulse.last(), Some(Beat::ToolStarted { .. })));
+        // A brief of a call that is not in flight is dropped.
+        pulse.apply(&brief("t9"));
+        assert_eq!(pulse.tools().len(), 1);
+        // After a turn ended, words alone do not open another.
+        let mut over = pulse_of(&[Beat::Prompt, Beat::TurnEnded]);
+        over.apply(&Beat::Heard {
+            text: "late".into(),
+            at: None,
+        });
+        assert!(over.turn_over());
+        // A sub-agent's own call keeps its brief too.
+        let mut parent = pulse_of(&[Beat::Prompt, started("a1", "Agent", "Explore: Map it")]);
+        parent.apply_to_subagent("a1", &started("s1", "Bash", "ls"));
+        parent.apply_to_subagent(
+            "a1",
+            &Beat::Brief {
+                id: "s1".into(),
+                text: "ls -la /srv".into(),
+                options: Vec::new(),
+            },
+        );
+        let current = parent.subagents()[0].current.as_ref().unwrap();
+        assert_eq!(current.brief.as_deref(), Some("ls -la /srv"));
     }
 }

@@ -272,6 +272,11 @@ pub struct AgentSpec {
     /// Code. Absent where it could not be verified; those agents only get
     /// Leon's own label.
     pub rename: Option<String>,
+    /// The key that stops the agent in the middle of a turn without ending
+    /// its session, as the bytes a terminal sends for it: Escape for Claude
+    /// Code and for Codex, whose own interfaces say so while they work.
+    /// Absent where it is not known; nothing is sent to those.
+    pub interrupt: Option<String>,
 }
 
 impl AgentSpec {
@@ -336,6 +341,7 @@ struct Row {
     docs: &'static str,
     exit: &'static str,
     rename: &'static str,
+    interrupt: &'static str,
 }
 
 const fn row(
@@ -355,6 +361,7 @@ const fn row(
         docs,
         exit: "",
         rename: "",
+        interrupt: "",
     }
 }
 
@@ -387,7 +394,16 @@ impl Row {
         self.rename = rename;
         self
     }
+    /// The key that interrupts a turn, as the bytes a terminal sends. Only
+    /// for agents whose key is known.
+    const fn interrupt(mut self, interrupt: &'static str) -> Self {
+        self.interrupt = interrupt;
+        self
+    }
 }
+
+/// What a terminal sends for the Escape key.
+const ESCAPE: &str = "\u{1b}";
 
 /// The built-in agents, in display order. The commands are Orca's
 /// (`src/shared/tui-agent-config.ts`) and the resume forms are those of its
@@ -404,9 +420,11 @@ const ROWS: &[Row] = &[
     .resume(&["--resume", "{id}"])
     .exit("/exit")
     .rename("/rename {name}")
+    .interrupt(ESCAPE)
     .mark("claude"),
     row("codex", "Codex", "codex", "https://github.com/openai/codex")
         .resume(&["resume", "{id}"])
+        .interrupt(ESCAPE)
         .mark("codex"),
     row(
         "opencode",
@@ -700,6 +718,7 @@ fn from_row(row: &Row) -> AgentSpec {
         custom: false,
         exit: (!row.exit.is_empty()).then(|| row.exit.to_owned()),
         rename: (!row.rename.is_empty()).then(|| row.rename.to_owned()),
+        interrupt: (!row.interrupt.is_empty()).then(|| row.interrupt.to_owned()),
     }
 }
 
@@ -946,6 +965,7 @@ impl CustomAgent {
             custom: true,
             exit: None,
             rename: None,
+            interrupt: None,
         })
     }
 }
@@ -1298,5 +1318,19 @@ mod tests {
             Some("/rename build the thing")
         );
         assert_eq!(claude.unwrap().rename_line("   "), None);
+    }
+
+    #[test]
+    fn only_the_agents_whose_interrupt_key_is_known_have_one_and_it_is_escape() {
+        let with: Vec<&str> = builtin()
+            .iter()
+            .filter(|spec| spec.interrupt.is_some())
+            .map(|spec| spec.id.as_str())
+            .collect();
+        assert_eq!(with, ["claude", "codex"]);
+        assert!(builtin()
+            .iter()
+            .filter_map(|spec| spec.interrupt.as_deref())
+            .all(|key| key == "\u{1b}"));
     }
 }

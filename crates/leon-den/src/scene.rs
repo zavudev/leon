@@ -14,13 +14,23 @@
 //! back to front. The room itself is one picture, painted by
 //! [`crate::paint::compose`]. There is no GPUI here, so a test can check a
 //! layout and an example can paint the same scene into a PNG file.
+//!
+//! The roster lists first the lions that need the user and counts them,
+//! and under the pride the sessions that were sent home, each with the way
+//! back ([`Scene::home_rows`]). The truth card has the lion's state, then
+//! the host's own lines ([`crate::sim::Note`]): what is asked stands out,
+//! the rest is in groups under their headings. A card that would cover its
+//! lion, or that takes more than two thirds of the view's height or a third
+//! of the room, says less
+//! from its end. The keys of the Den, while the host shows them, are a box
+//! over everything else.
 
 use gpui_kit::Hsla;
 
 use crate::model::Status;
 use crate::palette::DenPalette;
 use crate::pose::TILE;
-use crate::sim::{Actor, Den, Frame, RosterEntry, TruthCard};
+use crate::sim::{Actor, Den, Frame, NoteTone, RosterEntry, TruthCard};
 
 /// A rectangle in device pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -131,6 +141,23 @@ impl Layout {
         rows: i32,
         lions: usize,
     ) -> Self {
+        Self::compute_with_home(width, height, scale, metrics, cols, rows, lions, 0)
+    }
+
+    /// [`Self::compute`] for a den with `home` sessions at home: the roster
+    /// is higher by their part ([`roster_rows`]), so that the pride keeps
+    /// its own rows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn compute_with_home(
+        width: i32,
+        height: i32,
+        scale: f32,
+        metrics: TextMetrics,
+        cols: i32,
+        rows: i32,
+        lions: usize,
+        home: usize,
+    ) -> Self {
         let scale = if scale > 0. { scale } else { 1. };
         let px = |logical: f32| (logical * scale).round() as i32;
         let (gap, pad) = (px(12.), px(10.));
@@ -154,7 +181,7 @@ impl Layout {
             // to two fifths of the column: the feed has the rest.
             let head = pad + row_h + px(4.);
             let most = (((column.h * 2 / 5) - head - pad) / row_h).max(1) as usize;
-            let listed = lions.clamp(1, ROSTER_ROWS.min(most).max(1));
+            let listed = roster_rows(lions.clamp(1, ROSTER_ROWS), home).clamp(1, most);
             let roster = Rect {
                 h: (head + listed as i32 * row_h + pad).min(column.h),
                 ..column
@@ -277,6 +304,11 @@ pub struct Scene {
     pub jump: Option<Rect>,
     /// The name of the lion the feed is narrowed to: a click shows all.
     pub all: Option<Rect>,
+    /// The rows of the roster's "at home" part, for the pointer: where, and
+    /// which session a click wakes.
+    pub home_rows: Vec<(Rect, u64)>,
+    /// The box of the keys, while they are shown: a click anywhere closes it.
+    pub keys: Option<Rect>,
 }
 
 impl Scene {
@@ -311,6 +343,14 @@ impl Scene {
             .find(|(rect, _)| rect.contains(x, y))
             .map(|(_, id)| *id)
     }
+
+    /// The session at home whose row is under a point.
+    pub fn home_at(&self, x: i32, y: i32) -> Option<u64> {
+        self.home_rows
+            .iter()
+            .find(|(rect, _)| rect.contains(x, y))
+            .map(|(_, id)| *id)
+    }
 }
 
 fn status_color(palette: &DenPalette, status: Status) -> Hsla {
@@ -331,6 +371,25 @@ pub fn build(
     layout: &Layout,
     palette: &DenPalette,
     note: Option<&[String]>,
+) -> Scene {
+    build_around(den, frame, layout, palette, note, None)
+}
+
+/// Where a lion is in the view, in device pixels, when the picture of the
+/// room is not the pixel art's: the box around the lion with this id.
+pub type Boxes<'a> = &'a dyn Fn(u64) -> Option<Rect>;
+
+/// [`build`] for a picture of the room that is not laid out as the pixel
+/// art is: the room is `layout.map` whatever its tiles are, and `boxes`
+/// says where each lion is in it, for the truth card to stand beside its
+/// lion.
+pub fn build_around(
+    den: &Den,
+    frame: &Frame,
+    layout: &Layout,
+    palette: &DenPalette,
+    note: Option<&[String]>,
+    boxes: Option<Boxes<'_>>,
 ) -> Scene {
     let mut scene = Scene {
         room: layout.map,
@@ -366,16 +425,104 @@ pub fn build(
         feed_box(&mut scene, den, frame, area, layout, palette, note);
     }
     if let Some(area) = layout.roster {
-        roster(&mut scene, &den.roster(), area, layout, palette);
+        roster(&mut scene, den, area, layout, palette);
+    }
+    // The keys, while they are shown, are over everything: no card stands
+    // under them.
+    if let Some(keys) = den.keys() {
+        keys_box(&mut scene, keys, layout, palette);
+        return scene;
     }
     let shown = den.hovered().or(den.selected());
     if let Some((card, actor)) = shown.and_then(|id| {
         let actor = frame.actors.iter().find(|actor| actor.id == id)?;
         Some((den.truth(id)?, actor))
     }) {
-        truth_card(&mut scene, &card, actor, &frame.actors, layout, palette);
+        truth_card(
+            &mut scene,
+            &card,
+            actor,
+            &frame.actors,
+            layout,
+            palette,
+            boxes,
+        );
     }
     scene
+}
+
+/// How many rows the roster asks for: its lions, and the sessions at home
+/// under a heading of their own.
+pub fn roster_rows(lions: usize, home: usize) -> usize {
+    lions
+        + if home == 0 {
+            0
+        } else {
+            1 + home.min(HOME_ROWS)
+        }
+}
+
+/// The keys of the Den over the room: a box in the middle of the field, a
+/// row a key, in as many columns as its height asks for.
+fn keys_box(scene: &mut Scene, keys: &[(String, String)], layout: &Layout, palette: &DenPalette) {
+    let pad = layout.px(12.);
+    let char_w = layout.metrics.char_w;
+    let line_h = layout.metrics.line_h.ceil() as i32 + layout.px(2.);
+    let wide = |chars: usize| (char_w * chars as f32).ceil() as i32;
+    let key_chars = keys
+        .iter()
+        .map(|(key, _)| key.chars().count())
+        .max()
+        .unwrap_or(0);
+    let what_chars = keys
+        .iter()
+        .map(|(_, what)| what.chars().count())
+        .max()
+        .unwrap_or(0);
+    let column = wide(key_chars + 2 + what_chars);
+    let gutter = wide(3);
+    // The heading, a gap, the rows, a gap and the way out.
+    let most = (((layout.view.h - pad * 4) / line_h) - 4).max(1) as usize;
+    let fit = ((layout.view.w - pad * 4 + gutter) / (column + gutter)).max(1) as usize;
+    let columns = keys.len().div_ceil(most).clamp(1, fit);
+    let rows = keys.len().div_ceil(columns).min(most);
+    let w = columns as i32 * column + (columns as i32 - 1) * gutter + pad * 2;
+    let h = (rows as i32 + 4) * line_h + pad * 2;
+    let centre = (
+        layout.field.x + layout.field.w / 2,
+        layout.field.y + layout.field.h / 2,
+    );
+    let rect = Rect {
+        x: (centre.0 - w / 2).clamp(0, (layout.view.w - w).max(0)),
+        y: (centre.1 - h / 2).clamp(0, (layout.view.h - h).max(0)),
+        w,
+        h,
+    };
+    frame_box(scene, rect, layout, palette);
+    scene.keys = Some(rect);
+    let (x, mut y) = (rect.x + pad, rect.y + pad);
+    scene.text(x, y, "THE KEYS OF THE DEN", palette.text_muted, true);
+    y += line_h * 2;
+    for (index, (key, what)) in keys.iter().take(rows * columns).enumerate() {
+        let (col, row) = ((index / rows) as i32, (index % rows) as i32);
+        let left = x + col * (column + gutter);
+        let top = y + row * line_h;
+        scene.text(left, top, key.clone(), palette.signal, true);
+        scene.text(
+            left + wide(key_chars + 2),
+            top,
+            what.clone(),
+            palette.text,
+            false,
+        );
+    }
+    scene.text(
+        x,
+        y + (rows as i32 + 1) * line_h,
+        "? or Escape closes this.",
+        palette.text_muted,
+        false,
+    );
 }
 
 /// A box of the blueprint: a fill, a 1 px rule and an L at each corner.
@@ -776,13 +923,9 @@ fn clip(text: &str, chars: usize) -> String {
     }
 }
 
-fn roster(
-    scene: &mut Scene,
-    entries: &[RosterEntry],
-    area: Rect,
-    layout: &Layout,
-    palette: &DenPalette,
-) {
+fn roster(scene: &mut Scene, den: &Den, area: Rect, layout: &Layout, palette: &DenPalette) {
+    let entries: &[RosterEntry] = &den.roster();
+    let home = den.home();
     frame_box(scene, area, layout, palette);
     let pad = layout.px(10.);
     let char_w = layout.metrics.char_w;
@@ -791,6 +934,16 @@ fn roster(
     let at = |chars: usize| area.x + pad + (char_w * chars as f32).round() as i32;
 
     scene.text(at(0), area.y + pad, "THE PRIDE", palette.text_muted, true);
+    // How many need the user: the first thing to know of a pride.
+    let needy = entries.iter().filter(|entry| entry.needs).count();
+    if needy > 0 {
+        let said = if needy == 1 {
+            "1 NEEDS YOU".to_owned()
+        } else {
+            format!("{} NEED YOU", needy.min(99))
+        };
+        scene.text(at(11), area.y + pad, said, palette.signal, true);
+    }
     let count = entries.iter().filter(|entry| !entry.little).count();
     let count = format!("{count:>3}");
     scene.text(
@@ -811,7 +964,15 @@ fn roster(
         palette.rule,
     );
 
-    let room = ((area.y + area.h - pad - top) / row_h).max(0) as usize;
+    let all = ((area.y + area.h - pad - top) / row_h).max(0) as usize;
+    // Those at home have a heading and a few rows under the pride, where
+    // two rows are left to the pride itself.
+    let home_rows = match home.len() {
+        0 => 0,
+        waiting => (1 + waiting.min(HOME_ROWS)).min(all.saturating_sub(2)),
+    };
+    let home_rows = if home_rows < 2 { 0 } else { home_rows };
+    let room = all - home_rows;
     let shown = if entries.len() > room {
         room.saturating_sub(1)
     } else {
@@ -827,8 +988,10 @@ fn roster(
             h: row_h,
         };
         scene.rows.push((row, entry.id));
-        if entry.selected {
+        if entry.selected || entry.hovered {
             scene.fill(row, palette.raised);
+        }
+        if entry.selected {
             scene.fill(
                 Rect {
                     w: layout.px(2.),
@@ -896,12 +1059,110 @@ fn roster(
             false,
         );
     }
+    if home_rows == 0 {
+        return;
+    }
+    // At home: who was sent there, and the way back.
+    let head = top + room as i32 * row_h;
+    scene.fill(
+        Rect {
+            x: area.x,
+            y: head,
+            w: area.w,
+            h: layout.px(1.),
+        },
+        palette.rule,
+    );
+    let text_y = |y: i32| y + (row_h - line_h) / 2;
+    scene.text(at(0), text_y(head), "AT HOME", palette.text_muted, true);
+    scene.text(
+        at(ROSTER_CHARS - 3),
+        text_y(head),
+        format!("{:>3}", home.len()),
+        palette.text_muted,
+        false,
+    );
+    let listed = home_rows - 1;
+    let named = if home.len() > listed {
+        listed.saturating_sub(1)
+    } else {
+        home.len()
+    };
+    for (index, entry) in home.iter().take(named).enumerate() {
+        let y = head + (index as i32 + 1) * row_h;
+        let row = Rect {
+            x: area.x + layout.px(1.),
+            y,
+            w: area.w - layout.px(2.),
+            h: row_h,
+        };
+        scene.home_rows.push((row, entry.id));
+        let hovered = den.home_hovered() == Some(entry.id);
+        if hovered {
+            scene.fill(row, palette.raised);
+        }
+        // An outline for a swatch: its lion is not in the room.
+        let side = unit * 7;
+        let (sx, sy) = (at(0) + unit, y + (row_h - side) / 2);
+        scene.fill(
+            Rect {
+                x: sx - layout.px(1.),
+                y: sy - layout.px(1.),
+                w: side + layout.px(2.),
+                h: side + layout.px(2.),
+            },
+            entry.tint,
+        );
+        scene.fill(
+            Rect {
+                x: sx,
+                y: sy,
+                w: side,
+                h: side,
+            },
+            palette.paper,
+        );
+        scene.text(
+            at(3),
+            text_y(y),
+            clip(&entry.name, 18),
+            palette.text_muted,
+            false,
+        );
+        scene.text(
+            at(ROSTER_CHARS - 4),
+            text_y(y),
+            "WAKE",
+            if hovered {
+                palette.signal
+            } else {
+                palette.text_muted
+            },
+            hovered,
+        );
+    }
+    if named < home.len() {
+        let y = head + (named as i32 + 1) * row_h;
+        scene.text(
+            at(0),
+            text_y(y),
+            format!("+{} more at home", home.len() - named),
+            palette.text_muted,
+            false,
+        );
+    }
 }
 
 /// The width of the truth card, in characters.
 pub const CARD_CHARS: usize = 40;
 /// How many rows of detail the truth card shows at most.
 pub const CARD_DETAIL_ROWS: usize = 4;
+/// How many rows the host's notes take on the truth card at most.
+pub const CARD_NOTES: usize = 22;
+/// How many rows what the user is asked takes at most.
+pub const CARD_ASKED_ROWS: usize = 5;
+/// How many sessions at home the roster names at most.
+pub const HOME_ROWS: usize = 3;
 
 /// Breaks a text into rows of at most `chars` characters, at spaces when it
 /// can and inside a word when it must, so that nothing of it is lost but
@@ -962,32 +1223,43 @@ fn truth_card(
     others: &[Actor],
     layout: &Layout,
     palette: &DenPalette,
+    boxes: Option<Boxes<'_>>,
 ) {
     let pad = layout.px(10.);
     let char_w = layout.metrics.char_w;
     let line_h = layout.metrics.line_h.ceil() as i32;
     let limit = (((layout.field.w - pad * 4) as f32 / char_w) as usize).clamp(16, CARD_CHARS);
 
+    // A line and how long it is kept when the card has no room: what the
+    // lion is and does stays, what it asks goes last, the summary first.
+    #[derive(Clone, Copy, PartialEq, PartialOrd)]
+    enum Keep {
+        Summary,
+        Asked,
+        Always,
+    }
     let title = format!(
         "{}  Lv.{}",
         clip(&card.name, limit.saturating_sub(9)),
         card.level
     );
-    let mut lines: Vec<(String, Hsla, bool)> = vec![(title, palette.text, true)];
+    let mut lines: Vec<(String, Hsla, bool, Keep)> =
+        vec![(title, palette.text, true, Keep::Always)];
     let state_color = card
         .status
         .map_or(palette.text_muted, |status| status_color(palette, status));
-    lines.push((clip(card.label, limit), state_color, false));
+    lines.push((clip(card.label, limit), state_color, false, Keep::Always));
     if let Some(parent) = &card.parent {
         lines.push((
             clip(&format!("Sub-agent of {parent}"), limit),
             palette.text_muted,
             false,
+            Keep::Always,
         ));
     }
     if let Some(detail) = &card.detail {
         for row in wrap_detail(detail, limit, CARD_DETAIL_ROWS) {
-            lines.push((row, palette.text, false));
+            lines.push((row, palette.text, false, Keep::Always));
         }
     }
     if card.mystery {
@@ -995,29 +1267,59 @@ fn truth_card(
             clip("No transcript: only working or quiet.", limit),
             palette.text_muted,
             false,
+            Keep::Always,
         ));
     }
+    // The host's own lines: what the lion asks, then the summary in groups.
+    let core = lines.len();
+    for note in &card.notes {
+        let (rows, color, bold, keep) = match note.tone {
+            NoteTone::Urgent => (CARD_ASKED_ROWS, palette.text, false, Keep::Asked),
+            NoteTone::Heading => (1, palette.text_muted, true, Keep::Summary),
+            NoteTone::Plain => (2, palette.text_muted, false, Keep::Summary),
+        };
+        for row in wrap_detail(&note.text, limit, rows) {
+            if lines.len() - core < CARD_NOTES {
+                lines.push((row, color, bold, keep));
+            }
+        }
+    }
 
-    let widest = lines
-        .iter()
-        .map(|(text, _, _)| text.chars().count())
-        .max()
-        .unwrap_or(0);
-    let w = (char_w * widest as f32).ceil() as i32 + pad * 2;
-    let h = line_h * lines.len() as i32 + pad * 2;
     let unit = layout.unit;
+    // A lion that the picture does not show is taken to be in its middle.
+    let lost = Rect {
+        x: layout.map.x + layout.map.w / 2,
+        y: layout.map.y + layout.map.h / 2,
+        w: 1,
+        h: 1,
+    };
     let (left, top, cub_w, cub_h) = actor.bounds();
-    let cub = Rect {
-        x: layout.map.x + left * unit,
-        y: layout.map.y + top * unit,
-        w: cub_w * unit,
-        h: cub_h * unit,
+    let cub = match boxes {
+        Some(boxes) => boxes(actor.id).unwrap_or(lost),
+        None => Rect {
+            x: layout.map.x + left * unit,
+            y: layout.map.y + top * unit,
+            w: cub_w * unit,
+            h: cub_h * unit,
+        },
     };
     // Where it covers the least: over the lion, under it, or at a side,
     // never on the lion itself, and on as little of the other lions, their
     // bubbles and their names as can be.
     let margin = layout.px(6.);
     let around = |actor: &Actor, bubble: i32, name: i32| {
+        if let Some(boxes) = boxes {
+            // The same room for a bubble over it and a name under it, in
+            // the pixels of the view.
+            let rect = boxes(actor.id).unwrap_or(lost);
+            let (side, over, under) = (layout.px(8.), layout.px(20.), layout.px(24.));
+            return Rect {
+                x: rect.x - side,
+                y: rect.y - over,
+                w: rect.w + side * 2,
+                h: rect.h + over + under,
+            };
+        }
         let (left, top, w, h) = actor.bounds();
         Rect {
             x: layout.map.x + (left - 8) * unit,
@@ -1037,36 +1339,116 @@ fn truth_card(
         let high = (a.y + a.h).min(b.y + b.h) - a.y.max(b.y);
         i64::from(wide.max(0)) * i64::from(high.max(0))
     };
-    let (min_x, max_x) = (
-        layout.field.x + margin,
-        (layout.field.x + layout.field.w - w - margin).max(layout.field.x + margin),
+    // The middle half of the room, each way.
+    let middle = Rect {
+        x: layout.field.x + layout.field.w / 4,
+        y: layout.view.h / 4,
+        w: layout.field.w / 2,
+        h: layout.view.h / 2,
+    };
+    // The best place for a card of these lines, and how much of its own
+    // lion it would cover there.
+    let place = |lines: &[(String, Hsla, bool, Keep)]| {
+        let widest = lines
+            .iter()
+            .map(|(text, ..)| text.chars().count())
+            .max()
+            .unwrap_or(0);
+        let w = (char_w * widest as f32).ceil() as i32 + pad * 2;
+        let h = line_h * lines.len() as i32 + pad * 2;
+        let (min_x, max_x) = (
+            layout.field.x + margin,
+            (layout.field.x + layout.field.w - w - margin).max(layout.field.x + margin),
+        );
+        let (min_y, max_y) = (margin, (layout.view.h - h - margin).max(margin));
+        let centre_x = cub.x + cub.w / 2 - w / 2;
+        let centre_y = cub.y + cub.h / 2 - h / 2;
+        let field_area = i64::from(layout.field.w) * i64::from(layout.view.h);
+        // A card that is large for the room may also stand in a corner of
+        // it, away from its lion: the corners of the room are its emptiest
+        // parts, and the selected lion is marked where it stands.
+        let large = i64::from(w) * i64::from(h) * 5 > field_area;
+        let corners = [
+            (min_x, min_y),
+            (max_x, min_y),
+            (min_x, max_y),
+            (max_x, max_y),
+        ];
+        let (x, y) = [
+            (centre_x, own.y - h),
+            (centre_x, own.y + own.h),
+            (own.x + own.w, centre_y),
+            (own.x - w, centre_y),
+            (own.x + own.w, own.y - h),
+            (own.x - w, own.y - h),
+            (own.x + own.w, own.y + own.h - h),
+            (own.x - w, own.y + own.h - h),
+            (own.x + own.w, own.y),
+            (own.x - w, own.y),
+        ]
+        .into_iter()
+        .chain(corners.into_iter().filter(|_| large))
+        .map(|(x, y)| (x.clamp(min_x, max_x), y.clamp(min_y, max_y)))
+        .min_by_key(|(x, y)| {
+            let card = Rect { x: *x, y: *y, w, h };
+            // Its own lion counts for much more than anybody else, and the
+            // middle of the room, where most of it is, for a little.
+            overlap(card, own) * 16
+                + others
+                    .iter()
+                    .map(|other| overlap(card, *other))
+                    .sum::<i64>()
+                + overlap(card, middle) / 8
+        })
+        .unwrap_or((centre_x, own.y - h));
+        let rect = Rect { x, y, w, h };
+        // A card is a note beside its lion, not a page over the room: it
+        // takes two thirds of the view's height at most, and a third of
+        // the room.
+        let fits = h <= layout.view.h * 2 / 3 && i64::from(w) * i64::from(h) * 3 <= field_area;
+        (rect, overlap(rect, own) > 0 || !fits)
+    };
+    // A card that would cover its lion, or that is too high for the view,
+    // says less: the summary goes from its end, then what is asked, and the
+    // card says that there is more.
+    let more = (
+        "\u{2026}".to_owned(),
+        palette.text_muted,
+        false,
+        Keep::Always,
     );
-    let (min_y, max_y) = (margin, (layout.view.h - h - margin).max(margin));
-    let centre_x = cub.x + cub.w / 2 - w / 2;
-    let centre_y = cub.y + cub.h / 2 - h / 2;
-    let (x, y) = [
-        (centre_x, own.y - h),
-        (centre_x, own.y + own.h),
-        (own.x + own.w, centre_y),
-        (own.x - w, centre_y),
-        (own.x + own.w, own.y - h),
-        (own.x - w, own.y - h),
-    ]
-    .into_iter()
-    .map(|(x, y)| (x.clamp(min_x, max_x), y.clamp(min_y, max_y)))
-    .min_by_key(|(x, y)| {
-        let card = Rect { x: *x, y: *y, w, h };
-        // Its own lion counts for much more than anybody else.
-        overlap(card, own) * 16
-            + others
-                .iter()
-                .map(|other| overlap(card, *other))
-                .sum::<i64>()
-    })
-    .unwrap_or((centre_x, own.y - h));
-    let rect = Rect { x, y, w, h };
+    let mut cut = false;
+    let rect = loop {
+        let mut shown = lines.clone();
+        if cut {
+            shown.push(more.clone());
+        }
+        let (rect, covers) = place(&shown);
+        let droppable = lines
+            .iter()
+            .rposition(|line| line.3 == Keep::Summary)
+            .or_else(|| lines.iter().rposition(|line| line.3 == Keep::Asked));
+        match droppable.filter(|_| covers) {
+            Some(at) => {
+                lines.remove(at);
+                // A heading with nothing left under it says nothing.
+                while lines
+                    .last()
+                    .is_some_and(|line| line.2 && line.3 == Keep::Summary)
+                {
+                    lines.pop();
+                }
+                cut = true;
+            }
+            None => {
+                lines = shown;
+                break rect;
+            }
+        }
+    };
+    let Rect { x, y, .. } = rect;
     frame_box(scene, rect, layout, palette);
-    for (index, (text, color, bold)) in lines.into_iter().enumerate() {
+    for (index, (text, color, bold, _)) in lines.into_iter().enumerate() {
         scene.text(x + pad, y + pad + index as i32 * line_h, text, color, bold);
     }
 }

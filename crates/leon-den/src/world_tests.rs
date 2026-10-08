@@ -5,11 +5,11 @@ use std::collections::HashSet;
 
 use crate::layout::{DenLayout, Placed};
 use crate::pose::{Facing, TILE};
-use crate::prefabs::{default_layout, prefabs};
+use crate::prefabs::{prefabs, small_office};
 use crate::world::{Ground, Place, Tile, World};
 
 fn office() -> World {
-    World::build(&default_layout())
+    World::build(&small_office())
 }
 
 fn bare(cols: i32, rows: i32, pieces: &[Placed]) -> DenLayout {
@@ -140,15 +140,15 @@ fn a_little_seat_is_a_little_ones_and_without_one_they_borrow_a_desk() {
         Tile::new(4, 5)
     );
 
-    let without = World::build(&default_layout_without("wooden_bench"));
+    let without = World::build(&small_office_without("wooden_bench"));
     assert!(without.spots(Place::Bench).is_empty());
     assert!(without.missing().contains(&Place::Bench));
     let borrowed = without.claim(Place::Bench, &HashSet::new());
     assert_eq!(borrowed, without.spots(Place::Desks)[0]);
 }
 
-fn default_layout_without(id: &str) -> DenLayout {
-    let mut room = default_layout();
+fn small_office_without(id: &str) -> DenLayout {
+    let mut room = small_office();
     room.items.retain(|piece| piece.id != id);
     room
 }
@@ -161,7 +161,7 @@ fn a_lion_stands_in_front_of_what_it_uses_looking_at_it() {
         (Place::Board, "whiteboard"),
         (Place::Rack, "rack"),
     ] {
-        let room = default_layout();
+        let room = small_office();
         let piece = room.items.iter().find(|item| item.id == piece).unwrap();
         let spot = world.spots(place)[0];
         assert_eq!(spot.facing, Facing::Up, "{place:?}");
@@ -239,7 +239,7 @@ fn a_room_says_what_it_lacks_and_works_without_it() {
         assert_ne!(spot.tile, empty.door);
     }
     assert_eq!(office().missing(), Vec::<Place>::new());
-    let no_shelf = World::build(&default_layout_without("double_bookshelf"));
+    let no_shelf = World::build(&small_office_without("double_bookshelf"));
     assert_eq!(no_shelf.missing(), vec![Place::Shelf]);
 }
 
@@ -364,7 +364,7 @@ fn with_the_whole_floor_taken_two_lions_share_a_tile_rather_than_vanish() {
 
 #[test]
 fn the_furniture_is_sorted_back_to_front_and_what_is_on_a_table_comes_after_it() {
-    let room = default_layout();
+    let room = small_office();
     let world = World::build(&room);
     let items = world.items();
     assert!(items.windows(2).all(|pair| pair[0].z <= pair[1].z));
@@ -415,7 +415,7 @@ fn the_backdrop_is_the_size_of_the_map_with_a_floor_under_every_floor_tile() {
         }
     }
     // A carpet is another floor on its tiles, and only there.
-    let mut plain = default_layout();
+    let mut plain = small_office();
     plain.carpets.clear();
     let bare = World::build(&plain);
     let differs = |tile: Tile| {

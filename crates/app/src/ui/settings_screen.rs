@@ -1300,6 +1300,9 @@ impl Shell {
         let key = def.key;
         let modified = settings::is_modified(cx, def);
         let value = settings::value_opt(cx, key);
+        // What a setting cannot do here is said under it, not left to be
+        // found out.
+        let note = (key == "den_3d").then(|| self.den_fallback(cx)).flatten();
         let editing = self
             .settings_ui
             .edit
@@ -1498,7 +1501,16 @@ impl Shell {
                             .text_size(metrics::TEXT_SMALL())
                             .text_color(colours.text_muted)
                             .child(def.description),
-                    ),
+                    )
+                    .when_some(note, |this, note| {
+                        this.child(
+                            div()
+                                .debug_selector(move || format!("settings-note-{key}"))
+                                .text_size(metrics::TEXT_SMALL())
+                                .text_color(colours.warning)
+                                .child(note),
+                        )
+                    }),
             )
             .child(
                 div()

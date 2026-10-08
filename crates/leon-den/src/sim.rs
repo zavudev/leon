@@ -152,6 +152,70 @@ pub struct RosterEntry {
     pub little: bool,
     /// It is the selected cub.
     pub selected: bool,
+    /// The pointer is on it, in the room or on its row.
+    pub hovered: bool,
+    /// It needs the user: it waits, asks for a permission, or fainted.
+    pub needs: bool,
+}
+
+/// A session that was sent home and can be woken: a row of the roster's
+/// "at home" part. The host says who they are ([`Den::set_home`]); the Den
+/// draws no lion for them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HomeEntry {
+    /// What the host knows it by: handed back when it is to be woken.
+    pub id: u64,
+    /// Its name, as the session is called.
+    pub name: String,
+    /// The colour of its agent.
+    pub tint: Hsla,
+}
+
+/// How a line of the host's on a truth card is to be read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NoteTone {
+    /// A fact.
+    Plain,
+    /// The name of the group of facts that follows.
+    Heading,
+    /// What the user is asked: it stands out, and is the last to be left
+    /// out of a card that has no room.
+    Urgent,
+}
+
+/// A line the host adds to a truth card.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Note {
+    /// What it says.
+    pub text: String,
+    /// How it is to be read.
+    pub tone: NoteTone,
+}
+
+impl Note {
+    /// A fact.
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            tone: NoteTone::Plain,
+        }
+    }
+
+    /// The name of a group of facts.
+    pub fn heading(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            tone: NoteTone::Heading,
+        }
+    }
+
+    /// What the user is asked.
+    pub fn urgent(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            tone: NoteTone::Urgent,
+        }
+    }
 }
 
 /// The plain truth about one cub: what the joke was about.
@@ -175,6 +239,9 @@ pub struct TruthCard {
     pub mystery: bool,
     /// The status colour of its state, if it has one.
     pub status: Option<Status>,
+    /// What the host adds under it, a line each: what it asks, and a
+    /// summary of the session in groups.
+    pub notes: Vec<Note>,
 }
 
 /// How many lions wait in line at the entrance: the rest wait at their
@@ -248,6 +315,29 @@ impl Body {
             // It is on a tile until it has left it.
             if part == 0 { from } else { to },
             Some(from.facing_to(to)),
+        )
+    }
+
+    /// Where it is at a time between two ticks: its column and its row,
+    /// with the part of the step it has made. The same walk as
+    /// [`Self::position`], without the steps of the pixel art.
+    fn glide(&self, ticks: f64) -> (f32, f32) {
+        let first = self.path.first().copied().unwrap_or(self.spot.tile);
+        let depart = self.depart as f64;
+        if ticks < depart || self.path.len() < 2 {
+            return (first.x as f32, first.y as f32);
+        }
+        let steps = (ticks - depart) / STEP_TICKS as f64;
+        let index = steps.floor() as usize;
+        if index + 1 >= self.path.len() {
+            let last = self.path[self.path.len() - 1];
+            return (last.x as f32, last.y as f32);
+        }
+        let (from, to) = (self.path[index], self.path[index + 1]);
+        let part = (steps - index as f64) as f32;
+        (
+            from.x as f32 + (to.x - from.x) as f32 * part,
+            from.y as f32 + (to.y - from.y) as f32 * part,
         )
     }
 
@@ -376,6 +466,14 @@ pub struct Den {
     plain: bool,
     selected: Option<u64>,
     hovered: Option<u64>,
+    /// What the host adds to the truth card of each cub.
+    notes: HashMap<u64, Vec<Note>>,
+    /// The sessions that were sent home, as the host last said.
+    home: Vec<HomeEntry>,
+    /// The row of the "at home" part the pointer is on.
+    home_hovered: Option<u64>,
+    /// The keys of the Den, while they are shown: what each does.
+    keys: Option<Vec<(String, String)>>,
     /// How many times each kind of line was said of each cub: what turns
     /// the templates.
     said: HashMap<(u64, u8), u64>,
@@ -409,6 +507,10 @@ impl Den {
             plain: false,
             selected: None,
             hovered: None,
+            notes: HashMap::new(),
+            home: Vec::new(),
+            home_hovered: None,
+            keys: None,
             said: HashMap::new(),
             mood: Some((Mood::Empty, Duration::ZERO)),
         }
@@ -1243,14 +1345,109 @@ impl Den {
         }
     }
 
+    /// Where every lion that is drawn is at a time, in tiles and parts of
+    /// a tile: its id, its column and its row. A walk is continuous here,
+    /// where a [`Frame`] steps it a quarter of a tile at a time: what a
+    /// picture drawn more often than ten times a second moves its lions by.
+    pub fn glide(&self, now: Duration) -> Vec<(u64, f32, f32)> {
+        let tick = tick_of(now);
+        let ticks = now.as_secs_f64() / TICK.as_secs_f64();
+        self.bodies
+            .iter()
+            .filter(|body| !(body.leaving && body.settled(tick)))
+            .map(|body| {
+                let (x, y) = if self.reduced {
+                    let (_, _, tile, _) = body.position(tick);
+                    (tile.x as f32, tile.y as f32)
+                } else {
+                    body.glide(ticks)
+                };
+                (body.cub.id, x, y)
+            })
+            .collect()
+    }
+
+    /// Whether a lion is on its way somewhere at this time.
+    pub fn walking(&self, now: Duration) -> bool {
+        let tick = tick_of(now);
+        !self.reduced
+            && self.bodies.iter().any(|body| {
+                tick >= body.depart
+                    && body.path.len() >= 2
+                    && !body.settled(tick)
+                    && !body.in_egg(tick)
+            })
+    }
+
+    /// The lions that need the user, the most pressing first
+    /// ([`CubState::needs_user`]) and, of those as pressing, the one that
+    /// has needed them longest. A little one is its parent's business and is
+    /// never listed.
+    pub fn needy(&self) -> Vec<u64> {
+        let mut needy: Vec<(u8, Duration, usize, u64)> = self
+            .bodies
+            .iter()
+            .enumerate()
+            .filter(|(_, body)| !body.leaving && !self.is_little(body))
+            .filter_map(|(place, body)| {
+                Some((body.cub.state.needs_user()?, body.since, place, body.cub.id))
+            })
+            .collect();
+        needy.sort();
+        needy.into_iter().map(|(_, _, _, id)| id).collect()
+    }
+
+    /// Whether a body is a little one whose parent is in the den.
+    fn is_little(&self, body: &Body) -> bool {
+        body.cub.parent.is_some_and(|parent| {
+            self.bodies
+                .iter()
+                .any(|other| other.cub.id == parent && !other.leaving)
+        })
+    }
+
+    /// Selects the next lion that needs the user, after the selected one and
+    /// around the end; the most pressing when the selected one is not among
+    /// them. It answers who is selected now: `None`, and nothing changes,
+    /// when nobody needs the user.
+    pub fn select_needy(&mut self) -> Option<u64> {
+        let needy = self.needy();
+        let first = *needy.first()?;
+        let at = self.selected.and_then(|selected| {
+            // A little one stands where its parent does.
+            let lion = self
+                .bodies
+                .iter()
+                .find(|body| body.cub.id == selected)
+                .and_then(|body| body.cub.parent.filter(|_| self.is_little(body)))
+                .unwrap_or(selected);
+            needy.iter().position(|id| *id == lion)
+        });
+        self.selected = Some(match at {
+            Some(at) => needy[(at + 1) % needy.len()],
+            None => first,
+        });
+        self.selected
+    }
+
     /// The cubs in the order of the roster, which is the order the keyboard
-    /// walks them in: each cub in the order it came, followed by its little
-    /// ones.
+    /// walks them in: those that need the user first ([`Self::needy`]), then
+    /// the others in the order they came; each followed by its little ones.
     pub fn order(&self) -> Vec<u64> {
         let here: Vec<&Body> = self.bodies.iter().filter(|body| !body.leaving).collect();
         let is_here = |id: u64| here.iter().any(|body| body.cub.id == id);
+        let needy = self.needy();
+        let mut lions: Vec<&Body> = needy
+            .iter()
+            .filter_map(|id| here.iter().copied().find(|body| body.cub.id == *id))
+            .collect();
+        lions.extend(
+            here.iter()
+                .copied()
+                .filter(|body| !needy.contains(&body.cub.id)),
+        );
         let mut order = Vec::with_capacity(here.len());
-        for body in &here {
+        for body in &lions {
             // A little one whose parent is gone is listed on its own.
             if body.cub.parent.is_some_and(is_here) {
                 continue;
@@ -1284,6 +1481,8 @@ impl Den {
                         .parent
                         .is_some_and(|parent| self.bodies.iter().any(|b| b.cub.id == parent)),
                     selected: self.selected == Some(cub.id),
+                    hovered: self.hovered == Some(cub.id),
+                    needs: cub.parent.is_none() && cub.state.needs_user().is_some(),
                 }
             })
             .collect()
@@ -1314,7 +1513,61 @@ impl Den {
             }),
             mystery: cub.mystery,
             status: cub.state.status(),
+            notes: self.notes.get(&id).cloned().unwrap_or_default(),
         })
+    }
+
+    /// Sets what the host adds to the truth cards, by cub. It answers
+    /// whether anything changed.
+    pub fn set_notes(&mut self, notes: HashMap<u64, Vec<Note>>) -> bool {
+        let changed = self.notes != notes;
+        self.notes = notes;
+        changed
+    }
+
+    /// Says which sessions were sent home and can be woken. It answers
+    /// whether anything changed.
+    pub fn set_home(&mut self, home: Vec<HomeEntry>) -> bool {
+        let changed = self.home != home;
+        if self
+            .home_hovered
+            .is_some_and(|id| !home.iter().any(|entry| entry.id == id))
+        {
+            self.home_hovered = None;
+        }
+        self.home = home;
+        changed
+    }
+
+    /// The sessions that were sent home.
+    pub fn home(&self) -> &[HomeEntry] {
+        &self.home
+    }
+
+    /// The row of the "at home" part the pointer is on.
+    pub fn home_hovered(&self) -> Option<u64> {
+        self.home_hovered
+    }
+
+    /// Tells the den which row of the "at home" part the pointer is on. It
+    /// answers whether that changed.
+    pub fn hover_home(&mut self, id: Option<u64>) -> bool {
+        let changed = self.home_hovered != id;
+        self.home_hovered = id;
+        changed
+    }
+
+    /// Shows the keys of the Den over the room, each with what it does, or
+    /// takes them away. It answers whether anything changed.
+    pub fn set_keys(&mut self, keys: Option<Vec<(String, String)>>) -> bool {
+        let changed = self.keys != keys;
+        self.keys = keys;
+        changed
+    }
+
+    /// The keys of the Den, while they are shown.
+    pub fn keys(&self) -> Option<&[(String, String)]> {
+        self.keys.as_deref()
     }
 
     /// The selected cub.

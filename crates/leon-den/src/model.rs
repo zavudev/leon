@@ -136,6 +136,19 @@ impl CubState {
         )
     }
 
+    /// How pressing it is that the user looks at a session in this state:
+    /// `None` when it does not need them, else a rank, the lower the more
+    /// pressing. A permission prompt holds a turn up; a session that waits
+    /// has finished or asks; one that fainted is over and can only be read.
+    pub fn needs_user(self) -> Option<u8> {
+        match self {
+            CubState::NeedsPermission => Some(0),
+            CubState::WaitingForUser => Some(1),
+            CubState::Fainted => Some(2),
+            _ => None,
+        }
+    }
+
     /// The status colour the state carries in the rest of the app, if any.
     pub fn status(self) -> Option<Status> {
         match self {

@@ -361,9 +361,18 @@ mod tests {
         ]
     }
 
+    /// What the user wrote in a line of [`claude_lines::prompt`].
+    fn heard(text: &str) -> Beat {
+        Beat::Heard {
+            text: text.into(),
+            at: Some(1_772_359_200),
+        }
+    }
+
     fn turn_beats() -> Vec<Beat> {
         vec![
             Beat::Prompt,
+            heard("what does main do"),
             Beat::Thinking,
             Beat::Usage {
                 context: 1000,
@@ -375,6 +384,11 @@ mod tests {
                 name: "Read".into(),
                 kind: ToolKind::Read,
                 detail: "main.rs".into(),
+            },
+            Beat::Brief {
+                id: "t1".into(),
+                text: "/srv/api/src/main.rs".into(),
+                options: Vec::new(),
             },
             Beat::ToolFinished {
                 id: "t1".into(),
@@ -416,7 +430,7 @@ mod tests {
         let mut tail = Tail::new(Format::Claude);
         assert_eq!(tail.feed(head), []);
         assert_eq!(tail.feed(&[]), []);
-        assert_eq!(tail.feed(end), [Beat::Prompt]);
+        assert_eq!(tail.feed(end), [Beat::Prompt, heard("hello")]);
     }
 
     #[test]
@@ -427,7 +441,10 @@ mod tests {
         bytes.extend_from_slice(b"\n   \n\r\n");
         bytes.extend_from_slice(&lines(&[claude_lines::system("turn_duration")]));
         let mut tail = Tail::new(Format::Claude);
-        assert_eq!(tail.feed(&bytes), [Beat::Prompt, Beat::TurnEnded]);
+        assert_eq!(
+            tail.feed(&bytes),
+            [Beat::Prompt, heard("first"), Beat::TurnEnded]
+        );
         assert_eq!(tail.malformed(), 2);
     }
 
@@ -455,6 +472,7 @@ mod tests {
             second,
             [
                 Beat::Prompt,
+                heard("and now?"),
                 Beat::Said {
                     text: "Still done.".into(),
                     at: Some(1_772_359_200),
@@ -470,7 +488,7 @@ mod tests {
         let first_break = bytes.iter().position(|byte| *byte == b'\n').unwrap();
         let mut tail = Tail::mid_file(Format::Claude);
         let beats = tail.feed(&bytes[first_break / 2..]);
-        assert_eq!(beats, turn_beats()[1..]);
+        assert_eq!(beats, turn_beats()[2..]);
         assert_eq!(tail.malformed(), 0);
     }
 
@@ -485,7 +503,7 @@ mod tests {
         assert!(tail.skipping);
         let mut rest = b"still the long line\n".to_vec();
         rest.extend_from_slice(&lines(&[claude_lines::prompt("after")]));
-        assert_eq!(tail.feed(&rest), [Beat::Prompt]);
+        assert_eq!(tail.feed(&rest), [Beat::Prompt, heard("after")]);
         assert_eq!(tail.malformed(), 1);
     }
 
@@ -505,9 +523,10 @@ mod tests {
         ]);
         assert_eq!(Tail::new(Format::Claude).feed(&bytes), []);
         let beats = Tail::new(Format::ClaudeSubagent).feed(&bytes);
-        assert_eq!(beats.len(), 3);
+        assert_eq!(beats.len(), 4);
+        assert_eq!(beats[1], heard("map the parser"));
         assert!(matches!(
-            beats[1],
+            beats[2],
             Beat::ToolStarted {
                 kind: ToolKind::Search,
                 ..
@@ -634,7 +653,7 @@ mod tests {
         fs::write(&path, lines(&[claude_lines::prompt("a new file")])).unwrap();
         let polled = follower.poll().unwrap();
         assert!(polled.restarted);
-        assert_eq!(polled.beats, [Beat::Prompt]);
+        assert_eq!(polled.beats, [Beat::Prompt, heard("a new file")]);
     }
 
     #[test]
@@ -651,14 +670,18 @@ mod tests {
 
         let window = last.len() as u64 + 10;
         let mut follower = Follower::new(&path, Format::Claude, Start::Recent(window));
-        assert_eq!(follower.poll().unwrap().beats, [Beat::Prompt]);
+        assert_eq!(
+            follower.poll().unwrap().beats,
+            [Beat::Prompt, heard("the newest prompt")]
+        );
         assert_eq!(follower.tail().malformed(), 0);
 
         // A window larger than the file reads all of it.
         let mut whole = Follower::new(&path, Format::Claude, Start::Recent(u64::MAX));
-        // Seven beats for the first turn, six for each later one (its token
-        // numbers repeat the previous ones), and the last prompt.
-        assert_eq!(whole.poll().unwrap().beats.len(), 7 + 49 * 6 + 1);
+        // Nine beats for the first turn, eight for each later one (its token
+        // numbers repeat the previous ones), and the last prompt with its
+        // words.
+        assert_eq!(whole.poll().unwrap().beats.len(), 9 + 49 * 8 + 2);
     }
 
     #[test]

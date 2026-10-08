@@ -31,7 +31,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
 use serde_json::Value;
 
-use super::beat::{detail, seconds, speech, Beat, TaskOutcome, ToolKind};
+use super::beat::{detail, heard, seconds, speech, Beat, TaskOutcome, ToolKind};
 
 /// The stop reasons after which the model waits for the user.
 const TURN_ENDING: [&str; 3] = ["end_turn", "stop_sequence", "refusal"];
@@ -253,12 +253,16 @@ fn read_assistant(line: Line, out: &mut Vec<Beat>) {
                         conclusive = true;
                         let name = block.name.unwrap_or_default();
                         let kind = ToolKind::of(&name);
+                        let id = block.id.unwrap_or_default();
+                        let detail = detail(kind, block.input.as_ref());
+                        let brief = Beat::brief_of(&id, kind, &name, block.input.as_ref(), &detail);
                         out.push(Beat::ToolStarted {
-                            id: block.id.unwrap_or_default(),
-                            detail: detail(kind, block.input.as_ref()),
+                            id,
+                            detail,
                             name,
                             kind,
                         });
+                        out.extend(brief);
                     }
                     _ => {}
                 }
@@ -299,6 +303,7 @@ fn read_user(line: Line, out: &mut Vec<Beat>) {
         .tool_use_result
         .as_ref()
         .and_then(ToolUseResult::launched);
+    let at = seconds(line.timestamp.as_deref());
     let mut text: Option<String> = None;
     let mut results = false;
     match line.message.and_then(|message| message.content) {
@@ -335,9 +340,36 @@ fn read_user(line: Line, out: &mut Vec<Beat>) {
         // Text the harness injected: neither the user nor a new turn.
     } else if text.starts_with(INTERRUPTED) {
         out.push(Beat::Interrupted);
-    } else if !LOCAL_PREFIXES.iter().any(|prefix| text.starts_with(prefix)) {
+    } else if LOCAL_PREFIXES.iter().any(|prefix| text.starts_with(prefix)) {
+        // A command of the interface opens no turn by itself, but one typed
+        // with words after it is something the user said.
+        if let Some(words) = typed_command(text) {
+            out.push(Beat::Heard { text: words, at });
+        }
+    } else {
         out.push(Beat::Prompt);
+        let words = heard(text);
+        if !words.is_empty() {
+            out.push(Beat::Heard { text: words, at });
+        }
     }
+}
+
+/// A slash command as the user typed it, `/goal ship it`, when the line
+/// records one that was given words. A bare command (`/clear`) says nothing.
+fn typed_command(text: &str) -> Option<String> {
+    let inside = |tag: &str| {
+        let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+        let from = text.find(&open)? + open.len();
+        let to = from + text[from..].find(&close)?;
+        Some(text[from..to].trim())
+    };
+    let name = inside("command-name").filter(|name| !name.is_empty())?;
+    let words = heard(inside("command-args")?);
+    (!words.is_empty()).then(|| {
+        let slash = if name.starts_with('/') { "" } else { "/" };
+        speech(&format!("{slash}{name} {words}"))
+    })
 }
 
 fn read_result(block: Block, launched: Option<&str>) -> Beat {
@@ -522,12 +554,150 @@ mod tests {
     }
 
     #[test]
+    fn only_what_the_user_typed_is_heard() {
+        let said = |line: &Value| -> Vec<String> {
+            beats(line)
+                .into_iter()
+                .filter_map(|beat| match beat {
+                    Beat::Heard { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+        // A picture leaves a marker in the text: it is not a word.
+        assert_eq!(
+            said(&prompt("[Image #1] the mane is wrong here [Image #2]")),
+            ["the mane is wrong here"]
+        );
+        assert_eq!(said(&prompt("look [Image #3] again")), ["look again"]);
+        // A picture alone is a prompt without words.
+        assert_eq!(beats(&prompt("[Image #7]")), [Beat::Prompt]);
+        // What only looks like a marker is kept.
+        assert_eq!(
+            said(&prompt("see [Image #x] there")),
+            ["see [Image #x] there"]
+        );
+        // A paste is named, not quoted.
+        assert_eq!(
+            said(&prompt(
+                "<pasted_content id=\"00a7\">\nerror[E0308]: mismatched types\n</pasted_content>\nwhy does this fail?"
+            )),
+            ["[pasted text]\nwhy does this fail?"]
+        );
+        assert_eq!(
+            said(&prompt(
+                "<pasted_content id=\"0136\">\n# Notes\n</pasted_content>"
+            )),
+            ["[pasted text]"]
+        );
+        // A command typed with words is what the user said, and opens no
+        // turn by itself; a bare one says nothing.
+        let mut goal = prompt(
+            "<command-name>/goal</command-name>\n            <command-message>goal</command-message>\n            <command-args>ship the den</command-args>",
+        );
+        goal.as_object_mut().unwrap().remove("origin");
+        assert_eq!(
+            beats(&goal),
+            [Beat::Heard {
+                text: "/goal ship the den".into(),
+                at: Some(1_772_359_200)
+            }]
+        );
+        let skill = prompt(
+            "<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>the last commit</command-args>",
+        );
+        assert_eq!(said(&skill), ["/review the last commit"]);
+        for bare in [
+            "<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>",
+            "<command-name>/memory</command-name>",
+            "<local-command-stdout>Goal set: ship the den</local-command-stdout>",
+        ] {
+            assert_eq!(beats(&prompt(bare)), [], "{bare}");
+        }
+        // What the harness wrote under the user's role is never heard.
+        for (text, meta) in [
+            (
+                "<system-reminder>\nThe user named this session</system-reminder>",
+                true,
+            ),
+            (
+                "<local-command-caveat>The command below was run</local-command-caveat>",
+                true,
+            ),
+            ("[Image: source: /tmp/shot.png]", true),
+            ("[Request interrupted by user for tool use]", false),
+        ] {
+            let mut line = prompt(text);
+            line["isMeta"] = json!(meta);
+            assert!(said(&line).is_empty(), "{text}");
+        }
+        let mut notice = prompt("<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>");
+        notice["origin"] = json!({"kind": "task-notification"});
+        assert!(said(&notice).is_empty());
+    }
+
+    #[test]
     fn a_typed_message_is_a_prompt() {
-        assert_eq!(beats(&prompt("fix the login flow")), [Beat::Prompt]);
+        // The prompt, and what it says.
+        let heard = Beat::Heard {
+            text: "fix the login flow".into(),
+            at: Some(1_772_359_200),
+        };
+        assert_eq!(
+            beats(&prompt("fix the login flow")),
+            [Beat::Prompt, heard.clone()]
+        );
         // Older versions wrote no origin.
         let mut old = prompt("fix the login flow");
         old.as_object_mut().unwrap().remove("origin");
-        assert_eq!(beats(&old), [Beat::Prompt]);
+        assert_eq!(beats(&old), [Beat::Prompt, heard]);
+    }
+
+    #[test]
+    fn a_question_comes_with_its_words_and_its_answers_and_a_plan_with_its_text() {
+        let call = tool_use(
+            "t1",
+            "AskUserQuestion",
+            json!({"questions": [
+                {"header": "Storage", "question": "Where do the  sessions\nlive?", "multiSelect": false,
+                 "options": [{"label": "SQLite", "description": "one file"},
+                             {"label": "Postgres", "description": "a server"}]},
+                {"header": "Cache", "question": "Keep a cache?", "options": []}]}),
+        );
+        let got = beats(&reply("m1", call, Some("tool_use")));
+        assert_eq!(
+            got[1],
+            Beat::Brief {
+                id: "t1".into(),
+                text: "Where do the sessions live? (and 1 more question)".into(),
+                options: vec!["SQLite".into(), "Postgres".into()]
+            }
+        );
+        let plan = tool_use(
+            "t2",
+            "ExitPlanMode",
+            json!({"plan": "1. Read it.\n2. Fix it."}),
+        );
+        assert_eq!(
+            beats(&reply("m1", plan, Some("tool_use")))[1],
+            Beat::Brief {
+                id: "t2".into(),
+                text: "1. Read it. 2. Fix it.".into(),
+                options: Vec::new()
+            }
+        );
+        // A command no longer than its caption has no brief; a long one has
+        // all of it, on one line and within the limit.
+        let short = tool_use("t3", "Bash", json!({"command": "cargo check"}));
+        assert_eq!(beats(&reply("m1", short, Some("tool_use"))).len(), 2);
+        let long = format!("rm -rf target && {}", "cargo build --release ".repeat(60));
+        let call = tool_use("t4", "Bash", json!({"command": long}));
+        let got = beats(&reply("m1", call, Some("tool_use")));
+        let Beat::Brief { text, .. } = &got[1] else {
+            panic!("{got:?}");
+        };
+        assert!(text.starts_with("rm -rf target && cargo build --release"));
+        assert_eq!(text.chars().count(), crate::live::MAX_BRIEF_CHARS);
     }
 
     #[test]
@@ -609,6 +779,12 @@ mod tests {
                     name: "Edit".into(),
                     kind: ToolKind::Edit,
                     detail: "main.rs".into()
+                },
+                // The whole path, for whoever has to allow the edit.
+                Beat::Brief {
+                    id: "t1".into(),
+                    text: "/srv/api/src/main.rs".into(),
+                    options: Vec::new()
                 },
                 usage()
             ]

@@ -484,6 +484,15 @@ const BASE: &[Def] = &[
         D::Bool(true),
     ),
     def(
+        "den_3d",
+        S::Appearance,
+        "The Den in 2.5D",
+        "Draw the room of the Den as an isometric office in the colours of the theme, with the graphics card. Off, or on a computer whose graphics card cannot do it, the Den is the pixel art; when it is on and cannot be drawn, this setting and the keys of the Den (?) say why. It takes effect at once.",
+        "den lions room isometric 3d 2.5d office gpu graphics pixel art",
+        K::Toggle,
+        D::Bool(true),
+    ),
+    def(
         "reduce_motion",
         S::Appearance,
         "Reduce motion",

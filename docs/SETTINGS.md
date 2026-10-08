@@ -25,6 +25,7 @@ How Leon looks.
 | Narrator in the Den | `den_narrator` | on, off | `on` | The Den's feed tells what the sessions do in the voice of an old creature game. Off says the same facts plainly and replaces the line at its foot with a count of the sessions that work and wait. What the agents themselves wrote is shown as it is either way. |
 | Den | `den` | text | `office` | The room the Den shows: a built-in den by its id (office, open-plan, library, server-room, lounge, nook) or one of yours by the name of its file in the dens folder, without `.json`. "Choose a den" sets it. |
 | Sessions running elsewhere in the Den | `den_elsewhere` | on, off | `on` | The Den also shows the Claude Code and Codex sessions of this computer that run in another Leon window or in a plain terminal, read from their transcripts. They are found by the same look at the processes that marks sessions running elsewhere, so this needs "Detect sessions running elsewhere". |
+| The Den in 2.5D | `den_3d` | on, off | `on` | Draw the room of the Den as an isometric office in the colours of the theme, with the graphics card. Off, or on a computer whose graphics card cannot do it, the Den is the pixel art; when it is on and cannot be drawn, this setting and the keys of the Den (?) say why. It takes effect at once. |
 | Reduce motion | `reduce_motion` | `system`, `on`, `off` | `system` | Keep the interface still: follow the system's reduce-motion preference, always reduce motion, or never. Reduced motion shows the lion at rest. |
 
 ## Terminal

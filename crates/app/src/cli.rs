@@ -134,6 +134,8 @@ pub struct Options {
     pub theme: Option<AppearanceChoice>,
     /// The theme for this run, over the saved one.
     pub theme_name: Option<ThemeId>,
+    /// Open on the Den.
+    pub den: bool,
 }
 
 /// The text printed by `--help`.
@@ -145,6 +147,7 @@ pub fn usage() -> String {
          --data-dir <path>              Keep the database and settings here\n  \
          --theme <light|dark|system>    Use this appearance for this run\n  \
          --theme-name <id>              Use this theme for this run: {names}, or a user theme's id\n  \
+         --den                          Open on The Den\n  \
          -h, --help                     Print this help\n  \
          -V, --version                  Print the version",
         name = product::PRODUCT_NAME,
@@ -221,6 +224,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
         match name.as_str() {
             "-h" | "--help" => return Ok(Command::Help),
             "-V" | "--version" => return Ok(Command::Version),
+            "--den" => options.den = true,
             "--data-dir" => {
                 let path = value("a path")?;
                 if path.is_empty() {
@@ -543,9 +547,22 @@ mod tests {
             data_dir: Some(PathBuf::from("/tmp/leon")),
             theme: None,
             theme_name: None,
+            den: false,
         }));
         assert_eq!(parsed(&["--data-dir", "/tmp/leon"]), expected);
         assert_eq!(parsed(&["--data-dir=/tmp/leon"]), expected);
+    }
+
+    #[test]
+    fn the_den_can_be_asked_for_at_the_start() {
+        assert_eq!(
+            parsed(&["--den"]),
+            Ok(Command::Run(Options {
+                den: true,
+                ..Options::default()
+            }))
+        );
+        assert!(usage().contains("--den"));
     }
 
     #[test]
@@ -556,6 +573,7 @@ mod tests {
                 data_dir: None,
                 theme: Some(AppearanceChoice::Light),
                 theme_name: None,
+                den: false,
             }))
         );
     }
@@ -568,6 +586,7 @@ mod tests {
                 data_dir: Some(PathBuf::from("d")),
                 theme: Some(AppearanceChoice::Dark),
                 theme_name: None,
+                den: false,
             }))
         );
     }
@@ -580,6 +599,7 @@ mod tests {
                 data_dir: None,
                 theme: Some(AppearanceChoice::Light),
                 theme_name: Some(ThemeId::Leon),
+                den: false,
             }))
         );
         assert_eq!(

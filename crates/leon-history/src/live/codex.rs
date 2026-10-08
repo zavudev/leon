@@ -26,9 +26,17 @@ use serde_json::value::RawValue;
 use serde_json::Value;
 
 use super::beat::{
-    base_name, detail, patched_file, seconds, speech, Beat, ToolKind, MAX_DETAIL_CHARS,
+    base_name, detail, heard, patched_file, seconds, speech, Beat, ToolKind, MAX_DETAIL_CHARS,
 };
 use crate::normalize::{clip, truncate_chars};
+
+/// How the text the harness writes for the folder's instructions opens, in
+/// a message of the user's role.
+const INJECTED_HEADING: &str = "# AGENTS.md instructions";
+
+/// The heading over what the user typed, in a message that also carries
+/// what they attached (`# Files mentioned by the user:`, `# Diff comments:`).
+const OWN_REQUEST: &str = "## My request:";
 
 /// How much of a script is searched for the tool it uses.
 const SCRIPT_HEAD_BYTES: usize = 4096;
@@ -149,6 +157,36 @@ fn read_item(item: Record, at: Option<i64>, out: &mut Vec<Beat>) {
             text: speech(&message_text(item.content.as_ref())),
             at,
         }),
+        // What the user wrote. The harness writes its own text under the
+        // same role (the instructions of the folder, the environment): a
+        // block that opens with a tag or with that heading is not theirs.
+        Some("message") if item.role.as_deref() == Some("user") => {
+            let own = |text: &&str| {
+                let text = text.trim_start();
+                !text.is_empty() && !text.starts_with('<') && !text.starts_with(INJECTED_HEADING)
+            };
+            let words = match item.content.as_ref() {
+                Some(Value::String(text)) => Some(text.as_str()).filter(own).map(str::to_owned),
+                Some(Value::Array(blocks)) => {
+                    let kept: Vec<&str> = blocks
+                        .iter()
+                        .filter_map(|block| block.get("text").and_then(Value::as_str))
+                        .filter(own)
+                        .collect();
+                    (!kept.is_empty()).then(|| kept.join("\n"))
+                }
+                _ => None,
+            };
+            // An interface that attaches files or comments writes them
+            // first and the user's own words under this heading.
+            let words = words.map(|words| match words.rfind(OWN_REQUEST) {
+                Some(at) => heard(&words[at + OWN_REQUEST.len()..]),
+                None => heard(&words),
+            });
+            if let Some(words) = words.filter(|words| !words.is_empty()) {
+                out.push(Beat::Heard { text: words, at });
+            }
+        }
         Some("reasoning") => out.push(Beat::Thinking),
         Some("function_call") => {
             // Arguments arrive as JSON encoded in a string.
@@ -158,25 +196,26 @@ fn read_item(item: Record, at: Option<i64>, out: &mut Vec<Beat>) {
                 }
                 other => other,
             };
-            out.push(started(
+            started(
                 id(),
                 item.name.as_deref().unwrap_or_default(),
                 arguments.as_ref(),
-            ));
+                out,
+            );
         }
         Some("custom_tool_call") => {
             let name = item.name.as_deref().unwrap_or_default();
             match item.input.as_ref().and_then(Value::as_str) {
-                Some(script) if name == "exec" => out.push(read_script(id(), script)),
-                _ => out.push(started(id(), name, item.input.as_ref())),
+                Some(script) if name == "exec" => read_script(id(), script, out),
+                _ => started(id(), name, item.input.as_ref(), out),
             }
         }
-        Some("local_shell_call") => out.push(started(id(), "local_shell", item.action.as_ref())),
+        Some("local_shell_call") => started(id(), "local_shell", item.action.as_ref(), out),
         Some("web_search_call") => {
             // The search runs on the provider's side: the record is written
             // once, when it is over, and has no separate output.
             let id = id();
-            out.push(started(id.clone(), "web_search", item.action.as_ref()));
+            started(id.clone(), "web_search", item.action.as_ref(), out);
             out.push(Beat::ToolFinished {
                 id,
                 failed: false,
@@ -194,32 +233,37 @@ fn read_item(item: Record, at: Option<i64>, out: &mut Vec<Beat>) {
     }
 }
 
-fn started(id: String, name: &str, input: Option<&Value>) -> Beat {
+/// A tool call, and what more is known of it than its caption holds.
+fn started(id: String, name: &str, input: Option<&Value>, out: &mut Vec<Beat>) {
     let kind = ToolKind::of(name);
-    Beat::ToolStarted {
+    let detail = detail(kind, input);
+    let brief = Beat::brief_of(&id, kind, name, input, &detail);
+    out.push(Beat::ToolStarted {
         id,
         name: if name.is_empty() { "tool" } else { name }.to_owned(),
         kind,
-        detail: detail(kind, input),
-    }
+        detail,
+    });
+    out.extend(brief);
 }
 
 /// Reports an `exec` script as the tool it uses.
-fn read_script(id: String, script: &str) -> Beat {
+fn read_script(id: String, script: &str, out: &mut Vec<Beat>) {
     let head = clip(script, SCRIPT_HEAD_BYTES);
     if head.contains("*** Begin Patch") {
         let file = patched_file(head).map(base_name).unwrap_or_default();
-        return Beat::ToolStarted {
+        out.push(Beat::ToolStarted {
             id,
             name: "apply_patch".to_owned(),
             kind: ToolKind::Edit,
             detail: truncate_chars(file, MAX_DETAIL_CHARS),
-        };
+        });
+        return;
     }
-    let Some((name, arguments)) = script_call(head) else {
-        return started(id, "exec", None);
-    };
-    started(id, name, arguments.as_ref())
+    match script_call(head) {
+        Some((name, arguments)) => started(id, name, arguments.as_ref(), out),
+        None => started(id, "exec", None, out),
+    }
 }
 
 /// The first `tools.<name>(` of a script and, when the call is given a JSON
@@ -375,6 +419,89 @@ mod tests {
     }
 
     #[test]
+    fn what_the_user_wrote_is_heard_and_what_the_harness_wrote_for_them_is_not() {
+        let typed = item(json!({"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "rename the module\nand its tests"}]}));
+        assert_eq!(
+            beats(&typed),
+            [Beat::Heard {
+                text: "rename the module\nand its tests".into(),
+                at: Some(1_772_359_200)
+            }]
+        );
+        // The instructions of the folder and the environment come under the
+        // same role, in one message: none of it is the user's.
+        let harness = item(json!({"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "# AGENTS.md instructions\n\n<INSTRUCTIONS>be brief"},
+            {"type": "input_text", "text": "<environment_context>\n  <cwd>/srv/api</cwd>"}]}));
+        assert_eq!(beats(&harness), []);
+        // A message that holds both keeps what the user typed.
+        let mixed = item(json!({"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "<environment_context>"},
+            {"type": "input_text", "text": "run the tests"}]}));
+        assert!(
+            matches!(&beats(&mixed)[..], [Beat::Heard { text, .. }] if text == "run the tests")
+        );
+        // The desktop interface writes what was attached first, and the
+        // user's own words under a heading of its own.
+        let attached = item(json!({"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "# Files mentioned by the user:\n\n## plan.png: /tmp/plan.png\n\n## My request:\n[Image #1] follow this plan\n"},
+            {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}]}));
+        assert!(
+            matches!(&beats(&attached)[..], [Beat::Heard { text, .. }] if text == "follow this plan")
+        );
+        let comments = item(json!({"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "# Diff comments:\n\n## User Comment 1\nFile: a.rs\nrename it\n\n## My request:\napply the comments"}]}));
+        assert!(
+            matches!(&beats(&comments)[..], [Beat::Heard { text, .. }] if text == "apply the comments")
+        );
+        // An early rollout wrote a plain string.
+        let bare = json!({"type": "message", "role": "user", "content": "hello"});
+        assert!(matches!(&beats(&bare)[..], [Beat::Heard { text, at: None }] if text == "hello"));
+        // The developer's role is never the user.
+        let developer = item(json!({"type": "message", "role": "developer",
+            "content": [{"type": "input_text", "text": "be careful"}]}));
+        assert_eq!(beats(&developer), []);
+    }
+
+    #[test]
+    fn a_long_command_and_a_question_come_with_their_brief() {
+        let long = "cargo test --workspace --locked --no-fail-fast -- --test-threads 1 --nocapture";
+        let call = item(
+            json!({"type": "function_call", "name": "shell", "call_id": "c1",
+            "arguments": json!({"command": ["bash", "-lc", long]}).to_string()}),
+        );
+        let got = beats(&call);
+        assert_eq!(got.len(), 2);
+        assert!(
+            matches!(&got[1], Beat::Brief { id, text, options }
+                if id == "c1" && text.ends_with("--nocapture") && options.is_empty()),
+            "{got:?}"
+        );
+        // A short command says nothing more than its caption.
+        let short = item(
+            json!({"type": "function_call", "name": "shell", "call_id": "c2",
+            "arguments": json!({"command": "ls"}).to_string()}),
+        );
+        assert_eq!(beats(&short).len(), 1);
+        let asked = item(
+            json!({"type": "function_call", "name": "request_user_input",
+            "call_id": "c3", "arguments": json!({"questions": [{"id": "q1", "header": "Scope",
+                "question": "Which crate first?",
+                "options": [{"label": "api", "description": "the server"},
+                            {"label": "web", "description": "the client"}]}]}).to_string()}),
+        );
+        assert_eq!(
+            beats(&asked)[1],
+            Beat::Brief {
+                id: "c3".into(),
+                text: "Which crate first?".into(),
+                options: vec!["api".into(), "web".into()]
+            }
+        );
+    }
+
+    #[test]
     fn a_function_call_and_its_output_start_and_finish_a_tool() {
         let call = item(
             json!({"type": "function_call", "name": "shell", "call_id": "c1",
@@ -421,7 +548,14 @@ mod tests {
         );
         assert_eq!(
             beats(&image),
-            [tool("c3", "view_image", ToolKind::Read, "shot.png")]
+            [
+                tool("c3", "view_image", ToolKind::Read, "shot.png"),
+                Beat::Brief {
+                    id: "c3".into(),
+                    text: "/srv/api/shot.png".into(),
+                    options: Vec::new()
+                }
+            ]
         );
         let opaque = exec("c4", "text(1 + 1)");
         assert_eq!(beats(&opaque), [tool("c4", "exec", ToolKind::Run, "")]);
