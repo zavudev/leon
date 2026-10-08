@@ -887,16 +887,17 @@ fn the_selected_lion_is_what_the_commands_of_a_session_act_on(cx: &mut TestAppCo
     // Nobody is selected: the commands are not the Den's, and the bar
     // offers nothing for a lion.
     assert_eq!(h.shell(cx, |shell| shell.den_lion()), None);
-    assert!(!h.shows("den-lion-message", cx));
+    assert!(!h.shows("den-actions", cx));
 
     h.press("down", cx);
     assert_eq!(h.shell(cx, |shell| shell.den_lion_live()), Some(LiveId(1)));
     assert_eq!(h.shell(cx, |shell| shell.here_live()), Some(LiveId(1)));
     for button in [
-        "den-lion-message",
-        "den-lion-rename",
-        "den-lion-home",
-        "den-lion-menu",
+        "den-act-open",
+        "den-act-messagelion",
+        "den-act-rename",
+        "den-act-sendlionhome",
+        "den-act-closesession",
     ] {
         assert!(h.shows(button, cx), "{button}");
     }
@@ -957,6 +958,27 @@ fn the_selected_lion_is_what_the_commands_of_a_session_act_on(cx: &mut TestAppCo
         "{told:?}"
     );
     assert!(told.iter().all(|row| !row.contains("fainted")), "{told:?}");
+}
+
+#[gpui_kit::test]
+fn a_selected_lion_has_its_actions_as_buttons_and_a_click_does_one(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let _dir = shell_session(&h, cx);
+    agent_in(&h, cx, 1);
+    toggle(&h, cx);
+    // Nobody is selected: there is nothing to act on.
+    assert!(!h.shows("den-actions", cx));
+    let view = h.shell(cx, |shell| shell.den.view.clone().unwrap());
+    cx.update(|cx| view.update(cx, |den, cx| den.select(Some(1), cx)));
+    h.settle(cx);
+    assert!(h.shows("den-actions", cx));
+    for action in ["den-act-open", "den-act-messagelion", "den-act-rename"] {
+        assert!(h.shows(action, cx), "{action}");
+    }
+    assert!(h.shows("den-act-sendlionhome", cx));
+    // A click is the key: the question the key asks is asked.
+    h.mouse_on("den-act-rename".to_owned(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(h.shell(cx, |shell| shell.overlay), Overlay::Palette);
 }
 
 #[gpui_kit::test]

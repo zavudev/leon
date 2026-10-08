@@ -938,18 +938,6 @@ impl Shell {
         }
         let kind = if active.user { "YOURS" } else { "BUILT IN" };
         use crate::keys::Command;
-        let lion = (!editing && self.den_lion().is_some()).then(|| {
-            if self.den_lion_live().is_some() {
-                vec![
-                    ("den-lion-message", "Message (I)", Command::MessageLion),
-                    ("den-lion-rename", "Rename (R)", Command::Rename),
-                    ("den-lion-home", "Send home (H)", Command::SendLionHome),
-                    ("den-lion-menu", "More (M)", Command::ContextMenu),
-                ]
-            } else {
-                vec![("den-lion-menu", "More (M)", Command::ContextMenu)]
-            }
-        });
         // How many lions need the user, and the way to the next of them;
         // and the way to every key.
         let needy = self
@@ -990,17 +978,10 @@ impl Shell {
             )
             .child(mono(kind).text_color(colours.text_faint))
             .child(div().flex_1())
-            // What can be done to the selected lion, with the keys that do
-            // it: the Den has no other place for a hint.
+            // What the pride asks of the user; what can be done to the
+            // selected lion is on the strip over the foot of the room.
             .children(pride.into_iter().map(|(id, label, command, lit)| {
                 tool_button(id.into(), label, true, lit, colours).on_click(cx.listener(
-                    move |this, _: &ClickEvent, window, cx| {
-                        this.run_command(command, window, cx);
-                    },
-                ))
-            }))
-            .children(lion.into_iter().flatten().map(|(id, label, command)| {
-                tool_button(id.into(), label, true, false, colours).on_click(cx.listener(
                     move |this, _: &ClickEvent, window, cx| {
                         this.run_command(command, window, cx);
                     },
@@ -1276,7 +1257,7 @@ fn fingerprint(layout: &DenLayout) -> u64 {
 
 /// A button of the Den's bars: a mono label in a hairline box, lit when it
 /// is the thing in use and faint when there is nothing for it to do.
-fn tool_button(
+pub(super) fn tool_button(
     id: SharedString,
     label: impl Into<SharedString>,
     enabled: bool,

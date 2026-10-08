@@ -51,9 +51,10 @@ about them is in the README ("The Den").
 ## What you can do to a lion
 
 Select a lion (a click on it or on its row of the roster, the arrows or Tab)
-and the bar over the room offers **Message**, **Rename**, **Send home** and
-**More**. The right button on a lion, `M`, `Shift+F10` or the menu key open
-its menu:
+and a strip over the foot of the room offers what can be done to it, each
+with its key. A lion that runs outside this window can only be opened: the
+rest is shown dimmed, and a click says why. The right button on a lion, `M`,
+`Shift+F10` or the menu key open the same list as a menu:
 
 | Item | What it does |
 | --- | --- |

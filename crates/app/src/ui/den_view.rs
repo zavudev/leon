@@ -73,7 +73,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use gpui_kit::prelude::*;
-use gpui_kit::{div, AnyElement, Context, Entity, Keystroke, Subscription, Task, Window};
+use gpui_kit::{div, px, AnyElement, Context, Entity, Keystroke, Subscription, Task, Window};
 use leon_den::{Cub, CubState, DenEvent, DenPalette, DenStyle, DenView, HomeEntry, Note, Tokens};
 use leon_history::live::{Beat, Format};
 
@@ -1203,22 +1203,7 @@ impl Shell {
             return;
         };
         let live = self.den_lion_live();
-        let pinned = live.and_then(|live| {
-            let history = self.history_of_live(live)?;
-            let machine = self.live.get(live)?.machine.clone();
-            Some(self.pinned_ids(&machine).contains(&history))
-        });
-        let items = super::menu::items_for_lion(super::menu::LionMenu {
-            pinned,
-            elsewhere: live.is_none(),
-            interrupt: live.is_some_and(|live| {
-                self.live
-                    .get(live)
-                    .and_then(|session| session.shown_agent()?.spec()?.interrupt.clone())
-                    .is_some()
-            }),
-            queued: live.map_or(0, |live| self.den.post.waiting(live.0)),
-        });
+        let items = self.den_lion_items();
         if live.is_none() {
             if let Some(why) = self.den_lion_info(cx).and_then(|lion| lion.elsewhere) {
                 self.engine.report(crate::engine::StatusKind::Info, why);
@@ -1234,6 +1219,125 @@ impl Shell {
         self.menu = Some(menu);
         self.focus.focus(window, cx);
         cx.notify();
+    }
+
+    /// What can be done to the selected lion: the items of its menu, and of
+    /// the strip of actions under the room.
+    fn den_lion_items(&self) -> Vec<super::menu::Item> {
+        let live = self.den_lion_live();
+        let pinned = live.and_then(|live| {
+            let history = self.history_of_live(live)?;
+            let machine = self.live.get(live)?.machine.clone();
+            Some(self.pinned_ids(&machine).contains(&history))
+        });
+        super::menu::items_for_lion(super::menu::LionMenu {
+            pinned,
+            elsewhere: live.is_none(),
+            interrupt: live.is_some_and(|live| {
+                self.live
+                    .get(live)
+                    .and_then(|session| session.shown_agent()?.spec()?.interrupt.clone())
+                    .is_some()
+            }),
+            queued: live.map_or(0, |live| self.den.post.waiting(live.0)),
+        })
+    }
+
+    /// The actions of the selected lion, as buttons over the foot of the
+    /// room: what its menu holds, with the key of each. Nothing while
+    /// nobody is selected or the room is edited.
+    fn render_den_actions(&self, colours: &Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::keys::Command as C;
+        let lion = self.den_lion()?;
+        if self.den_editing(cx) {
+            return None;
+        }
+        let name = self.den_lion_info(cx)?.name;
+        let buttons = self.den_lion_items().into_iter().map(|item| {
+            let key = match item.command {
+                C::Open => Some("Enter"),
+                C::MessageLion => Some("I"),
+                C::QueuedMessages => Some("Q"),
+                C::InterruptLion => Some("X"),
+                C::Rename => Some("R"),
+                C::SendLionHome => Some("H"),
+                _ => None,
+            };
+            let label = match key {
+                Some(key) => format!("{} ({key})", item.label),
+                None => item.label.clone(),
+            };
+            let id: gpui_kit::SharedString =
+                format!("den-act-{:?}", item.command).to_lowercase().into();
+            let command = item.command;
+            super::den_edit::tool_button(id, label, true, false, colours).on_click(cx.listener(
+                move |this, _: &gpui_kit::ClickEvent, window, cx| {
+                    this.run_lion_item(lion, command, window, cx);
+                    cx.notify();
+                },
+            ))
+        });
+        // A lion that runs elsewhere can only be opened: what it could be
+        // told here is shown dimmed, and a click says why not.
+        let elsewhere = self.den_lion_info(cx).and_then(|lion| lion.elsewhere);
+        let buttons: Vec<_> = buttons.collect();
+        let dimmed = elsewhere.into_iter().flat_map(|why| {
+            [
+                "Message\u{2026}",
+                "Interrupt",
+                "Rename\u{2026}",
+                "Send home",
+            ]
+            .into_iter()
+            .enumerate()
+            .map(move |(index, label)| (index, label, why.clone()))
+        });
+        let dimmed: Vec<_> = dimmed
+            .map(|(index, label, why)| {
+                let id: gpui_kit::SharedString = format!("den-act-no-{index}").into();
+                super::den_edit::tool_button(id, label, false, false, colours).on_click(
+                    cx.listener(move |this, _: &gpui_kit::ClickEvent, _, cx| {
+                        this.engine
+                            .report(crate::engine::StatusKind::Info, why.clone());
+                        cx.notify();
+                    }),
+                )
+            })
+            .collect();
+        let note = (!dimmed.is_empty()).then(|| {
+            super::widgets::mono("runs outside this window: act on it there")
+                .text_color(colours.text_faint)
+        });
+        Some(
+            div()
+                .id("den-actions")
+                .debug_selector(|| "den-actions".into())
+                .absolute()
+                .bottom(px(12.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .occlude()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(6.))
+                        .px(px(10.))
+                        .py(px(6.))
+                        .rounded(metrics::RADIUS())
+                        .border_1()
+                        .border_color(colours.signal)
+                        .bg(colours.surface)
+                        .child(super::widgets::mono(name).text_color(colours.text))
+                        .children(buttons)
+                        .children(dimmed)
+                        .children(note),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Does what an item of a lion's menu says, for that lion.
@@ -2133,7 +2237,14 @@ impl Shell {
                 }
             }))
             .child(self.render_den_bar(colours, cx))
-            .child(div().flex_1().min_h_0().children(self.den.view.clone()))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .children(self.den.view.clone())
+                    .children(self.render_den_actions(colours, cx)),
+            )
             .when(editing, |den| den.child(self.render_den_strip(colours, cx)))
             .into_any_element()
     }

@@ -1467,9 +1467,9 @@ agents and other machines are left out, since nothing could be said of them.
 `den_elsewhere` turns these lions off.
 
 **A lion can be talked to and sent home from the Den.** With a lion selected,
-the bar over the room offers **Message**, **Rename**, **Send home** and
-**More**; the right button on a lion, `M`, `Shift+F10` or the menu key open
-its menu (Open, Message…, Rename…, Pin, Send home, Close), and Rename, Sleep,
+a strip over the foot of the room offers what can be done to it, each with
+its key; the right button on a lion, `M`, `Shift+F10` or the menu key open
+the same list as a menu (Open, Message…, Rename…, Pin, Send home, Close), and Rename, Sleep,
 Close and Pin from the palette act on its session, the whole of it, whatever
 the sidebar's cursor is on. **Message** (`I`) asks for a text and types it
 into the session's terminal as a prompt: at once when the agent waits at its
