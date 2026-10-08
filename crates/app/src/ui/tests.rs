@@ -393,6 +393,7 @@ fn open_core(
         error_flash: std::time::Duration::from_secs(4),
         notify: Rc::new(move |note, _| notes_in.borrow_mut().push(note.clone())),
         banner_duration: std::time::Duration::from_secs(30),
+        den_tick: std::time::Duration::from_millis(5),
         save_debounce: std::time::Duration::ZERO,
         editor_debounce: std::time::Duration::ZERO,
         draft_debounce: std::time::Duration::ZERO,
@@ -719,6 +720,7 @@ impl Harness {
             }
             Main::Session(transcript) => format!("session:{}", transcript.session.title),
             Main::Live(id) => format!("live:{id}"),
+            Main::Den => "den".to_owned(),
         })
     }
 }
@@ -3022,6 +3024,7 @@ fn the_empty_state_lists_the_keys_from_the_registry(cx: &mut TestAppContext) {
         Command::Commands,
         Command::SearchHistory,
         Command::NewSession,
+        Command::ShowDen,
         Command::Shortcuts,
     ] {
         let selector: &'static str = Box::leak(format!("hint-{command:?}").into_boxed_str());
@@ -7320,6 +7323,12 @@ mod tests_restore;
 #[path = "tests_settings_layout.rs"]
 mod tests_settings_layout;
 
+#[path = "tests_den_edit.rs"]
+mod den_edit;
+
+#[path = "tests_home.rs"]
+mod home;
+
 #[path = "tests_themes.rs"]
 mod themes_files;
 
@@ -7334,3 +7343,8 @@ mod elsewhere;
 #[cfg(leon_posix_tests)]
 #[path = "tests_lion.rs"]
 mod lion_in_window;
+
+// The Den: how it opens, its keys, and what it shows of the live sessions.
+#[cfg(leon_posix_tests)]
+#[path = "tests_den.rs"]
+mod den_in_window;

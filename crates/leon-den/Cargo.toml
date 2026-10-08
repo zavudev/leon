@@ -1,0 +1,20 @@
+[package]
+name = "leon-den"
+description = "The Den for GPUI: every live agent session as a pixel-art lion cub, with a narrator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui-kit.workspace = true
+# Decodes the bundled PNG sheets, and hands the composited den to GPUI as an
+# image. Already in the build through the GPUI stack; only PNG is asked for.
+image = { version = "0.25", default-features = false, features = ["png"] }
+# A den's layout is kept as JSON.
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }

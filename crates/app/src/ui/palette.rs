@@ -1207,6 +1207,10 @@ impl Shell {
             Action::DiscardAndQuit => self.discard_and_quit(cx),
             Action::RestartToUpdate => self.restart_now(cx),
             Action::NewTheme(name) => self.create_theme(&name, cx),
+            Action::SetDen(id) => self.den_choose(&id, cx),
+            Action::SaveDenAs(name) => self.den_save_as(&name, cx),
+            Action::RenameDen(name) => self.den_rename(&name, cx),
+            Action::DeleteDen => self.den_delete(cx),
             Action::AddAgent {
                 name,
                 command,

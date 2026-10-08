@@ -519,6 +519,14 @@ platform (see below).
 | Settings | `⌘,` | `Ctrl+,` |
 | Show usage | `⇧⌘U` | `Ctrl+Shift+Alt+U` |
 | Refresh usage now | palette only | palette only |
+| Go home | `⌥⇧⌘H` | `Ctrl+Shift+Alt+H` |
+| Open the Den | `⌥⇧⌘L` | `Ctrl+Shift+Alt+L` |
+| Edit the Den | palette only (`E` in the Den) | palette only (`E` in the Den) |
+| Choose a den… | palette only | palette only |
+| Save the den as… | palette only | palette only |
+| Rename the den… | palette only | palette only |
+| Delete the den… | palette only | palette only |
+| Open dens folder | palette only | palette only |
 | Open settings.json | palette only | palette only |
 | Reveal settings folder | palette only | palette only |
 | Larger interface | `⌘=` `⌘+` | `Ctrl+=` `Ctrl++` |
@@ -1341,6 +1349,140 @@ purpose:
   scopes the keychain item (Orca normalises it to NFC first).
 * The footer also shows a marker (`!`, `!!`) after a window at a warning or
   critical level, so that colour is never the only signal.
+
+## The home
+
+The home is where the window starts and a place to act from. It is always one
+step away: the **Home** row at the top of the sidebar, over the filter, with
+**The Den** under it (both stay there whatever is filtered or scrolled; the
+Den's row counts its lions and marks when one waits for you), `⌥⇧⌘H` (`Ctrl+Shift+Alt+H`), **View >
+Go home**, or **Go home** in the palette. Going home closes nothing: the
+terminals go on running and stay in the sidebar.
+
+On it:
+
+* **Actions**, each a button with its chord: Open the Den first, then a new
+  agent session, open a project, go to, search the history, the command
+  palette, connect a machine, the shortcuts, usage and settings.
+* **Sessions** at a glance: how many run in this window, how many of them
+  work and how many wait for you, and how many run elsewhere (another Leon,
+  another terminal). The ones that wait are listed (a failed one first); a
+  click opens it. The ones that run elsewhere are listed too and open as
+  their row of the sidebar does.
+* **Recent sessions** of the history, which open as from the sidebar.
+
+Clicks and keys do the same: when the home has the keyboard, the arrows (or
+`J`/`K`, `Home`, `End`) walk the actions and the rows and `Enter` opens the one
+the keyboard is on. `Tab` goes to the sidebar, as everywhere; there, `Up` from
+the first row of the tree is The Den and then Home, and `Enter` opens the
+one the cursor is on.
+
+## The Den
+
+`⌥⇧⌘L` (`Ctrl+Shift+Alt+L`), **View > Open the Den** and the palette's **Open the
+Den** show the live sessions as lions at work in a small pixel-art office, in
+the place of the main pane; the sidebar stays. The same chord or `Esc` puts
+back what was there.
+
+| The agent | The lion |
+| --- | --- |
+| edits or writes a file | types at its desk; its screen is on |
+| reads, searches | at the bookshelf; paper flies when it searches |
+| runs a command | at the rack, whose lights run |
+| fetches from the web | at the telescope |
+| plans | at the whiteboard |
+| sends out a sub-agent | by the nest, where an egg hatches; the little one works at the small table |
+| thinks | at its desk, with `...` |
+| finished its turn, or asks a question | on the rug at the entrance, with `!` |
+| needs a permission | the same, staring at you, with a warning sign |
+| is back at the shell | on a sofa while one is free, else at its desk; asleep at its desk after fifteen quiet minutes |
+| exited with an error | on the floor, with a cross; the roster says `FNT` |
+
+Every lion has **a desk of its own**, given when it joins and kept: it works
+there, sleeps there, and comes back to it. The other places hold as many as
+they have spots (a bookshelf, a rack, three in the line at the entrance, the
+seats of the sofas): a lion that finds its place full stays at its desk and
+shows there what it does, so nobody is piled on anybody. More lions than
+desks stand on free floor, apart from each other. The name under a lion is
+the first words of its session's title that mean something, in plain capitals
+(`CHAT MOVIL` for "Chat móvil para el relay"); where the room is too crowded
+to name everybody legibly a plate is left out rather than drawn over another,
+and the roster, the pointer and the selection still name that lion.
+
+On the right, under the roster of the pride (each lion with its `Lv.`, the
+number of tools it has used), is **the feed**: a log with the newest at the
+bottom and two kinds of entry. The narrator's lines tell what happens in the
+voice of an old creature game and never invent: every line is a fact (`MOSS
+used CARGO TEST!`, `It's super effective!` only when the command passed).
+And what an agent **wrote to you** is there in its own words, marked `said`,
+unchanged: a long message shows its first rows, and a click opens it. Each
+entry has the colour of its lion's mane, its name and how long ago it was.
+When the Den opens, the feed already holds the last of each session's past:
+its messages, and one line for the tools of each turn (`MOSS used 14 tools.`)
+rather than one per tool; the same goes for what happened while the Den was
+closed. It follows its end until you scroll back (the wheel, `Page Up`,
+`Page Down`, `Home`); then it stays put and a mark says how many entries are
+new (`End` or a click goes back). `Shift+Up` and `Shift+Down` walk the entries
+and `Enter` opens the message the keyboard is on. Selecting a lion narrows
+the feed to it and its sub-agents; `Esc`, or a click on its name over the
+feed, shows everybody again. In a narrow pane the feed is under the room and
+the roster is left out. With the `den_narrator` setting off, the narrator's
+lines say the same facts plainly (``Running `cargo test` ``) and the agents'
+messages stay as they are. Point at a lion, or select it with the
+arrows or `Tab`, for the plain truth: the tool, the file, the command line.
+`Enter` or a double click opens that session's terminal; a sub-agent opens its
+parent's.
+
+**Sessions that run elsewhere are lions too.** The Den also shows the Claude
+Code and Codex sessions of this computer that run in another Leon window or in
+a plain terminal, so one window can watch every agent you have going. They
+are found by the look at the processes that marks sessions "running elsewhere"
+(at its own pace, the `elsewhere_interval` setting; no faster scan is added)
+and are told by their transcripts alone: the tool and its subject, `Lv.`,
+sub-agents, what they wrote, and their past in the feed. With no terminal to
+watch, Leon does not guess a permission prompt for them: the lion keeps
+showing the tool and its card says for how long nothing was written. The card
+also says where it runs (`in another Leon window`, or `in iTerm, outside
+Leon`) and the pid. `Enter` opens what Leon has of it, the stored transcript
+with the notice of who holds it; nothing is done to the other process. When
+its process ends the lion goes home. Only a process that names its session is
+shown (never a guess by folder), never one this window runs itself; other
+agents and other machines are left out, since nothing could be said of them.
+`den_elsewhere` turns these lions off.
+
+**The room is yours to change.** **Edit the Den** (the button over the room,
+the palette, or `E`) opens an editor: pick furniture from a strip of pictures
+and put it down, drag it, turn it (`R`), remove it, lay carpets, repaint the
+floor and the walls, make the room wider or deeper, undo and redo. The lions
+keep living in the room meanwhile, and go where the furniture says: a seat
+that faces a computer is a place to work, a bookshelf a place to read, a rack
+a place to run commands; a room without one still works, and a note over the feed
+tells you what is missing. Everything can be done from the keyboard. **Choose
+a den…** switches between six built-in dens (the office, the open plan, the
+library, the server room, the lounge, the nook) and your own. A built-in den
+is never changed: the first change makes a den of yours from it, kept as a
+JSON file in the `dens` folder beside the settings and written on every
+change; **Save the den as…**, **Rename the den…**, **Delete the den…** and
+**Open dens folder** manage them. A file from somebody else dropped in that
+folder is a den in the list. The editor, the rules, the file format and the
+catalogue are in [docs/DEN.md](docs/DEN.md).
+
+Where the facts come from: for **Claude Code and Codex sessions of this
+computer**, Leon follows the agent's own transcript while it grows (only while
+the Den is open; nothing is read otherwise). Every other session (a remote
+machine, another agent, a plain shell) shows what its terminal says and no
+more: working, waiting or idle, with a `?` when nothing else is known. **A
+pending permission prompt is inferred**: the transcript does not record it, so
+Leon takes a tool call without a result in a terminal that went quiet for one;
+the card says "probably". It can be wrong for a tool that runs long without
+the agent drawing anything.
+
+Settings: `den_narrator` (off replaces the narrator with a plain count of the
+sessions that work and wait) and `reduce_motion` (the lions hold still and
+appear at their place; the information is the same). The art is the furniture
+and characters of [pixel-agents](https://github.com/pixel-agents-hq/pixel-agents)
+(MIT), with lion heads, manes in each agent's colour and tails drawn for Leon;
+see [`NOTICE`](NOTICE).
 
 ## Notifications
 

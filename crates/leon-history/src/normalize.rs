@@ -51,7 +51,7 @@ pub(crate) fn clip(text: &str, max_bytes: usize) -> &str {
 
 /// Cuts `text` to at most `max_chars` characters. A cut text ends with an
 /// ellipsis, which counts towards the limit.
-fn truncate_chars(text: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_chars(text: &str, max_chars: usize) -> String {
     if text.chars().nth(max_chars).is_none() {
         return text.to_owned();
     }
@@ -81,16 +81,22 @@ pub(crate) fn title_from(text: &str) -> String {
 /// and when nothing suitable exists the tool name stands alone.
 pub(crate) fn tool_line(name: &str, input: Option<&Value>) -> String {
     let name = if name.is_empty() { "tool" } else { name };
-    let detail = match input {
+    match tool_detail(input) {
+        Some(detail) => format!("{name}: {detail}"),
+        None => name.to_owned(),
+    }
+}
+
+/// The most telling part of a tool call's input, as one line: the first of
+/// [`TOOL_DETAIL_KEYS`] the input has, or the first line of a plain-text
+/// input. `None` when the input has nothing suitable.
+pub(crate) fn tool_detail(input: Option<&Value>) -> Option<String> {
+    match input {
         Some(Value::Object(fields)) => TOOL_DETAIL_KEYS
             .iter()
             .find_map(|key| fields.get(*key).and_then(detail_text)),
         Some(other) => detail_text(other),
         None => None,
-    };
-    match detail {
-        Some(detail) => format!("{name}: {detail}"),
-        None => name.to_owned(),
     }
 }
 

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/leon-mark",
+    "crates/leon-den",
     "crates/leon-core",
     "crates/leon-history",
     "crates/leon-remote",
@@ -30,6 +31,7 @@ leon-remote = { path = "crates/leon-remote" }
 leon-usage = { path = "crates/leon-usage" }
 leon-term = { path = "crates/leon-term" }
 leon-mark = { path = "crates/leon-mark" }
+leon-den = { path = "crates/leon-den" }
 leon-pty = { path = "crates/leon-pty" }
 leon-host = { path = "crates/leon-host" }
 leon-wire = { path = "crates/leon-wire" }
