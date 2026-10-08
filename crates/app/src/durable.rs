@@ -949,6 +949,33 @@ mod tests {
     }
 
     #[test]
+    fn what_leon_tells_a_terminal_of_the_shared_memory_travels_to_the_keeper() {
+        // The plan's environment as `launch::plan_with` makes it: Leon's own
+        // variables, then the user's, the last of a name being the one kept.
+        let mut plan = spec();
+        plan.env = vec![
+            ("LEON_BIN".into(), "/opt/leon/leon".into()),
+            ("LEON_MEMORY".into(), "/data/memory/api.md".into()),
+            ("LEON_DATA_DIR".into(), "/data".into()),
+            ("LEON_MEMORY".into(), "/my/own.md".into()),
+        ];
+        let wire = wire_spec(&plan, base(), None).unwrap();
+        let get = |name: &str| {
+            wire.env
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("LEON_BIN"), Some("/opt/leon/leon"));
+        assert_eq!(get("LEON_DATA_DIR"), Some("/data"));
+        assert_eq!(get("LEON_MEMORY"), Some("/my/own.md"), "the user's wins");
+        assert_eq!(
+            wire.env.iter().filter(|(n, _)| n == "LEON_MEMORY").count(),
+            1
+        );
+    }
+
+    #[test]
     fn the_request_carries_this_processs_environment_with_the_plans_on_top() {
         let wire = wire_spec(&spec(), base(), Some("/elsewhere".into())).unwrap();
         let get = |name: &str| {

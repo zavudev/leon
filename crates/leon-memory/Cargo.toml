@@ -1,0 +1,18 @@
+[package]
+name = "leon-memory"
+description = "The memory agents share in Leon: the memory file, the managed block, the MCP server core."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+leon-core.workspace = true
+chrono.workspace = true
+serde.workspace = true
+# `.mcp.json` is written back with its keys in the order they had. The
+# application's build has this feature on already (the GPUI stack asks for it).
+serde_json = { workspace = true, features = ["preserve_order"] }
+sha2.workspace = true
+thiserror.workspace = true

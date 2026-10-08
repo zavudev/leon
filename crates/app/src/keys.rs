@@ -174,6 +174,11 @@ pub enum Command {
     AddProject,
     /// Removes a project from the list, after asking.
     RemoveProject,
+    /// Writes the shared memory's managed block into the instruction files of
+    /// a project of this computer.
+    EnableMemory,
+    /// Takes that block out again.
+    DisableMemory,
     /// Removes a git worktree, after asking.
     RemoveWorktree,
     /// Removes the merged worktrees the person ticks, after asking. The ones
@@ -1384,6 +1389,22 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::EnableMemory,
+        "Turn on agent memory for this project",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::DisableMemory,
+        "Turn off agent memory for this project",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::RemoveWorktree,
         "Remove a worktree",
         S::Create,
@@ -2368,6 +2389,9 @@ pub fn keywords(command: Command) -> &'static str {
     use Command as C;
     match command {
         C::ChooseTheme => "colors colours look appearance custom user",
+        C::EnableMemory | C::DisableMemory => {
+            "memory remember notes shared agents instructions AGENTS.md CLAUDE.md GEMINI.md block"
+        }
         C::NewThemeFromCurrent => "create custom make theme colors colours file toml",
         C::RunScript => "project leon.toml command task build test lint run npm cargo make",
         C::PromptAgents => "compare agents prompt task several parallel worktrees race try each",
@@ -2693,6 +2717,8 @@ mod tests {
             C::NewProject,
             C::AddProject,
             C::RemoveProject,
+            C::EnableMemory,
+            C::DisableMemory,
             C::RemoveWorktree,
             C::RemoveMergedWorktrees,
             C::Refresh,
@@ -2868,6 +2894,8 @@ mod tests {
                 | C::NewProject
                 | C::AddProject
                 | C::RemoveProject
+                | C::EnableMemory
+                | C::DisableMemory
                 | C::RemoveWorktree
                 | C::RemoveMergedWorktrees
                 | C::Refresh

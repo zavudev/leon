@@ -403,6 +403,10 @@ pub struct LaunchPrefs {
     pub shell: Option<(String, Vec<String>)>,
     /// Variables added to the environment of terminals on this computer.
     pub env: Vec<(String, String)>,
+    /// What Leon itself tells a terminal on this computer (`LEON_BIN`,
+    /// `LEON_MEMORY`): worked out by the caller for the terminal's folder, set
+    /// before the user's variables, so one of theirs with the same name wins.
+    pub leon_env: Vec<(String, String)>,
     /// How each agent starts, by agent; an agent without an entry starts as
     /// the catalogue says.
     pub agents: std::collections::HashMap<AgentId, AgentPrefs>,
@@ -696,7 +700,9 @@ pub fn plan_with(
         let (program, args) = prefs.shell.clone().unwrap_or_else(|| system.login_shell());
         let flavor = flavor_of(&program);
         let mut command = CommandSpec::new(program).args(args).cwd(cwd);
-        command.env = prefs.env.clone();
+        // Leon's own first: the terminal applies them in order, so a
+        // variable of the user's with the same name is the one that stays.
+        command.env = prefs.leon_env.iter().chain(&prefs.env).cloned().collect();
         command.env.extend(account_vars);
         (spawn_spec(command), flavor)
     } else {
@@ -1108,6 +1114,60 @@ mod tests {
             planned.spawn.env,
             [("EDITOR".to_owned(), "nvim".to_owned())]
         );
+    }
+
+    #[test]
+    fn leons_own_variables_come_first_so_the_users_win() {
+        let prefs = LaunchPrefs {
+            env: vec![
+                ("EDITOR".into(), "nvim".into()),
+                ("LEON_MEMORY".into(), "/my/own.md".into()),
+            ],
+            leon_env: vec![
+                ("LEON_BIN".into(), "/opt/leon".into()),
+                ("LEON_MEMORY".into(), "/data/memory/api.md".into()),
+            ],
+            ..LaunchPrefs::default()
+        };
+        let planned = plan_with(
+            &local(),
+            None,
+            "/srv/api",
+            &agent(AgentId::CLAUDE, None),
+            &ssh(),
+            &fake(),
+            &prefs,
+        )
+        .unwrap();
+        let names: Vec<&str> = planned.spawn.env.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["LEON_BIN", "LEON_MEMORY", "EDITOR", "LEON_MEMORY"]);
+        // The terminal sets them in this order: the last one stays.
+        let command = leon_pty::spec::command_builder(&planned.spawn);
+        let value = |name: &str| command.get_env(name).and_then(|v| v.to_str());
+        assert_eq!(value("LEON_BIN"), Some("/opt/leon"));
+        assert_eq!(value("LEON_MEMORY"), Some("/my/own.md"));
+        // Nothing of it is typed: the agent's line is as before.
+        assert_eq!(planned.send.as_deref(), Some("claude\r"));
+    }
+
+    #[test]
+    fn a_remote_terminal_is_told_nothing_of_leons_memory() {
+        let prefs = LaunchPrefs {
+            leon_env: vec![("LEON_MEMORY".into(), "/data/memory/api.md".into())],
+            ..LaunchPrefs::default()
+        };
+        let planned = plan_with(
+            &remote(),
+            Some(&report(Some("/usr/bin/claude"))),
+            "/srv/api",
+            &Launch::Shell,
+            &ssh(),
+            &fake(),
+            &prefs,
+        )
+        .unwrap();
+        assert!(planned.spawn.env.is_empty());
+        assert!(planned.spawn.args.iter().all(|arg| !arg.contains("LEON_")));
     }
 
     fn custom(name: &str, command: &str, args: &str, resume: &str) -> AgentSpec {

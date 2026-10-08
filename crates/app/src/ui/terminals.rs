@@ -439,6 +439,25 @@ impl Shell {
         }
     }
 
+    /// What a terminal of this computer in `cwd` is told of the shared
+    /// memory: where Leon is and where the memory file of the folder's
+    /// project is. The engine is asked to write that file, so that it is
+    /// there to be read. Nothing when the window was not told where its data
+    /// is.
+    fn memory_env(&self, cwd: &str) -> Vec<(String, String)> {
+        let Some(terminals) = &self.options.memory else {
+            return Vec::new();
+        };
+        let root = crate::memory::resolve_root(
+            self.engine.store(),
+            &crate::memory::Disk,
+            std::path::Path::new(cwd),
+        );
+        let env = crate::memory::terminal_env(terminals, &root);
+        self.engine.submit(Op::WriteMemoryFile { root });
+        env
+    }
+
     /// Starts the terminal of `launch` without placing it in any tab: the
     /// caller puts it in a layout. With `deferred` the agent's line is held
     /// back (the session is "paused") until [`Shell::resume_paused`]; `title`
@@ -512,7 +531,12 @@ impl Shell {
         if remote && report.is_none() {
             self.engine.submit(Op::Probe(machine.clone()));
         }
-        let prefs = Self::launch_prefs(cx);
+        let mut prefs = Self::launch_prefs(cx);
+        // What a terminal of this computer is told of the shared memory. A
+        // terminal the keeper already holds was told when it was started.
+        if matches!(found.kind, MachineKind::Local) && attach.is_none() {
+            prefs.leon_env = self.memory_env(cwd);
+        }
         let plan = if attach.is_some() {
             // Already running: there is nothing to plan, and a folder that
             // went away since is not a reason to lose the session.

@@ -222,6 +222,8 @@ How each coding agent is started and resumed.
 | Jcode executable | `agent_jcode_executable` | a path | empty | The program that starts Jcode. Empty lets the login shell find `jcode`. |
 | Jcode arguments, new session | `agent_jcode_args` | text | empty | Extra arguments typed after the command of a new Jcode session. |
 | Jcode arguments, resume | `agent_jcode_resume_args` | text | empty | Extra arguments typed after the command that resumes a Jcode session. |
+| Memory file size | `memory_budget` | 2000 to 200000 bytes | `12000` | The most bytes of the summary of the shared memory that an agent reads when it starts. `leon memory search` and `show` reach the rest. |
+| Offer agent memory when a project is added | `memory_offer` | on, off | `on` | Ask whether a project's agents should share Leon's memory when you open, clone or create it here. Off: nothing is asked. |
 
 ## Sessions & history
 

@@ -40,6 +40,9 @@ pub struct Snapshot {
     /// What was last read about the checkout of each worktree; a worktree
     /// nothing was read about has no entry.
     pub statuses: HashMap<WorktreeId, WorktreeStatus>,
+    /// What was decided about each project's agent memory, by the identity
+    /// of its root (`leon_core::path::key`).
+    pub memory: HashMap<String, leon_core::MemoryChoice>,
 }
 
 impl Snapshot {
@@ -74,6 +77,11 @@ impl Snapshot {
             }
         }
         let statuses = store.worktree_statuses()?;
+        let memory = store
+            .memory_choices()?
+            .into_iter()
+            .map(|(root, choice)| (leon_core::path::key(&root), choice))
+            .collect();
         Ok(Self {
             machines,
             projects,
@@ -81,6 +89,7 @@ impl Snapshot {
             icons,
             dismissed,
             statuses,
+            memory,
         })
     }
 

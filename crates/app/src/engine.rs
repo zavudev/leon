@@ -200,6 +200,27 @@ pub enum Op {
     /// Remove a project from the list and remember that it was removed, so
     /// that discovery does not bring it back.
     RemoveProject(ProjectId),
+    /// Turn the shared memory on or off for a project of this computer: write
+    /// the managed block into its instruction files, or take it out (what
+    /// `leon memory enable` and `disable` do, without the MCP entry).
+    ProjectMemory {
+        /// The project.
+        project: ProjectId,
+        /// On, or off.
+        on: bool,
+    },
+    /// "Never for this project": remember not to ask about its agent memory
+    /// again.
+    MemoryNever(ProjectId),
+    /// Write every memory file again: the size they may have was changed in
+    /// the settings. Says nothing.
+    RewriteMemoryFiles,
+    /// Write the memory file of a project again, so that the terminal just
+    /// started in it finds the file its `LEON_MEMORY` names. Says nothing.
+    WriteMemoryFile {
+        /// The root of the project the terminal's folder belongs to.
+        root: String,
+    },
     /// Give a project another name.
     RenameProject {
         /// The project.
@@ -382,6 +403,9 @@ pub enum EngineEvent {
     Usage,
     /// The history report of "Why is a session missing?" changed.
     History,
+    /// There is a question to ask about a project's agent memory
+    /// ([`Engine::take_memory_offer`]).
+    MemoryOffer,
 }
 
 /// Why an operation failed. The text is what the status line says.
@@ -503,6 +527,10 @@ struct State {
     elsewhere: HashMap<MachineId, Arc<Elsewhere>>,
     /// What each project's `leon.toml` said when it was last read.
     project_files: HashMap<ProjectId, ProjectState>,
+    /// The questions about agent memory that wait for the window, oldest
+    /// first: one for each project somebody added by hand and was not asked
+    /// about yet.
+    memory_offers: std::collections::VecDeque<crate::memory_offer::Offer>,
 }
 
 /// What the user's settings change in the engine, live: how SSH is called,
@@ -560,6 +588,18 @@ struct Inner {
     unsupported_told: std::sync::atomic::AtomicBool,
     /// The home folder the history report writes as `~`.
     history_home: Mutex<Option<std::path::PathBuf>>,
+    /// Leon's data folder, where the memory files are written. `None` until
+    /// `main` says, and in tests that do not: no memory file is written then.
+    memory_dir: Mutex<Option<std::path::PathBuf>>,
+    /// The size a memory file may have, in bytes: the setting, which the
+    /// window tells the engine at the start and when it changes.
+    memory_budget: std::sync::atomic::AtomicUsize,
+    /// Whether a project added by hand is asked about: the setting. Off until
+    /// the window says, so that nothing is asked where there is no window.
+    memory_offer: std::sync::atomic::AtomicBool,
+    /// The roots (by identity) asked about since Leon started: "not now" is
+    /// not asked again in the same run.
+    memory_asked: Mutex<std::collections::HashSet<String>>,
     /// Which network sources are switched on.
     usage_policy: Mutex<leon_usage::network::NetworkPolicy>,
     /// How many jobs run on the blocking pool right now. They run on threads
@@ -620,6 +660,7 @@ impl Engine {
                     machines: HashMap::new(),
                     elsewhere: HashMap::new(),
                     project_files: HashMap::new(),
+                    memory_offers: std::collections::VecDeque::new(),
                 }),
                 events,
                 fetcher: Mutex::new(Arc::new(NoFetch)),
@@ -630,6 +671,12 @@ impl Engine {
                 history_stamps: Mutex::new(HashMap::new()),
                 unsupported_told: std::sync::atomic::AtomicBool::new(false),
                 history_home: Mutex::new(leon_history::home_dir()),
+                memory_dir: Mutex::new(None),
+                memory_budget: std::sync::atomic::AtomicUsize::new(
+                    leon_memory::render::DEFAULT_BUDGET,
+                ),
+                memory_offer: std::sync::atomic::AtomicBool::new(false),
+                memory_asked: Mutex::new(std::collections::HashSet::new()),
                 usage_policy: Mutex::new(leon_usage::network::NetworkPolicy::default()),
                 blocking: std::sync::atomic::AtomicUsize::new(0),
                 local_posix_shell: std::sync::atomic::AtomicBool::new(
@@ -670,6 +717,120 @@ impl Engine {
         self.inner
             .blocking
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Tells the engine where Leon's data folder is, for the memory files it
+    /// writes when a terminal starts. Without it none is written.
+    pub fn set_memory_dir(&self, data_dir: std::path::PathBuf) {
+        *self
+            .inner
+            .memory_dir
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(data_dir);
+    }
+
+    /// Whether a project added by hand is asked about its agent memory.
+    pub fn set_memory_offer(&self, on: bool) {
+        self.inner
+            .memory_offer
+            .store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The oldest question about agent memory that waits, taken off the
+    /// queue: the window shows it.
+    pub fn take_memory_offer(&self) -> Option<crate::memory_offer::Offer> {
+        self.state().memory_offers.pop_front()
+    }
+
+    /// What there is to say or ask about the agent memory of a project that
+    /// somebody has just added by hand. The project's files are looked at on
+    /// the blocking pool; a question is queued for the window
+    /// ([`EngineEvent::MemoryOffer`]); and when the files hold the block
+    /// already, the words for the status line come back. A project of
+    /// another machine, and anything that goes wrong, is silence: this never
+    /// fails the adding.
+    async fn memory_note(&self, project: &leon_core::Project) -> Option<String> {
+        use crate::memory_offer::{decide, Decision, Facts, Offer};
+        if !project.machine_id.is_local() {
+            return None;
+        }
+        let root = std::path::PathBuf::from(&project.root);
+        let found = self
+            .blocking(move || crate::memory::look(&root))
+            .await
+            .ok()?;
+        let key = leon_core::path::key(&project.root);
+        let facts = Facts {
+            local: true,
+            explicit: true,
+            setting_on: self
+                .inner
+                .memory_offer
+                .load(std::sync::atomic::Ordering::SeqCst),
+            answered: self
+                .inner
+                .store
+                .memory_choice(&project.root)
+                .ok()?
+                .map(|(choice, _)| choice),
+            asked_this_run: self
+                .inner
+                .memory_asked
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(&key),
+            block_present: !leon_memory::files::holding(&found).is_empty(),
+        };
+        match decide(&facts) {
+            Decision::Nothing => None,
+            Decision::AlreadyOn => {
+                self.record_memory_choice(&project.root, leon_core::MemoryChoice::On);
+                Some(crate::memory_offer::already_on(&project.name))
+            }
+            Decision::Ask => {
+                let offer = Offer::new(
+                    project.id.clone(),
+                    project.name.clone(),
+                    project.root.clone(),
+                    &leon_memory::files::enable(&found),
+                );
+                if !offer.writes_something() {
+                    return None;
+                }
+                self.inner
+                    .memory_asked
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(key);
+                self.state().memory_offers.push_back(offer);
+                let _ = self.inner.events.send(EngineEvent::MemoryOffer);
+                None
+            }
+        }
+    }
+
+    /// Remembers what was decided about a root. A store that refuses is a
+    /// warning: the decision itself was carried out.
+    fn record_memory_choice(&self, root: &str, choice: leon_core::MemoryChoice) {
+        let at = crate::memory::now_millis();
+        if let Err(error) = self.inner.store.set_memory_choice(root, choice, at) {
+            tracing::warn!(%error, "the answer about agent memory was not kept");
+        }
+    }
+
+    /// The size a memory file may have, in bytes.
+    pub fn memory_budget(&self) -> usize {
+        self.inner
+            .memory_budget
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Tells the engine the size a memory file may have. The files are
+    /// written again with [`Op::RewriteMemoryFiles`].
+    pub fn set_memory_budget(&self, bytes: usize) {
+        self.inner
+            .memory_budget
+            .store(bytes, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Lets the engine download owner avatars with `fetcher`. Without one it
@@ -1519,6 +1680,24 @@ impl Engine {
                 .await
                 .map(Some),
             Op::RemoveProject(project) => self.remove_project(&project).map(Some),
+            Op::ProjectMemory { project, on } => self.project_memory(&project, on).await.map(Some),
+            Op::WriteMemoryFile { root } => {
+                self.write_memory_file(Some(root)).await?;
+                Ok(None)
+            }
+            Op::MemoryNever(project) => {
+                let project = self.inner.store.project(&project)?;
+                self.inner.store.set_memory_choice(
+                    &project.root,
+                    leon_core::MemoryChoice::Never,
+                    crate::memory::now_millis(),
+                )?;
+                Ok(Some(crate::memory_offer::never_line(&project.name)))
+            }
+            Op::RewriteMemoryFiles => {
+                self.write_memory_file(None).await?;
+                Ok(None)
+            }
             Op::RenameProject { project, name } => self.rename_project(&project, &name).map(Some),
             Op::ReorderProjects { machine, ordered } => {
                 self.reorder_projects(&machine, &ordered).map(Some)
@@ -2662,10 +2841,11 @@ impl Engine {
         let project = self.inner.store.add_project(machine, &name, path)?;
         let synced = self.sync_worktrees(&project.id).await;
         self.detect_icon_quietly(&project.id).await;
+        let note = self.memory_note(&project).await;
         match synced {
-            Ok(count) => Ok(format!(
-                "Added project {name} with {}.",
-                plural(count, "worktree")
+            Ok(count) => Ok(with_note(
+                format!("Added project {name} with {}.", plural(count, "worktree")),
+                note,
             )),
             // The project is saved; "refresh" tries git again.
             Err(error) => Err(EngineError::Invalid(format!(
@@ -2730,10 +2910,13 @@ impl Engine {
         Git::new(&runner, &machine, &self.ssh())
             .clone(url.trim(), &parent, &target)
             .await?;
-        let count = self.register_project(&machine, &name, &target).await?;
-        Ok(format!(
-            "Cloned {name} into {target} with {}.",
-            plural(count, "worktree")
+        let (count, note) = self.register_project(&machine, &name, &target).await?;
+        Ok(with_note(
+            format!(
+                "Cloned {name} into {target} with {}.",
+                plural(count, "worktree")
+            ),
+            note,
         ))
     }
 
@@ -2777,10 +2960,13 @@ impl Engine {
         Git::new(&runner, &machine, &self.ssh())
             .init(&target)
             .await?;
-        let count = self.register_project(&machine, &name, &target).await?;
-        Ok(format!(
-            "Created project {name} at {target} with {}.",
-            plural(count, "worktree")
+        let (count, note) = self.register_project(&machine, &name, &target).await?;
+        Ok(with_note(
+            format!(
+                "Created project {name} at {target} with {}.",
+                plural(count, "worktree")
+            ),
+            note,
         ))
     }
 
@@ -2791,17 +2977,73 @@ impl Engine {
         machine: &Machine,
         name: &str,
         path: &str,
-    ) -> Result<usize, EngineError> {
+    ) -> Result<(usize, Option<String>), EngineError> {
         let project = self.inner.store.add_project(&machine.id, name, path)?;
         let count = self.sync_worktrees(&project.id).await?;
         self.detect_icon_quietly(&project.id).await;
-        Ok(count)
+        // Somebody cloned or created it: the one moment to ask about its
+        // agent memory.
+        let note = self.memory_note(&project).await;
+        Ok((count, note))
     }
 
     fn remove_project(&self, id: &ProjectId) -> Result<String, EngineError> {
         let project = self.inner.store.project(id)?;
         self.inner.store.remove_project(id)?;
         Ok(format!("Removed project {}.", project.name))
+    }
+
+    /// Writes the managed block of the shared memory into a project's
+    /// instruction files, or takes it out. Only on this computer: the files of
+    /// a project on another machine are not Leon's to reach.
+    async fn project_memory(&self, id: &ProjectId, on: bool) -> Result<String, EngineError> {
+        let project = self.inner.store.project(id)?;
+        if !project.machine_id.is_local() {
+            return Err(EngineError::Invalid(format!(
+                "The agent memory only works on this computer: {} is on another machine.",
+                project.name
+            )));
+        }
+        let root = std::path::PathBuf::from(&project.root);
+        let lines = self
+            .blocking(move || crate::memory::set_block(&root, on, false))
+            .await?
+            .map_err(EngineError::File)?;
+        if on {
+            // The file the block points agents at is there from now on.
+            self.write_memory_file(Some(project.root.clone())).await?;
+        }
+        let said = memory_status(&project.name, on, &lines).map_err(EngineError::File)?;
+        // Only what was done is remembered: a failure above leaves no "yes".
+        let choice = if on {
+            leon_core::MemoryChoice::On
+        } else {
+            leon_core::MemoryChoice::Off
+        };
+        self.record_memory_choice(&project.root, choice);
+        Ok(said)
+    }
+
+    /// Writes the memory file of the project rooted at `root` again, or,
+    /// without a root, every memory file there is.
+    async fn write_memory_file(&self, root: Option<String>) -> Result<(), EngineError> {
+        let data_dir = self
+            .inner
+            .memory_dir
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let Some(data_dir) = data_dir else {
+            return Ok(());
+        };
+        let store = self.inner.store.clone();
+        let budget = self.memory_budget();
+        self.blocking(move || match root {
+            Some(root) => crate::memory::write_file(&store, &data_dir, &root, budget).map(|_| ()),
+            None => crate::memory::write_global_files(&store, &data_dir, budget),
+        })
+        .await?
+        .map_err(EngineError::File)
     }
 
     fn rename_project(&self, id: &ProjectId, name: &str) -> Result<String, EngineError> {
@@ -2940,15 +3182,22 @@ impl Engine {
             .store
             .replace_worktrees(&project.id, new_worktrees(&listing))?
             .len();
+        let mut note = None;
         if is_new {
             self.detect_icon_quietly(&project.id).await;
+            // Somebody opened a folder Leon did not have: the one moment to
+            // ask about its agent memory.
+            note = self.memory_note(&project).await;
         }
         Ok((
-            project.id,
-            format!(
-                "Opened project {} with {}.",
-                project.name,
-                plural(count, "worktree")
+            project.id.clone(),
+            with_note(
+                format!(
+                    "Opened project {} with {}.",
+                    project.name,
+                    plural(count, "worktree")
+                ),
+                note,
             ),
         ))
     }
@@ -3938,6 +4187,46 @@ fn trim(path: &str) -> &str {
     } else {
         trimmed
     }
+}
+
+/// A status line with what there is to add about the agent memory.
+fn with_note(text: String, note: Option<String>) -> String {
+    match note {
+        Some(note) => format!("{text} {note}"),
+        None => text,
+    }
+}
+
+/// The status line of turning a project's agent memory on or off: what was
+/// done, with the names of the files it was done to. An error when it was to
+/// be turned on and no file could take the block.
+fn memory_status(project: &str, on: bool, lines: &[String]) -> Result<String, String> {
+    let changed: Vec<&str> = lines
+        .iter()
+        .filter(|line| !line.starts_with("left "))
+        .filter_map(|line| line.rsplit(['/', '\\']).next())
+        .collect();
+    if !changed.is_empty() {
+        let files = changed.join(", ");
+        return Ok(if on {
+            format!("Agent memory is on for {project}: the block is in {files}.")
+        } else {
+            format!("Agent memory is off for {project}: the block is out of {files}.")
+        });
+    }
+    if !on {
+        return Ok(format!("Agent memory was already off for {project}."));
+    }
+    if lines
+        .iter()
+        .any(|line| line.ends_with("already has the block"))
+    {
+        return Ok(format!("Agent memory was already on for {project}."));
+    }
+    Err(format!(
+        "Agent memory was not turned on for {project}: {}.",
+        lines.join("; ")
+    ))
 }
 
 fn plural(count: usize, noun: &str) -> String {
@@ -5641,6 +5930,377 @@ branch refs/heads/feature/login
         rig.engine.run(Op::Refresh).await;
 
         assert!(roots(&rig.store, &local).is_empty(), "it stays removed");
+    }
+
+    #[tokio::test]
+    async fn agent_memory_is_turned_on_and_off_for_a_project_of_this_computer() {
+        let rig = rig(ScriptedRunner::new());
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("api");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("CLAUDE.md"), "# Claude\n").unwrap();
+        rig.engine.set_memory_dir(dir.path().join("data"));
+        let root_text = root.to_string_lossy().into_owned();
+        let project = rig
+            .store
+            .add_project(&MachineId::local(), "api", &root_text)
+            .unwrap();
+        let op = |on: bool| Op::ProjectMemory {
+            project: project.id.clone(),
+            on,
+        };
+
+        rig.engine.run(op(true)).await;
+        assert_eq!(
+            status(&rig.engine).text,
+            "Agent memory is on for api: the block is in CLAUDE.md."
+        );
+        let text = std::fs::read_to_string(root.join("CLAUDE.md")).unwrap();
+        assert!(leon_memory::block::current(&text));
+        // Only the file that was there, and the memory file it points at.
+        assert!(!root.join("AGENTS.md").exists());
+        assert!(crate::memory::file_of(&dir.path().join("data"), &root_text).is_file());
+
+        rig.engine.run(op(true)).await;
+        assert_eq!(
+            status(&rig.engine).text,
+            "Agent memory was already on for api."
+        );
+
+        rig.engine.run(op(false)).await;
+        assert_eq!(
+            status(&rig.engine).text,
+            "Agent memory is off for api: the block is out of CLAUDE.md."
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("CLAUDE.md")).unwrap(),
+            "# Claude\n"
+        );
+        rig.engine.run(op(false)).await;
+        assert_eq!(
+            status(&rig.engine).text,
+            "Agent memory was already off for api."
+        );
+    }
+
+    /// A folder that is there, a runner that says it is a repository, and an
+    /// engine that asks about agent memory.
+    fn offer_rig(replies: usize) -> (Rig, tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("api");
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.to_string_lossy().into_owned();
+        let listing = format!(
+            "worktree {root}\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/main\n"
+        );
+        let mut runner = ScriptedRunner::new();
+        for _ in 0..replies {
+            runner = runner.reply(Output::ok(listing.clone()));
+        }
+        let rig = rig(runner);
+        rig.engine.set_memory_offer(true);
+        (rig, dir, root)
+    }
+
+    fn add_by_hand(root: &str) -> Op {
+        Op::AddProject {
+            machine: MachineId::local(),
+            path: root.to_owned(),
+            name: "api".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_project_added_by_hand_is_asked_about_and_the_answer_is_carried_out() {
+        let (rig, _dir, root) = offer_rig(1);
+        std::fs::write(std::path::Path::new(&root).join("CLAUDE.md"), "# Claude\n").unwrap();
+        let mut events = rig.engine.subscribe();
+        rig.engine.run(add_by_hand(&root)).await;
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            seen.push(event);
+        }
+        assert!(seen.contains(&EngineEvent::MemoryOffer), "{seen:?}");
+        // The adding itself says nothing of the memory: the question does.
+        assert!(!status(&rig.engine).text.contains("memory"));
+        let offer = rig.engine.take_memory_offer().expect("a question waits");
+        assert_eq!(
+            (offer.name.as_str(), offer.root.as_str()),
+            ("api", root.as_str())
+        );
+        assert_eq!(
+            (offer.writes.as_slice(), offer.creates),
+            (&["CLAUDE.md"][..], None)
+        );
+        assert!(rig.engine.take_memory_offer().is_none(), "asked once");
+        // Asking wrote nothing and recorded nothing.
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(&root).join("CLAUDE.md")).unwrap(),
+            "# Claude\n"
+        );
+        assert_eq!(rig.store.memory_choice(&root).unwrap(), None);
+
+        // "Turn it on" is the palette command's own operation.
+        rig.engine
+            .run(Op::ProjectMemory {
+                project: offer.project.clone(),
+                on: true,
+            })
+            .await;
+        assert_eq!(
+            status(&rig.engine).text,
+            "Agent memory is on for api: the block is in CLAUDE.md."
+        );
+        assert_eq!(
+            rig.store
+                .memory_choice(&root)
+                .unwrap()
+                .map(|(choice, _)| choice),
+            Some(leon_core::MemoryChoice::On)
+        );
+        // Turned off by hand: remembered too, so it is not asked about.
+        rig.engine
+            .run(Op::ProjectMemory {
+                project: offer.project,
+                on: false,
+            })
+            .await;
+        assert_eq!(
+            rig.store
+                .memory_choice(&root)
+                .unwrap()
+                .map(|(choice, _)| choice),
+            Some(leon_core::MemoryChoice::Off)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_project_without_instruction_files_is_offered_agents_md() {
+        let (rig, _dir, root) = offer_rig(1);
+        rig.engine.run(add_by_hand(&root)).await;
+        let offer = rig.engine.take_memory_offer().unwrap();
+        assert_eq!((offer.writes.len(), offer.creates), (0, Some("AGENTS.md")));
+        assert!(!std::path::Path::new(&root).join("AGENTS.md").exists());
+    }
+
+    #[tokio::test]
+    async fn never_is_remembered_across_removing_and_adding_the_project_again() {
+        let (rig, _dir, root) = offer_rig(2);
+        rig.engine.run(add_by_hand(&root)).await;
+        let offer = rig.engine.take_memory_offer().unwrap();
+        rig.engine.run(Op::MemoryNever(offer.project.clone())).await;
+        assert!(status(&rig.engine)
+            .text
+            .starts_with("Leon will not ask about agent memory for api again."));
+        rig.engine.run(Op::RemoveProject(offer.project)).await;
+        rig.engine.run(add_by_hand(&root)).await;
+        assert_eq!(rig.store.projects(None).unwrap().len(), 1);
+        assert!(rig.engine.take_memory_offer().is_none());
+        assert!(!std::path::Path::new(&root).join("AGENTS.md").exists());
+    }
+
+    #[tokio::test]
+    async fn not_now_is_not_asked_again_in_the_same_run_and_is_not_remembered() {
+        let (rig, _dir, root) = offer_rig(2);
+        rig.engine.run(add_by_hand(&root)).await;
+        // "Not now": the window takes the question and answers nothing.
+        let offer = rig.engine.take_memory_offer().unwrap();
+        rig.engine.run(Op::RemoveProject(offer.project)).await;
+        rig.engine.run(add_by_hand(&root)).await;
+        assert!(
+            rig.engine.take_memory_offer().is_none(),
+            "not twice in one run"
+        );
+        assert_eq!(
+            rig.store.memory_choice(&root).unwrap(),
+            None,
+            "the next run asks"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_project_that_has_the_block_is_not_asked_about_only_said_to_be_on() {
+        let (rig, _dir, root) = offer_rig(1);
+        let file = std::path::Path::new(&root).join("AGENTS.md");
+        std::fs::write(&file, leon_memory::block::insert("# Agents\n")).unwrap();
+        let before = std::fs::read(&file).unwrap();
+        rig.engine.run(add_by_hand(&root)).await;
+        let line = status(&rig.engine);
+        assert_eq!(line.kind, StatusKind::Info);
+        assert!(
+            line.text.ends_with("Agent memory is already on for api."),
+            "{}",
+            line.text
+        );
+        assert!(rig.engine.take_memory_offer().is_none());
+        assert_eq!(std::fs::read(&file).unwrap(), before, "nothing was written");
+        assert_eq!(
+            rig.store
+                .memory_choice(&root)
+                .unwrap()
+                .map(|(choice, _)| choice),
+            Some(leon_core::MemoryChoice::On)
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_is_asked_with_the_setting_off_or_for_another_machine() {
+        let (rig, _dir, root) = offer_rig(1);
+        rig.engine.set_memory_offer(false);
+        rig.engine.run(add_by_hand(&root)).await;
+        assert!(rig.engine.take_memory_offer().is_none());
+        // The command still works.
+        let project = rig.store.projects(None).unwrap().remove(0);
+        rig.engine
+            .run(Op::ProjectMemory {
+                project: project.id,
+                on: true,
+            })
+            .await;
+        assert!(std::path::Path::new(&root).join("AGENTS.md").is_file());
+
+        let rig = rig_with(ScriptedRunner::new().reply(Output::ok(LISTING)));
+        rig.engine.set_memory_offer(true);
+        let remote = ssh_machine(&rig.store);
+        rig.engine
+            .run(Op::AddProject {
+                machine: remote.id,
+                path: PROJECT_ROOT.into(),
+                name: "api".into(),
+            })
+            .await;
+        assert_eq!(rig.store.projects(None).unwrap().len(), 1);
+        assert!(rig.engine.take_memory_offer().is_none());
+    }
+
+    #[tokio::test]
+    async fn projects_leon_finds_by_itself_are_never_asked_about() {
+        let rig = discovery_rig(Answering::new(git_at(ALL_API_FOLDERS, LISTING)));
+        rig.engine.set_memory_offer(true);
+        let mut events = rig.engine.subscribe();
+        session_in(&rig.store, &MachineId::local(), "/srv/api", "a");
+        rig.engine.run(Op::Refresh).await;
+        assert!(
+            !rig.store.projects(None).unwrap().is_empty(),
+            "it was found"
+        );
+        assert!(rig.engine.take_memory_offer().is_none());
+        while let Ok(event) = events.try_recv() {
+            assert_ne!(event, EngineEvent::MemoryOffer);
+        }
+    }
+
+    #[tokio::test]
+    async fn turning_it_on_where_it_cannot_be_written_records_no_yes() {
+        let (rig, dir, root) = offer_rig(1);
+        rig.engine.run(add_by_hand(&root)).await;
+        let offer = rig.engine.take_memory_offer().unwrap();
+        // The folder went away between the question and the answer.
+        std::fs::remove_dir_all(dir.path().join("api")).unwrap();
+        rig.engine
+            .run(Op::ProjectMemory {
+                project: offer.project,
+                on: true,
+            })
+            .await;
+        let line = status(&rig.engine);
+        assert_eq!(line.kind, StatusKind::Error);
+        assert!(line.text.contains("is not a folder"), "{}", line.text);
+        assert_eq!(rig.store.memory_choice(&root).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn agent_memory_is_refused_for_a_project_on_another_machine() {
+        let rig = rig(ScriptedRunner::new());
+        let remote = ssh_machine(&rig.store);
+        let project = rig
+            .store
+            .add_project(&remote.id, "api", "/srv/api")
+            .unwrap();
+        rig.engine
+            .run(Op::ProjectMemory {
+                project: project.id,
+                on: true,
+            })
+            .await;
+        let status = status(&rig.engine);
+        assert_eq!(status.kind, StatusKind::Error);
+        assert!(status.text.contains("only works on this computer"));
+        // Nothing was asked of the machine.
+        assert!(rig.runner.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_memory_file_is_written_only_when_the_data_folder_is_known() {
+        let rig = rig(ScriptedRunner::new());
+        let dir = tempfile::tempdir().unwrap();
+        let op = || Op::WriteMemoryFile {
+            root: "/srv/api".into(),
+        };
+        rig.engine.run(op()).await;
+        assert!(rig.engine.status().is_none());
+
+        rig.engine.set_memory_dir(dir.path().to_path_buf());
+        rig.store
+            .add_memory(
+                &leon_core::NewMemory::note(
+                    leon_core::MemoryScope::project("/srv/api"),
+                    "Use pnpm.",
+                ),
+                1,
+            )
+            .unwrap();
+        rig.engine.run(op()).await;
+        assert!(rig.engine.status().is_none(), "it says nothing");
+        let file = crate::memory::file_of(dir.path(), "/srv/api");
+        assert!(std::fs::read_to_string(file).unwrap().contains("Use pnpm."));
+    }
+
+    #[tokio::test]
+    async fn the_engine_and_the_command_line_write_the_same_file_for_one_setting() {
+        let rig = rig(ScriptedRunner::new());
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        let scope = leon_core::MemoryScope::project("/srv/api");
+        for n in 0..200 {
+            let text = format!("fact {n} {}", "word ".repeat(40));
+            rig.store
+                .add_memory(&leon_core::NewMemory::note(scope.clone(), text), n)
+                .unwrap();
+        }
+        let file = crate::memory::file_of(&data, "/srv/api");
+        let settings = data.join(crate::settings::FILE_NAME);
+        rig.engine.set_memory_dir(data.clone());
+        // The file is there from the first terminal started in the project;
+        // a change of the setting then writes it again.
+        rig.engine
+            .run(Op::WriteMemoryFile {
+                root: "/srv/api".into(),
+            })
+            .await;
+        for budget in [3_000usize, 12_000, 50_000] {
+            // The application: the setting as the window told it.
+            rig.engine.set_memory_budget(budget);
+            rig.engine.run(Op::RewriteMemoryFiles).await;
+            let by_the_app = std::fs::read(&file).unwrap();
+            assert!(
+                by_the_app.len() <= budget,
+                "{} for {budget}",
+                by_the_app.len()
+            );
+            // It follows the setting: more room, more of the memory.
+            assert!(by_the_app.len() > budget.min(30_000) - 1_000);
+            // The command line: the same setting, read from the file.
+            std::fs::write(&settings, format!(r#"{{"memory_budget": {budget}}}"#)).unwrap();
+            std::fs::remove_file(&file).unwrap();
+            let service =
+                crate::memory::Service::new(rig.store.clone(), data.clone(), "/srv/api".into());
+            service.refresh(&scope);
+            assert_eq!(std::fs::read(&file).unwrap(), by_the_app, "budget {budget}");
+        }
+        // A change of the setting rewrites the global file and every
+        // project's file that is there.
+        assert!(crate::memory::global_file(&data).is_file());
     }
 
     #[tokio::test]

@@ -1,5 +1,65 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+* A memory the agents share. Every agent started in a terminal of Leon on this
+  computer can save and find what earlier sessions decided, agreed on and
+  found out, whichever agent wrote it: `leon memory add`, `edit`, `show`, `search`,
+  `list`, `pin`, `forget`, `restore`, `purge`, `context`, `path` and
+  `status`. An entry is one fact with a kind
+  (`decision`, `convention`, `discovery`, `preference`, `note`); it belongs to
+  a project, shared by all its git worktrees, or to every project
+  (`--global`). The entries are in Leon's database on this computer; each
+  project also gets a memory file that an agent reads before it starts: a
+  summary of the global entries and then the project's, with pinned entries
+  in full (within half of the file, so that pins cannot crowd out the rest)
+  and every other entry on one line (`leon memory show <id>` reads
+  one whole), within a size the new setting **Memory file size**
+  (`memory_budget`, 12,000 bytes by default) gives.
+  Terminals get `LEON_BIN` (the running Leon) and `LEON_MEMORY` (that file),
+  which your own `terminal_env` can override.
+* The memory is kept from degrading with use. A text that a live entry
+  already says (whatever its case, spacing and surrounding punctuation) is not
+  saved again: `Already known as <id>`. A fact saved with `--topic <key>` is
+  revised in place the next time something is saved under that key, with a
+  revision count. `leon memory pin` keeps an entry in full and first in the
+  memory file, and last to be left out of it. `leon memory edit`
+  corrects an entry. `leon memory forget` is soft: `list --forgotten` shows
+  what is forgotten, `restore` brings it back, and it is removed for good
+  after 30 days (`purge`, `forget --hard`).
+* Leon asks whether to turn the memory on when you open, clone or create a
+  project on this computer: a small question with what the memory is good
+  for and exactly which instruction files it would write. `Enter` turns it
+  on, `Esc` is "not now", `N` is never for that project, `D` stops the
+  question for good (the new setting **Offer agent memory when a project is
+  added**). Projects Leon finds by itself, projects on other machines and
+  projects that already have the block are not asked about.
+  `leon memory status` shows what was answered.
+* Agents are told about the memory only when you ask. `leon memory enable`, or
+  the palette's **Turn on agent memory for this project**, writes a short
+  managed block into the project's `AGENTS.md`, `CLAUDE.md` and `GEMINI.md`
+  (the ones that exist; `AGENTS.md` when there is none). The block names no
+  path, so it can be committed, and tells an agent outside Leon to ignore it.
+  `--dry-run` shows what would change; `leon memory disable`, or **Turn off
+  agent memory for this project**, puts every file back byte for byte.
+* `leon memory mcp`, an MCP server over stdio with `memory_search`,
+  `memory_get`, `memory_add`, `memory_update`, `memory_pin`, `memory_list`,
+  `memory_forget` and `memory_context`.
+  `leon memory enable --mcp` registers it in the project's `.mcp.json` for
+  Claude Code (every other key of the file is kept; a file that does not
+  parse is refused, not replaced) and prints what to run for Codex and
+  opencode. See `docs/MEMORY.md`.
+
+### Not yet
+
+* The memory is local: terminals on a machine reached over SSH or a relay are
+  not told of it. Nothing is captured automatically, and the window has no
+  view of the memory yet.
+* The memory's tables are schema 19 of the database. A Leon older than this
+  one refuses a database this one has opened.
+
 ## [0.7.0] - 2026-10-08
 
 ### Added

@@ -6,6 +6,10 @@
 //! `--name=value`, and
 //! pulling in a parser for that would cost more than it saves.
 //!
+//! Two words are command lines of their own, taken in `main` before this
+//! parser sees anything: `host` (`leon_host::cli`) and `memory`
+//! (`memory_cli.rs`). [`usage`] names both.
+//!
 //! One hidden option is for developers and bug reports, not for users:
 //! `--diagnose terminal [--input <text>] [--timeout <seconds>] [-- <program>
 //! [args...]]` runs a program in a pseudo-terminal without a window and
@@ -142,7 +146,7 @@ pub struct Options {
 pub fn usage() -> String {
     format!(
         "{name} {version}\n\n\
-         Usage: {slug} [options]\n       {slug} host [--pair] | pair | devices | status | revoke <device>   (share this computer; see `{slug} host --help`)\n\n\
+         Usage: {slug} [options]\n       {slug} host [--pair] | pair | devices | status | revoke <device>   (share this computer; see `{slug} host --help`)\n       {slug} memory add | edit | show | search | list | pin | forget | ...   (the memory agents share; see `{slug} memory --help`)\n\n\
          Options:\n  \
          --data-dir <path>              Keep the database and settings here\n  \
          --theme <light|dark|system>    Use this appearance for this run\n  \
@@ -441,6 +445,17 @@ mod tests {
 
     fn parsed(args: &[&str]) -> Result<Command, String> {
         parse(args.iter().map(|arg| (*arg).to_owned()))
+    }
+
+    #[test]
+    fn the_help_names_the_two_command_lines_of_their_own() {
+        let usage = usage();
+        assert!(usage.contains("leon host [--pair]"), "{usage}");
+        assert!(
+            usage.contains("leon memory add | edit | show | search"),
+            "{usage}"
+        );
+        assert!(usage.contains("`leon memory --help`"), "{usage}");
     }
 
     #[test]

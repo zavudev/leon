@@ -28,6 +28,7 @@ use crate::error::Result;
 mod history;
 mod icons;
 mod machines;
+pub mod memory;
 mod migrations;
 mod projects;
 pub mod search;

@@ -305,6 +305,299 @@ fn a_chosen_shell_and_extra_environment_start_new_terminals(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
+fn a_terminal_of_this_computer_is_told_where_leon_and_the_memory_file_are(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let (_dir, root) = real_worktree(&h, cx);
+    let data = tempfile::tempdir().unwrap();
+    let terminals = crate::memory::Terminals {
+        bin: "/opt/leon/leon".into(),
+        data_dir: data.path().to_path_buf(),
+        default_data_dir: true,
+    };
+    h.engine.set_memory_dir(data.path().to_path_buf());
+    cx.update(|cx| {
+        h.shell.update(cx, |shell, _| {
+            shell.options.memory = Some(terminals.clone());
+        })
+    });
+    // The user's own variable of the same name comes after Leon's, and wins.
+    set(
+        &h,
+        cx,
+        "terminal_env",
+        Value::List(vec!["LEON_BIN=/my/leon".into()]),
+    );
+    h.press("ctrl-t", cx);
+    wait_until(&h, cx, "the shell", |h, cx| terminal_of(h, cx, 1).is_some());
+    let file = crate::memory::file_of(data.path(), &root);
+    let spec = script_of(&h, 1).spec().clone();
+    assert_eq!(
+        spec.env,
+        [
+            ("LEON_BIN".to_owned(), "/opt/leon/leon".to_owned()),
+            (
+                "LEON_MEMORY".to_owned(),
+                file.to_string_lossy().into_owned()
+            ),
+            ("LEON_BIN".to_owned(), "/my/leon".to_owned()),
+        ]
+    );
+    // The engine was asked for the file the variable names: it is there.
+    wait_until(&h, cx, "the memory file", |_, _| file.is_file());
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("## This project: "), "{text}");
+}
+
+#[gpui_kit::test]
+fn a_change_of_the_memory_file_size_writes_the_memory_files_again(cx: &mut TestAppContext) {
+    let h = open_live(cx);
+    let data = tempfile::tempdir().unwrap();
+    h.engine.set_memory_dir(data.path().to_path_buf());
+    let scope = leon_core::MemoryScope::project("/srv/api");
+    for n in 0..120 {
+        let text = format!("fact {n} {}", "word ".repeat(40));
+        h.store
+            .add_memory(&leon_core::NewMemory::note(scope.clone(), text), n)
+            .unwrap();
+    }
+    let budget = h.engine.memory_budget();
+    assert_eq!(budget, 12_000);
+    let file = crate::memory::write_file(&h.store, data.path(), "/srv/api", budget).unwrap();
+    let before = std::fs::metadata(&file).unwrap().len();
+    assert!(before > 11_000, "{before}");
+
+    set(&h, cx, crate::memory::BUDGET_KEY, Value::Int(3_000));
+    wait_until(&h, cx, "the smaller file", |_, _| {
+        std::fs::metadata(&file).is_ok_and(|meta| meta.len() <= 3_000)
+    });
+    assert_eq!(h.engine.memory_budget(), 3_000);
+    assert!(crate::memory::global_file(data.path()).is_file());
+}
+
+/// A window in which "Open project…" picks a real, empty folder that git
+/// says is a repository, as many times as `opens`, with the question about
+/// agent memory allowed. The folder lives as long as the returned value.
+fn opening_a_real_folder(
+    cx: &mut TestAppContext,
+    opens: usize,
+    prepare: impl FnOnce(&std::path::Path),
+) -> (Harness, tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap().join("api");
+    std::fs::create_dir_all(&root).unwrap();
+    prepare(&root);
+    let listing = format!(
+        "worktree {}\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/main\n",
+        root.display()
+    );
+    let mut runner = ScriptedRunner::new();
+    for _ in 0..opens {
+        runner = runner.reply(Output::ok(listing.clone()));
+    }
+    let h = open_full(cx, runner, None, Picked::Folder(root.clone()), |_| {});
+    h.engine.set_memory_offer(true);
+    (h, dir, root)
+}
+
+fn open_the_folder(h: &Harness, cx: &mut TestAppContext) {
+    h.press("ctrl-o", cx);
+    h.settle(cx);
+}
+
+fn memory_choice_of(h: &Harness, root: &std::path::Path) -> Option<leon_core::MemoryChoice> {
+    h.store
+        .memory_choice(&root.to_string_lossy())
+        .unwrap()
+        .map(|(choice, _)| choice)
+}
+
+#[gpui_kit::test]
+fn opening_a_project_asks_whether_to_turn_on_its_agent_memory(cx: &mut TestAppContext) {
+    let (h, _dir, root) = opening_a_real_folder(cx, 1, |root| {
+        std::fs::write(root.join("CLAUDE.md"), "# Claude\n").unwrap();
+    });
+    open_the_folder(&h, cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::MemoryOffer);
+    let offer = h
+        .shell(cx, |s| s.memory_offer.clone())
+        .expect("the question is up");
+    assert_eq!(offer.title(), "Turn on agent memory for api?");
+    assert_eq!(
+        offer.change(),
+        format!(
+            "Leon adds a short section to CLAUDE.md in {}. \
+             Turn off agent memory for this project removes it again, byte for byte.",
+            root.display()
+        )
+    );
+    for part in [
+        "memory-offer-title",
+        "memory-offer-benefits",
+        "memory-offer-change",
+        "memory-offer-on",
+        "memory-offer-not-now",
+        "memory-offer-never",
+        "memory-offer-stop",
+    ] {
+        assert!(h.shows(part, cx), "{part}");
+    }
+    // Asking wrote nothing.
+    assert_eq!(
+        std::fs::read_to_string(root.join("CLAUDE.md")).unwrap(),
+        "# Claude\n"
+    );
+    // A key that is not the question's does nothing to it.
+    h.press("y", cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::MemoryOffer);
+
+    // Enter turns it on, through the engine, which says what it wrote.
+    h.press("enter", cx);
+    h.settle(cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+    assert_eq!(
+        h.status(),
+        "Agent memory is on for api: the block is in CLAUDE.md."
+    );
+    assert!(leon_memory::block::current(
+        &std::fs::read_to_string(root.join("CLAUDE.md")).unwrap()
+    ));
+    assert!(!root.join("AGENTS.md").exists());
+    assert_eq!(
+        memory_choice_of(&h, &root),
+        Some(leon_core::MemoryChoice::On)
+    );
+}
+
+#[gpui_kit::test]
+fn not_now_writes_and_remembers_nothing(cx: &mut TestAppContext) {
+    let (h, _dir, root) = opening_a_real_folder(cx, 1, |_| {});
+    open_the_folder(&h, cx);
+    let offer = h.shell(cx, |s| s.memory_offer.clone()).unwrap();
+    assert_eq!(offer.creates, Some("AGENTS.md"));
+    h.press("escape", cx);
+    h.settle(cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+    assert!(h.shell(cx, |s| s.memory_offer.is_none()));
+    assert_eq!(
+        std::fs::read_dir(&root).unwrap().count(),
+        0,
+        "nothing was written"
+    );
+    assert_eq!(memory_choice_of(&h, &root), None);
+    assert!(!h.status().contains("memory"), "{}", h.status());
+}
+
+#[gpui_kit::test]
+fn never_for_this_project_is_not_asked_again_when_it_is_added_again(cx: &mut TestAppContext) {
+    let (h, _dir, root) = opening_a_real_folder(cx, 6, |_| {});
+    open_the_folder(&h, cx);
+    let offer = h.shell(cx, |s| s.memory_offer.clone()).unwrap();
+    h.press("n", cx);
+    h.settle(cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+    assert!(h
+        .status()
+        .starts_with("Leon will not ask about agent memory for api again."));
+    assert_eq!(
+        memory_choice_of(&h, &root),
+        Some(leon_core::MemoryChoice::Never)
+    );
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+
+    // Removed and opened again: another project id, no question.
+    h.engine
+        .submit(crate::engine::Op::RemoveProject(offer.project));
+    h.settle(cx);
+    drop(
+        h.engine
+            .open_project(MachineId::local(), root.to_string_lossy().into_owned()),
+    );
+    h.settle(cx);
+    assert!(
+        h.status().starts_with("Opened project api"),
+        "{}",
+        h.status()
+    );
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+    assert!(h.engine.take_memory_offer().is_none());
+}
+
+#[gpui_kit::test]
+fn a_project_that_already_has_the_block_is_only_said_to_be_on(cx: &mut TestAppContext) {
+    let (h, _dir, root) = opening_a_real_folder(cx, 1, |root| {
+        std::fs::write(
+            root.join("AGENTS.md"),
+            leon_memory::block::insert("# Agents\n"),
+        )
+        .unwrap();
+    });
+    let before = std::fs::read(root.join("AGENTS.md")).unwrap();
+    open_the_folder(&h, cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+    assert!(
+        h.status().ends_with("Agent memory is already on for api."),
+        "{}",
+        h.status()
+    );
+    assert_eq!(std::fs::read(root.join("AGENTS.md")).unwrap(), before);
+    assert_eq!(
+        memory_choice_of(&h, &root),
+        Some(leon_core::MemoryChoice::On)
+    );
+}
+
+#[gpui_kit::test]
+fn with_the_setting_off_nothing_is_asked_and_do_not_ask_again_turns_it_off(
+    cx: &mut TestAppContext,
+) {
+    // "Do not ask again" in the question turns the setting off.
+    let (h, _dir, root) = opening_a_real_folder(cx, 1, |_| {});
+    assert!(cx.update(|cx| settings::flag(cx, crate::memory_offer::SETTING_KEY)));
+    open_the_folder(&h, cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::MemoryOffer);
+    h.press("d", cx);
+    h.settle(cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+    assert!(!cx.update(|cx| settings::flag(cx, crate::memory_offer::SETTING_KEY)));
+    assert_eq!(h.status(), crate::memory_offer::STOPPED_LINE);
+    assert_eq!(memory_choice_of(&h, &root), None);
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+
+    // With the setting off, a project that is opened is not asked about.
+    let (h, _dir, root) = opening_a_real_folder(cx, 1, |_| {});
+    set(&h, cx, crate::memory_offer::SETTING_KEY, Value::Bool(false));
+    open_the_folder(&h, cx);
+    assert!(
+        h.status().starts_with("Opened project api"),
+        "{}",
+        h.status()
+    );
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+    assert!(h.engine.take_memory_offer().is_none());
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+}
+
+#[gpui_kit::test]
+fn the_question_waits_for_another_overlay_to_close(cx: &mut TestAppContext) {
+    let (h, _dir, root) = opening_a_real_folder(cx, 1, |_| {});
+    // Something else is up when the project arrives.
+    cx.update(|cx| {
+        h.shell
+            .update(cx, |shell, _| shell.overlay = Overlay::Shortcuts);
+    });
+    drop(
+        h.engine
+            .open_project(MachineId::local(), root.to_string_lossy().into_owned()),
+    );
+    h.settle(cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Shortcuts);
+    assert!(h.shell(cx, |s| s.memory_offer.is_none()));
+    h.press("escape", cx);
+    h.settle(cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::MemoryOffer);
+}
+
+#[gpui_kit::test]
 fn a_bell_marks_a_background_session_only_when_the_setting_says_so(cx: &mut TestAppContext) {
     let (h, _dir, _) = shell_open(cx);
     h.press_chord("cmd-t", "ctrl-shift-t", cx);

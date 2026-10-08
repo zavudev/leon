@@ -41,6 +41,7 @@ mod lion;
 mod live;
 mod logos;
 mod main_pane;
+mod memory_offer;
 mod menu;
 mod model;
 pub(crate) mod notify;

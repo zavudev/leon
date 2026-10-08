@@ -6,18 +6,20 @@ simple; the tests enforce the ones that can be enforced.
 ## Crates
 
 ```text
-app (leon)  ── ui, engine, keys, theme, launch, diagnose
+app (leon)  ── ui, engine, keys, theme, launch, memory, diagnose
  │   ├── leon-term     the embedded terminal (GPUI, PTY, emulator)
  │   ├── leon-mark     the animated lion (GPUI)
  │   ├── leon-den      the Den: live sessions as lions in an office, 2.5D or pixel art (GPUI)
  │   ├── leon-remote   commands on this machine or over SSH
  │   ├── leon-history  importers for the agents' own session files
 │   ├── leon-usage    the agents' usage limits, per machine
+ │   ├── leon-memory   the memory agents share: file, block, MCP (pure)
  │   ├── leon-update   updates from the GitHub releases (no window)
  │   └── leon-core     the model and the SQLite store
 leon-remote ── leon-core
 leon-history ── leon-core
 leon-usage ── leon-core, leon-remote
+leon-memory ── leon-core
 leon-update ── leon-remote (only for `spawn`)
 leon-term ── gpui-kit only (no other Leon crate)
 leon-mark ── gpui-kit only (no other Leon crate)
@@ -30,6 +32,7 @@ leon-den ── gpui-kit and image only (no other Leon crate); wgpu behind `den3
 | `leon-history` | Reads the history Claude Code, Codex and opencode keep on disk and turns it into sessions and messages. |
 | `leon-remote` | A `CommandSpec` says what to run and where; `run_on` and `interactive_on` place it on a machine (unchanged locally, `ssh` remotely, with shell quoting and optional connection sharing). Git worktree operations, the changed files and diffs of a checkout and the commit, push and pull request (`changes`, `ship`), how each agent starts and resumes, the machine probe and the connection checklist (`connect`, `diagnosis`) are built on it. A scripted runner makes all of it testable without a process. |
 | `leon-usage` | How much of each agent's limits is left. A provider-neutral model (`AgentUsage`: windows with a used percentage, a reset time and a length, or an explicit `Reason` why nothing is known; staleness is part of it), pure parsers for each source (`codex`, `claude`, `opencode`), the burn-rate `forecast`, the wording (`present`, `view`), `collect_machine` (one bounded command per machine through a `Runner`) and the opt-in `network` sources behind an `Http` trait. No UI. |
+| `leon-memory` | The memory agents share, without a disk or a process: `render` (the memory file: one markdown document within a hard size budget, every entry framed as data), `block` (the managed block of an instruction file: insert, replace, remove, byte-exact), `files` (which of `AGENTS.md`, `CLAUDE.md`, `GEMINI.md` get it), `mcp` (the MCP server as a JSON-RPC line in, a line out, over a `Backend` trait), `mcp_json` (the `leon-memory` entry of `.mcp.json`) and `scope` (the repository a folder is in, from git's own files, and the name of a memory file). The entries themselves are in `leon-core` (`store/memory.rs`). |
 | `leon-update` | Updates from the GitHub releases of this repository. `version` (which tags count, which is newer), `release` (the API's answer, the platform's file), `http` (an `Http` trait and the system `curl` behind it, with the host allow-list), `download` (redirects by hand, resumable, bounded), `checksums` (`SHA256SUMS`, constant-time), `package` (the program out of the dmg, tarball or zip, strictly), `trust` (the signature rules), `install` (where Leon is installed and the swap with its way back), `launch` (the hand-over, the watch, the confirmation, the rollback), `updater` (the state machine published over a watch channel) and `state` (what is kept). No UI; every system tool (`hdiutil`, `ditto`, `codesign`, PowerShell) is behind a `Tools` trait. |
 | `leon-wire` | The wire protocol: versioned length-prefixed frames, the application messages (run a command, terminals, re-attach) and the relay rendezvous messages. Pure (`postcard` over `serde`); every decoder is bounded and fuzz-style tested. |
 | `leon-link` | Everything that keeps a remote session private: identity, the short pairing code (SPAKE2 then Noise `XXpsk3`), the Noise `IK` session with fragmentation and rekeying, the device registry, the relay WebSocket adapter, the durable `Client` (reconnection, exact terminal re-attach) and, behind `test-support`, an in-process test relay. |
@@ -131,7 +134,8 @@ module. See `docs/REMOTE.md` for the security model.
    README lists each one.
 5. **Pure first.** What can be decided without a window is a pure function with
    tests: the tree (`ui/tree.rs`), the palette's questions (`ui/steps.rs`), what
-   a session runs (`launch::plan`), key to bytes (`leon_term::keys`), cells to
+   a session runs (`launch::plan`), the shared memory's file, block and MCP
+   answers (`leon-memory`), key to bytes (`leon_term::keys`), cells to
    runs (`leon_term::layout`), resize maths (`leon_term::size`).
 6. **English everywhere, prose `//!` header on every file.**
 
@@ -253,6 +257,128 @@ above: the engine writes the store and the UI reads it.
   prints no account, e-mail, token or path; its network sources follow the
   settings (on by default), overridden by `--network <agent>` and
   `--no-network <agent|all>`.
+
+## The shared memory (`leon-memory`, `memory.rs`, `memory_cli.rs`)
+
+A memory every agent started in Leon can read and write, so that what was
+decided, agreed and found out survives a session and reaches the other agents.
+`docs/MEMORY.md` is the reference; this is how it is built.
+
+* **The entries** are rows of the store (`leon_core::store::memory`, migration
+  19): a scope, a kind, a title, a text, the agent that wrote it, its times,
+  and what keeps a memory from degrading: a `topic`, a `text_hash`, a
+  `revision` and a `duplicates` count, `pinned`, `forgotten_at`.
+  The scope is the **identity of the project's root** (`path::key`) or a marker
+  for the global scope that no path's key can be. It is not the project's id:
+  that id changes when a project is removed and added again, and a folder Leon
+  was never shown has none. `memory_fts` is an external-content FTS5 index kept
+  by triggers, like the history's, and `search_memories` reuses `fts_query` and
+  the snippet markers. Lengths and the number of entries per scope are bounded;
+  what is refused is a `MemoryError`. The store never reads the clock: a write
+  takes its time. A write announces `StoreChange::Memory`.
+* **Five rules against decay**, all decided in `add_memory` and its
+  neighbours, inside one transaction each. `add_memory` returns a `Saved`:
+  `Known` when a live entry of the scope has the same `text_hash` (the hash of
+  `normalized`: case, white space and surrounding punctuation taken out; the
+  entry counts the repeat), else `Revised` when a live entry has the topic
+  (same id, new words, `revision + 1`), else `New`. A partial unique index on
+  `(scope, topic)` over live rows guards the second. `update_memory` edits
+  (refused with `Duplicate` or `TopicTaken`, naming the other entry),
+  `pin_memory` pins (without a bound: the file's size is the bound),
+  `forget_memory` sets
+  `forgotten_at`, `restore_memory` clears it under the same guards,
+  `delete_memory` and `purge_memories(before)` remove rows. "Live" is
+  `forgotten_at IS NULL` everywhere: listings, counts, the cap and the search.
+  The FTS triggers are untouched, so the index also holds forgotten rows and
+  it is `search_memories`' query that leaves them out; a row that is removed
+  leaves the index through its trigger.
+* **Whose memory a folder shares** is `memory::resolve_root`: the root of the
+  project of the store that owns the folder (`Store::memory_root`, which
+  follows a linked worktree to its project), else the main checkout of the git
+  repository the folder is in, read from git's own files without running git
+  (`leon_memory::scope::git_root`: `.git`, and for a linked worktree its
+  `gitdir:` and `commondir`), else the folder itself. The window and the
+  command line use the same function, so a terminal's `LEON_MEMORY` and
+  `leon memory path` in it always agree.
+* **The pure parts** are the crate `leon-memory`: the memory file
+  (`render::render`: a summary within a budget. A pinned entry is there in
+  full; every other is one line, `render::summary` over the pure `render::clip`,
+  which counts characters and is applied before the line is disarmed, so a cut
+  is never inside a character or an escape. Pinned entries get their lines
+  first, then their whole text while all that is pinned stays within one
+  part in `render::PINNED_PART` (half) of the room for entries; the other
+  half is shared between the global and the project's unpinned entries, and
+  what those leave goes back to the pins. A pin in full whose title was made
+  from its text is the bracket and the text, so nothing is said twice. `render::detail` is one entry in full, for
+  `leon memory show` and `memory_get`), with every line of an entry and its
+  topic passed through
+  `data_line` so that it cannot be a heading, a fence, a rule or a comment of
+  the document), the managed block (`block::insert` and `remove`, exact
+  inverses that keep a file's line ending and final newline), which instruction
+  files get it (`files::enable`, `disable`), the `.mcp.json` entry
+  (`mcp_json::add`, `remove`) and the MCP server (`mcp::Server::handle`).
+* **The disk** is `memory.rs`, and it is thin: `Service` (the entries of one
+  folder's project and of the global scope, and the memory files that mirror
+  them, each written to a temporary file and renamed; every change by id is
+  first checked to be this project's or global, and `forget` also purges what
+  was forgotten more than 30 days ago), `set_block` and
+  `set_mcp_json` (the opt-in: they write the three instruction files and
+  `.mcp.json` at a project's root and nothing else, and never through a link
+  that leads elsewhere; `files_root` is where those files are, which from a
+  linked worktree outside the root is the worktree's own top). A global write rewrites every project's file in the
+  folder, since each holds the global entries; a file says whose it is in its
+  first line and is only rewritten when its name is the one that root gets.
+* **The size of the file is a setting** (`memory_budget`, in the schema like
+  any other). The window tells the engine (`Engine::set_memory_budget`, at the
+  start and in `sync_settings`, which also submits `Op::RewriteMemoryFiles`);
+  the command line and the MCP server, being other processes, read the same
+  validated value from the data folder's `settings.json`
+  (`memory::budget_in`, over `settings::stored`). Both end in
+  `memory::document(store, root, budget)`, so the file is the same bytes
+  whoever writes it; a test compares them.
+* **The command line** is `memory_cli.rs`: `leon memory ...`, parsed by hand
+  (`parse` is pure) and intercepted in `main` before the window's options, the
+  way `leon host` is. It opens the database as a second process (WAL, the
+  store's busy timeout). `leon memory mcp` is `mcp::Server` between the two
+  pipes (`converse`), with a bound on the length of a line; standard output
+  carries protocol only, the log goes to standard error as everywhere.
+* **Terminals.** `launch::plan_with` stays pure: `LaunchPrefs::leon_env` is
+  worked out by the caller (`Shell::memory_env`: `LEON_BIN`, `LEON_MEMORY`, and
+  `LEON_DATA_DIR` when the data folder is not the platform's) and placed before
+  the user's `terminal_env`, which therefore wins; a remote machine's terminal
+  gets none. The window then asks the engine (`Op::WriteMemoryFile`) to write
+  the file the variable names. There is one place a terminal is started
+  (`Shell::spawn_live_as`), and the plan's environment goes with it whichever
+  way it is started: in the window, or, with `durable_sessions`, by the keeper
+  (`durable::wire_spec` puts the plan's variables on top of this process's).
+  A session the keeper already holds is attached to, not started: it keeps
+  the environment it was started with.
+* **Opt-in.** Leon writes into a project only when asked: `leon memory enable`
+  and the palette's `Command::EnableMemory` / `DisableMemory`, a one-question
+  flow (`steps::project_memory`, local projects only) that ends in
+  `Op::ProjectMemory`, which the engine runs on the blocking pool and reports
+  in a status line. The MCP entry is the command line's alone.
+* **Being asked.** A project enters Leon by `Engine::open_project` (Open
+  project…), `Op::CloneProject` and `Op::CreateProject` (both through
+  `register_project`), `Op::AddProject` (the palette's typed path, which the
+  flow only offers for other machines), by discovery from the history and by
+  `Op::SyncHost` from a paired computer. The first four are somebody's own
+  doing, and each ends in `Engine::memory_note`, the one entry point: for a
+  project of this computer it looks at the instruction files on the blocking
+  pool and asks the pure `memory_offer::decide` (local, added by hand, the
+  setting, the recorded answer, asked this run, block present). "Ask" queues a
+  `memory_offer::Offer` (the project and the files `files::enable` would
+  write) and sends `EngineEvent::MemoryOffer`; "already on" comes back as words
+  for the status line. Discovery and `SyncHost` never call it. The window
+  (`ui/memory_offer.rs`) takes the offer when no overlay is up
+  (`Overlay::MemoryOffer`) and draws it from that data alone: the view reads no
+  file. The answer goes back as an operation: `Op::ProjectMemory` (the palette
+  command's own), `Op::MemoryNever`, or the setting `memory_offer` turned off.
+  What was decided is a row of `memory_choice` in the store
+  (`Store::set_memory_choice`), by the root's identity, written by the engine
+  on success only and by `leon memory enable` / `disable`.
+* **Not built:** the memory of a machine reached over SSH or a relay, any
+  automatic capture from transcripts, and a view of the memory in the window.
 
 ## Finding agent history (`leon-history`)
 

@@ -26,7 +26,7 @@ use crate::error::{Result, StoreError};
 /// public schema is version 3, so version 4 never existed in the wild and this
 /// order (usage, then relay) is the one every database goes through.
 const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19,
 ];
 
 const V1: &str = r#"
@@ -399,6 +399,79 @@ ALTER TABLE saved_terminal ADD COLUMN keeper_pty INTEGER;
 ALTER TABLE saved_terminal ADD COLUMN keeper_token TEXT;
 "#;
 
+/// Version 19: the memory agents share. An entry belongs to a scope: the
+/// identity of a project's root (`path::key`, so every worktree and every
+/// spelling of the folder shares it, and removing and adding the project again
+/// loses nothing) or the marker of the global scope, which no path's key can
+/// be. `root` is the folder as it was written, for display. `pk` is the row id
+/// of the index; `id` is the public identifier. `topic` is the key an entry
+/// is revised under: one live entry per scope has it, which the partial unique
+/// index guards. `text_hash` is of the text without its case, spacing and
+/// surrounding punctuation: what tells that a text was saved before.
+/// `forgotten_at` is set on an entry that was forgotten and not yet purged; it
+/// is "live" while that is NULL. `memory_fts` follows the pattern of version
+/// 1: external content, kept in step by triggers. It indexes forgotten rows
+/// too; the search leaves them out.
+///
+/// `memory_choice` is what somebody answered when asked whether a project's
+/// agents should be told of the memory (`on`, `off`, `never`), by the same
+/// identity of the root, so that removing a project and adding it again does
+/// not ask twice.
+const V19: &str = r#"
+CREATE TABLE memory (
+    pk         INTEGER PRIMARY KEY,
+    id         TEXT NOT NULL UNIQUE,
+    scope      TEXT NOT NULL,
+    root       TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    title      TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    agent      TEXT,
+    topic      TEXT,
+    text_hash  TEXT NOT NULL,
+    revision   INTEGER NOT NULL DEFAULT 1,
+    duplicates INTEGER NOT NULL DEFAULT 0,
+    pinned     INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    forgotten_at INTEGER
+);
+CREATE INDEX memory_by_scope ON memory (scope, updated_at DESC);
+CREATE INDEX memory_by_hash ON memory (scope, text_hash);
+CREATE UNIQUE INDEX memory_live_topic ON memory (scope, topic)
+    WHERE topic IS NOT NULL AND forgotten_at IS NULL;
+
+CREATE TABLE memory_choice (
+    scope       TEXT PRIMARY KEY,
+    root        TEXT NOT NULL,
+    answer      TEXT NOT NULL,
+    answered_at INTEGER NOT NULL
+) WITHOUT ROWID;
+
+CREATE VIRTUAL TABLE memory_fts USING fts5(
+    title,
+    text,
+    content = 'memory',
+    content_rowid = 'pk',
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+
+CREATE TRIGGER memory_fts_insert AFTER INSERT ON memory BEGIN
+    INSERT INTO memory_fts (rowid, title, text) VALUES (new.pk, new.title, new.text);
+END;
+CREATE TRIGGER memory_fts_delete AFTER DELETE ON memory BEGIN
+    INSERT INTO memory_fts (memory_fts, rowid, title, text)
+    VALUES ('delete', old.pk, old.title, old.text);
+END;
+CREATE TRIGGER memory_fts_update AFTER UPDATE OF title, text ON memory
+WHEN old.title IS NOT new.title OR old.text IS NOT new.text BEGIN
+    INSERT INTO memory_fts (memory_fts, rowid, title, text)
+    VALUES ('delete', old.pk, old.title, old.text);
+    INSERT INTO memory_fts (rowid, title, text) VALUES (new.pk, new.title, new.text);
+END;
+"#;
+
 /// Brings the database up to the latest schema version.
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     let supported = MIGRATIONS.len() as u32;
@@ -713,6 +786,103 @@ mod tests {
             )
             .unwrap();
         assert_eq!((pty, token, cwd.as_str()), (None, None, "/srv/api"));
+    }
+
+    #[test]
+    fn a_version_18_database_gains_the_memory_tables_and_keeps_its_data() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        for (index, sql) in MIGRATIONS[..18].iter().enumerate() {
+            connection.execute_batch(sql).unwrap();
+            connection
+                .pragma_update(None, "user_version", index as u32 + 1)
+                .unwrap();
+        }
+        // Something in every table the versions before this one made, and
+        // in the columns they added.
+        connection
+            .execute_batch(
+                "INSERT INTO project (id, machine_id, name, root)
+                     VALUES ('p', 'local', 'api', '/srv/api');
+                 INSERT INTO worktree (id, project_id, path, is_main)
+                     VALUES ('w', 'p', '/srv/api', 1);
+                 INSERT INTO worktree_status (worktree_id, status) VALUES ('w', '{}');
+                 INSERT INTO session (id, machine_id, agent, external_id, cwd, title,
+                                      started_at, updated_at, message_count, account)
+                     VALUES ('s', 'local', 'claude', 'e', '/srv/api', 't', 1, 1, 0, 'work');
+                 INSERT INTO session_shelf (session_id, kind, until) VALUES ('s', 'snoozed', 9);
+                 INSERT INTO token_usage (session_pk, model, day, input, output, cache_read,
+                                          cache_write, cache_write_1h)
+                     SELECT pk, 'm', '2026-10-08', 1, 2, 3, 4, 5 FROM session;
+                 INSERT INTO usage_reading (machine_id, agent, account, payload, collected_at)
+                     VALUES ('local', 'claude', 'work', '{}', 1);",
+            )
+            .unwrap();
+        let before = |connection: &Connection| -> Vec<i64> {
+            [
+                "project",
+                "worktree",
+                "worktree_status",
+                "session",
+                "session_shelf",
+                "token_usage",
+                "usage_reading",
+            ]
+            .iter()
+            .map(|table| {
+                connection
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap()
+            })
+            .collect()
+        };
+        let counted = before(&connection);
+        assert_eq!(counted, [1; 7]);
+
+        migrate(&mut connection).unwrap();
+        assert_eq!(before(&connection), counted, "nothing of theirs moved");
+        let (account, keeper): (String, Option<String>) = connection
+            .query_row(
+                "SELECT s.account, (SELECT keeper_token FROM saved_terminal LIMIT 1) FROM session s",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((account.as_str(), keeper), ("work", None));
+
+        assert_eq!(version(&connection), MIGRATIONS.len() as u32);
+        let projects: i64 = connection
+            .query_row("SELECT count(*) FROM project", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(projects, 1);
+        connection
+            .execute(
+                "INSERT INTO memory (id, scope, root, kind, title, text, topic, text_hash,
+                                     created_at, updated_at, last_seen_at)
+                 VALUES ('m', '/srv/api', '/srv/api', 'note', 'Ports', 'the api listens on 8080',
+                         'ports', 'h1', 1, 1, 1)",
+                [],
+            )
+            .unwrap();
+        // One live entry per scope and topic; a forgotten one is not in the way.
+        let second = "INSERT INTO memory (id, scope, root, kind, title, text, topic, text_hash,
+                                          created_at, updated_at, last_seen_at)
+                      VALUES ('n', '/srv/api', '/srv/api', 'note', 'Ports', 'now 9090', 'ports',
+                              'h2', 2, 2, 2)";
+        assert!(connection.execute(second, []).is_err());
+        connection
+            .execute("UPDATE memory SET forgotten_at = 3 WHERE id = 'm'", [])
+            .unwrap();
+        connection.execute(second, []).unwrap();
+        let found: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM memory_fts WHERE memory_fts MATCH 'listens'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(found, 1);
     }
 
     #[test]

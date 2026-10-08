@@ -3957,6 +3957,7 @@ dependencies = [
  "leon-host",
  "leon-link",
  "leon-mark",
+ "leon-memory",
  "leon-pty",
  "leon-remote",
  "leon-term",
@@ -3988,6 +3989,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -4072,6 +4074,18 @@ version = "0.7.0"
 dependencies = [
  "gpui-kit",
  "roxmltree 0.21.1",
+]
+
+[[package]]
+name = "leon-memory"
+version = "0.7.0"
+dependencies = [
+ "chrono",
+ "leon-core",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

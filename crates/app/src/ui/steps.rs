@@ -35,6 +35,8 @@ pub struct ProjectInfo {
     pub machine_name: String,
     /// Its worktrees.
     pub worktrees: Vec<Worktree>,
+    /// Whether its agent memory was turned on, as far as Leon recorded.
+    pub memory_on: bool,
 }
 
 /// A folder where sessions ran that no project contains: a project nobody has
@@ -425,6 +427,11 @@ impl World {
                     project: entry.project.clone(),
                     machine_name: machine.name.clone(),
                     worktrees: entry.worktrees.clone(),
+                    memory_on: entry.project.machine_id.is_local()
+                        && snapshot
+                            .memory
+                            .get(&leon_core::path::key(&entry.project.root))
+                            == Some(&leon_core::MemoryChoice::On),
                 });
             }
             for Folder { cwd, sessions } in placement
@@ -1032,6 +1039,8 @@ pub fn is_flow(command: Command) -> bool {
             | Command::CloneProject
             | Command::NewProject
             | Command::RemoveProject
+            | Command::EnableMemory
+            | Command::DisableMemory
             | Command::RemoveWorktree
             | Command::SetAppearance
             | Command::ChooseTheme
@@ -1106,6 +1115,8 @@ pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
         Command::CloneProject => clone_project(answers, world),
         Command::NewProject => new_project(answers, world),
         Command::RemoveProject => remove_project(answers, world),
+        Command::EnableMemory => project_memory(answers, world, true),
+        Command::DisableMemory => project_memory(answers, world, false),
         Command::RemoveWorktree => remove_worktree(answers, world),
         Command::RemoveMergedWorktrees => remove_merged_worktrees(answers, world),
         Command::OpenChanges => show_changes(answers, world),
@@ -2947,6 +2958,50 @@ fn remove_project(answers: &[String], world: &World) -> Outcome {
     }
 }
 
+/// Turning the agents' shared memory on or off asks for which project: one of
+/// this computer's (the engine writes into its folder), the one the keyboard
+/// is on first.
+fn project_memory(answers: &[String], world: &World, on: bool) -> Outcome {
+    match answers {
+        [] => {
+            let here = world.here.as_ref().and_then(|here| here.project.as_ref());
+            // The list says which projects have it on, and puts the ones
+            // the command would change first, the one the keyboard is on
+            // before all.
+            let mut list: Vec<(bool, Choice)> = world
+                .projects
+                .iter()
+                .filter(|info| info.project.machine_id.is_local())
+                .map(|info| {
+                    let state = if info.memory_on { " · memory on" } else { "" };
+                    (
+                        info.memory_on == on,
+                        Choice::new(
+                            info.project.name.clone(),
+                            format!("{}{state}", info.project.root),
+                            info.project.id.as_str(),
+                        )
+                        .current(Some(&info.project.id) == here),
+                    )
+                })
+                .collect();
+            if list.is_empty() {
+                return Outcome::Refuse(
+                    "There is no project on this computer: the agent memory works here only."
+                        .to_owned(),
+                );
+            }
+            list.sort_by_key(|(done, choice)| (!choice.current, *done));
+            let list = list.into_iter().map(|(_, choice)| choice).collect();
+            choices("Project", list, Custom::No)
+        }
+        [project, ..] => Outcome::Run(Action::Engine(Op::ProjectMemory {
+            project: ProjectId::from_string(project.as_str()),
+            on,
+        })),
+    }
+}
+
 /// The answer the window adds when git refused a worktree for the files it
 /// holds: the question it leads to is the one about forcing them away.
 pub const REFUSED: &str = "refused";
@@ -3738,6 +3793,7 @@ mod tests {
                     project: project("web", "web", "/srv/web"),
                     machine_name: "Local".into(),
                     worktrees: vec![worktree("w0", "/srv/web", Some("main"), true)],
+                    memory_on: false,
                 },
                 ProjectInfo {
                     project: project("api", "api", "/srv/api"),
@@ -3747,6 +3803,7 @@ mod tests {
                         worktree("a1", "/srv/api-worktrees/x", Some("x"), false),
                         worktree("a2", "/srv/api-worktrees/detached", None, false),
                     ],
+                    memory_on: false,
                 },
             ],
             here: Some(Where {
@@ -4550,6 +4607,63 @@ mod tests {
         assert!(matches!(
             advance(Command::RemoveProject, &[], &empty),
             Outcome::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn agent_memory_asks_for_a_project_of_this_computer_the_current_one_first() {
+        let mut world = world();
+        // A project on another machine is not offered.
+        let mut far = world.projects[0].clone();
+        far.project.id = ProjectId::from_string("far");
+        far.project.name = "far".into();
+        far.project.machine_id = MachineId::from_string("m2");
+        world.projects.push(far);
+        world.here = Some(Where {
+            machine: MachineId::local(),
+            machine_name: "Local".into(),
+            project: Some(ProjectId::from_string("api")),
+            cwd: "/srv/api".into(),
+        });
+        for (command, on) in [
+            (Command::EnableMemory, true),
+            (Command::DisableMemory, false),
+        ] {
+            assert!(is_flow(command));
+            assert_eq!(labels(&advance(command, &[], &world)), ["api", "web"]);
+            // What is on already is said, and goes after what is not when
+            // turning on, before it when turning off.
+            let mut marked = world.clone();
+            marked.here = None;
+            marked.projects[0].memory_on = true;
+            let Outcome::Ask(Step {
+                kind: StepKind::Choices { choices, .. },
+                ..
+            }) = advance(command, &[], &marked)
+            else {
+                panic!("expected the projects");
+            };
+            let listed: Vec<(&str, &str)> = choices
+                .iter()
+                .map(|choice| (choice.label.as_str(), choice.detail.as_str()))
+                .collect();
+            let web = ("web", "/srv/web · memory on");
+            let api = ("api", "/srv/api");
+            assert_eq!(listed, if on { [api, web] } else { [web, api] });
+            assert_eq!(
+                advance(command, &strings(&["api"]), &world),
+                Outcome::Run(Action::Engine(Op::ProjectMemory {
+                    project: ProjectId::from_string("api"),
+                    on,
+                }))
+            );
+        }
+        world
+            .projects
+            .retain(|info| !info.project.machine_id.is_local());
+        assert!(matches!(
+            advance(Command::EnableMemory, &[], &world),
+            Outcome::Refuse(why) if why.contains("on this computer")
         ));
     }
 

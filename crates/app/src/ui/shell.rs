@@ -140,6 +140,8 @@ pub enum Overlay {
     /// "Run this command?": a command of the project's `leon.toml` that is
     /// not trusted yet.
     Trust,
+    /// "Turn on agent memory for <project>?", after a project was added.
+    MemoryOffer,
 }
 
 /// What the folder picker answered.
@@ -292,6 +294,11 @@ pub struct Options {
     /// there is none (Windows, and tests that do not need it). The setting
     /// `durable_sessions` decides whether it is used.
     pub durable: Option<Arc<dyn crate::durable::Durable>>,
+    /// Where Leon and its data folder are, for what a terminal of this
+    /// computer is told of the shared memory (`LEON_BIN`, `LEON_MEMORY`).
+    /// `None` tells terminals nothing: tests, which must not name this
+    /// computer's folders.
+    pub memory: Option<crate::memory::Terminals>,
 }
 
 /// A `~/.ssh` that is not there: the home folder is unknown.
@@ -358,6 +365,7 @@ impl Default for Options {
                 None => Arc::new(NoSshDir),
             },
             remote: None,
+            memory: None,
             updates: None,
             durable: None,
             update_timer: true,
@@ -516,6 +524,9 @@ pub struct Shell {
     pub(super) history_scroll: ScrollHandle,
     /// What is remembered and offered back (see `restore_view.rs`).
     pub(super) restore: super::restore_view::RestoreUi,
+    /// The question about a project's agent memory that is up, as the engine
+    /// worked it out.
+    pub(super) memory_offer: Option<crate::memory_offer::Offer>,
     /// Quit once the saves that are on their way are done ("Save all and
     /// quit").
     pub(super) quit_after_saves: bool,
@@ -787,6 +798,8 @@ impl Shell {
                         if !this.show_inactive {
                             this.rebuild_rows();
                         }
+                        // A project somebody just added may be asked about.
+                        this.show_memory_offer(cx);
                         cx.notify()
                     })
                     .is_err()
@@ -843,6 +856,7 @@ impl Shell {
             logos: Logos::default(),
             history_scroll: ScrollHandle::new(),
             restore: Default::default(),
+            memory_offer: None,
             quit_after_saves: false,
             applied_editor_settings: 0,
             open_files_file: settings::sibling(super::editor::OPEN_FILES_FILE, cx),
@@ -2662,6 +2676,9 @@ impl Shell {
         if self.overlay == Overlay::Trust && self.trust_key(stroke, window, cx) {
             return true;
         }
+        if self.overlay == Overlay::MemoryOffer && self.memory_offer_key(stroke, window, cx) {
+            return true;
+        }
         if self.overlay == Overlay::Usage && self.usage_key(stroke, window, cx) {
             return true;
         }
@@ -2918,6 +2935,8 @@ impl Shell {
             | C::SleepSession
             | C::AddProject
             | C::RemoveProject
+            | C::EnableMemory
+            | C::DisableMemory
             | C::RemoveWorktree
             | C::RemoveMergedWorktrees
             | C::SetAppearance
@@ -3036,6 +3055,7 @@ impl Shell {
                 | Overlay::History
                 | Overlay::Restore
                 | Overlay::Trust
+                | Overlay::MemoryOffer
                 | Overlay::Problems
                 | Overlay::Connect
                 | Overlay::Usage
@@ -3072,6 +3092,8 @@ impl Shell {
                 self.focus.focus(window, cx);
             }
             Overlay::Menu => self.close_menu(window, cx),
+            // Closed without an answer: "not now".
+            Overlay::MemoryOffer => self.dismiss_memory_offer(window, cx),
             Overlay::Settings => self.close_settings(window, cx),
             Overlay::Connect => self.close_connect(window, cx),
             Overlay::Pair => self.close_pair(window, cx),
@@ -3092,6 +3114,11 @@ impl Shell {
             }
             Overlay::Trust => self.answer_trust(super::scripts::Answer::Cancel, window, cx),
             Overlay::None => {}
+        }
+        // A question about a project's agent memory may have waited for
+        // this to close.
+        if self.overlay == Overlay::None {
+            self.show_memory_offer(cx);
         }
     }
 
@@ -3990,6 +4017,7 @@ impl Shell {
             Overlay::History => self.render_history_report(colours, cx).into_any_element(),
             Overlay::Restore => self.render_restore(colours, cx).into_any_element(),
             Overlay::Trust => self.render_trust(colours, cx).into_any_element(),
+            Overlay::MemoryOffer => self.render_memory_offer(colours, cx).into_any_element(),
         };
         let top = match self.overlay {
             Overlay::Palette => self.palette_top(),
