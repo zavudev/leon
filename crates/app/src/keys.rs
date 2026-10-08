@@ -204,6 +204,27 @@ pub enum Command {
     ChooseIcon,
     /// Goes back to the logo that was detected.
     ResetIcon,
+    // ----- files
+    /// Opens a text file of the machine in a tab, asking for its path.
+    OpenFile,
+    /// Saves the file that has the keyboard.
+    SaveFile,
+    /// Closes the file that has the keyboard, asking first while it has
+    /// changes that were not saved.
+    CloseFile,
+    /// Opens a file of the project in view by part of its name.
+    QuickOpen,
+    /// Looks for text in the file that has the keyboard.
+    FindInFile,
+    /// Looks for text in the file that has the keyboard and replaces it.
+    ReplaceInFile,
+    /// Looks for text in the files of the project in view.
+    SearchProject,
+    /// Shows a Markdown file as text, as text and page, or as the page.
+    TogglePreview,
+    /// Selects the file that has the keyboard in the file tree, opening the
+    /// folders above it.
+    RevealInTree,
     // ----- terminal
     /// Splits the focused pane, the new one to its right.
     SplitRight,
@@ -366,6 +387,8 @@ pub enum Command {
     // ----- sidebar
     /// Shows or hides the sidebar.
     ToggleSidebar,
+    /// Shows or hides the file tree of the project in view.
+    ToggleFiles,
     /// Makes the sidebar wider by one step.
     WidenSidebar,
     /// Makes the sidebar narrower by one step.
@@ -395,6 +418,8 @@ pub enum When {
     Panes,
     /// Only while a terminal has the keyboard.
     Terminal,
+    /// Only while an editor has the keyboard.
+    File,
 }
 
 /// The sections of the shortcuts sheet, in its order.
@@ -408,6 +433,8 @@ pub enum Section {
     Navigation,
     /// Agent sessions, worktrees, machines and projects.
     Create,
+    /// Text files open in tabs.
+    Files,
     /// The live terminal sessions.
     Terminal,
     /// Keeping the store fresh.
@@ -420,11 +447,12 @@ pub enum Section {
 
 impl Section {
     /// Every section, in the order they are listed.
-    pub const ALL: [Section; 8] = [
+    pub const ALL: [Section; 9] = [
         Section::Search,
         Section::Panes,
         Section::Navigation,
         Section::Create,
+        Section::Files,
         Section::Terminal,
         Section::Data,
         Section::View,
@@ -438,6 +466,7 @@ impl Section {
             Section::Panes => "Panes",
             Section::Navigation => "Navigation",
             Section::Create => "Create",
+            Section::Files => "Files",
             Section::Terminal => "Terminal",
             Section::Data => "Data",
             Section::View => "View",
@@ -749,6 +778,24 @@ pub const BINDINGS: &[Binding] = &[
         &[mac(secondary_shift("g")), other(secondary_shift("u"))],
         true,
     ),
+    // The same goes for a file: `Cmd+F` finds in the text, it does not filter
+    // the projects.
+    bind(
+        C::FindInFile,
+        "Find in the file\u{2026}",
+        S::Files,
+        W::File,
+        &[secondary("f")],
+        true,
+    ),
+    bind(
+        C::ReplaceInFile,
+        "Replace in the file\u{2026}",
+        S::Files,
+        W::File,
+        &[mac(with_alt(secondary("f"))), other(secondary("h"))],
+        true,
+    ),
     bind(
         C::ClearBuffer,
         "Clear the terminal buffer",
@@ -953,6 +1000,17 @@ pub const BINDINGS: &[Binding] = &[
         S::Panes,
         W::Anywhere,
         &[mac(secondary("b")), other(secondary_shift("b"))],
+        true,
+    ),
+    bind(
+        C::ToggleFiles,
+        "Show or hide the file tree",
+        S::Panes,
+        W::Anywhere,
+        &[
+            mac(secondary_shift("e")),
+            other(with_alt(secondary_shift("e"))),
+        ],
         true,
     ),
     bind(
@@ -1342,6 +1400,72 @@ pub const BINDINGS: &[Binding] = &[
         S::Create,
         W::Anywhere,
         &[],
+        true,
+    ),
+    // Files
+    bind(
+        C::OpenFile,
+        "Open a file\u{2026}",
+        S::Files,
+        W::Anywhere,
+        &[
+            mac(secondary_shift("o")),
+            other(with_alt(secondary_shift("o"))),
+        ],
+        true,
+    ),
+    bind(
+        C::SaveFile,
+        "Save the file",
+        S::Files,
+        W::Anywhere,
+        &[secondary("s")],
+        true,
+    ),
+    bind(
+        C::CloseFile,
+        "Close the file",
+        S::Files,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::TogglePreview,
+        "Preview the Markdown file",
+        S::Files,
+        W::File,
+        &[
+            mac(with_alt(secondary("v"))),
+            other(with_alt(secondary_shift("v"))),
+        ],
+        true,
+    ),
+    bind(
+        C::RevealInTree,
+        "Reveal the file in the file tree",
+        S::Files,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::QuickOpen,
+        "Open a file of the project by name\u{2026}",
+        S::Files,
+        W::Anywhere,
+        &[
+            mac(with_alt(secondary("p"))),
+            other(with_alt(secondary_shift("p"))),
+        ],
+        true,
+    ),
+    bind(
+        C::SearchProject,
+        "Search the text of the project\u{2026}",
+        S::Files,
+        W::Anywhere,
+        &[with_alt(secondary_shift("f"))],
         true,
     ),
     // Terminal
@@ -1999,8 +2123,16 @@ pub fn keywords(command: Command) -> &'static str {
         C::ClearBuffer | C::ClearScrollback => "reset empty erase terminal",
         C::PasteText | C::PasteImage => "clipboard image picture screenshot ctrl+v",
         C::SaveOutput | C::SaveOutputAnsi => "export write log terminal file",
+        C::OpenFile => "edit editor text code source path open",
+        C::SaveFile | C::CloseFile => "edit editor text code source write",
+        C::TogglePreview => "markdown md render page split view readme",
+        C::RevealInTree => "show select locate explorer sidebar folder",
+        C::QuickOpen => "file name fuzzy find go open path goto ctrl+p",
+        C::FindInFile | C::ReplaceInFile => "search editor text code substitute change",
+        C::SearchProject => "grep ripgrep find text content files everywhere project code",
         C::CopyAll | C::CopyScreen => "clipboard terminal output",
         C::ToggleSidebar => "hide show panel tree",
+        C::ToggleFiles => "hide show panel explorer files folder tree project",
         C::AddMachine => {
             "add machine remote server code relay ssh connect computer host login pair"
         }
@@ -2025,6 +2157,20 @@ pub fn keywords(command: Command) -> &'static str {
     }
 }
 
+/// Whether a command acts on the file that has the keyboard, and so only
+/// applies while one does.
+pub fn needs_file(command: Command) -> bool {
+    matches!(
+        command,
+        Command::SaveFile
+            | Command::CloseFile
+            | Command::FindInFile
+            | Command::ReplaceInFile
+            | Command::TogglePreview
+            | Command::RevealInTree
+    )
+}
+
 /// What a command is called.
 pub fn label(command: Command) -> &'static str {
     binding(command).map_or("", |binding| binding.label)
@@ -2046,6 +2192,8 @@ pub struct Context {
     /// A terminal has the keyboard: see the module documentation for which
     /// chords stay Leon's.
     pub terminal: bool,
+    /// An editor has the keyboard: the chords of [`When::File`] apply.
+    pub file: bool,
 }
 
 /// Whether `chord` exists on a platform that is, or is not, macOS.
@@ -2066,6 +2214,8 @@ pub fn kept_in_terminal(binding: &Binding, chord: &Chord, mac: bool) -> bool {
         When::Panes => false,
         // Cmd on macOS, Ctrl+Shift elsewhere.
         When::Anywhere => chord.secondary && (mac || chord.shift),
+        // An editor is not a terminal: its chords never apply there.
+        When::File => false,
         // Scrollback keys are bare. Copy and paste also keep the operating
         // system's ordinary primary-modifier chord on every platform; the
         // shell takes a copy chord only when there is a selection and gives
@@ -2106,6 +2256,7 @@ pub fn resolve_on(stroke: &Keystroke, context: Context, mac: bool) -> Option<Com
             When::Anywhere => true,
             When::Panes => !context.typing && !context.terminal,
             When::Terminal => context.terminal,
+            When::File => context.file,
         })
         .find(|binding| {
             binding.chords.iter().any(|chord| {
@@ -2136,14 +2287,22 @@ mod tests {
     const NOT_TYPING: Context = Context {
         typing: false,
         terminal: false,
+        file: false,
     };
     const TYPING: Context = Context {
         typing: true,
         terminal: false,
+        file: false,
     };
     const TERMINAL: Context = Context {
         typing: false,
         terminal: true,
+        file: false,
+    };
+    const FILE: Context = Context {
+        typing: true,
+        terminal: false,
+        file: true,
     };
 
     /// Every variant, written out. The `match` makes adding a variant without
@@ -2181,6 +2340,15 @@ mod tests {
             C::TakeOver,
             C::RevealTerminal,
             C::OpenShell,
+            C::OpenFile,
+            C::SaveFile,
+            C::CloseFile,
+            C::QuickOpen,
+            C::FindInFile,
+            C::ReplaceInFile,
+            C::SearchProject,
+            C::TogglePreview,
+            C::RevealInTree,
             C::SplitRight,
             C::SplitDown,
             C::FocusPaneLeft,
@@ -2276,6 +2444,7 @@ mod tests {
             C::PasteText,
             C::PasteImage,
             C::ToggleSidebar,
+            C::ToggleFiles,
             C::WidenSidebar,
             C::NarrowSidebar,
             C::ResetSidebarWidth,
@@ -2321,6 +2490,15 @@ mod tests {
                 | C::TakeOver
                 | C::RevealTerminal
                 | C::OpenShell
+                | C::OpenFile
+                | C::SaveFile
+                | C::CloseFile
+                | C::QuickOpen
+                | C::FindInFile
+                | C::ReplaceInFile
+                | C::SearchProject
+                | C::TogglePreview
+                | C::RevealInTree
                 | C::SplitRight
                 | C::SplitDown
                 | C::FocusPaneLeft
@@ -2417,6 +2595,7 @@ mod tests {
                 | C::PasteText
                 | C::PasteImage
                 | C::ToggleSidebar
+                | C::ToggleFiles
                 | C::WidenSidebar
                 | C::NarrowSidebar
                 | C::ResetSidebarWidth
@@ -2478,14 +2657,18 @@ mod tests {
                         taken.insert(id, (binding.command, binding.when))
                     {
                         // The one deliberate sharing: a chord that means
-                        // something only while a terminal has the keyboard,
-                        // listed before (so winning over) the command it
-                        // shares the chord with everywhere else.
-                        let deliberate = other_when == When::Terminal
-                            && binding.when != When::Terminal
+                        // something only while a terminal or an editor has
+                        // the keyboard, listed before (so winning over) the
+                        // command it shares the chord with everywhere else.
+                        let deliberate = matches!(other_when, When::Terminal | When::File)
+                            && binding.when != other_when
                             && matches!(
                                 (other, binding.command),
-                                (C::ClearBuffer, C::GoTo) | (C::Find, C::FilterProjects)
+                                (C::ClearBuffer, C::GoTo)
+                                    | (C::Find, C::FindInFile)
+                                    | (C::Find, C::FilterProjects)
+                                    | (C::FindInFile, C::FilterProjects)
+                                    | (C::SaveOutput, C::SaveFile)
                             );
                         assert!(
                             deliberate,
@@ -3143,6 +3326,122 @@ mod tests {
         // And a macOS-only chord is not one elsewhere, nor the reverse.
         assert_eq!(resolve_on(&stroke("ctrl-cmd-left"), TERMINAL, false), None);
         assert_eq!(resolve_on(&stroke("ctrl-shift-d"), TERMINAL, true), None);
+    }
+
+    #[test]
+    fn the_file_chords_never_take_a_key_the_program_in_a_terminal_needs() {
+        // Off macOS a plain Ctrl+S is the program's (it stops the output):
+        // only the file on screen has it.
+        assert!(!terminal_chords(false)
+            .iter()
+            .any(|(command, _)| *command == C::SaveFile));
+        assert_eq!(
+            resolve_on(&stroke("ctrl-s"), NOT_TYPING, false),
+            Some(C::SaveFile)
+        );
+        assert_eq!(resolve_on(&stroke("ctrl-s"), TERMINAL, false), None);
+        // On macOS Cmd+S saves the terminal's output while a terminal has
+        // the keyboard, and the file when it is not one.
+        assert_eq!(
+            resolve_on(&stroke("cmd-s"), TERMINAL, true),
+            Some(C::SaveOutput)
+        );
+        assert_eq!(
+            resolve_on(&stroke("cmd-s"), TYPING, true),
+            Some(C::SaveFile)
+        );
+        // Opening a file works from a terminal on every platform.
+        for mac in [true, false] {
+            assert!(
+                terminal_chords(mac)
+                    .iter()
+                    .any(|(command, _)| *command == C::OpenFile),
+                "mac: {mac}"
+            );
+        }
+        assert_eq!(
+            resolve_on(&stroke("ctrl-shift-alt-o"), TERMINAL, false),
+            Some(C::OpenFile)
+        );
+        assert_eq!(
+            resolve_on(&stroke("cmd-shift-o"), TERMINAL, true),
+            Some(C::OpenFile)
+        );
+        // Closing a file is the pane's chord; the command is the palette's.
+        assert!(binding(C::CloseFile).is_some_and(|b| b.chords.is_empty()));
+        assert!(needs_file(C::SaveFile) && needs_file(C::CloseFile) && !needs_file(C::OpenFile));
+    }
+
+    #[test]
+    fn find_in_the_file_is_the_editors_while_a_file_has_the_keyboard_and_nothing_else() {
+        // With a file: Cmd+F on macOS, Ctrl+F elsewhere, and replace beside it.
+        assert_eq!(
+            resolve_on(&stroke("cmd-f"), FILE, true),
+            Some(C::FindInFile)
+        );
+        assert_eq!(
+            resolve_on(&stroke("ctrl-f"), FILE, false),
+            Some(C::FindInFile)
+        );
+        assert_eq!(
+            resolve_on(&stroke("cmd-alt-f"), FILE, true),
+            Some(C::ReplaceInFile)
+        );
+        assert_eq!(
+            resolve_on(&stroke("ctrl-h"), FILE, false),
+            Some(C::ReplaceInFile)
+        );
+        // Without one the chords keep their older meanings: the filter of the
+        // sidebar, the terminal's own find, and the program's Ctrl+F.
+        assert_eq!(
+            resolve_on(&stroke("cmd-f"), NOT_TYPING, true),
+            Some(C::FilterProjects)
+        );
+        assert_eq!(resolve_on(&stroke("cmd-f"), TYPING, true), None);
+        assert_eq!(resolve_on(&stroke("ctrl-f"), TYPING, false), None);
+        assert_eq!(resolve_on(&stroke("cmd-f"), TERMINAL, true), Some(C::Find));
+        assert_eq!(resolve_on(&stroke("ctrl-f"), TERMINAL, false), None);
+        assert_eq!(
+            resolve_on(&stroke("ctrl-shift-f"), TERMINAL, false),
+            Some(C::Find)
+        );
+        // The commands apply only to a file.
+        assert!(needs_file(C::FindInFile) && needs_file(C::ReplaceInFile));
+        assert!(!needs_file(C::QuickOpen) && !needs_file(C::SearchProject));
+        assert!(!terminal_chords(true)
+            .iter()
+            .chain(terminal_chords(false).iter())
+            .any(|(command, _)| matches!(command, C::FindInFile | C::ReplaceInFile)));
+    }
+
+    #[test]
+    fn quick_open_and_the_project_search_have_chords_of_their_own_everywhere() {
+        // Cmd or Ctrl with P is the palette's "go to": quick open takes the
+        // Alt variant.
+        assert_eq!(binding(C::GoTo).unwrap().chords[0], secondary("p"));
+        for (mac, key) in [(true, "cmd-alt-p"), (false, "ctrl-shift-alt-p")] {
+            for context in [NOT_TYPING, TYPING, TERMINAL, FILE] {
+                assert_eq!(
+                    resolve_on(&stroke(key), context, mac),
+                    Some(C::QuickOpen),
+                    "{key} {context:?}"
+                );
+            }
+        }
+        for (mac, key) in [(true, "cmd-shift-alt-f"), (false, "ctrl-shift-alt-f")] {
+            for context in [NOT_TYPING, TYPING, TERMINAL, FILE] {
+                assert_eq!(
+                    resolve_on(&stroke(key), context, mac),
+                    Some(C::SearchProject),
+                    "{key} {context:?}"
+                );
+            }
+        }
+        // The session history keeps Cmd+Shift+F.
+        assert_eq!(
+            resolve_on(&stroke("cmd-shift-f"), NOT_TYPING, true),
+            Some(C::SearchHistory)
+        );
     }
 
     #[test]

@@ -369,8 +369,9 @@ impl Shell {
 
     /// Whether quitting asks a question now.
     pub(super) fn quit_asks(&self, cx: &gpui_kit::App) -> bool {
-        super::steps::QuitConfirm::parse(&settings::text(cx, "quit_confirmation"))
-            .asks(self.busy_sessions(cx))
+        let mode = super::steps::QuitConfirm::parse(&settings::text(cx, "quit_confirmation"));
+        mode.asks(self.busy_sessions(cx))
+            || (mode != super::steps::QuitConfirm::Never && !self.unsaved_files().is_empty())
     }
 }
 

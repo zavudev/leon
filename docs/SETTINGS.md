@@ -47,6 +47,20 @@ How terminals are drawn and started.
 | Extra environment variables | `terminal_env` | a list of text | empty | NAME=value lines added to the environment of terminals on this computer. |
 | Mark a session that rings the bell | `terminal_bell_mark` | on, off | `on` | Show the bell mark on a background session whose program rang the terminal bell. |
 
+## Editor
+
+How text files are drawn and edited.
+
+| Setting | Key | Values | Default | Description |
+| --- | --- | --- | --- | --- |
+| Tab size | `editor_tab_size` | 1 to 8 | `4` | The columns a tab or an indent takes in text files. Applies to the files that are open. |
+| Wrap long lines | `editor_soft_wrap` | on, off | `off` | Break lines that are wider than the editor instead of scrolling sideways. |
+| Line numbers | `editor_line_numbers` | on, off | `on` | Number the lines in the margin of text files. |
+| Indent guides | `editor_indent_guides` | on, off | `on` | Draw a faint vertical line at each level of indentation. |
+| Syntax highlighting | `editor_highlight` | on, off | `on` | Colour the code of text files by their language. |
+| Font size | `editor_font_size` | 8 to 32px | `13` | The size of text in files, in pixels at the 100% interface size. The family is the terminal's. |
+| Reopen files at start | `editor_restore_files` | on, off | `on` | Open the files that were open last time, with the cursor where it was and the same Markdown view. A file that no longer exists is skipped. |
+
 ## Agents
 
 How each coding agent is started and resumed.
@@ -302,6 +316,7 @@ The sidebar and what quitting asks.
 | Show the sidebar | `sidebar_visible` | on, off | `on` | The tree of machines, projects, worktrees and sessions. |
 | Show only active sessions | `sidebar_active_only` | on, off | `off` | The sidebar lists only the sessions that are active: a live terminal, or an agent running in another terminal or Leon. Sleeping and history-only sessions, and the projects and worktrees without any active one, are hidden. |
 | Sidebar width | `sidebar_width` | 220 to 560px | `320` | The sidebar's width in pixels at the 100% interface size. |
+| Show the file tree | `files_visible` | on, off | `off` | The files of the project or worktree in view, with the git state of each. Toggled with a chord, the View menu and the palette. |
 | Confirm before quitting | `quit_confirmation` | `running`, `always`, `never` | `running` | Ask before quitting: only while programs run in terminals, always, or never. |
 
 ## Keyboard

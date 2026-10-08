@@ -22,12 +22,14 @@ use serde::{Deserialize, Serialize};
 use crate::frame::FrameError;
 
 /// The protocol version this crate speaks.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 /// The most terminal bytes one [`Message::PtyData`] carries.
 pub const MAX_PTY_CHUNK: usize = 32 * 1024;
 /// The most bytes kept of a command's output, per stream; the rest is
 /// dropped and `truncated` is set.
 pub const MAX_EXEC_OUTPUT: usize = 4 * 1024 * 1024;
+/// The most bytes of standard input one [`Message::Exec`] carries.
+pub const MAX_EXEC_INPUT: usize = 4 * 1024 * 1024;
 /// How many bytes of recent output a host keeps for each terminal.
 pub const REPLAY_BUFFER_BYTES: usize = 2 * 1024 * 1024;
 /// How many history sessions a host offers at most in one
@@ -49,6 +51,10 @@ pub struct ExecSpec {
     pub env: Vec<(String, String)>,
     /// Working directory.
     pub cwd: Option<String>,
+    /// Standard input for [`Message::Exec`] (at most [`MAX_EXEC_INPUT`]
+    /// bytes), closed after it is written; a command without any gets none.
+    /// A terminal ([`Message::PtyOpen`]) ignores it.
+    pub stdin: Option<Vec<u8>>,
 }
 
 /// A program to run in a terminal.
@@ -396,6 +402,13 @@ impl Message {
             if spec.args.len() > MAX_ITEMS || spec.env.len() > MAX_ITEMS {
                 return Err(FrameError::OverLimit("too many arguments"));
             }
+            if spec
+                .stdin
+                .as_ref()
+                .is_some_and(|input| input.len() > MAX_EXEC_INPUT)
+            {
+                return Err(FrameError::OverLimit("command input"));
+            }
             Ok(())
         }
         match self {
@@ -530,6 +543,7 @@ mod tests {
             args: vec!["status".into(), "--porcelain".into()],
             env: vec![("LANG".into(), "C".into())],
             cwd: Some("/srv/api".into()),
+            stdin: None,
         }
     }
 
@@ -578,7 +592,7 @@ mod tests {
                 token: None,
             },
             Message::Hello {
-                protocol: 1,
+                protocol: PROTOCOL_VERSION,
                 app_version: String::new(),
                 device_name: "é日本".into(),
                 token: Some(vec![0, 255]),
@@ -757,6 +771,53 @@ mod tests {
             timeout_ms: None,
         };
         assert!(encode_frame(&message).is_err());
+    }
+
+    #[test]
+    fn an_exec_carrying_standard_input_round_trips() {
+        let mut spec = spec();
+        spec.stdin = Some(b"line one\nline two\n".to_vec());
+        let message = Message::Exec {
+            id: 1,
+            spec,
+            timeout_ms: Some(5000),
+        };
+        let bytes = encode_frame(&message).unwrap();
+        let (back, used) = decode_frame(&bytes).unwrap();
+        assert_eq!(back, message);
+        assert_eq!(used, bytes.len());
+    }
+
+    #[test]
+    fn standard_input_over_the_limit_is_refused_both_ways() {
+        let mut spec = spec();
+        spec.stdin = Some(vec![0; MAX_EXEC_INPUT]);
+        let at_limit = Message::Exec {
+            id: 1,
+            spec: spec.clone(),
+            timeout_ms: None,
+        };
+        assert!(encode_frame(&at_limit).is_ok());
+        spec.stdin = Some(vec![0; MAX_EXEC_INPUT + 1]);
+        let big = Message::Exec {
+            id: 1,
+            spec,
+            timeout_ms: None,
+        };
+        assert!(encode_frame(&big).is_err());
+        // A peer that skips the check on its side is caught on ours.
+        let payload = postcard::to_allocvec(&big).unwrap();
+        let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+        frame.push(PROTOCOL_VERSION as u8);
+        frame.extend(payload);
+        assert!(decode_frame(&frame).is_err());
+    }
+
+    #[test]
+    fn a_frame_from_the_previous_protocol_version_is_refused() {
+        let mut bytes = encode_frame(&Message::Pong { nonce: 7 }).unwrap();
+        bytes[4] = 1;
+        assert_eq!(decode_frame(&bytes), Err(FrameError::UnsupportedVersion(1)));
     }
 
     #[test]

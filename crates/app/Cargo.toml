@@ -7,6 +7,33 @@ license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Syntax highlighting of the editor: a tree-sitter grammar for each common
+# language (JSON comes with the base). Off, files open as plain text.
+default = ["languages"]
+languages = [
+    "gpui-kit/tree-sitter-rust",
+    "gpui-kit/tree-sitter-javascript",
+    "gpui-kit/tree-sitter-typescript",
+    "gpui-kit/tree-sitter-tsx",
+    "gpui-kit/tree-sitter-python",
+    "gpui-kit/tree-sitter-go",
+    "gpui-kit/tree-sitter-toml",
+    "gpui-kit/tree-sitter-yaml",
+    "gpui-kit/tree-sitter-bash",
+    "gpui-kit/tree-sitter-markdown",
+    "gpui-kit/tree-sitter-markdown-inline",
+    "gpui-kit/tree-sitter-css",
+    "gpui-kit/tree-sitter-html",
+    "gpui-kit/tree-sitter-c",
+    "gpui-kit/tree-sitter-cpp",
+    "gpui-kit/tree-sitter-lua",
+    "gpui-kit/tree-sitter-make",
+    "gpui-kit/tree-sitter-diff",
+    "gpui-kit/tree-sitter-java",
+    "gpui-kit/tree-sitter-ruby",
+]
+
 [dependencies]
 leon-core.workspace = true
 leon-mark.workspace = true
@@ -27,8 +54,10 @@ dirs.workspace = true
 gpui-kit.workspace = true
 # Decodes the bundled application icon: the `image` GPUI already uses.
 image = { version = "0.25", default-features = false, features = ["png"] }
+regex = "1"
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tokio.workspace = true

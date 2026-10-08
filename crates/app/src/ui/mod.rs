@@ -22,6 +22,7 @@ mod den_follow;
 mod den_store;
 mod den_view;
 mod dialogs;
+mod editor;
 mod expansion;
 mod filter;
 mod find;

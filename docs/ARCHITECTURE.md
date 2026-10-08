@@ -987,6 +987,171 @@ quiet threshold; a tool that runs long while the agent's interface draws
 nothing reads as a prompt; and a session without a transcript (remote, another
 agent, an id not learned yet) can only say "waiting". An `AskUserQuestion` or
 `ExitPlanMode` call in flight is "waiting for you" whatever the terminal does.
+## Files in tabs (`ui/editor/`)
+
+A text file is a leaf of a tab like a terminal is. `Layout`, `Tab` and
+`Workspaces` are unchanged: they hold `LiveId`s, and a file's id comes from the
+same counter as the terminals'. What tells the two apart is a side table,
+`Shell.files: HashMap<LiveId, EditorDoc>`; a leaf in it is not in `Shell.live`.
+`Main::Live(id)` is therefore also "a file is on screen". Every user of a leaf
+asks one table or the other: `render_pane`, the tab bar, the header, `open_live`
+(a file has no row in the tree), `sync_focus` (the editor's focus handle),
+`split_pane`, `close`, the stale-main check, `current_machine` and `here`. The
+saved layout (`restore_view.rs`) lists only live terminals; open files are kept
+by `session.rs` instead (below). `quit_gently.rs` only looks at terminals;
+unsaved files are asked about by the `Quit` flow.
+
+* `document.rs`: `EditorDoc` is the machine, path, the engine's `FileRevision`,
+  a fingerprint of the saved text, the dirty flag, the language and the byte
+  order mark and line ends that the editor does not hold (a file whose lines do
+  not all end alike keeps its `\r`s as text). The dirty flag compares the text
+  with what was saved, a pause (`Options::editor_debounce`) after the last
+  change, so undoing back to clean clears it.
+* `view.rs`: the leaf (gpui-component's `Editor`, or a placeholder for a binary
+  or too big file), the tab's dot and the header.
+* `actions.rs`: `Shell::open_file(machine, path, line)` shows the existing tab
+  of that file or reads it through the engine and adds one with
+  `Workspaces::add_tab`; saving sends the revision the file was read with, and a
+  conflict opens the `SaveFile` flow (overwrite re-reads the revision, reload
+  replaces the editor's text).
+* `OpenFile`, `SaveFile` and `CloseFile` are ordinary `Command`s with flows in
+  `steps.rs` (`World::file` says what is focused). `SaveFile` and `CloseFile`
+  are listed in the palette and enabled in the menu only while a file is on
+  screen. While an editor has the keyboard the key context is "typing", so bare
+  keys are text. `Ctrl+S` is not kept in a terminal (it is XOFF), and on macOS
+  `Cmd+S` saves the terminal's output while a terminal has the keyboard.
+
+* `preview.rs`: a `.md` / `.markdown` file has a `ViewMode` (`Edit`, `Split`,
+  `Preview`), cycled by `TogglePreview` (`Cmd+Opt+V`, `Ctrl+Shift+Alt+V`; a
+  `When::File` chord, so it never reaches a terminal, and `Ctrl+Shift+V` is the
+  terminal's paste) and by three buttons above the file. The page is
+  gpui-component's `TextView` over a `TextViewState` kept in the document, so
+  each half keeps its scroll position across modes; a change of the text is
+  passed on after `Options::editor_debounce`. The text view does not read
+  files, so `prepare` settles images first: a relative image of a file on this
+  computer is embedded as a `data:` URL (up to 4 MiB, PNG, JPEG, GIF, WebP,
+  BMP), on another machine it is replaced by `*[image: alt]*`. A clicked link
+  goes through `resolve_link`: `http(s)`/`mailto` open in the browser
+  (`Options::open_url`), a path (relative to the document's folder, `..`
+  resolved, `%20` decoded, `#fragment` and `?query` dropped) opens through
+  `open_file` on the document's machine, anything else is ignored.
+* `drafts.rs`, `guard.rs`: the text of a file with unsaved changes is written
+  to `drafts/<sha256(machine, path)>.json` beside the settings, a pause after
+  the last change (`Options::draft_debounce`, 1 s) and when the application
+  ends; saving, discarding (closing without saving, "Quit without saving") and
+  reloading remove it. `finish_open` looks for one and puts the text back as
+  unsaved changes; if the file's revision is not the one the draft began from,
+  the document is marked in conflict and the banner below is shown at once, so
+  the next save asks what to do. When the window comes to the front every open
+  text file is read again (`Engine::check_file`, quietly) and its revision
+  compared: a clean document is replaced by the new text (cursor kept); a
+  dirty one gets a banner above the editor (`Reload` / `Keep mine`, not a
+  dialog). A save still compares the revision where the file is, so a change
+  that lands after the look is caught as a conflict. Overwriting a file that
+  was deleted creates it again (a save with no expected revision refuses if
+  something appears there meanwhile). Quit with unsaved files asks "Save all
+  N files and quit / Quit without saving / Cancel" (`steps::quit`;
+  `Shell::save_all_and_quit` quits when the last save has landed, and not at
+  all if one conflicted or failed). The window's close button goes through the
+  same flow.
+* `session.rs`: `open_files.json` beside the settings (`version`, the open
+  files in tab order with machine, path, cursor line, Markdown mode and
+  whether it was shown in its workspace, and per folder of the tree the open
+  folders and selection). Every field has a default and unknown fields are
+  ignored. It is written when the shape changes and as the application ends
+  (cursor lines only then); at start the files are opened one after another
+  without taking the keyboard (`editor_restore_files`), and the ones that are
+  gone or no longer text are skipped without a message.
+* Editor settings (`editor_tab_size`, `editor_soft_wrap`, `editor_line_numbers`,
+  `editor_indent_guides`, `editor_highlight`, `editor_font_size`) are read when
+  an editor is made and applied to every open one when the settings change
+  (`Shell::sync_editor_prefs`); the family is the terminal's. `Open anyway`
+  on the placeholder of a binary or too-big file on this computer shows its
+  first 8 MiB as lossy text in a read-only editor (`Body::Lossy`); on other
+  machines the bytes would have to cross the wire, so it is not offered.
+  `RevealInTree` shows the tree, opens the folders above the focused file and
+  selects it.
+
+### The file tree (`files_panel.rs`, `filetree.rs`, `icons_map.rs`)
+
+A column between the sidebar and the main pane, drawn while the setting
+`files_visible` (default off) is on. The keyboard model gained a third pane:
+`Pane::Files` sits between `Sidebar` and `Main` in `NextPane`/`PreviousPane`
+(Tab cycles `editor::next_pane`, two panes while the column is hidden). A new
+pane was the least invasive way in: every keyboard command already branches on
+`Shell::pane` (`move_cursor`, `open_here`, `Expand`, `Collapse`, `Close`), the
+tree is not a text field so it needs no focus handle of its own (the shell's
+holds the keyboard, as for the sidebar), and `Esc` from it goes to `Main`.
+`ToggleFiles` (`Cmd+Shift+E`, `Ctrl+Shift+Alt+E`: every `Ctrl+Shift+letter` was
+taken, and `Ctrl+B` is the sidebar's on macOS only) shows it with the keyboard
+or hides it, and `metrics::FILES_WIDTH()` (zero while hidden, like
+`SIDEBAR_WIDTH`) is subtracted wherever the main pane's width is computed
+(`line_frame`, the terminals' pane area, the usage strip).
+
+* `filetree.rs` is pure: `Tree` holds the listings (folder to entries or
+  failure), the open folders, the selected path, git's marks and `rows()`, the
+  flat list of visible rows (`depth`, `open`, `mark`, notes for a folder that is
+  loading, empty or failed), with `step`, `right` and `left` for the
+  keyboard. Paths are relative to the root and `/` separated, like git's.
+* `files_panel.rs` keeps `FileTreeUi`: a `Tree` for each
+  `workspace::key_of(machine, root)`, so the open folders and the selection are
+  as they were left. The root is the workspace folder `Shell::here` points at
+  (the sidebar's row, or what the main pane shows), else the first project of
+  the machine in view; `files_sync` runs in `render` and switches trees when it
+  changes. `files_refresh` lists the root and every open folder again
+  (`Engine::list_dir`) and reads `Engine::git_marks`; it runs on a timer
+  (`Options::files_interval`, 5 s, only while visible), when the window gets the
+  focus and after a save, never asks for what is already in flight, and a
+  failed refresh keeps what was shown.
+* `icons_map.rs`: `glyph(name, is_dir, open)` gives a codepoint of the bundled
+  Symbols Nerd Font Mono and a colour *token* (the theme's text, accent or ANSI
+  hues), by exact file name, then extension, then a generic file or folder. If
+  the family is not among the text system's fonts the Lucide `File`, `Folder`
+  and `FolderOpen` are drawn instead.
+
+Git marks for a folder inside a repository: `git status --porcelain` names paths
+from the work tree's root, so `GitMarks::from_status_in(status, prefix)` makes
+them relative to the folder (`prefix` is `git rev-parse --show-prefix`) and
+drops what lies outside it. The local engine runs the prefix command after
+`status`; the remote script prints the prefix on the line after `GIT`.
+
+### Finding things (`quick.rs`, `search.rs`)
+
+Quick open and the search of the project are scopes of the palette, not
+overlays of their own: `Scope::Files` (`~`) and `Scope::Text` (`%`), whose rows
+are `Item::File`, `Item::FileHeading` and `Item::Match`; the plain palette
+(`Scope::All`) lists the files that match too, in a "Files" group after the
+places. `QuickOpen` and `SearchProject` just open the palette with the prefix
+typed. `ui/editor/quick.rs` holds the state (`QuickFiles`: the last file list
+of each `key_of(machine, root)`, asked for again each time the palette opens;
+`TextSearch`: switches, hits, the flag and abort handle of the search under
+way), the pure ranking (`file_score`: the file's own name counts for more than
+its folders; `split_line` reads `path:line`) and the grouping of hits. The root
+is `files_target` of the file tree. Rows lead with `Shell::file_icon`
+(`icons_map`).
+
+`Engine::search_project` is the one call. On this computer it takes the file
+list of `project_files` (so `.gitignore` is honoured) and scans it in-process
+with `regex` (`crate::search`; literal text is escaped, an empty match is not a
+hit, files above 1 MiB and those with a NUL near the start are skipped, 1000
+hits at most) on a blocking thread that looks at a cancel flag between files;
+elsewhere it is `leon_remote::search` (see `docs/REMOTE.md`) under a 30 s
+limit. A new query raises the flag, aborts the job and drops the hits; an answer
+carries the generation it was asked for and is ignored when stale. The palette
+lists 300 lines of the 1000.
+
+The search bar of the editor is gpui-component's (`open_search`). `FindInFile`
+(`Cmd/Ctrl+F`) and `ReplaceInFile` (`Cmd+Opt+F`, `Ctrl+H`) have `When::File`
+chords: `keys::Context::file` is true while an editor has the keyboard, and
+those chords listed before the terminal's find and the sidebar's filter win only
+there. Leon sees every key before the editor, so while the bar's fields have the
+keyboard `Escape` is let through to the bar (`editor_search_has_keyboard`) and
+`sync_focus` does not take the keyboard back. `go_to_line` puts the cursor again
+two frames after opening, when the editor has been laid out and can scroll.
+
+Languages are a Cargo feature, `languages` (on by default), that turns on the
+tree-sitter grammars of gpui-component through `gpui-kit`; JSON comes with the
+base. SQL is not included: its grammar pins an older `cc` than GPUI needs.
 
 ## The lion (`leon-mark`)
 
@@ -1061,6 +1226,10 @@ child <-> PTY <-> reader thread --chunks--> parser thread --> Term (grid, scroll
 
 ## Not built yet
 
+* Files in tabs: no replace across the project, no side-by-side comparison of
+  a draft or a changed file with the editor's text, "Open anyway" only for
+  files on this computer, the editor's soft wrap, tab size and guides cannot
+  be set per language, and the editor has no language server.
 * Cursor blinking, hyperlinks (OSC 8) and URL detection, kitty keyboard
   protocol, images (sixel, kitty graphics).
 * Copying the last command's output (needs the shell's OSC 133 prompt marks,

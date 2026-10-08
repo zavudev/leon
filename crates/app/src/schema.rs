@@ -26,6 +26,8 @@ pub enum Section {
     Appearance,
     /// Font, scrollback, cursor, clipboard and shell of terminals.
     Terminal,
+    /// Tab size, wrapping, numbers and font of text files.
+    Editor,
     /// Claude Code, Codex and opencode.
     Agents,
     /// What is imported and shown of the history.
@@ -48,9 +50,10 @@ pub enum Section {
 
 impl Section {
     /// Every section, in order.
-    pub const ALL: [Section; 11] = [
+    pub const ALL: [Section; 12] = [
         Section::Appearance,
         Section::Terminal,
+        Section::Editor,
         Section::Agents,
         Section::Sessions,
         Section::Projects,
@@ -67,6 +70,7 @@ impl Section {
         match self {
             Section::Appearance => "Appearance",
             Section::Terminal => "Terminal",
+            Section::Editor => "Editor",
             Section::Agents => "Agents",
             Section::Sessions => "Sessions & history",
             Section::Projects => "Projects",
@@ -84,6 +88,7 @@ impl Section {
         match self {
             Section::Appearance => "How Leon looks.",
             Section::Terminal => "How terminals are drawn and started.",
+            Section::Editor => "How text files are drawn and edited.",
             Section::Agents => "How each coding agent is started and resumed.",
             Section::Sessions => "What is imported and shown of the agents' history.",
             Section::Projects => "How projects are found and what they show.",
@@ -1031,6 +1036,89 @@ const BASE: &[Def] = &[
         D::Int(320),
     ),
     def(
+        "files_visible",
+        S::Window,
+        "Show the file tree",
+        "The files of the project or worktree in view, with the git state of each. Toggled with a chord, the View menu and the palette.",
+        "files explorer panel project tree",
+        K::Toggle,
+        D::Bool(false),
+    ),
+    // ----- editor
+    def(
+        "editor_tab_size",
+        S::Editor,
+        "Tab size",
+        "The columns a tab or an indent takes in text files. Applies to the files that are open.",
+        "indent spaces width tabs",
+        K::Number {
+            min: 1,
+            max: 8,
+            step: 1,
+            unit: "",
+        },
+        D::Int(4),
+    ),
+    def(
+        "editor_soft_wrap",
+        S::Editor,
+        "Wrap long lines",
+        "Break lines that are wider than the editor instead of scrolling sideways.",
+        "soft wrap word long lines horizontal scroll",
+        K::Toggle,
+        D::Bool(false),
+    ),
+    def(
+        "editor_line_numbers",
+        S::Editor,
+        "Line numbers",
+        "Number the lines in the margin of text files.",
+        "gutter margin numbers",
+        K::Toggle,
+        D::Bool(true),
+    ),
+    def(
+        "editor_indent_guides",
+        S::Editor,
+        "Indent guides",
+        "Draw a faint vertical line at each level of indentation.",
+        "indentation lines levels",
+        K::Toggle,
+        D::Bool(true),
+    ),
+    def(
+        "editor_highlight",
+        S::Editor,
+        "Syntax highlighting",
+        "Colour the code of text files by their language.",
+        "colour color syntax language grammar tree-sitter",
+        K::Toggle,
+        D::Bool(true),
+    ),
+    def(
+        "editor_font_size",
+        S::Editor,
+        "Font size",
+        "The size of text in files, in pixels at the 100% interface size. The family is the terminal's.",
+        "text points px",
+        K::Number {
+            min: 8,
+            max: 32,
+            step: 1,
+            unit: "px",
+        },
+        D::Int(13),
+    ),
+    def(
+        "editor_restore_files",
+        S::Editor,
+        "Reopen files at start",
+        "Open the files that were open last time, with the cursor where it was and the same Markdown view. A file that no longer exists is skipped.",
+        "restore reopen tabs session start files remember",
+        K::Toggle,
+        D::Bool(true),
+    ),
+    def(
         "quit_confirmation",
         S::Window,
         "Confirm before quitting",
@@ -1876,6 +1964,7 @@ mod tests {
             "interface_scale",
             "sidebar_visible",
             "sidebar_width",
+            "files_visible",
         ] {
             assert!(find(key).is_some(), "{key}");
         }

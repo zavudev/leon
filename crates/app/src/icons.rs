@@ -23,6 +23,7 @@ icon_assets!(
         CircleDot,
         Command,
         ExternalLink,
+        File,
         Folder,
         FolderOpen,
         GitBranch,

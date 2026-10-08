@@ -76,6 +76,100 @@
   usage, settings), the sessions at a glance (how many run here and
   elsewhere, how many work, and the ones that wait for you, each a click
   away) and the recent sessions. The arrows walk it and `Enter` opens.
+* A file engine for the editor, on this computer and on every other machine:
+  read, save, list a folder, list a project's files and ask git for each file's
+  mark. A save refuses to overwrite a file that changed since it was read, keeps
+  its mode, never leaves half a file and follows a symbolic link to its target.
+  Other computers run short `sh` scripts over SSH or the relay (they need `sh`,
+  `cksum`, `base64` and `wc`).
+* Text files open in a tab next to the terminals of their project, on any
+  machine: **Open a file…** (`⇧⌘O`, `Ctrl+Shift+Alt+O`) asks for a path,
+  **Save the file** is `⌘S` / `Ctrl+S` and **Close the file** is in the palette
+  (`Close the pane` closes one too). A file splits beside a terminal like any
+  pane. The editor has syntax highlighting (Rust, JavaScript, TypeScript, TSX,
+  Python, Go, JSON, TOML, YAML, shell, Markdown, CSS, HTML, C, C++, Lua, Make,
+  diff, Java and Ruby), line numbers, search and indent guides. The tab shows a
+  dot while there are unsaved changes (undoing back to what was saved clears
+  it), a byte order mark and `\r\n` line ends are kept when saving, and a file
+  that is not text or is over 2 MiB says so instead of opening. Closing or
+  quitting with unsaved changes asks first, and so does saving a file that
+  somebody else changed (overwrite, reload or cancel).
+
+* A file tree for the project or worktree in view: a column between the
+  sidebar and the main pane, hidden until asked for (**Show or hide the file
+  tree**: `⇧⌘E`, `Ctrl+Shift+Alt+E`, the folder button of the main header, the
+  View menu and the palette; the choice is kept in `settings.json` as
+  `files_visible`). Folders are listed when opened, on the machine the project
+  is on, and again every five seconds, when the window gets the focus and after
+  a save; the open folders and the selection are kept for each project. The
+  arrows (or `j` `k` `h` `l`) move and open, `Enter` opens a file in a tab,
+  `Esc` returns to the main pane, `Tab` visits it between the sidebar and the
+  main pane, a click selects and a double click opens. Icons are glyphs of a
+  bundled symbols font (Symbols Nerd Font Mono, MIT) in the theme's colours,
+  chosen by file name and then by extension; Git's state is a letter on each
+  file (`M A D R ? U`) and a dot on the folders that hold changes, and ignored
+  files are dimmed.
+* **Open a file of the project by name…** (`⌥⌘P`, `Ctrl+Shift+Alt+P`; `~` in
+  the palette) finds a file of the project in view by part of its name, with
+  the file's icon and its path, and opens it; `name:42` goes to a line. The
+  ordinary `⌘P` / `Ctrl+P` palette lists matching files too, below the
+  projects, sessions and machines. The list is asked for again each time it
+  opens, on the machine the project is on.
+* **Find in the file…** (`⌘F`, `Ctrl+F`) and **Replace in the file…**
+  (`⌥⌘F`, `Ctrl+H`) open the editor's search bar; they apply only while a file
+  has the keyboard, so `⌘F` still finds in a terminal and filters the sidebar.
+  `Esc` closes the bar.
+* **Search the text of the project…** (`⌥⇧⌘F`, `Ctrl+Shift+Alt+F`; `%` in the
+  palette): the lines that match, grouped by file, with a switch for case
+  (`Alt+C`) and for regular expressions (`Alt+R`). `Enter` or a click opens the
+  file with the cursor on the line, a new query stops the search before it.
+  On this computer it runs in Leon over the project's file list (so
+  `.gitignore` is honoured; binary files and files above 1 MiB are skipped); on
+  another machine it is one command there, using `rg`, else `git grep`, else
+  `grep -r`. It keeps the first 1000 lines (300 are listed).
+
+* A Markdown file can be previewed: **Preview the Markdown file** (`⌥⌘V`,
+  `Ctrl+Shift+Alt+V`, or three buttons above the file) goes from the text to
+  text and page side by side to the page. Tables, task lists and code blocks
+  are rendered; the page follows the text as it is typed and keeps its scroll
+  position when the mode changes. Web links open in the browser, relative links
+  open the file in a tab (on the document's machine), relative images show when
+  the document is on this computer.
+* Text that was not saved survives a crash: a draft is kept beside the
+  settings and put back when the file is opened again (a file that changed on
+  disk meanwhile asks what to do when saved). When the window gets the focus a
+  file that changed on disk is read again if it has no unsaved changes, and
+  gets a **Reload** / **Keep mine** banner if it has. Quitting with unsaved
+  files offers **Save all and quit**, **Quit without saving** and **Cancel**.
+* The files that were open (cursor, Markdown view, the one on screen in each
+  workspace) are opened again at the next start, and the file tree keeps its
+  open folders and selection. **Reveal the file in the file tree** selects the
+  focused file in the tree. **Open anyway** shows a file that is not text or is
+  too big, on this computer, as read-only lossy text.
+* An Editor section in the settings: tab size, wrapping, line numbers, indent
+  guides, syntax highlighting, font size and reopening files at start, applied
+  live to the files that are open.
+
+### Fixed
+
+* Saving over a file that was deleted ("Overwrite" after "changed on disk")
+  creates it again instead of doing nothing.
+* Git's marks of a project whose folder is inside a larger repository (a
+  monorepo's package) are read relative to that folder, on this computer and
+  on other machines; they were taken as relative to the repository's root, so
+  none matched.
+
+### Changed
+
+* Protocol 2: a command sent to another computer (`Exec`) can carry standard
+  input, up to 4 MiB, which the host writes while it reads the output and
+  closes afterwards. Over SSH the same input reaches the remote command. The
+  protocol version changes from 1 to 2, so a Leon that speaks 1.x and one that
+  speaks 2.x refuse each other at the version check: update both computers
+  together.
+* The release binary carries the grammars of the editor's languages; build
+  with `--no-default-features` to leave them out (files then open as plain
+  text).
 
 ## [0.5.0] - 2026-10-07
 

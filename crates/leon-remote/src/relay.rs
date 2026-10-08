@@ -228,6 +228,7 @@ impl Runner for RoutingRunner {
             args: spec.args.clone(),
             env: spec.env.clone(),
             cwd: spec.cwd.clone(),
+            stdin: spec.stdin.clone(),
         };
         let timeout_ms = self
             .limit

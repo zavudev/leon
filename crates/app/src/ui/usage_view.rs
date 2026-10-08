@@ -694,14 +694,15 @@ impl Shell {
         model
     }
 
-    /// The width of the footer strip: the window's, less the sidebar's.
+    /// The width of the footer strip: the window's, less the sidebar's and the
+    /// file tree's.
     fn strip_width(&self, cx: &gpui_kit::App) -> f32 {
         let sidebar = if settings::get(cx).sidebar_visible {
             metrics::SIDEBAR_WIDTH().as_f32()
         } else {
             0.0
         };
-        self.viewport.width.as_f32() - sidebar
+        self.viewport.width.as_f32() - sidebar - metrics::FILES_WIDTH().as_f32()
     }
 
     fn machine_name_of(&self, id: &str) -> String {

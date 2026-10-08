@@ -16,6 +16,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 
 use crate::command::CommandSpec;
 
@@ -115,20 +116,47 @@ impl Runner for ProcessRunner {
         command
             .args(&spec.args)
             .envs(spec.env.iter().map(|(name, value)| (name, value)))
-            .stdin(Stdio::null())
+            .stdin(if spec.stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);
         }
 
+        let mut child = command.spawn().map_err(|source| RunError::Spawn {
+            program: spec.program.clone(),
+            source,
+        })?;
+        let mut input = child.stdin.take();
+        // The input is written while the output is read, so a command that
+        // answers before it has read everything cannot block on a full pipe.
+        let work = async {
+            let write = async {
+                if let (Some(mut pipe), Some(bytes)) = (input.take(), &spec.stdin) {
+                    // A command that stops reading early closes the pipe; that
+                    // is its choice, not a failure of ours. Dropping the pipe
+                    // is what ends its input.
+                    let _ = pipe.write_all(bytes).await;
+                }
+            };
+            let (_, finished) = tokio::join!(write, child.wait_with_output());
+            finished
+        };
         let finished = match self.time_limit {
-            Some(limit) => tokio::time::timeout(limit, command.output())
-                .await
-                .map_err(|_| RunError::TimedOut {
-                    program: spec.program.clone(),
-                    limit,
-                })?,
-            None => command.output().await,
+            Some(limit) => {
+                tokio::time::timeout(limit, work)
+                    .await
+                    .map_err(|_| RunError::TimedOut {
+                        program: spec.program.clone(),
+                        limit,
+                    })?
+            }
+            None => work.await,
         };
         let output = finished.map_err(|source| RunError::Spawn {
             program: spec.program.clone(),
@@ -286,6 +314,32 @@ mod tests {
         let spec = CommandSpec::new("sh").args(["-c", "read line; echo \"got:$line\""]);
         let output = ProcessRunner::new().run(&spec).await.unwrap();
         assert_eq!(output.stdout.trim_end(), "got:");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_that_reads_standard_input_gets_what_was_given_and_then_end_of_file() {
+        let spec = CommandSpec::new("cat").stdin("some text\n");
+        let output = ProcessRunner::new().run(&spec).await.unwrap();
+        assert_eq!(output.stdout, "some text\n");
+        assert_eq!(output.status, Some(0));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn large_input_and_large_output_at_once_do_not_deadlock() {
+        let spec = CommandSpec::new("cat").stdin(vec![b'x'; 4 * 1024 * 1024]);
+        let runner = ProcessRunner::with_time_limit(Duration::from_secs(30));
+        let output = runner.run(&spec).await.unwrap();
+        assert_eq!(output.stdout.len(), 4 * 1024 * 1024);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_that_ignores_its_input_is_not_a_failure() {
+        let spec = CommandSpec::new("true").stdin(vec![0; 1024 * 1024]);
+        let output = ProcessRunner::new().run(&spec).await.unwrap();
+        assert!(output.success());
     }
 
     #[cfg(unix)]
