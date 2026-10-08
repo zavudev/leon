@@ -80,6 +80,7 @@ fn prepare(cx: &mut gpui_kit::App, settings_file: Option<std::path::PathBuf>) {
 
 /// Shows the sessions that are not active too, for a test that gave its
 /// settings a file (which keeps the default, off).
+#[cfg(leon_posix_tests)]
 fn show_inactive(cx: &mut TestAppContext) {
     cx.update(|cx| {
         settings::set_value(
@@ -143,6 +144,7 @@ impl FakeSystem {
     }
 
     /// The same computer with these programs too.
+    #[cfg(leon_posix_tests)]
     fn with(extra: &[&'static str]) -> Rc<Self> {
         let mut computer = Rc::try_unwrap(Self::new()).ok().expect("just made");
         computer.extra = extra.to_vec();
