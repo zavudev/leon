@@ -154,6 +154,9 @@ impl Shell {
                     )
                     .when(focused, |this| this.child(focus_rule(colours))),
             )
+            // The places that are always one step away, over the filter
+            // and outside the tree's list.
+            .child(self.render_nav(colours, cx))
             .child(self.render_filter(colours, cx))
             .child(
                 div()
@@ -451,7 +454,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let row = self.rows.get(index)?;
-        let on = self.cursor == Some(index);
+        // While the keyboard is on the navigation the tree has no cursor.
+        let on = self.cursor == Some(index) && self.home.nav.is_none();
         let focused = self.pane == Pane::Sidebar;
         let hover = colours.surface;
         let base = div()

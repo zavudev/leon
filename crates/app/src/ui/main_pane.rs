@@ -37,13 +37,14 @@ impl Shell {
         let focused = self.pane == Pane::Main;
         let (kind, title, meta) = self.main_heading(cx);
         let body = match &self.main {
-            Main::Empty => self.render_empty(colours).into_any_element(),
+            Main::Empty => self.render_home(colours, cx),
             Main::Project(id) => self.render_project(id, colours),
             Main::Worktree(project, worktree) => {
                 self.render_worktree(project, worktree, colours, cx)
             }
             Main::Session(transcript) => self.render_transcript(transcript, colours, cx),
             Main::Live(id) => self.render_live(*id, colours, cx),
+            Main::Den => self.render_den(colours, cx),
         };
         let agent = self.main_agent();
         div()
@@ -171,7 +172,7 @@ impl Shell {
                 None => self.live.get(*id).map(|session| session.cwd.clone()),
             },
             Main::Session(transcript) => Some(transcript.session.cwd.clone()),
-            Main::Empty => None,
+            Main::Empty | Main::Den => None,
         };
         match path.filter(|path| !path.is_empty()).and_then(|path| {
             meta.split_once(&path)
@@ -214,7 +215,8 @@ impl Shell {
     /// What the header says: the kind of thing, its name and a line about it.
     pub(super) fn main_heading(&self, cx: &App) -> (&'static str, String, String) {
         match &self.main {
-            Main::Empty => ("Home", "Nothing open".to_owned(), String::new()),
+            Main::Empty => ("Home", "Home".to_owned(), self.home_headline()),
+            Main::Den => self.den_heading(),
             Main::Project(id) => match self.snapshot.project(id) {
                 Some(entry) => (
                     "Project",
@@ -313,77 +315,6 @@ impl Shell {
                 )
             }
         }
-    }
-
-    /// What is on screen before anything is open: the keys that start things,
-    /// read from the registry.
-    fn render_empty(&self, colours: &Palette) -> Div {
-        let line = |command: Command| {
-            let label = keys::label(command);
-            div()
-                .debug_selector(move || format!("hint-{command:?}"))
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_6()
-                .w(px(360.))
-                .child(div().text_color(colours.text_muted).child(label))
-                .children(keys::keys_label(command).map(|text| key_cap(text, colours)))
-        };
-        let hints = div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(10.))
-            .child(line(Command::OpenProject))
-            .child(line(Command::GoTo))
-            .child(line(Command::Commands))
-            .child(line(Command::SearchHistory))
-            .child(line(Command::NewSession))
-            .child(line(Command::AddMachine))
-            .child(line(Command::Shortcuts));
-        // What there is to open, as the dimension of the drawing.
-        let caption = format!(
-            "{} PROJECTS \u{b7} {} SESSIONS",
-            self.snapshot.projects.len(),
-            self.snapshot.sessions.len()
-        );
-        div()
-            .debug_selector(|| "main-empty".into())
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(10.))
-            .child(section_label("Nothing open", colours))
-            .child(empty_frame("main-empty", hints, Some(caption), colours))
-            .child(
-                div()
-                    .debug_selector(|| "main-empty-remote".into())
-                    .text_size(metrics::TEXT_SMALL())
-                    .text_color(colours.text_muted)
-                    .child(format!(
-                        "Projects on another computer work too: connect a machine ({}) with a code, no network setup needed, or over SSH.",
-                        keys::keys_label(Command::AddMachine).unwrap_or_default()
-                    )),
-            )
-            .child(
-                div().pt_4().child(
-                    // The product's name is a name, not a label: as it is
-                    // written, in the interface font.
-                    div()
-                        .debug_selector(|| "maker".into())
-                        .text_size(metrics::TEXT_SMALL())
-                        .text_color(colours.text_faint)
-                        .child(format!(
-                            "{} {} · by {}",
-                            crate::product::PRODUCT_NAME,
-                            crate::product::VERSION,
-                            crate::product::MAKER
-                        )),
-                ),
-            )
     }
 
     fn field(label: &'static str, value: String, colours: &Palette) -> Div {

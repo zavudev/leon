@@ -12,6 +12,7 @@ use leon_core::{
     SessionId, Worktree, WorktreeId,
 };
 
+use super::den_store::DenChoice;
 use super::live::LiveId;
 use super::model::Snapshot;
 use super::tree::{worktree_label, Folder, Placement};
@@ -245,6 +246,10 @@ pub struct World {
     pub theme_id: ThemeId,
     /// The interface size in use, in percent.
     pub scale: u16,
+    /// The dens there are to choose: the built-in ones, then the user's.
+    pub dens: Vec<DenChoice>,
+    /// The id of the den in use.
+    pub den_id: String,
     /// What the settings change in the questions.
     pub prefs: Prefs,
     /// Git repositories found on the machines (by the Connect screen), by
@@ -313,11 +318,26 @@ impl World {
             theme,
             theme_id,
             scale,
+            dens: Vec::new(),
+            den_id: String::new(),
             prefs: Prefs::default(),
             repositories: Vec::new(),
             installed: Vec::new(),
             update_ready: None,
         }
+    }
+
+    /// The same world knowing the dens there are to choose and the one in
+    /// use.
+    pub fn with_dens(mut self, dens: Vec<DenChoice>, current: String) -> Self {
+        self.dens = dens;
+        self.den_id = current;
+        self
+    }
+
+    /// The den in use.
+    pub fn den(&self) -> Option<&DenChoice> {
+        self.dens.iter().find(|den| den.id == self.den_id)
     }
 
     /// The same world knowing which update is waiting for a restart.
@@ -610,6 +630,14 @@ pub enum Action {
     /// Ask the process that holds a session in another terminal to end, then
     /// resume the session in a terminal of Leon.
     TakeOver(SessionId),
+    /// Use this den: a built-in one's id or the name of a file of the user's.
+    SetDen(String),
+    /// Save the Den's room as a new den with this name.
+    SaveDenAs(String),
+    /// Give the user's den in use this name.
+    RenameDen(String),
+    /// Delete the user's den in use.
+    DeleteDen,
     /// Change the appearance: light, dark or the desktop's.
     SetAppearance(AppearanceChoice),
     /// Change the theme.
@@ -701,6 +729,10 @@ pub fn is_flow(command: Command) -> bool {
             | Command::SetInterfaceSize
             | Command::Quit
             | Command::NewThemeFromCurrent
+            | Command::ChooseDen
+            | Command::SaveDenAs
+            | Command::RenameDen
+            | Command::DeleteDen
     )
 }
 
@@ -753,6 +785,40 @@ pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
         Command::NewThemeFromCurrent => match answers {
             [] => text("Theme name", "My theme", Validate::Required),
             [name, ..] => Outcome::Run(Action::NewTheme(name.clone())),
+        },
+        Command::ChooseDen => choose_den(answers, world),
+        Command::SaveDenAs => match answers {
+            [] => text("Den name", "My den", Validate::Required),
+            [name, ..] => Outcome::Run(Action::SaveDenAs(name.clone())),
+        },
+        Command::RenameDen => match (world.den(), answers) {
+            (Some(den), _) if !den.user => Outcome::Refuse(format!(
+                "{} is built in: save it under a name first.",
+                den.name
+            )),
+            (None, _) => Outcome::Refuse("There is no den in use.".to_owned()),
+            (Some(den), []) => text("New name", den.name.clone(), Validate::Required),
+            (Some(_), [name, ..]) => Outcome::Run(Action::RenameDen(name.clone())),
+        },
+        Command::DeleteDen => match (world.den(), answers) {
+            (Some(den), _) if !den.user => {
+                Outcome::Refuse(format!("{} is built in: it cannot be deleted.", den.name))
+            }
+            (None, _) => Outcome::Refuse("There is no den in use.".to_owned()),
+            (Some(den), []) => choices(
+                "Delete this den?",
+                vec![
+                    Choice::new(
+                        format!("Delete {}", den.name),
+                        "Its file is removed",
+                        "delete",
+                    ),
+                    Choice::new("Keep it", "", "keep"),
+                ],
+                Custom::No,
+            ),
+            (Some(_), [answer, ..]) if answer == "delete" => Outcome::Run(Action::DeleteDen),
+            (Some(_), _) => Outcome::Run(Action::Nothing),
         },
         _ => Outcome::Refuse(format!("{} has no steps.", keys::label(command))),
     }
@@ -1773,6 +1839,28 @@ fn remove_worktree(answers: &[String], world: &World) -> Outcome {
     }
 }
 
+/// Which den: the built-in ones, then the user's, the one in use marked.
+fn choose_den(answers: &[String], world: &World) -> Outcome {
+    match answers {
+        [] => choices(
+            "Den",
+            world
+                .dens
+                .iter()
+                .map(|den| {
+                    Choice::new(den.name.clone(), den.detail.clone(), den.id.clone())
+                        .current(den.id == world.den_id)
+                })
+                .collect(),
+            Custom::No,
+        ),
+        [chosen, ..] => match world.dens.iter().find(|den| den.id == *chosen) {
+            Some(den) => Outcome::Run(Action::SetDen(den.id.clone())),
+            None => Outcome::Refuse(format!("Unknown den {chosen:?}.")),
+        },
+    }
+}
+
 /// Which theme: every theme with its swatches, the one in use marked. The
 /// palette previews the one under the selection.
 fn choose_theme(answers: &[String], world: &World) -> Outcome {
@@ -2176,6 +2264,8 @@ mod tests {
             theme: AppearanceChoice::Dark,
             theme_id: ThemeId::Leon,
             scale: 100,
+            dens: Vec::new(),
+            den_id: String::new(),
             prefs: Prefs::default(),
             repositories: Vec::new(),
             installed: Vec::new(),

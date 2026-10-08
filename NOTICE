@@ -51,6 +51,14 @@ BUNDLED ASSETS (sources and licences: crates/app/assets/ASSETS.md)
   Agent marks:
     Claude and OpenAI marks (Simple Icons): CC0 1.0.
     opencode mark (github.com/sst/opencode): MIT, Copyright (c) 2025 opencode.
+  The Den (crates/leon-den/assets; sources in crates/app/assets/ASSETS.md):
+    Furniture, floor and wall tiles, and the character sheets the lions
+    are made from: pixel-agents
+    (https://github.com/pixel-agents-hq/pixel-agents). MIT License,
+    Copyright (c) 2026 Pablo De Lucca; licence text in
+    crates/leon-den/assets/LICENSE-pixel-agents-MIT. Its characters are
+    based on MetroCity by JIK-A-4 (CC0 according to its page). The lion sheets are modified
+    copies: lion heads, fur and tails drawn by Leon's authors.
   Interface icons:
     Lucide (https://lucide.dev), bundled by gpui-kit's default assets.
     ISC License. Copyright (c) 2022 Lucide Contributors; portions

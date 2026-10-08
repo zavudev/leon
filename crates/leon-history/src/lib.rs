@@ -18,12 +18,16 @@
 //!   unchanged.
 //! * The **[`Importer`]** drives sources into a [`leon_core::Store`],
 //!   skipping whatever has not changed since the previous run.
+//!
+//! Beside the import, [`live`] follows a transcript while its agent writes
+//! it and says what the agent is doing now.
 
 #![warn(missing_docs)]
 
 pub mod claude;
 pub mod codex;
 mod importer;
+pub mod live;
 mod normalize;
 pub mod opencode;
 pub mod opencode_json;

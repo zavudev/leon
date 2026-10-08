@@ -383,6 +383,7 @@ impl Shell {
         });
         self.refresh_activity(cx);
         self.keep_watching(cx);
+        self.den_watch(cx);
         if agent.is_some() {
             // A new session appears in the history within seconds.
             self.request_import(cx);
@@ -1248,7 +1249,7 @@ impl Shell {
 
     /// Shows the stored transcript of a session that another terminal runs,
     /// with who holds it and the ways on.
-    fn show_elsewhere(
+    pub(super) fn show_elsewhere(
         &mut self,
         session: Session,
         found: &crate::elsewhere::Found,

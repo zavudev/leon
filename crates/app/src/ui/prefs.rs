@@ -252,6 +252,8 @@ impl Shell {
         // ones are listed too.
         self.show_inactive = settings::flag(cx, "sidebar_show_inactive");
         self.rebuild_rows();
+        // The Den may have somebody to follow now: sessions elsewhere.
+        self.den_watch(cx);
         cx.notify();
     }
 
