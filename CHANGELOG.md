@@ -1,8 +1,41 @@
 # Changelog
 
-## [Unreleased]
+## [0.7.0] - 2026-10-08
 
 ### Added
+
+* **The Den in 2.5D** (setting `den_3d`, **The Den in 2.5D**, on by default). The
+  Den is drawn as an isometric office in the colours of the theme, light and
+  dark, by a graphics device of its own rendered off screen. The pixel art
+  stays as the fall back: when no adapter is found, when a draw fails, or with
+  the setting off; a fall back is said in the status bar, in the setting and
+  in the log. The default office is larger (20x15 tiles, 12 seats, from 14x11
+  and 6), and the editor and the thumbnails of the dens are isometric. Lions
+  of one agent differ in mane, coat, cut, build and what they wear. It was
+  seen running on Linux only; on macOS and Windows it builds and its tests
+  pass, and nobody has looked at it yet.
+* **What you can do to a lion.** Selecting a lion shows its actions as a strip
+  over the foot of the room, each with its key, and the right button, `M`,
+  `Shift+F10` or the menu key open the same list as a menu: Open, Message…,
+  Queued messages…, Interrupt, Rename…, Pin, Send home, Close. A message is
+  typed into the lion's agent as a prompt, waits in a queue of its session
+  while the agent works, and is never delivered into a permission prompt or a
+  question; when an Enter seems lost the queue holds and says so. **Send
+  home** stops the agent and leaves the session asleep in the sidebar; it
+  always asks first. A lion that runs outside this window can only be opened:
+  the rest is shown dimmed, and a click says why. Typing into a real Claude
+  Code or Codex was tested with a scripted agent only.
+* Keys of the Den: `N` the next lion that needs you, `I` message, `P` message
+  the pride, `Q` queued messages, `X` interrupt (Claude Code and Codex), `R`
+  rename, `H` send home, `W` wake a lion that is at home, `A` hatch a lion
+  (the selected lion's worktree is offered first, and still asked), `/` or `G`
+  go to a lion, `?` every key of the Den. While the Den has the keyboard, `?`
+  and `/` are its own; the sheet of shortcuts and the filter stay in the
+  palette.
+* The card of a lion says what a permission prompt or a question asks, your
+  first and last prompt, the agent's last words, the agent and model, the
+  project and branch, the tools used and the context.
+* `leon --den` opens on the Den.
 
 * **Keep local sessions running** (setting `durable_sessions`, off by default;
   macOS and Linux only). The terminals, and the agents in them, that Leon opens
@@ -345,6 +378,9 @@
 
 ### Fixed
 
+* The Den no longer shows a lion for a terminal without an agent, and its
+  lions no longer all look alike.
+* A click in the Den gives it the keyboard back from the sidebar.
 * `leon host` no longer refuses to start because of the heartbeat a crashed or
   killed host left behind: a heartbeat now counts only while its process still
   exists, so `leon host status` and `leon host pair` do not report a dead host

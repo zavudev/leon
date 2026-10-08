@@ -343,7 +343,7 @@ Folders, logging and starting over.
 | Updates | `updates_mode` | `automatic`, `notify`, `off` | `automatic` | How Leon follows its releases on GitHub: download them and install at the next restart, only tell you and let you decide, or never ask. |
 | Pre-release versions | `updates_prereleases` | on, off | `off` | Also offer pre-releases (release candidates and betas). Off follows the stable releases only. |
 | Check for updates |  | button |  | Ask GitHub now whether a newer version of Leon is out. |
-| About Leon |  | button |  | Version 0.6.0, by Zavu: the About panel. |
+| About Leon |  | button |  | Version 0.7.0, by Zavu: the About panel. |
 | Data folder |  | button |  | Show the folder that holds the database and these settings. |
 | Themes folder |  | button |  | Show the folder of your theme files. |
 | Reset all settings |  | button |  | Put every setting back to its default. Theme files, projects and history are not touched. |
