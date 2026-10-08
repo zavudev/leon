@@ -449,6 +449,8 @@ impl Shell {
         let mut nav = div()
             .debug_selector(|| "sidebar-nav".into())
             .flex_none()
+            // The rows end where the tree's do, before its scrollbar's column.
+            .pr(metrics::SCROLLBAR_GUTTER())
             .border_b_1()
             .border_color(colours.border)
             .flex()

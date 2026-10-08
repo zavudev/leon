@@ -828,7 +828,7 @@ typing selects an item. Every item shows the shortcut it has.
 | Machine | Open project…, New shell, Probe, Why is it offline? and Edit machine… (SSH machines), Rename, Connect a machine…, Remove machine (not for this computer) |
 | Project | New worktree…, New agent session ▸ (Claude Code, Codex, opencode and your own agents; the palette lists the whole catalogue), Open shell here, Copy path, Rename, Move up, Move down, Reveal in file manager (this computer), Refresh icon, Choose icon…, Reset icon, Remove project |
 | Worktree | New agent session ▸, Open shell here, Copy path, Copy branch name, Move up, Move down, Reveal in file manager (this computer), Close (not the main one: removes the worktree, its terminals and the sessions that ran in it) |
-| History session | By state. **Running** (it has a terminal): Focus, Rename, Sleep, Close. **Asleep**: Wake (asks first), Close. **History only**: Resume (asks first), Remove from history. Every state also has Rename. **Running elsewhere** (another terminal or another Leon): Open transcript, Take over…, Resume here anyway…, Reveal the terminal, Remove from history. All of them then: Open transcript, Pin or Unpin, Move up, Move down, Copy session id |
+| History session | By state. **Running** (it has a terminal): Focus, Rename, Sleep, Close. **Asleep**: Wake (asks first), Close. **History only**: Resume (asks first), Remove from history. Every state also has Rename. **Running elsewhere** (another terminal or another Leon): Open transcript, Take over…, Resume here anyway…, Reveal the terminal, Remove from history. All of them then: Open transcript, Pin or Unpin, Move up and Move down (only a pinned session), Copy session id |
 | Live terminal | Focus, Split right, Split down, Rename, Sleep, Close |
 
 A worktree row says two separate things. At its start, what the branch is
@@ -850,7 +850,9 @@ Spanish, German or Italian ones it is Shift+7); `Esc` clears it and a second
 
 A session row tells its state at a glance: **running** has the agent's colour,
 a bold title and a light; **asleep** is dimmed, with a moon and `SLEEP`;
-**history only** is grey, with its age alone.
+**history only** is grey, with its age alone. A pinned session has its pin at
+the left of its row, in the accent colour; the other rows show theirs while
+they are hovered.
 
 **Close** is final: it ends the terminal and takes its row out of the sidebar
 with the history session that belongs to it (the agent's own file stays).
@@ -1537,11 +1539,14 @@ Projects, worktrees and sessions keep the order you give them. Drag one onto
 another of the same list to move it (a line marks before or after), or use
 "Move up" / "Move down" in its context menu; the order is stored, so it
 survives restarts, and new projects and worktrees go last. Sessions sort
-themselves by recency until you move one: a dragged or moved session is
-*pinned* where you put it, on top of its list ("Pin" also does that;
-"Unpin" sends it back to recency). Sessions can only move inside their own
-list; projects inside their machine; worktrees inside their project. `F2` or
-"Rename" renames the project, machine, session or terminal under the cursor.
+themselves by recency until you pin one. A **pinned** session moves to the
+**Pinned** section at the top of its machine, above the projects, and keeps
+the place you give it there: the pin at the left of its row (or "Pin" in its
+menu) puts it on top, "Unpin" sends it back to its worktree or folder by
+recency, dragging a session onto a pinned one places it there, and "Move up" /
+"Move down" reorder the pinned sessions. Projects can only move inside their
+machine; worktrees inside their project. `F2` or "Rename" renames the project,
+machine, session or terminal under the cursor.
 A session is renamed in any state (running, asleep or history only): Leon
 shows old and new names and asks first. The name is Leon's own, kept in its
 store, shown over the agent's title and never lost when the history is

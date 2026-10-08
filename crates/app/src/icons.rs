@@ -38,6 +38,7 @@ icon_assets!(
         Moon,
         PanelLeft,
         PanelLeftClose,
+        Pin,
         PawPrint,
         Plus,
         RefreshCw,
@@ -192,6 +193,7 @@ mod tests {
             IconName::GitMerge,
             IconName::Github,
             IconName::Check,
+            IconName::Pin,
             IconName::House,
             IconName::PawPrint,
         ] {

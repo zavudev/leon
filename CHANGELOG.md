@@ -150,6 +150,14 @@
   guides, syntax highlighting, font size and reopening files at start, applied
   live to the files that are open.
 
+* A **Pinned** section at the top of every machine, above its projects. A
+  pinned session moves there, on top of the section: the pin at the left of its
+  row, "Pin" in its menu, or dropping a session onto a pinned one pins it, and
+  "Unpin" sends it back to its worktree or folder by recency. Dragging a pinned
+  session, or "Move up" / "Move down", reorders the section. Every session row
+  shows its pin: a pinned one always, the others while the row is hovered.
+  Sessions outside every project can be pinned too.
+
 ### Fixed
 
 * Saving over a file that was deleted ("Overwrite" after "changed on disk")
@@ -158,6 +166,12 @@
   monorepo's package) are read relative to that folder, on this computer and
   on other machines; they were taken as relative to the repository's root, so
   none matched.
+
+* Unpinning a session says so in the status line ("Unpinned the session."),
+  where it said "Pinned the session.".
+* The sidebar's scrollbar has a column of its own: it no longer covers the
+  activity lights, the WAITING and FAILED words and the counts at the end of the
+  rows.
 
 ### Changed
 
@@ -170,6 +184,12 @@
 * The release binary carries the grammars of the editor's languages; build
   with `--no-default-features` to leave them out (files then open as plain
   text).
+
+* Pins are one order per machine, not one per worktree or project: a pinned
+  session leaves its worktree or folder for the Pinned section. Pins already set
+  keep their order there. Dropping a session onto one that is not pinned no
+  longer pins it. "Move up" and "Move down" are offered for a pinned session
+  only.
 
 ## [0.5.0] - 2026-10-07
 

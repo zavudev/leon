@@ -429,9 +429,10 @@ impl Store {
         })
     }
 
-    /// Pins `pinned` sessions, in this order, on top of their parent's list;
+    /// Pins `pinned` sessions in this order, as the pinned order of `parent`;
     /// every other session of that parent goes back to automatic (by
-    /// recency). Every pinned session must belong to `parent`.
+    /// recency). Every pinned session must belong to `parent`. The sidebar
+    /// passes the whole pinned order of a machine (`SessionScope::Machine`).
     pub fn pin_sessions(&self, parent: &SessionScope, pinned: &[SessionId]) -> Result<()> {
         self.write(StoreChange::Sessions, |tx| {
             for (position, id) in pinned.iter().enumerate() {
@@ -496,6 +497,7 @@ fn scope_holds(connection: &Connection, parent: &SessionScope, session: &Session
         SessionScope::Folder(machine, cwd) => {
             Ok(session.machine_id == *machine && session.cwd == *cwd)
         }
+        SessionScope::Machine(machine) => Ok(session.machine_id == *machine),
     }
 }
 
@@ -1034,6 +1036,36 @@ mod tests {
         ));
         assert_eq!(store.session(&far).unwrap().sort_order, None);
         let _ = web;
+    }
+
+    #[test]
+    fn the_pins_of_a_machine_are_one_order_across_its_projects() {
+        let store = Store::open_in_memory().unwrap();
+        store.add_project(&local(), "api", "/srv/api").unwrap();
+        store.add_project(&local(), "web", "/srv/web").unwrap();
+        let api = store
+            .upsert_session(&session_at("/srv/api", "api", 100), &[])
+            .unwrap();
+        let web = store
+            .upsert_session(&session_at("/srv/web", "web", 200), &[])
+            .unwrap();
+        let scope = SessionScope::Machine(local());
+
+        store
+            .pin_sessions(&scope, std::slice::from_ref(&api))
+            .unwrap();
+        store
+            .pin_sessions(&scope, &[web.clone(), api.clone()])
+            .unwrap();
+        assert_eq!(store.session(&web).unwrap().sort_order, Some(0));
+        assert_eq!(store.session(&api).unwrap().sort_order, Some(1));
+
+        // Unpinning one keeps the order of the others.
+        store
+            .pin_sessions(&scope, std::slice::from_ref(&api))
+            .unwrap();
+        assert_eq!(store.session(&web).unwrap().sort_order, None);
+        assert_eq!(store.session(&api).unwrap().sort_order, Some(0));
     }
 
     #[test]
