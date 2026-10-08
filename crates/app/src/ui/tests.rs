@@ -1461,6 +1461,34 @@ fn the_pin_of_a_session_row_pins_it_and_pressing_it_again_unpins_it(cx: &mut Tes
 }
 
 #[gpui_kit::test]
+fn the_scrollbar_has_a_column_of_its_own_clear_of_the_marks_at_the_ends_of_the_rows(
+    cx: &mut TestAppContext,
+) {
+    let h = open(cx, ScriptedRunner::new());
+    let column = h
+        .bounds_of("tree-scrollbar".to_owned(), cx)
+        .expect("the scrollbar is drawn in a column of its own");
+    let rows = h.shell(cx, |shell| shell.rows.len());
+    let mut checked = 0;
+    for index in 0..rows {
+        for mark in [
+            format!("tree-row-{index}"),
+            format!("tree-pin-{index}"),
+            format!("tree-activity-{index}"),
+        ] {
+            if let Some(bounds) = h.bounds_of(mark.clone(), cx) {
+                assert!(
+                    bounds.right() <= column.left(),
+                    "{mark} is under the scrollbar"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0, "the rows are drawn");
+}
+
+#[gpui_kit::test]
 fn a_session_outside_every_project_can_be_pinned_too(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
     session_at(

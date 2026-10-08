@@ -158,25 +158,39 @@ impl Shell {
             .child(self.render_filter(colours, cx))
             .child(
                 div()
-                    .relative()
                     .flex_1()
                     .min_h_0()
+                    .flex()
                     .child(
-                        uniform_list(
-                            "tree",
-                            self.rows.len(),
-                            cx.processor(
-                                move |this, range: std::ops::Range<usize>, _window, cx| {
-                                    range
-                                        .filter_map(|index| this.render_row(index, &palette, cx))
-                                        .collect::<Vec<_>>()
-                                },
-                            ),
-                        )
-                        .track_scroll(&self.tree_scroll)
-                        .size_full(),
+                        div().flex_1().min_w_0().h_full().child(
+                            uniform_list(
+                                "tree",
+                                self.rows.len(),
+                                cx.processor(
+                                    move |this, range: std::ops::Range<usize>, _window, cx| {
+                                        range
+                                            .filter_map(|index| {
+                                                this.render_row(index, &palette, cx)
+                                            })
+                                            .collect::<Vec<_>>()
+                                    },
+                                ),
+                            )
+                            .track_scroll(&self.tree_scroll)
+                            .size_full(),
+                        ),
                     )
-                    .child(Scrollbar::vertical(&self.tree_scroll)),
+                    // The scrollbar has a column of its own: laid over the rows
+                    // it would cover the marks at their end.
+                    .child(
+                        div()
+                            .debug_selector(|| "tree-scrollbar".into())
+                            .relative()
+                            .flex_none()
+                            .w(metrics::SCROLLBAR_GUTTER())
+                            .h_full()
+                            .child(Scrollbar::vertical(&self.tree_scroll)),
+                    ),
             )
             .child(self.render_connect_row(colours, cx))
             .child(self.render_share_row(colours, cx))

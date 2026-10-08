@@ -576,6 +576,11 @@ pub mod metrics {
     pub fn ROW_HEIGHT() -> Pixels {
         token(38.0)
     }
+    /// The column at the right of the sidebar tree that its scrollbar has to
+    /// itself, so the rows' marks at their end are never under the thumb.
+    pub fn SCROLLBAR_GUTTER() -> Pixels {
+        token(16.0)
+    }
     /// Height of the status strip under the main pane.
     pub fn STATUS_HEIGHT() -> Pixels {
         token(28.0)

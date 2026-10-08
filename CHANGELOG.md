@@ -24,6 +24,9 @@
 
 * Unpinning a session says so in the status line ("Unpinned the session."),
   where it said "Pinned the session.".
+* The sidebar's scrollbar has a column of its own: it no longer covers the
+  activity lights, the WAITING and FAILED words and the counts at the end of the
+  rows.
 
 ## [0.5.0] - 2026-10-07
 
