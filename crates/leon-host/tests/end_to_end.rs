@@ -44,6 +44,11 @@ fn shell() -> ExecSpec {
         env: vec![
             ("PS1".into(), "LEON> ".into()),
             ("ENV".into(), "/dev/null".into()),
+            // Where `/bin/sh` is a recent bash, readline brackets every
+            // line with the paste-mode sequences unless the terminal is a
+            // dumb one, and they land between a command's echo and its
+            // output.
+            ("TERM".into(), "dumb".into()),
         ],
         cwd: None,
     }
