@@ -80,14 +80,14 @@ impl Shell {
             .position(|row| matches!(row.kind, Kind::Project { .. } | Kind::Worktree { .. }))
     }
 
-    /// Turns "show only the active sessions" on or off: the setting is kept,
+    /// Turns "show inactive sessions" on or off: the setting is kept,
     /// and the tree is read again at once (the settings screen and the file
     /// do the same through the settings' own sync).
-    pub(super) fn toggle_active_only(&mut self, cx: &mut Context<Self>) {
-        let Some(def) = crate::schema::find("sidebar_active_only") else {
+    pub(super) fn toggle_show_inactive(&mut self, cx: &mut Context<Self>) {
+        let Some(def) = crate::schema::find("sidebar_show_inactive") else {
             return;
         };
-        let on = !crate::settings::flag(cx, "sidebar_active_only");
+        let on = !crate::settings::flag(cx, "sidebar_show_inactive");
         crate::settings::set_value(cx, def, crate::schema::Value::Bool(on));
         self.sync_settings(cx);
     }

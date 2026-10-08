@@ -15,7 +15,7 @@ use crate::icons::{agent_icon, icon, IconName};
 use crate::keys::Command;
 use crate::launch::Launch;
 use crate::theme::{metrics, px, Palette};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::InputState;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::*;
 use gpui_kit::{div, AnyElement, Context, Div, Entity, FontWeight, SharedString, Stateful, Window};
@@ -738,7 +738,8 @@ impl Shell {
     }
 
     /// Runs "New worktree" with what the dialog holds: git makes the
-    /// worktree, and an agent asked for starts in it once it appears.
+    /// worktree, and a session starts in it once it appears: the agent asked
+    /// for, else a plain shell. A worktree is never left empty.
     fn submit_new_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ui) = &self.new_worktree_ui else {
             return;
@@ -763,9 +764,8 @@ impl Shell {
             branch: branch.clone(),
             base,
         });
-        if let Some(kind) = agent {
-            self.start_agent_when_worktree_appears(project, machine, branch, kind, window, cx);
-        }
+        let launch = agent.map_or(Launch::Shell, |kind| Launch::Agent { kind, resume: None });
+        self.start_when_worktree_appears(project, machine, branch, launch, window, cx);
         let keep_open = self
             .new_worktree_ui
             .as_ref()
@@ -792,12 +792,12 @@ impl Shell {
 
     /// Waits for the worktree to be synced and starts `agent` in it, in a
     /// new terminal.
-    fn start_agent_when_worktree_appears(
+    pub(super) fn start_when_worktree_appears(
         &mut self,
         project: ProjectId,
         machine: MachineId,
         branch: String,
-        agent: AgentId,
+        launch: Launch,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -819,13 +819,10 @@ impl Shell {
                     Ok(Some(path)) => {
                         this.update_in(cx, |this, window, cx| {
                             this.start_live(
-                                Launch::Agent {
-                                    kind: agent,
-                                    resume: None,
-                                },
+                                launch,
                                 &machine,
                                 &path,
-                                Place::Tab,
+                                Place::Session,
                                 None,
                                 window,
                                 cx,
@@ -839,6 +836,23 @@ impl Shell {
                 }
             }
         }));
+    }
+
+    /// The session a worktree made without a choice starts with: the agent of
+    /// the settings when it is turned on and installed on `machine` (or
+    /// nothing is known of the machine), else a plain shell.
+    pub(super) fn new_worktree_launch(&self, machine: &MachineId, cx: &gpui_kit::App) -> Launch {
+        let prefs = super::shell::Shell::step_prefs(cx);
+        let installed = self
+            .installed_agents()
+            .into_iter()
+            .find(|(id, _)| id == machine)
+            .map(|(_, agents)| agents);
+        prefs
+            .default_agent
+            .filter(|agent| prefs.offered().contains(agent))
+            .filter(|agent| installed.as_ref().is_none_or(|list| list.contains(agent)))
+            .map_or(Launch::Shell, |kind| Launch::Agent { kind, resume: None })
     }
 
     /// Whether the "Create from" list is open (and the row has the
@@ -886,6 +900,8 @@ impl Shell {
         let field = |row: usize, colours: &Palette, content: AnyElement| {
             div()
                 .w_full()
+                .min_w_0()
+                .overflow_hidden()
                 .h(metrics::CONTROL())
                 .px(px(10.))
                 .flex()
@@ -927,14 +943,15 @@ impl Shell {
                 }))
         };
         let agent_name = ui.agent.map_or_else(
-            || "None".to_owned(),
+            || "Shell".to_owned(),
             |agent| format::agent_name(agent).to_owned(),
         );
         let agent_lead: AnyElement = match ui.agent {
             Some(agent) => agent_icon(agent, px(14.), colours).into_any_element(),
             None => div().into_any_element(),
         };
-        let tip: SharedString = "Starts the agent in the new worktree".into();
+        let tip: SharedString =
+            "Starts this session in the new worktree: an agent, or a plain shell".into();
         let mut card = self
             .card("new-worktree", colours)
             .debug_selector(|| "new-worktree".into())
@@ -1006,10 +1023,17 @@ impl Shell {
                                 9,
                                 colours,
                                 div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
                                     .flex()
                                     .items_center()
                                     .gap(px(8.))
-                                    .child(mono(&machine_name).text_color(colours.text_muted))
+                                    .child(
+                                        div().flex_none().max_w(px(120.)).truncate().child(
+                                            mono(&machine_name).text_color(colours.text_muted),
+                                        ),
+                                    )
                                     .child(
                                         div()
                                             .flex_1()
@@ -1017,7 +1041,7 @@ impl Shell {
                                             .truncate()
                                             .text_size(metrics::TEXT_SMALL())
                                             .text_color(colours.text_faint)
-                                            .child(root.clone()),
+                                            .child(shorten_path_start(&root, 40)),
                                     )
                                     .into_any_element(),
                             )),
@@ -1030,7 +1054,7 @@ impl Shell {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(Input::new(&ui.name).appearance(false))
+                        .child(super::widgets::text_input(&ui.name))
                         .into_any_element(),
                 )),
             )
@@ -1047,7 +1071,7 @@ impl Shell {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(Input::new(&ui.base).appearance(false))
+                                    .child(super::widgets::text_input(&ui.base))
                                     .into_any_element(),
                             ))
                             .when(!ui.base_refs.is_empty(), |this| {
@@ -1408,6 +1432,17 @@ impl Shell {
     }
 }
 
+/// `path` kept to its last `max` characters, with an ellipsis at the start: the
+/// end of a path (the project's folder) is what tells it.
+fn shorten_path_start(path: &str, max: usize) -> String {
+    let count = path.chars().count();
+    if count <= max {
+        return path.to_owned();
+    }
+    let tail: String = path.chars().skip(count - (max - 1)).collect();
+    format!("\u{2026}{tail}")
+}
+
 /// What the agent list offers, in order: no agent, then every agent a new
 /// session may start.
 fn agent_choices(cx: &gpui_kit::App) -> Vec<Option<AgentId>> {
@@ -1439,6 +1474,15 @@ fn next_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_path_loses_its_start_and_keeps_its_end() {
+        assert_eq!(shorten_path_start("/srv/api", 40), "/srv/api");
+        let long = "/home/viktorpy/code/nely/monorepo/packages/some/deep/project";
+        let short = shorten_path_start(long, 40);
+        assert_eq!(short.chars().count(), 40);
+        assert!(short.starts_with('\u{2026}') && short.ends_with("deep/project"));
+    }
 
     #[test]
     fn the_agent_cycle_visits_none_and_every_agent() {

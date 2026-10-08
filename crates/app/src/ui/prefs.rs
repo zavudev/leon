@@ -248,9 +248,9 @@ impl Shell {
         for session in self.live.all() {
             apply_terminal_prefs(&session.view, cx);
         }
-        // The length of the lists of sessions, and whether only the active
-        // ones are listed.
-        self.active_only = settings::flag(cx, "sidebar_active_only");
+        // The length of the lists of sessions, and whether the inactive
+        // ones are listed too.
+        self.show_inactive = settings::flag(cx, "sidebar_show_inactive");
         self.rebuild_rows();
         // The Den may have somebody to follow now: sessions elsewhere.
         self.den_watch(cx);

@@ -917,7 +917,7 @@ impl Shell {
             launch,
             &open.machine,
             &open.path,
-            super::terminals::Place::Tab,
+            super::terminals::Place::Session,
             None,
             window,
             cx,

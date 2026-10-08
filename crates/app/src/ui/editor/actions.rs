@@ -115,7 +115,7 @@ impl Shell {
             .find(|id| {
                 self.workspaces
                     .workspace_of(*id)
-                    .is_some_and(|workspace| workspace.key == key)
+                    .is_some_and(|workspace| workspace.in_folder(&key))
             })
     }
 
@@ -167,11 +167,12 @@ impl Shell {
             return;
         }
         let id = self.live.next_id();
-        let key = workspace::key_of(machine.as_str(), &folder);
         let mut doc = EditorDoc::open(machine, path, folder, content, id, window, cx);
         self.restore_draft_of(&mut doc, window, cx);
+        let (machine, folder) = (doc.machine.clone(), doc.folder.clone());
         self.files.insert(id, doc);
-        self.workspaces.add_tab(&key, id);
+        self.workspaces
+            .add_folder_tab(machine.as_str(), &folder, id);
         self.open_live(id, window, cx);
         self.go_to_line(id, line, window, cx);
     }

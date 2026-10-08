@@ -88,9 +88,10 @@ pub enum Command {
     SearchHistory,
     /// Moves the keyboard to the sidebar's project filter.
     FilterProjects,
-    /// Shows only the sessions that are active: a live terminal, or an agent
-    /// running elsewhere. Turns the setting `sidebar_active_only` on or off.
-    ToggleActiveOnly,
+    /// Shows or hides the sessions that are not active (anything but a live
+    /// terminal, or an agent running elsewhere). Turns the setting
+    /// `sidebar_show_inactive` on or off.
+    ToggleInactiveSessions,
     // ----- panes
     /// Jumps to the machine at this place in the sidebar, from 1.
     Machine(u8),
@@ -902,8 +903,8 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
-        C::ToggleActiveOnly,
-        "Show only active sessions",
+        C::ToggleInactiveSessions,
+        "Show inactive sessions",
         S::Search,
         W::Anywhere,
         &[],
@@ -2313,7 +2314,7 @@ mod tests {
             C::Commands,
             C::SearchHistory,
             C::FilterProjects,
-            C::ToggleActiveOnly,
+            C::ToggleInactiveSessions,
             C::RefreshIcon,
             C::ChooseIcon,
             C::ResetIcon,
@@ -2462,7 +2463,7 @@ mod tests {
                 | C::Commands
                 | C::SearchHistory
                 | C::FilterProjects
-                | C::ToggleActiveOnly
+                | C::ToggleInactiveSessions
                 | C::RefreshIcon
                 | C::ChooseIcon
                 | C::ResetIcon

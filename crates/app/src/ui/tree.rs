@@ -111,6 +111,9 @@ pub struct LiveEntry {
     pub agent: Option<AgentId>,
     /// The history session it was started from, when it resumed one.
     pub history: Option<SessionId>,
+    /// For a sleeping session that has no terminal and no history row: what
+    /// its row says (empty when it had no name). `None` for a live one.
+    pub asleep: Option<String>,
 }
 
 /// What a row shows.
@@ -1979,6 +1982,7 @@ mod tests {
             cwd: cwd.to_owned(),
             agent: Some(AgentId::CLAUDE),
             history: None,
+            asleep: None,
         }
     }
 

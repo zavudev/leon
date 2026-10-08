@@ -314,7 +314,7 @@ The sidebar and what quitting asks.
 | Setting | Key | Values | Default | Description |
 | --- | --- | --- | --- | --- |
 | Show the sidebar | `sidebar_visible` | on, off | `on` | The tree of machines, projects, worktrees and sessions. |
-| Show only active sessions | `sidebar_active_only` | on, off | `off` | The sidebar lists only the sessions that are active: a live terminal, or an agent running in another terminal or Leon. Sleeping and history-only sessions, and the projects and worktrees without any active one, are hidden. |
+| Show inactive sessions | `sidebar_show_inactive` | on, off | `off` | The sidebar also lists the sessions that are not active: sleeping ones and the history of past sessions, with the projects and worktrees that have none running. Off (the default), it lists only the active sessions: a live terminal, or an agent running in another terminal or Leon. |
 | Sidebar width | `sidebar_width` | 220 to 560px | `320` | The sidebar's width in pixels at the 100% interface size. |
 | Show the file tree | `files_visible` | on, off | `off` | The files of the project or worktree in view, with the git state of each. Toggled with a chord, the View menu and the palette. |
 | Confirm before quitting | `quit_confirmation` | `running`, `always`, `never` | `running` | Ask before quitting: only while programs run in terminals, always, or never. |

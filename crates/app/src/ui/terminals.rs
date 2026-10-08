@@ -88,8 +88,10 @@ pub const MIN_PANE: MinSize = MinSize {
 /// Where a new terminal goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Place {
-    /// A new tab of the workspace of its folder.
-    Tab,
+    /// A new session: its own workspace, this terminal its first tab.
+    Session,
+    /// A new tab in the session of this terminal, beside its tabs.
+    Tab(LiveId),
     /// A new pane beside or below this terminal's.
     Split(LiveId, Axis),
 }
@@ -181,8 +183,9 @@ impl Shell {
         }
     }
 
-    /// Starts `launch` in `cwd` on `machine`: a base terminal in a tab or a
-    /// pane, with the agent typed into its shell when one is asked for.
+    /// Starts `launch` in `cwd` on `machine`: a base terminal that is a new
+    /// session, a tab of one or a pane, with the agent typed into its shell
+    /// when one is asked for.
     /// `history` is the history session it resumes, when it does.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn start_live(
@@ -207,10 +210,10 @@ impl Shell {
             Place::Split(of, axis) if self.workspaces.locate(of).is_some() => {
                 self.workspaces.split(of, axis, id);
             }
+            Place::Tab(of) if self.workspaces.add_tab(of, id) => {}
             _ => {
                 let root = tree::workspace_root(&self.snapshot, machine, cwd);
-                self.workspaces
-                    .add_tab(&workspace::key_of(machine.as_str(), &root), id);
+                self.workspaces.add_session(machine.as_str(), &root, id);
             }
         }
         self.refresh_live();
@@ -484,7 +487,7 @@ impl Shell {
             launch,
             &intent.machine,
             &intent.cwd,
-            Place::Tab,
+            Place::Session,
             None,
             window,
             cx,
@@ -856,41 +859,169 @@ impl Shell {
         self.resume_tab_of(id, cx);
         self.main = Main::Live(id);
         self.pane = Pane::Main;
-        // A terminal that resumed a history session is that session's row.
+        // The row is the session's: the one of its first terminal, which is
+        // the history session's row when it resumed one.
+        let lead = self.workspaces.lead_of(id).unwrap_or(id);
         let node = match self
             .live
-            .get(id)
+            .get(lead)
             .and_then(|session| session.history.clone())
         {
             Some(history) if self.placement.merged.contains(&history) => NodeId::Session(history),
-            _ => NodeId::Live(id),
+            _ => NodeId::Live(lead),
         };
         self.show(&node);
         self.sync_focus(window, cx);
         cx.notify();
     }
 
-    /// Closes a live session for good: it is ended as [`Self::close_live`]
-    /// does, and the history session that belongs to it leaves the history
-    /// with it, so no dimmed row is left in the sidebar. Putting it to sleep
-    /// is what keeps that row. The agent's own file is not touched.
-    pub(super) fn forget_live(&mut self, id: LiveId, window: &mut Window, cx: &mut Context<Self>) {
-        let belonging = self.history_of_live(id);
-        self.close_live(id, window, cx);
+    /// Shows a session as it was left: the tab on screen, with the pane that
+    /// had the keyboard. `id` is any of its terminals.
+    pub(super) fn show_session(&mut self, id: LiveId, window: &mut Window, cx: &mut Context<Self>) {
+        let front = self.workspaces.front_of(id).unwrap_or(id);
+        self.open_live(front, window, cx);
+    }
+
+    /// Whether a close or a sleep from where the keyboard is ends the whole
+    /// session: it is, from the session's row in the sidebar. From a terminal
+    /// it ends that pane.
+    fn whole_session_here(&self) -> bool {
+        self.pane == Pane::Sidebar && self.session_here().is_some()
+    }
+
+    /// Ends the terminal `id`, or every terminal of its session when `whole`
+    /// is set, as [`Self::close_live`] does. The history session that belongs
+    /// to it stays in the sidebar, marked as asleep, when `keep` is set, and
+    /// leaves the history with it when not.
+    fn end_live(
+        &mut self,
+        id: LiveId,
+        whole: bool,
+        keep: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let lead = self.workspaces.lead_of(id).unwrap_or(id);
+        let ending = if whole {
+            let mut all = self.workspaces.terminals_of(id);
+            if all.is_empty() {
+                all.push(id);
+            }
+            all
+        } else {
+            vec![id]
+        };
+        let belonging = self.history_of_live(if whole { lead } else { id });
+        // A session with no history row to stay in the sidebar as is kept as
+        // a record of its own.
+        let remembered = (whole && keep && belonging.is_none())
+            .then(|| {
+                self.live.get(lead).map(|session| {
+                    (
+                        session.machine.clone(),
+                        session.cwd.clone(),
+                        session.shown_agent(),
+                        session.name.clone().or_else(|| session.title.clone()),
+                    )
+                })
+            })
+            .flatten();
+        for terminal in ending {
+            self.close_live(terminal, window, cx);
+        }
+        if let Some((machine, cwd, agent, label)) = remembered {
+            self.dormant.add(&machine, &cwd, agent, label);
+            self.save_dormant();
+            self.refresh_live();
+        }
         if let Some(history) = belonging {
-            self.slept.remove(&history);
-            self.engine.submit(Op::ForgetSessions(vec![history]));
+            if keep {
+                self.slept.insert(history);
+            } else {
+                self.slept.remove(&history);
+                self.engine.submit(Op::ForgetSessions(vec![history]));
+            }
         }
     }
 
-    /// Puts a live session to sleep: it is ended as [`Self::close_live`]
-    /// does, and the history session that belongs to it stays in the sidebar,
-    /// marked as asleep, to be resumed.
+    /// The sleeping session whose row the keyboard is on.
+    pub(super) fn dormant_here(&self) -> Option<LiveId> {
+        match &self.rows.get(self.cursor?)?.kind {
+            tree::Kind::Live(entry) if entry.asleep.is_some() => Some(entry.id),
+            _ => None,
+        }
+    }
+
+    /// Takes a sleeping session out of the sidebar for good.
+    pub(super) fn close_dormant(&mut self, id: LiveId) {
+        if self.dormant.remove(id).is_some() {
+            self.save_dormant();
+            self.refresh_live();
+        }
+    }
+
+    /// Wakes a sleeping session: a new session starts where it ran, with its
+    /// agent when it had one, and its row is the new session's.
+    pub(super) fn wake_dormant(&mut self, id: LiveId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sleeping) = self.dormant.get(id).cloned() else {
+            return;
+        };
+        self.close_dormant(id);
+        let launch = match sleeping.agent() {
+            Some(kind) => Launch::Agent { kind, resume: None },
+            None => Launch::Shell,
+        };
+        let machine = sleeping.machine();
+        self.start_live(
+            launch,
+            &machine,
+            &sleeping.cwd,
+            Place::Session,
+            None,
+            window,
+            cx,
+        );
+        if let (Some(label), Some(new)) = (sleeping.label, self.live.ids().last().copied()) {
+            if let Some(session) = self.live.get_mut(new) {
+                session.name = Some(label);
+            }
+        }
+    }
+
+    /// Closes a terminal for good (the whole session from its row): it is
+    /// ended as [`Self::close_live`] does, and the history session that
+    /// belongs to it leaves the history with it, so no dimmed row is left in
+    /// the sidebar. Putting it to sleep is what keeps that row. The agent's
+    /// own file is not touched.
+    pub(super) fn forget_live(&mut self, id: LiveId, window: &mut Window, cx: &mut Context<Self>) {
+        let whole = self.whole_session_here();
+        self.end_live(id, whole, false, window, cx);
+    }
+
+    /// Puts a terminal to sleep (the whole session from its row): it is ended
+    /// as [`Self::close_live`] does, and the history session that belongs to
+    /// it stays in the sidebar, marked as asleep, to be resumed.
     pub(super) fn sleep_live(&mut self, id: LiveId, window: &mut Window, cx: &mut Context<Self>) {
-        let belonging = self.history_of_live(id);
-        self.close_live(id, window, cx);
-        if let Some(history) = belonging {
-            self.slept.insert(history);
+        let whole = self.whole_session_here();
+        self.end_live(id, whole, true, window, cx);
+    }
+
+    /// Closes the tab holding `id`, its panes with it. Closing the last tab of
+    /// a session puts the session to sleep instead of dropping it: its row
+    /// stays in the sidebar to be resumed (a plain shell has nothing to
+    /// resume, so its row goes).
+    pub(super) fn close_tab(&mut self, id: LiveId, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(workspace), Some(tab)) =
+            (self.workspaces.workspace_of(id), self.workspaces.tab_of(id))
+        else {
+            return;
+        };
+        if workspace.tabs.len() <= 1 {
+            self.end_live(id, true, true, window, cx);
+            return;
+        }
+        for pane in tab.layout.leaves() {
+            self.close_live(pane, window, cx);
         }
     }
 
@@ -991,6 +1122,10 @@ impl Shell {
         for id in inside {
             self.close_live(id, window, cx);
         }
+        if self.dormant.remove_within(machine, root) {
+            self.save_dormant();
+            self.refresh_live();
+        }
     }
 
     /// Moves the keyboard into the terminal on screen, or to the most recent
@@ -1001,7 +1136,7 @@ impl Shell {
             _ => self.live.ids().last().copied(),
         };
         match target {
-            Some(id) => self.open_live(id, window, cx),
+            Some(id) => self.show_session(id, window, cx),
             None => self
                 .engine
                 .report(StatusKind::Info, "There are no live sessions."),
@@ -1034,7 +1169,7 @@ impl Shell {
         self.slept.remove(&session.id);
         // One terminal per history session: look at the one that has it.
         if let Some(running) = self.live.of_history(&session.id).map(|live| live.id) {
-            self.open_live(running, window, cx);
+            self.show_session(running, window, cx);
             return;
         }
         // The learned link can lag the program by a moment (the history has
@@ -1042,7 +1177,7 @@ impl Shell {
         // names this session is already showing it, so land there rather
         // than start a second agent on the same session.
         if let Some(running) = self.showing(&session) {
-            self.open_live(running, window, cx);
+            self.show_session(running, window, cx);
             return;
         }
         // Another terminal may hold the session: look at the processes now,
@@ -1091,7 +1226,7 @@ impl Shell {
     ) {
         // Asked twice while it was being checked: it is running here now.
         if let Some(running) = self.live.of_history(&session.id).map(|live| live.id) {
-            self.open_live(running, window, cx);
+            self.show_session(running, window, cx);
             return;
         }
         match self.elsewhere_of(&session) {
@@ -1169,7 +1304,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if let Some(running) = self.live.of_history(&session.id).map(|live| live.id) {
-            self.open_live(running, window, cx);
+            self.show_session(running, window, cx);
             return;
         }
         if let Some(found) = self.elsewhere_of(&session) {
@@ -1210,7 +1345,7 @@ impl Shell {
             return;
         }
         if let Some(running) = self.live.of_history(&session.id).map(|live| live.id) {
-            self.open_live(running, window, cx);
+            self.show_session(running, window, cx);
             return;
         }
         let title = session.title.clone();
@@ -1406,7 +1541,7 @@ impl Shell {
             Target::Ready => {
                 // Asked twice while it was being checked: it is running now.
                 if let Some(running) = self.live.of_history(&session.id).map(|live| live.id) {
-                    self.open_live(running, window, cx);
+                    self.show_session(running, window, cx);
                     return;
                 }
                 self.engine.report(
@@ -1448,7 +1583,7 @@ impl Shell {
             launch,
             &session.machine_id,
             cwd,
-            Place::Tab,
+            Place::Session,
             Some(session.id.clone()),
             window,
             cx,
@@ -1471,12 +1606,63 @@ impl Shell {
         self.open_transcript(session, None, Some(Notice::plain(why, other_folder)), cx);
     }
 
-    /// Opens a base terminal in a new tab, in the folder the keyboard is on.
+    /// The session the keyboard is in: the one on screen while the main pane
+    /// has it, the one of the row under the cursor while the sidebar does.
+    fn session_here(&self) -> Option<LiveId> {
+        match self.pane {
+            Pane::Main => match self.main {
+                Main::Live(id) if self.live.get(id).is_some() => Some(id),
+                _ => None,
+            },
+            Pane::Sidebar => match &self.rows.get(self.cursor?)?.kind {
+                tree::Kind::Live(entry) => Some(entry.id),
+                tree::Kind::Session(session) => {
+                    self.live.of_history(&session.id).map(|live| live.id)
+                }
+                _ => None,
+            },
+            Pane::Files => None,
+        }
+    }
+
+    /// Opens a shell as a new tab of the session holding `of`, in its folder.
+    fn open_shell_in(&mut self, of: LiveId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((machine, cwd)) = self
+            .live
+            .get(of)
+            .map(|session| (session.machine.clone(), session.cwd.clone()))
+        else {
+            return;
+        };
+        self.start_live(
+            Launch::Shell,
+            &machine,
+            &cwd,
+            Place::Tab(of),
+            None,
+            window,
+            cx,
+        );
+    }
+
+    /// Opens a base terminal: a new tab in the session the keyboard is in
+    /// (which gets no row of its own), else a new shell session in the folder
+    /// the keyboard is on.
     pub(super) fn open_shell_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(of) = self.session_here() {
+            self.open_shell_in(of, window, cx);
+            return;
+        }
         match self.here().map(|place| (place.machine, place.cwd)) {
-            Some((machine, cwd)) => {
-                self.start_live(Launch::Shell, &machine, &cwd, Place::Tab, None, window, cx)
-            }
+            Some((machine, cwd)) => self.start_live(
+                Launch::Shell,
+                &machine,
+                &cwd,
+                Place::Session,
+                None,
+                window,
+                cx,
+            ),
             None => self
                 .engine
                 .report(StatusKind::Info, "Select a project or a worktree first."),
@@ -1722,8 +1908,7 @@ impl Shell {
 
     // ----- drawing -------------------------------------------------------------------------
 
-    /// The workspace of a live session: its tab bar when it has several tabs,
-    /// and its active tab's panes.
+    /// The workspace of a live session: its tab bar and its active tab's panes.
     pub(super) fn render_live(
         &self,
         id: LiveId,
@@ -1754,7 +1939,6 @@ impl Shell {
         let Some(tab) = workspace.tabs.get(workspace.active) else {
             return nothing();
         };
-        let many_tabs = workspace.tabs.len() > 1;
         let panes = tab.layout.leaves().len();
         let body = if tab.zoomed {
             self.render_pane(tab.focus, false, colours, cx)
@@ -1775,9 +1959,7 @@ impl Shell {
             .flex()
             .flex_col()
             .bg(colours.background)
-            .when(many_tabs, |this| {
-                this.child(self.render_tab_bar(workspace, colours, cx))
-            })
+            .child(self.render_tab_bar(workspace, colours, cx))
             .child(div().flex_1().min_h_0().min_w_0().child(body))
             .into_any_element()
     }
@@ -1853,10 +2035,44 @@ impl Shell {
                         this.child(
                             super::widgets::mono(format!("{panes}")).text_color(colours.text_faint),
                         )
-                    }),
+                    })
+                    .child(
+                        div()
+                            .id(("tab-close", index))
+                            .debug_selector(move || format!("terminal-tab-close-{index}"))
+                            .flex_none()
+                            .px_1()
+                            .cursor_pointer()
+                            .text_color(colours.text_faint)
+                            .hover(|this| this.text_color(colours.text))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(focus, window, cx);
+                            }))
+                            .child(super::widgets::mono("×")),
+                    ),
             );
         }
-        bar
+        // A new tab is a shell in this session; it has no row in the sidebar.
+        let lead = workspace.lead();
+        bar.child(
+            div()
+                .id("tab-new")
+                .debug_selector(|| "terminal-tab-new".into())
+                .flex_none()
+                .px_3()
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .text_color(colours.text_muted)
+                .hover(|this| this.text_color(colours.text))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if let Some(of) = lead {
+                        this.open_shell_in(of, window, cx);
+                    }
+                }))
+                .child(super::widgets::mono("+")),
+        )
     }
 
     /// One pane: the terminal, marked with the accent when it is the focused

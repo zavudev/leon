@@ -29,7 +29,7 @@ use crate::icons::{icon, IconName};
 use crate::schema::{self, Def, Kind, Section, Value};
 use crate::settings;
 use crate::theme::{metrics, px, Palette};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::InputState;
 use gpui_kit::prelude::*;
 use gpui_kit::{div, Context, Div, Entity, Keystroke, ScrollHandle, Stateful, Window};
 use leon_core::{Machine, MachineId, MachineKind};
@@ -77,6 +77,9 @@ pub struct SettingsUi {
     /// Whether the screen is to be shown again when the palette's question
     /// about an option ends.
     pub return_from_palette: bool,
+    /// The machine the palette is asked about from this screen (to remove
+    /// it): its row may not be in the sidebar, which hides what is inactive.
+    pub machine: Option<MachineId>,
     /// Whether the sidebar's filter had the keyboard when the screen opened.
     pub restore_filter: bool,
     /// The project roots that were removed, read from the store when the
@@ -99,6 +102,7 @@ impl SettingsUi {
             confirm_reset: false,
             scroll: ScrollHandle::new(),
             return_from_palette: false,
+            machine: None,
             restore_filter: false,
             dismissed: Vec::new(),
             agents_expanded: false,
@@ -630,7 +634,8 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.show(&super::tree::NodeId::Machine(machine));
+        self.show(&super::tree::NodeId::Machine(machine.clone()));
+        self.settings_ui.machine = Some(machine);
         self.settings_ui.return_from_palette = true;
         self.begin_flow(crate::keys::Command::RemoveMachine, window, cx);
     }
@@ -925,11 +930,7 @@ impl Shell {
                                 cx.notify();
                             }))
                             .child(icon(IconName::Search, px(16.), colours.text_muted))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .child(Input::new(&ui.search).appearance(false)),
-                            ),
+                            .child(div().flex_1().child(super::widgets::text_input(&ui.search))),
                     )
                     .child(key_cap(crate::keys::key_label("escape"), colours)),
             )
@@ -1364,7 +1365,7 @@ impl Shell {
                         .border_1()
                         .border_color(colours.signal)
                         .rounded(metrics::RADIUS())
-                        .child(Input::new(&self.settings_ui.input).appearance(false)),
+                        .child(super::widgets::text_input(&self.settings_ui.input)),
                 )
                 .children(edit.error.clone().map(|why| {
                     div()
@@ -1547,7 +1548,7 @@ mod tests {
             keys,
             [
                 "sidebar_visible",
-                "sidebar_active_only",
+                "sidebar_show_inactive",
                 "sidebar_width",
                 "files_visible",
                 "quit_confirmation"

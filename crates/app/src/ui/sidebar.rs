@@ -22,7 +22,6 @@ use crate::icons::{agent_icon, agent_icon_in, icon, IconName, Tone};
 use crate::keys::{self, Command};
 use crate::product;
 use crate::theme::{fonts, metrics, px, Appearance, Palette};
-use gpui_kit::component::input::Input;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::*;
@@ -317,7 +316,7 @@ impl Shell {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(Input::new(&self.filter_input).appearance(false)),
+                    .child(super::widgets::text_input(&self.filter_input)),
             )
             .when(empty, |this| {
                 this.children(
@@ -356,23 +355,24 @@ impl Shell {
             )
     }
 
-    /// The toggle beside the filter: only the active sessions (live terminals
-    /// and agents running elsewhere) are listed while it is on.
+    /// The toggle beside the filter: the sessions that are not active (asleep,
+    /// or only history) are listed while it is on; off, only the active ones
+    /// (live terminals and agents running elsewhere) are.
     fn render_active_toggle(&self, colours: &Palette, cx: &mut Context<Self>) -> Stateful<Div> {
-        let on = self.active_only;
+        let on = self.show_inactive;
         let hover = colours.surface;
         let tip: SharedString = if on {
-            "Showing only active sessions \u{b7} click to show all".into()
+            "Showing inactive sessions \u{b7} click to hide them".into()
         } else {
-            "Show only active sessions".into()
+            "Show inactive sessions".into()
         };
         div()
-            .id("filter-active-only")
+            .id("filter-show-inactive")
             .debug_selector(move || {
                 if on {
-                    "filter-active-only-on".to_owned()
+                    "filter-show-inactive-on".to_owned()
                 } else {
-                    "filter-active-only".to_owned()
+                    "filter-show-inactive".to_owned()
                 }
             })
             .flex_none()
@@ -386,7 +386,7 @@ impl Shell {
             .when(!on, |this| this.hover(move |style| style.bg(hover)))
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             .on_click(cx.listener(|this, _, window, cx| {
-                this.run_command(Command::ToggleActiveOnly, window, cx);
+                this.run_command(Command::ToggleInactiveSessions, window, cx);
             }))
             .child(icon(
                 IconName::CircleDot,
@@ -848,7 +848,12 @@ impl Shell {
             Kind::Live(entry) => {
                 let session = self.live.get(entry.id);
                 let state = session.map_or(LiveState::Starting, |session| session.state(cx));
-                let text = session.map_or_else(String::new, |session| session.label());
+                let asleep = entry.asleep.is_some();
+                let text = match &entry.asleep {
+                    Some(label) if !label.is_empty() => label.clone(),
+                    Some(_) => entry.agent.map_or("Shell", format::agent_name).to_owned(),
+                    None => session.map_or_else(String::new, |session| session.label()),
+                };
                 let name: SharedString = entry.agent.map_or("Shell", format::agent_name).into();
                 let lead = match entry.agent {
                     Some(agent) => agent_icon(agent, px(14.), colours).into_any_element(),
@@ -871,19 +876,37 @@ impl Shell {
                             .justify_center()
                             .child(lead),
                     )
-                    .child(label().font_weight(FontWeight::MEDIUM).child(text))
-                    .when(!matches!(state, LiveState::Running), |this| {
+                    .child(if asleep {
+                        label().text_color(colours.text_muted).child(text)
+                    } else {
+                        label().font_weight(FontWeight::MEDIUM).child(text)
+                    })
+                    .when(asleep, |this| {
+                        this.child(
+                            div()
+                                .debug_selector(move || format!("tree-asleep-{index}"))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .child(icon(IconName::Moon, px(11.), colours.text_faint))
+                                .child(mono("SLEEP").text_color(colours.text_faint)),
+                        )
+                    })
+                    .when(!asleep && !matches!(state, LiveState::Running), |this| {
                         this.child(
                             mono(state.label())
                                 .debug_selector(move || format!("tree-live-state-{id}"))
                                 .text_color(colours.text_faint),
                         )
                     })
-                    .child(
-                        div()
-                            .debug_selector(move || format!("tree-live-led-{id}"))
-                            .child(led(light)),
-                    )
+                    .when(!asleep, |this| {
+                        this.child(
+                            div()
+                                .debug_selector(move || format!("tree-live-led-{id}"))
+                                .child(led(light)),
+                        )
+                    })
                     .into_any_element()
             }
             Kind::More { hidden } => base
@@ -1043,7 +1066,20 @@ impl Shell {
         self.placement
             .live_of_worktree(worktree)
             .iter()
-            .filter_map(|place| self.live.get(self.placement.live[*place].id))
+            .map(|place| self.session_activity(self.placement.live[*place].id))
+            .fold(Activity::Off, Activity::most_urgent)
+    }
+
+    /// How a session is doing: the most urgent state of its terminals, its
+    /// tabs' shells included.
+    fn session_activity(&self, id: super::live::LiveId) -> Activity {
+        let mut terminals = self.workspaces.terminals_of(id);
+        if terminals.is_empty() {
+            terminals.push(id);
+        }
+        terminals
+            .into_iter()
+            .filter_map(|terminal| self.live.get(terminal))
             .fold(Activity::Off, |all, session| {
                 all.most_urgent(session.activity)
             })
@@ -1061,10 +1097,8 @@ impl Shell {
             .get(project)
             .into_iter()
             .flatten()
-            .filter_map(|place| self.live.get(self.placement.live[*place].id))
-            .fold(Activity::Off, |all, session| {
-                all.most_urgent(session.activity)
-            });
+            .map(|place| self.session_activity(self.placement.live[*place].id))
+            .fold(Activity::Off, Activity::most_urgent);
         entry
             .worktrees
             .iter()

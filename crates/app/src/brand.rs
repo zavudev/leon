@@ -18,48 +18,45 @@ pub fn agent_mark(agent: leon_core::AgentId) -> Option<String> {
     Some(format!("agents/{mark}.svg"))
 }
 
-const FILES: [(&str, &[u8]); 10] = [
-    (
-        "agents/claude.svg",
-        include_bytes!("../assets/agents/claude.svg"),
-    ),
-    (
-        "agents/codex.svg",
-        include_bytes!("../assets/agents/codex.svg"),
-    ),
-    (
-        "agents/opencode.svg",
-        include_bytes!("../assets/agents/opencode.svg"),
-    ),
-    (
-        "agents/cursor.svg",
-        include_bytes!("../assets/agents/cursor.svg"),
-    ),
-    (
-        "agents/copilot.svg",
-        include_bytes!("../assets/agents/copilot.svg"),
-    ),
-    (
-        "agents/gemini.svg",
-        include_bytes!("../assets/agents/gemini.svg"),
-    ),
-    (
-        "agents/mistral-vibe.svg",
-        include_bytes!("../assets/agents/mistral-vibe.svg"),
-    ),
-    (
-        "agents/cline.svg",
-        include_bytes!("../assets/agents/cline.svg"),
-    ),
-    (
-        "agents/kimi.svg",
-        include_bytes!("../assets/agents/kimi.svg"),
-    ),
-    (
-        "agents/qwen-code.svg",
-        include_bytes!("../assets/agents/qwen-code.svg"),
-    ),
-];
+/// Declares the bundled agent marks from their file stems: one stem here, one
+/// `assets/agents/<stem>.svg` file, and `.mark("<stem>")` on the agent's row in
+/// `leon-core`'s catalogue.
+macro_rules! agent_marks {
+    ($($stem:literal),* $(,)?) => {
+        const FILES: &[(&str, &[u8])] = &[
+            $((
+                concat!("agents/", $stem, ".svg"),
+                include_bytes!(concat!("../assets/agents/", $stem, ".svg")),
+            )),*
+        ];
+    };
+}
+
+agent_marks!(
+    "claude",
+    "codex",
+    "opencode",
+    "cursor",
+    "copilot",
+    "gemini",
+    "mistral-vibe",
+    "cline",
+    "kimi",
+    "qwen-code",
+    "grok",
+    "muse",
+    "mimo-code",
+    "antigravity",
+    "pi",
+    "hermes-agent",
+    "devin",
+    "auggie",
+    "codebuddy",
+    "kilocode",
+    "kiro",
+    "trae",
+    "qoder",
+);
 
 /// The bytes of a bundled brand asset.
 pub fn load(path: &str) -> Option<&'static [u8]> {
@@ -297,10 +294,19 @@ mod tests {
             let svg = std::str::from_utf8(bytes).unwrap();
             assert!(svg.contains("fill=\"currentColor\""), "{path}");
             assert!(!svg.contains('#'), "{path} carries a colour of its own");
-            assert_eq!(svg.matches("<path").count(), 1, "{path} is one path");
+            assert!(svg.contains("<path"), "{path} draws no path");
+            assert!(!svg.contains("<image"), "{path} embeds a picture");
             assert!(paths().any(|name| name == path));
         }
-        assert_eq!(marked, FILES.len(), "a bundled file no agent uses");
+        assert!(marked >= FILES.len(), "a bundled file no agent uses");
+        for (name, _) in FILES {
+            assert!(
+                leon_core::agent::builtin()
+                    .iter()
+                    .any(|spec| agent_mark(spec.id).as_deref() == Some(name)),
+                "{name} is used by no agent"
+            );
+        }
     }
 
     #[test]
@@ -308,7 +314,8 @@ mod tests {
         let assets = include_str!("../assets/ASSETS.md");
         for (name, _) in FILES {
             assert!(
-                assets.contains(&format!("`{name}`")),
+                assets.contains(&format!("`{name}`"))
+                    || assets.contains(&format!("`{}`", name.trim_start_matches("agents/"))),
                 "{name} is not in ASSETS.md"
             );
         }

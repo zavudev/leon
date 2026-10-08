@@ -156,7 +156,6 @@
   "Unpin" sends it back to its worktree or folder by recency. Dragging a pinned
   session, or "Move up" / "Move down", reorders the section. Every session row
   shows its pin: a pinned one always, the others while the row is hovered.
-  Sessions outside every project can be pinned too.
 
 ### Fixed
 
@@ -174,6 +173,17 @@
   rows.
 
 ### Changed
+
+* The sidebar lists only the active sessions by default. The toggle beside the
+  filter is now **Show inactive sessions** (off by default; setting
+  `sidebar_show_inactive`, replacing `sidebar_active_only`, which is ignored:
+  everyone starts from the new default).
+* A new worktree always starts a session at once (the default agent, else a
+  shell), so it is never empty and never hidden as inactive.
+* The "New agent session" menu offers every agent installed on the machine,
+  Grok included, and more agents have their logo (Grok, Muse, MiMo Code,
+  Antigravity, Pi, Hermes Agent, Devin, Auggie, CodeBuddy, Kilocode, Kiro,
+  Trae, Qoder).
 
 * Protocol 2: a command sent to another computer (`Exec`) can carry standard
   input, up to 4 MiB, which the host writes while it reads the output and

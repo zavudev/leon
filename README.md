@@ -390,7 +390,7 @@ platform (see below).
 | Focus the sidebar | `⌘L` `⇧⌘B` | `Ctrl+L` `Ctrl+Shift+S` |
 | Show or hide the sidebar | `⌘B` | `Ctrl+Shift+B` |
 | Show or hide the file tree | `⇧⌘E` | `Ctrl+Shift+Alt+E` |
-| Show only active sessions | palette only | palette only |
+| Show inactive sessions | palette only | palette only |
 | Make the sidebar wider | palette only | palette only |
 | Make the sidebar narrower | palette only | palette only |
 | Reset the sidebar's width | palette only | palette only |
@@ -840,10 +840,11 @@ live, green when idle, a ring when working, and `WAITING` or `FAILED` in a
 word when they need you. Leon does not read commits ahead or behind,
 uncommitted files or open pull requests, so none of those is drawn.
 
-The toggle beside the filter (also `Show only active sessions` in the palette
-and in the settings) lists only the active sessions: live terminals and
-agents running elsewhere. Sleeping and history-only sessions, and the projects
-and worktrees left without any, are hidden, and the tree says `No active
+The sidebar lists only the active sessions by default: live terminals and
+agents running elsewhere. The toggle beside the filter (also `Show inactive
+sessions` in the palette and in the settings, `sidebar_show_inactive`, off by
+default) adds the sleeping and history-only sessions and the projects and
+worktrees that have none running; with it off the tree says `No active
 sessions` when none is. `/` focuses the filter on every keyboard layout (on
 Spanish, German or Italian ones it is Shift+7); `Esc` clears it and a second
 `Esc` leaves it.

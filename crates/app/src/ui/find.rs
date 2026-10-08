@@ -27,7 +27,7 @@ use super::live::LiveId;
 use super::shell::{Main, Overlay, Pane, Shell};
 use super::widgets::mono;
 use crate::theme::{metrics, px, Palette};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::InputState;
 use gpui_kit::prelude::*;
 use gpui_kit::{div, Context, Div, Entity, Focusable as _, Keystroke, Window};
 use leon_term::FindState;
@@ -330,7 +330,7 @@ impl Shell {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(Input::new(&self.find_input).appearance(false)),
+                        .child(super::widgets::text_input(&self.find_input)),
                 )
                 .child(
                     div()

@@ -67,12 +67,23 @@ ink read from `brand/logo/final/app-icon.svg`: never edited by hand, and a test 
 `prefers-reduced-motion` media query that swaps the animated path for a still one.
 Their first frame, last frame and still path are the owner's path to the byte.
 
+## More agent marks
+
+`agents/grok.svg`, `muse.svg` (Meta AI mark), `mimo-code.svg`, `antigravity.svg`,
+`pi.svg`, `hermes-agent.svg`, `devin.svg`, `codebuddy.svg`, `kiro.svg`,
+`kilocode.svg`, `trae.svg`, `qoder.svg` (also Qoder CLI China) come from
+`@lobehub/icons-static-svg` 1.95.1 (<https://github.com/lobehub/lobe-icons>,
+MIT), through the Leon website's `public/brand/agents/`; `auggie.svg` is the
+Augment logo from the same folder. All draw with `currentColor`. They are
+registered by one stem in `brand::agent_marks!` and one `.mark("stem")` on the
+agent's row in `leon-core`.
+
 ## Agents without a mark
 
-Every other agent of the catalogue (Grok, Muse, DeepSeek Harness, ZCode and the
-rest) has **no bundled logo**: no mark of it was found whose licence clearly
-allows redistribution (Simple Icons, CC0, has none of them, or has a different
-product's mark: its `amp` is the AMP web project, not Sourcegraph's Amp). Those
+Every other agent of the catalogue (Amp, DeepSeek Harness, ZCode and the
+rest) has **no bundled logo**: its mark is multicolour or carries its own
+background, which a single-colour tint would turn into a blob, or no licence that
+clearly allows redistribution was found. Those
 agents get a letter-mark tile, drawn by the application from the theme's tokens
 and the initials of the agent's name (`icons::agent_icon`): nothing is bundled
 and nothing is fetched at run time. Leon never loads an icon from the network.

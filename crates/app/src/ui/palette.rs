@@ -1122,6 +1122,27 @@ impl Shell {
         match action {
             Action::PickCloneParent { url, name } => self.pick_clone_parent(url, name, window, cx),
             Action::PickProjectParent { name } => self.pick_project_parent(name, window, cx),
+            Action::Engine(crate::engine::Op::AddWorktree {
+                project,
+                branch,
+                base,
+            }) => {
+                // A new worktree always gets a session: the default agent
+                // when the settings name one that is installed there, else
+                // a shell.
+                let machine = self
+                    .snapshot
+                    .project(&project)
+                    .map(|entry| entry.project.machine_id.clone())
+                    .unwrap_or_else(leon_core::MachineId::local);
+                let launch = self.new_worktree_launch(&machine, cx);
+                self.engine.submit(crate::engine::Op::AddWorktree {
+                    project: project.clone(),
+                    branch: branch.clone(),
+                    base,
+                });
+                self.start_when_worktree_appears(project, machine, branch, launch, window, cx);
+            }
             Action::Engine(op) => self.engine.submit(op),
             Action::StartSession(intent) => self.start_intent(intent, window, cx),
             Action::CloseLive(id) => self.forget_live(id, window, cx),

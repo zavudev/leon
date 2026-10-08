@@ -342,7 +342,10 @@ pub const NOT_IN_MENUS: &[(Command, &str)] = &[
     ),
     (C::SetAppearance, "palette: a question"),
     (C::SetInterfaceSize, "palette: a question"),
-    (C::ToggleActiveOnly, "palette and the sidebar's toggle"),
+    (
+        C::ToggleInactiveSessions,
+        "palette and the sidebar's toggle",
+    ),
     (C::WidenSidebar, "palette: a step of a drag"),
     (C::NarrowSidebar, "palette: a step of a drag"),
     (C::ResetSidebarWidth, "palette: a step of a drag"),
