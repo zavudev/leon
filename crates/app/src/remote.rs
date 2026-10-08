@@ -48,6 +48,9 @@ pub(crate) enum Op {
     Resize(GridSize),
     Close,
     Detach,
+    // Only a terminal the keeper holds is terminated, and there is no keeper
+    // on Windows.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Terminate,
 }
 
@@ -57,6 +60,7 @@ pub(crate) enum Pump {
     /// On another computer, reached through a relay.
     Relay,
     /// By the keeper on this computer.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Keeper(KeeperPump),
 }
 
@@ -92,6 +96,7 @@ impl RemoteLink for Link {
 
 /// The link of a terminal the keeper holds: the same ops, and the answers
 /// the keeper gave about the foreground.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct HeldLink {
     pub(crate) ops: mpsc::UnboundedSender<Op>,
     pub(crate) front: Arc<Mutex<Option<HeldForeground>>>,

@@ -774,8 +774,10 @@ mod tests {
         }
     }
 
+    #[cfg(leon_posix_tests)]
     /// What `systemctl show` prints for a unit that is up.
     const UP: &str = "LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nMainPID=99\n";
+    #[cfg(leon_posix_tests)]
     /// And for one that started, ended and waits to be restarted.
     const RESTARTING: &str = "LoadState=loaded\nActiveState=activating\nSubState=auto-restart\nUnitFileState=enabled\nMainPID=0\n";
     /// And for one the manager has never heard of.
@@ -789,6 +791,8 @@ mod tests {
         runner.calls().iter().map(command_text).collect()
     }
 
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(leon_posix_tests)]
     #[tokio::test]
     async fn install_writes_the_unit_runs_the_commands_and_explains_lingering() {
         let root = tempfile::tempdir().unwrap();
@@ -820,6 +824,8 @@ mod tests {
         assert!(outcome.out.contains("full terminal"));
     }
 
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(leon_posix_tests)]
     #[tokio::test]
     async fn install_with_linger_enables_it_and_a_refusal_is_a_note_not_a_failure() {
         let root = tempfile::tempdir().unwrap();
@@ -845,6 +851,8 @@ mod tests {
         assert!(outcome.err.contains("Interactive authentication required."));
     }
 
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(leon_posix_tests)]
     #[tokio::test]
     async fn install_bakes_in_the_relay_of_the_session_unless_one_is_given() {
         let root = tempfile::tempdir().unwrap();
@@ -872,6 +880,8 @@ mod tests {
         assert!(!unit.contains("from-env"));
     }
 
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(leon_posix_tests)]
     #[tokio::test]
     async fn a_required_command_that_fails_stops_the_install_and_says_why() {
         let root = tempfile::tempdir().unwrap();
@@ -889,6 +899,8 @@ mod tests {
         assert!(outcome.out.is_empty());
     }
 
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(leon_posix_tests)]
     #[tokio::test]
     async fn a_missing_systemctl_is_reported_as_such() {
         let root = tempfile::tempdir().unwrap();
@@ -915,6 +927,8 @@ mod tests {
         assert!(!env.layout.definition.exists());
     }
 
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(leon_posix_tests)]
     #[tokio::test]
     async fn the_unit_points_at_the_file_an_update_leaves_in_place() {
         let root = tempfile::tempdir().unwrap();
@@ -946,6 +960,8 @@ mod tests {
         assert!(runner.calls().is_empty());
     }
 
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(leon_posix_tests)]
     #[tokio::test]
     async fn install_on_macos_writes_the_plist_and_loads_it() {
         let root = tempfile::tempdir().unwrap();
@@ -971,6 +987,7 @@ mod tests {
         );
     }
 
+    #[cfg(leon_posix_tests)]
     /// Installs on a scripted Linux and leaves the paired data around.
     async fn installed(env: &Environment) {
         let paths = Paths::new(&env.data_dir);
@@ -987,6 +1004,8 @@ mod tests {
         assert!(env.layout.definition.exists());
     }
 
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(leon_posix_tests)]
     #[tokio::test]
     async fn uninstall_removes_the_unit_and_leaves_the_pairings_and_settings() {
         let root = tempfile::tempdir().unwrap();
@@ -1016,6 +1035,8 @@ mod tests {
         );
     }
 
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(leon_posix_tests)]
     #[tokio::test]
     async fn a_service_that_cannot_be_stopped_keeps_its_definition_and_says_so() {
         let root = tempfile::tempdir().unwrap();
@@ -1043,6 +1064,8 @@ mod tests {
         assert!(env.layout.definition.exists());
     }
 
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(leon_posix_tests)]
     #[tokio::test]
     async fn a_failed_stop_of_a_service_that_is_not_running_still_uninstalls() {
         let root = tempfile::tempdir().unwrap();
@@ -1059,6 +1082,8 @@ mod tests {
         assert!(outcome.out.contains("the service is stopped and"));
     }
 
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(leon_posix_tests)]
     #[tokio::test]
     async fn a_host_waiting_to_restart_is_not_a_stopped_one() {
         let root = tempfile::tempdir().unwrap();
@@ -1107,6 +1132,8 @@ mod tests {
             .contains("Could not tell whether a host is still running"));
     }
 
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(leon_posix_tests)]
     #[tokio::test]
     async fn install_says_so_when_the_service_starts_and_does_not_stay_up() {
         let root = tempfile::tempdir().unwrap();
@@ -1138,6 +1165,8 @@ mod tests {
         assert!(outcome.err.contains("it is failed"));
     }
 
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(leon_posix_tests)]
     #[tokio::test]
     async fn install_that_cannot_ask_the_manager_does_not_claim_it_checked() {
         let root = tempfile::tempdir().unwrap();
@@ -1154,6 +1183,8 @@ mod tests {
             .contains("Could not confirm that the host is running"));
     }
 
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(leon_posix_tests)]
     #[tokio::test]
     async fn install_from_a_per_version_folder_warns_that_an_update_will_not_reach_it() {
         let root = tempfile::tempdir().unwrap();

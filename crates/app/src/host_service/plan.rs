@@ -386,6 +386,8 @@ mod tests {
         }
     }
 
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(leon_posix_tests)]
     #[test]
     fn installing_on_macos_loads_the_agent_into_the_users_domain() {
         let plan = install(&service(), &mac(), 501, false);

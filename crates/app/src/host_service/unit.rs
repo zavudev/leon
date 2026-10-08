@@ -341,6 +341,8 @@ WantedBy=default.target
         assert_eq!(systemd_word("$HOME", false), "\"$HOME\"");
     }
 
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(leon_posix_tests)]
     #[test]
     fn a_service_that_cannot_be_written_down_is_refused() {
         assert!(service().validate().is_ok());
