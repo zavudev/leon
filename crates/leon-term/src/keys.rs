@@ -10,6 +10,7 @@
 //! | --- | --- |
 //! | Enter, Tab, Backspace, Escape | `CR`, `HT`, `DEL`, `ESC` |
 //! | Shift+Tab | `ESC [ Z` |
+//! | Shift+Enter, Alt+Enter | `ESC CR` (a new line in Claude Code) |
 //! | arrows | `ESC [ A` to `D`, or `ESC O A` to `D` in application cursor mode |
 //! | Home, End | `ESC [ H`, `ESC [ F` (`ESC O` in application cursor mode) |
 //! | PgUp, PgDn, Insert, Delete | `ESC [ 5 ~`, `6 ~`, `2 ~`, `3 ~` |
@@ -148,6 +149,9 @@ pub fn encode_key(stroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
         bytes
     };
     match key {
+        // Shift+Enter sends what Alt+Enter does: a plain `CR` is "submit" to
+        // Claude Code and friends, `ESC CR` is "a new line".
+        "enter" if m.shift => return Some(vec![ESC, b'\r']),
         "enter" => return Some(alt_prefix(vec![b'\r'])),
         "escape" => return Some(alt_prefix(vec![ESC])),
         "backspace" => {
@@ -449,6 +453,7 @@ mod tests {
         assert_eq!(bytes("alt-b"), Some(b"\x1bb".to_vec()));
         assert_eq!(bytes("alt-shift-b"), Some(b"\x1bB".to_vec()));
         assert_eq!(bytes("alt-enter"), Some(b"\x1b\r".to_vec()));
+        assert_eq!(bytes("shift-enter"), Some(b"\x1b\r".to_vec()));
         assert_eq!(bytes("alt-backspace"), Some(b"\x1b\x7f".to_vec()));
         assert_eq!(bytes("ctrl-alt-b"), Some(b"\x1b\x02".to_vec()));
         assert_eq!(bytes("alt-space"), Some(b"\x1b ".to_vec()));
