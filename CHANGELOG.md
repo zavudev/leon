@@ -1,5 +1,355 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+* **Keep local sessions running** (setting `durable_sessions`, off by default;
+  macOS and Linux only). The terminals, and the agents in them, that Leon opens
+  on this computer are held by a small background process (`leon keeper`, the
+  same program started in a session of its own the first time one is needed), so
+  they keep running when the window closes, when Leon quits and when it crashes.
+  The next start attaches to them again, in their saved tab, pane and focus,
+  with the output they printed meanwhile, and does not ask about them or type
+  anything into them. Quitting no longer types `/exit` or signals anything to
+  them; the quit question says that those sessions keep running. Closing or
+  putting a session to sleep still ends it, and the palette's **Quit and end
+  every session** is the old quit for all of them. The activity light and
+  transcript status, the "running in another terminal" scan, learning an
+  agent's session id, file and `#123` links and image paste work for these
+  sessions as for the others; the keeper is asked who is in front of each
+  terminal twice a second. A running terminal the saved layout does not know
+  appears in a session of its own. A session whose terminal is gone (the computer
+  restarted, the program ended) is restored the usual way, with a paused resume
+  line, and Leon says so; a keeper that is killed takes its terminals with it,
+  which is printed in them. Limits: only the last 2 MiB of each terminal's
+  output is kept, so older scrollback is not restored; sessions on SSH or relay
+  machines are not held; the keeper ends 30 seconds after its last program ended
+  with no window connected, runs the Leon it was started from until then (an
+  update is picked up by the next keeper), and can be ended with its launcher or
+  by logging out; turning it off leaves the sessions already kept running
+  until they are closed; with it off from the start, and on Windows, everything
+  is as before. It is
+  tested with a scripted keeper over a real socket and a scripted window; closing
+  the window and reopening Leon on a real machine has not been tried.
+  Before it talks to the keeper the window checks the socket's folder (a real
+  folder of its own, closed to other users: the fallback folder under `/tmp` has a
+  predictable name another user could create first) and, once connected, that
+  the other end is its own user, and sends nothing otherwise; the session then
+  starts in the window. New terminals appear at once and are filled in as the
+  keeper answers (nothing waits more than a second and a half, and a keeper that
+  did not answer is not tried again for 20 seconds); keystrokes and hang-ups are
+  never dropped on a full queue; "Quit and end every session" ends only what
+  this window holds and says when the keeper did not confirm it. A saved tab
+  with a surviving and a gone terminal is restored in one piece; a session
+  another window of the same data directory is attached to is left to it; a
+  keeper found with the setting off is not left stranded. Also fixed for relay
+  machines: the terminal's answers to a program's questions (where is the cursor,
+  which colours) now reach the program. A replay can start mid-escape-sequence
+  and look garbled until the program draws again.
+* The light of a session now says what the agent is doing, not only that its
+  terminal went quiet. For Claude Code and Codex sessions of this computer
+  Leon reads the agent's own transcript while it grows, **whether or not the
+  Den is open**, and tells apart: **working** (a turn is going on, a tool is
+  running, or the model is thinking in silence), **finished its turn** (your
+  move: a square in the theme's info colour, `READY` beside the worktree) and **needs you** (a
+  question, or a tool call without a result in a quiet terminal: a ringed
+  orange square, `ASKS`), besides the existing idle, waiting, failed and off.
+  The same words are in the home (`1 need an answer · 2 finished` and a note on
+  each row), the lion in the header and the banners and system notifications,
+  which now say `finished its turn · your move` or `needs an answer · a
+  question, or probably a permission prompt`; both are governed by the
+  existing setting `notify_waiting`. A permission prompt is still **inferred**
+  (the transcript does not record the question) and can be wrong for a tool
+  that runs a long time while the agent draws nothing.
+  Only a session whose id Leon knows for sure is followed (started with
+  `--resume`, or learned from the agent's state file or arguments, and asked
+  again of the process scan so that an agent that moves to another session in
+  the same terminal, with `/clear` or `/resume`, is followed there; until the
+  scan sees it, the light can still be that of the old session). Every other
+  session (another agent, SSH and relay sessions, **Windows**, where the
+  terminal cannot say whether the agent is in front, a plain shell, a session
+  whose transcript is missing or still empty) keeps the previous behaviour,
+  and its notification now says `waiting for you · quiet, or the bell rang`
+  instead of claiming a finished turn. A transcript is read from its last
+  megabyte, then only what is appended about once a second, and nothing is
+  read when no agent is followed; a turn that began before that megabyte is
+  not guessed at: the light stays the terminal's until the transcript shows
+  where the agent is. The first look can come a couple of seconds after the
+  agent starts. It was built on the transcripts' format and tested with
+  written transcripts; it has not been run against long real sessions of
+  either agent yet, so tell us where it reads wrong.
+* Worktree status in the tree. Every worktree row now ends with the state of its
+  checkout: the open pull request of its branch (`#123`, coloured by its checks:
+  green passing, amber running, red failing, grey for a draft), the number of
+  changed files (`~3`, the files the Changes tab lists, untracked ones counted
+  one by one) and the distance from its upstream (`↑2↓1`). Pointing at
+  the row tells all of it in words, and the worktree's own screen has a **State**
+  card with the same, the review state included; the pull request there opens
+  on GitHub when clicked. On a narrow sidebar (under 300 px) a row keeps only
+  the first of those it knows. The changes and the distance are read with git
+  every time the worktrees are checked (about every 10 seconds for a local
+  project with a terminal running in it, and on `Import history and sync
+  worktrees` for every project, remote ones included, which are not watched on
+  a timer). The pull request and its checks come from the GitHub CLI (`gh`),
+  only for a project whose `origin` is on GitHub, and a project is asked at
+  most once a minute, so a refresh within a minute of the last question reads
+  git again but keeps the pull requests of that answer; without `gh`, signed
+  out, offline or without git a row simply shows what it could read, and
+  nothing is reported. A pull request
+  from a fork that shares a branch name with one of yours is not told apart.
+* Changes, commit, push and pull request. `Show the changes of the worktree`
+  (`Cmd+Opt+G`, `Ctrl+Shift+Alt+G`; the **Changes** button of a worktree's
+  screen, the **Changes** chip of the file tree, or the palette, which asks which
+  worktree when none is in view) opens a tab with the files git says changed and
+  the diff of the selected one: read only, added and removed lines in the
+  theme's colours, the hunk headers and both line numbers; a binary file or a
+  diff over 1 MB is said instead of drawn, and long lines are cut (no horizontal
+  scrolling yet). `Enter` or a double click opens the file in the editor; `Space`
+  takes a file out of the commit and back in. Under the list: **Commit** (`git
+  add` of the files in the box, then `git commit` with your message, hooks
+  included), **Push** (`git push`, setting the upstream on `origin` when the
+  branch has none), **Pull request…** (title, body, base and a draft switch,
+  prefilled from the branch's commits, then `gh pr create`, the address shown as
+  a link and the worktree's pull request in the tree updated at once) and
+  **Commit, push and open a pull request**, which does the three in order and
+  stops at the first that fails (`Push the branch` and that one are palette
+  commands too). From the palette it opens the tab if needed and starts when the
+  tab has read its files; it commits only when files changed (and asks for the
+  message first when there is none), so a branch already committed is just
+  pushed and opened. Nothing is destructive: no force push, amend, reset or
+  discarding. What git, `gh` and the hooks print is shown whole. Everything runs
+  through the machine's runner, so it is meant to work on this computer, over SSH
+  and over the relay. What the tests check is the placement of each command (one
+  `ssh` command in the worktree's folder with its input piped, the route of a
+  relay machine) with a scripted runner, and the steps against a real
+  repository on this computer; no real SSH or relay machine and no real `gh`
+  was tried. `gh` has to be installed and signed in there. The commands that may take long are stopped
+  after ten minutes, the others after thirty seconds. The tab is not reopened at
+  the next start.
+* **Suggest a message** and **Suggest title and body** ask an agent to word the
+  commit or the pull request from the diff or the commits, and put the text in
+  the field to edit. Only Claude Code (`claude --tools "" -p --permission-mode
+  dontAsk --no-session-persistence`) and Codex (`codex exec --sandbox
+  read-only`) are asked, because their non-interactive form was run here and
+  checked against the CLI's own `--help`; for any other agent (Gemini's `-p`
+  form is documented but could not be run: it was not signed in) the button is
+  not there. The diff is text of your repository, so the agent is not trusted
+  with it: Claude Code runs with no tools at all and Codex in its read-only
+  sandbox, and the instruction also tells it to answer with the text alone. The
+  diff is cut at 60 KB and is that of the files in the commit (files git does
+  not track yet are only named, and when those are all that is in the commit
+  the agent gets just their names), the agent gets two minutes, its failure is a plain message that
+  blocks nothing, and a suggestion that arrives after you started writing is not
+  used.
+* Remove merged worktrees. **Remove merged worktrees…** in the palette, or the
+  **REMOVE MERGED** button on the screen of a merged worktree, lists the linked
+  worktrees whose pull request GitHub reports as merged and lets you tick the
+  ones to remove. Each ticked worktree goes through `git worktree remove`, one
+  after another, and is never forced: a worktree git refuses is kept and named
+  in the status line. A second removal asked for while one is running is
+  refused with a message, so the first always reaches its end. The terminals
+  running in a removed worktree and its Changes tab close, as they do for
+  **Remove a worktree**; files open from it stay open, because they may hold
+  text you did not save. A worktree with uncommitted or untracked files, commits
+  its upstream does not have, a session running in its folder, or a checkout
+  nobody has read yet is listed with the reason and cannot be ticked. A branch
+  whose remote GitHub deleted after the merge is not held back for that: its
+  commits went up with the pull request. The branch and its commits stay in the
+  repository.
+* The `offer_merged_cleanup` setting (**Offer to remove merged worktrees** in
+  Settings, Projects; off by default). When a worktree's pull request turns
+  merged while Leon is open, a banner offers the list above, and a click opens
+  it. The banner removes nothing. Only a change Leon saw is announced: a
+  worktree whose branch GitHub's last answer did not list as merged and whose
+  next answer does. A branch first seen merged is not announced, and a branch
+  with no pull request counts as not merged, so a pull request opened and merged
+  between two answers is announced too. GitHub is asked at most once a minute
+  per project, so the banner can come a minute late.
+* A project file, `leon.toml`, at the root of a repository: `[[script]]`
+  entries (`name`, `command`, and optionally an `icon` and a `key`) and
+  `[worktree] setup = "..."`, a command for every new worktree. Leon reads it
+  where the project is (this computer, over SSH or through a relay), and a
+  mistake is reported with the line it is on. The format, with the rules and
+  the limits, is in `docs/PROJECT.md`.
+* **Run a script…** in the palette lists the scripts of the project in view and
+  runs the chosen one in a new terminal tab of the worktree in view. A script
+  with a `key` (`mod+shift+u`: `mod` is `Cmd` on macOS and `Ctrl` elsewhere,
+  and `shift` is always required, so the chord stays Leon's while a terminal
+  has the keyboard) answers that chord. A key that one of Leon's own commands
+  already has is not bound: the status line and the palette say so, and the
+  script still runs from the palette. A key uses the file as it was when the
+  project came into view; the palette reads it again first.
+* A worktree's `setup` command runs, in a terminal of the new worktree, before
+  the agent starts: in a POSIX shell the terminal is typed `sh -c '<setup>' &&
+  <the agent>`, or `sh -c '<setup>'` alone for a shell session, so the setup
+  means the same in every login shell and the agent starts only if it
+  succeeded. When it fails the terminal stays open with the output and no agent
+  is started. What the setup exports does not reach the agent, and a multi-line
+  setup is refused (join the commands with `&&`). PowerShell and `cmd.exe` have
+  no `sh`: the setup is typed there as written. A script, by contrast, is typed
+  as written into the shell of its terminal, so that shell's aliases and its
+  own syntax apply.
+* If `leon.toml` is wrong or cannot be read when a worktree is made, the session
+  still starts without the setup and the status line says why (`No setup was
+  run: leon.toml line 7: ...`), also when several agents were started at once.
+* The commands of `leon.toml` come from the repository, so Leon asks before
+  the first one runs, and again whenever its text changes: a card shows the
+  exact command, where it comes from, where it would run and how it is typed.
+  The card can appear by itself a moment after a worktree is made, so no plain
+  key answers it: `Ctrl+Enter` (`Cmd+Enter` on macOS) runs the command once,
+  `Ctrl+Shift+Enter` (`Cmd+Shift+Enter`) runs it and remembers it, `Esc` does
+  not run it, and the card has a button for each. A plain `Enter` does nothing.
+  Cards wait their turn instead of replacing a palette or another card. What is
+  remembered is a hash of the command for that project, in `trusted.json` next
+  to `settings.json`; there is no screen to take an answer back, delete the file
+  (with Leon closed) to forget them all. A worktree whose setup was not run still
+  gets its session, and the status line says the setup was skipped.
+* The setting `worktree_location` (Settings, Projects) says where new
+  worktrees go: a template with `{root}`, the project's folder, and `{branch}`,
+  the branch with its slashes turned into dashes. The default,
+  `{root}-worktrees/{branch}`, is exactly where worktrees have always gone;
+  `{root}/.worktrees/{branch}` keeps them inside the project. A template that
+  does not name `{branch}` or does not give an absolute path is refused when a
+  worktree is made.
+* **One prompt, several agents…** (palette, File menu, and the menu of a project row): type
+  a prompt, tick two or more agents, pick the base, and Leon makes one worktree
+  per agent and starts each agent in its own with the prompt already on its
+  launch line, so the sessions sit side by side in the tree and can be compared.
+  The branches are a slug of the prompt and the agent (`fix-the-login-bug-claude`,
+  `fix-the-login-bug-codex`), made one after the other the way **New worktree**
+  makes them: `worktree_location` and the `setup` of `leon.toml` apply, and the
+  setup is asked about once for the whole batch. A branch name that the project
+  already has in git, with or without a worktree, gets a number before the agent
+  (`fix-the-login-bug-2-claude`), so giving the same prompt again works. An
+  agent that is not installed, cannot take the prompt or whose worktree git
+  refuses is told by name in the status line (`Started 1 of 2 agents: Codex:
+  ...`) and the others go on. If git cannot list the branches, only the names of
+  the worktrees are avoided and git's own refusal is what you read.
+* Only agents whose way of taking a prompt was read in the `--help` of the
+  program are offered there: Claude Code, Codex, Grok and Cursor (the prompt as
+  their argument), opencode (`--prompt`) and Gemini (`--prompt-interactive`). A
+  custom agent declares its form in the new last question of **Add a custom
+  agent…**, the prompt arguments (`--ask {prompt}`); left empty, it is not
+  offered the prompt.
+* The prompt is typed into the shell as one quoted argument, on this computer
+  and over SSH or a relay: quotes, `$`, backticks, `!`, backslashes and several
+  lines arrive as written. It cannot hold control characters (a tab becomes a
+  space), start with a dash, be longer than 8000 characters or be a single word
+  (an agent would take `apply` or `update` for one of its own commands), and the
+  palette's field takes one line. It is not offered when the shell is
+  PowerShell or `cmd.exe`.
+* Settle, snooze and undo in the sidebar. **Settle** (a session's context
+  menu or the palette) moves a session onto a folded **Settled** shelf at the
+  bottom of its machine; **Snooze…** hides it on a folded **Snoozed** shelf
+  until a time you pick or type (`45m`, `2h`, `3 days`, `tomorrow`,
+  `next week`, `2026-10-12 14:00`), and its row says when it comes back. A
+  snoozed session returns by itself, and early when its terminal needs you,
+  fails or finishes (a session running in another terminal cannot end its own
+  snooze, because Leon only sees it from outside). **Bring back** puts either
+  kind where it was; a pinned session keeps its pin on the shelf. The shelves
+  honour the filter and are kept in the local store, so they survive a restart.
+  A running session cannot be settled (that includes one whose terminal
+  Leon only learned the agent's session id for), and a sleeping plain shell,
+  which has no history session, can be neither settled nor snoozed.
+* `sidebar_settle_merged` (off by default): settle a session by itself once the
+  pull request of its worktree is merged and its terminal is not live. Pinned
+  sessions, ones you brought back by hand and ones running in another terminal
+  are left alone. Leon knows about other terminals only from its look at the
+  machine (`detect_elsewhere`), so nothing is settled on a machine it has not
+  been able to look at.
+* Undo for closing, sleeping, settling, snoozing and unpinning: a banner offers
+  it for five seconds, and `⌥⌘Z` (`Ctrl+Shift+Alt+Z`) and the palette's **Undo**
+  do the same. Undoing a settle or a snooze puts the session back in its list
+  and an unpin puts it back among the pinned sessions in its old place. A
+  session that was never on a shelf comes back as one you took back by hand,
+  which `sidebar_settle_merged` leaves alone. A closed terminal's program
+  cannot come back, so undoing a close restores the row as a sleeping session (a
+  closed shell that had no sleeping row gets a new one after the others) and
+  undoing a sleep wakes it with a new program; the banner says so. A closed
+  session leaves the history when the banner goes or when you quit; if Leon is
+  killed or crashes inside those five seconds, it stays listed.
+* Tokens and an estimated cost in the usage view (`⇧⌘U`, `Ctrl+Shift+Alt+U`).
+  Under the limits it now lists what the agents used, per agent, per model and
+  per UTC day, over the last 7, 30 or 90 days or all time (`T`, or a click on
+  the span), with the share of the input that came from the cache. The counts
+  are read from the agents' own transcripts by the history import (Claude Code,
+  Codex and opencode), once per file however often it is read, so a transcript
+  that grows is never counted twice; the first start after the update reads each
+  transcript once more to count the sessions already imported. The cost is an
+  **estimate at the providers' API list prices, not what a subscription is
+  billed**, and a model with no price shows its tokens and `no price`. The
+  prices are a file bundled with Leon, each entry with the page it was copied
+  from and the day (Anthropic and OpenAI models, 2026-10-07); a `prices.json`
+  next to `settings.json` overrides or extends it, with model aliases. Not
+  counted: machines connected through the relay, opencode's sub-agent sessions,
+  and models whose price depends on the length of each prompt (Claude Haiku
+  5.5), which have tokens and no price. A Claude Code sub-agent's calls
+  (`<session>/subagents/agent-*.jsonl`) are counted into the session that
+  started it, but a reply that a resumed or forked Claude Code or Codex session
+  repeats from its parent is counted in each file, so those sessions are
+  counted twice.
+* `leon host service install | uninstall | status | logs`: the host as a
+  background service of your own session, so a computer stays shared with no
+  window or terminal open. On Linux it is a systemd user unit
+  (`~/.config/systemd/user/leon-host.service`, driven with `systemctl --user`);
+  on macOS a launchd agent in `~/Library/LaunchAgents`; on Windows the command
+  says it is not supported yet and exits with an error. It never needs or
+  accepts root, runs the file that installed it (an update that replaces that
+  file in place takes effect the next time the service starts; with Homebrew or
+  Nix, which keep each version in its own folder, run `install` again after an
+  update, and `install` says so) and restarts after a failure, with a growing
+  delay under systemd 254 or newer and at least 30 seconds apart under launchd.
+  `install` waits two seconds and exits with an error if the host is not
+  running then; `status` says whether it is installed and running, since when,
+  its relay and how many devices are paired; `uninstall` stops the service
+  first, keeps its definition and exits with an error if it cannot confirm that
+  the service is stopped, and leaves your pairings and settings alone. A
+  `leon host` started by hand makes the service wait its turn, but **Share this
+  machine** in the app does not, so use one or the other on a computer.
+  On Linux the service stops when you log out of your last session unless you
+  install with `--linger`, which runs `loginctl enable-linger` for your own
+  user; nothing touches lingering without that flag. The terminals the host
+  serves to a paired device live in the service; the desktop app's own local
+  sessions still end with its window, and the macOS side has not been run on a
+  Mac yet. See `docs/REMOTE.md`.
+* Several accounts of one agent. The palette's **Add an account…**, **Rename an
+  account…** and **Remove an account…** (and Settings, Agents) keep named
+  accounts: an agent, a name and the environment variables that make the agent
+  another account, usually its configuration folder (`CLAUDE_CONFIG_DIR` for
+  Claude Code, `CODEX_HOME` for Codex; a leading `~` is the home folder of the
+  machine the terminal is on). A new session of an agent that has accounts asks
+  which one to start, the agent's own setup being one of the choices; the setting
+  `default_accounts` (`claude=work`, or `claude=default`) skips the question. **One prompt, several agents…** and the session of a new worktree never ask: each agent starts as the account `default_accounts` names for it, else as its own setup. The
+  variables are added to that terminal only: to the shell's environment here, and
+  to the `env` of the command that runs over SSH or a relay, each quoted as one
+  word. A session remembers its account, so resuming it, **Resume the session in
+  another worktree…**, waking a sleeping session and restoring the last sessions
+  all use the same one. If the account was removed the session is never started
+  as another: a history session shows its transcript with the reason, a sleeping
+  one stays asleep (add the account again with the same name to wake it), and a
+  session of the last run is listed among those that could not be reopened. The
+  session's header and its sidebar row show the account's name, and the header's
+  limit figure is that account's own, or absent. Removing an account takes its
+  line of limits and its history chart with it. For Claude Code and Codex, on this
+  computer, each account's folder is imported like the agent's own (its sessions
+  appear in the tree) and its limits get a line of their own, read with the
+  sign-in kept in that folder. For other agents, and for the accounts of another
+  machine, the account only changes the launch: no history and no limits are read
+  for it, and the usage view says so instead of showing the agent's own numbers.
+
+### Changed
+
+* `leon host` now stops cleanly on `SIGTERM` as well as Ctrl-C, and its
+  heartbeat file also says when it started.
+
+### Fixed
+
+* `leon host` no longer refuses to start because of the heartbeat a crashed or
+  killed host left behind: a heartbeat now counts only while its process still
+  exists, so `leon host status` and `leon host pair` do not report a dead host
+  as running either.
+
 ## [0.6.0] - 2026-10-07
 
 ### Added

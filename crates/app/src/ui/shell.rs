@@ -137,6 +137,9 @@ pub enum Overlay {
     History,
     /// "Restore N sessions from last time?" and what could not be restored.
     Restore,
+    /// "Run this command?": a command of the project's `leon.toml` that is
+    /// not trusted yet.
+    Trust,
 }
 
 /// What the folder picker answered.
@@ -215,8 +218,9 @@ pub struct Options {
     pub notify: notify::Notify,
     /// How long a banner stays on screen.
     pub banner_duration: Duration,
-    /// How often the transcripts of the live sessions are read while the Den
-    /// is open.
+    /// How often the transcripts of the live sessions are read: for the
+    /// lights of the sessions whose agent is followed, and, while the Den is
+    /// open, for the Den.
     pub den_tick: Duration,
     /// How long after a message from the Den was pasted into a terminal the
     /// Enter key follows: an agent reads a paste and a key right behind it
@@ -284,6 +288,10 @@ pub struct Options {
     pub update_timer: bool,
     /// Opens an address in the browser.
     pub open_url: OpenUrl,
+    /// The keeper of durable local sessions (see `durable.rs`); absent where
+    /// there is none (Windows, and tests that do not need it). The setting
+    /// `durable_sessions` decides whether it is used.
+    pub durable: Option<Arc<dyn crate::durable::Durable>>,
 }
 
 /// A `~/.ssh` that is not there: the home folder is unknown.
@@ -351,6 +359,7 @@ impl Default for Options {
             },
             remote: None,
             updates: None,
+            durable: None,
             update_timer: true,
             open_url: Rc::new(|cx, url| cx.open_url(url)),
             terminate_process: Rc::new(crate::elsewhere::terminate),
@@ -469,6 +478,9 @@ pub struct Shell {
     /// The files open in leaves, by the id of their leaf (allocated with the
     /// terminals' counter). A leaf that has an entry here is not a terminal.
     pub(super) files: std::collections::HashMap<LiveId, super::editor::EditorDoc>,
+    /// The changes tabs open in leaves, by the id of their leaf: like a file,
+    /// a leaf with an entry here is not a terminal.
+    pub(super) changes: std::collections::HashMap<LiveId, super::changes::ChangesView>,
     /// The file tree panel: a tree for each folder it showed.
     pub(super) file_tree: super::editor::FileTreeUi,
     /// How the terminals are laid out: workspaces of tabs of split panes.
@@ -483,6 +495,8 @@ pub struct Shell {
     /// The usage bar and view.
     pub(super) usage: super::usage_view::UsageUi,
     pub(super) den: super::den_view::DenUi,
+    /// Following the agents' transcripts for the sessions' lights.
+    pub(super) status: super::transcript_watch::StatusUi,
     /// "Connect a machine, with a code".
     pub(super) pair_ui: super::pair::PairUi,
     /// "Share this machine".
@@ -521,6 +535,10 @@ pub struct Shell {
     pub(super) ticker: Option<Task<()>>,
     /// The notifications shown for what sessions just did, oldest first.
     pub(super) banners: Vec<notify::Banner>,
+    /// The branches whose pull request was just seen merged, while the
+    /// setting asks to be offered the cleanup: a banner, until it is dismissed
+    /// or used.
+    pub(super) merged_offer: Option<Vec<String>>,
     /// Watches the banners' expiry while any is on screen.
     pub(super) banner_ticker: Option<Task<()>>,
     /// The id the next banner gets.
@@ -530,10 +548,14 @@ pub struct Shell {
     pub(super) menu: Option<Menu>,
     /// The "Add a project" dialog.
     pub(super) add_project_ui: super::dialogs::AddProjectUi,
+    /// The project files read, and the commands asked about.
+    pub(super) scripts: super::scripts::ScriptsUi,
     /// The "Create worktree" dialog, while it is open.
     pub(super) new_worktree_ui: Option<super::dialogs::NewWorktreeUi>,
     /// The wait for a worktree an agent should start in, while it runs.
     pub(super) worktree_task: Option<Task<()>>,
+    /// The batches of worktrees being made for one prompt and several agents.
+    pub(super) fanout_tasks: Vec<Task<()>>,
     /// The agent of the last session started: new dialogs offer it first.
     pub(super) last_agent: Option<leon_core::AgentId>,
     pub(super) sheet_scroll: ScrollHandle,
@@ -570,6 +592,11 @@ pub struct Shell {
     pub(super) slept: std::collections::HashSet<SessionId>,
     /// The sleeping sessions that have no history row to stand for them.
     pub(super) dormant: super::dormant::Dormants,
+    /// The Settled and Snoozed shelves, and the banner that offers Undo (see
+    /// `shelving.rs`).
+    pub(super) shelves: super::shelving::ShelfUi,
+    /// A new session that waits for the person to pick its account.
+    pub(super) pending_start: Option<super::terminals::PendingStart>,
     /// Where they are remembered, when anywhere.
     dormant_file: Option<PathBuf>,
     /// Whether the tree also shows the sessions that are not active (the
@@ -578,6 +605,13 @@ pub struct Shell {
     pub(super) show_inactive: bool,
     /// The removal of a worktree, while it runs.
     pub(super) removing: Option<Task<()>>,
+    /// The removal of the merged worktrees the cleanup ticked, one after the
+    /// other; dropping it would stop the rest.
+    pub(super) removing_merged: Option<Task<()>>,
+    /// Whether that removal is still going: a second batch is not started
+    /// beside it, because starting one replaces the task and drops the rest of
+    /// the first.
+    pub(super) merged_busy: bool,
     /// The removal of a worktree, while it runs. Its project's row says
     /// `DELETING` meanwhile, so taking a big folder away is visible.
     pub(super) deleting: Option<(ProjectId, WorktreeId)>,
@@ -611,8 +645,15 @@ impl Shell {
             .as_deref()
             .map(super::dormant::Dormants::load)
             .unwrap_or_default();
-        let placement =
-            Placement::compute(&snapshot).with_live(&snapshot, Self::dormant_entries(&dormant));
+        let shelf = store.shelves().unwrap_or_default();
+        let placement = Placement::compute(&snapshot)
+            .with_live(&snapshot, Self::dormant_entries(&dormant))
+            .with_shelves(
+                &snapshot,
+                &shelf,
+                &std::collections::HashSet::new(),
+                (options.now)(),
+            );
         let expansion_file = settings::sibling(expansion::FILE_NAME, cx);
         let expansion = expansion_file
             .as_deref()
@@ -692,6 +733,7 @@ impl Shell {
                     this.reload(cx);
                     // The files may have changed while another program ran.
                     this.files_refresh(cx);
+                    this.changes_refresh_all(window, cx);
                     this.check_external_changes(window, cx);
                 }
                 cx.notify();
@@ -738,6 +780,9 @@ impl Shell {
                         this.learn_session_ids(cx);
                         // A session that started elsewhere is a lion too.
                         this.den_watch(cx);
+                        // A scan that has just come back is what lets merged
+                        // work be settled.
+                        this.settle_merged_now();
                         // What runs elsewhere changes who is active.
                         if !this.show_inactive {
                             this.rebuild_rows();
@@ -777,6 +822,7 @@ impl Shell {
             main: Main::Empty,
             live: Sessions::default(),
             files: std::collections::HashMap::new(),
+            changes: std::collections::HashMap::new(),
             file_tree: Default::default(),
             workspaces: Workspaces::default(),
             palette,
@@ -785,6 +831,7 @@ impl Shell {
             connect_ui,
             usage: super::usage_view::UsageUi::default(),
             den: super::den_view::DenUi::default(),
+            status: super::transcript_watch::StatusUi::default(),
             home: super::home::HomeUi::default(),
             pair_ui,
             share_ui: super::share::ShareUi::default(),
@@ -805,6 +852,7 @@ impl Shell {
             closing: Default::default(),
             ticker: None,
             banners: Vec::new(),
+            merged_offer: None,
             banner_ticker: None,
             next_banner: 0,
             choosing: None,
@@ -812,6 +860,7 @@ impl Shell {
             add_project_ui: super::dialogs::AddProjectUi::default(),
             new_worktree_ui: None,
             worktree_task: None,
+            fanout_tasks: Vec::new(),
             last_agent: None,
             sheet_scroll: ScrollHandle::new(),
             find: std::collections::HashMap::new(),
@@ -830,9 +879,14 @@ impl Shell {
             checking: None,
             slept: std::collections::HashSet::new(),
             dormant,
+            shelves: super::shelving::ShelfUi::default(),
+            pending_start: None,
             dormant_file,
+            scripts: super::scripts::ScriptsUi::new(settings::sibling(crate::trust::FILE_NAME, cx)),
             show_inactive: settings::flag(cx, "sidebar_show_inactive"),
             removing: None,
+            removing_merged: None,
+            merged_busy: false,
             deleting: None,
             elsewhere_ticker: None,
             window_active: window.is_window_active(),
@@ -842,6 +896,9 @@ impl Shell {
             _watchers: vec![store_watcher, engine_watcher],
             _subscriptions: subscriptions,
         };
+        shell.shelves.read(shelf);
+        shell.shelves.settle_merged = settings::flag(cx, "sidebar_settle_merged");
+        shell.arm_shelf_timer(cx);
         shell.load_logos(cx);
         shell.watch_themes(cx);
         shell.watch_elsewhere(window, cx);
@@ -959,15 +1016,32 @@ impl Shell {
     /// Reads the store again and rebuilds the tree, keeping the cursor on the
     /// same node when it is still there.
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
-        let snapshot = match Snapshot::load(self.engine.store()) {
+        let mut snapshot = match Snapshot::load(self.engine.store()) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 tracing::warn!(%error, "could not read the store");
                 return;
             }
         };
+        // Sessions that were closed a moment ago wait to be removed from the
+        // history until the banner that offers Undo is gone.
+        snapshot
+            .sessions
+            .retain(|session| !self.shelves.hidden.contains(&session.id));
+        if let Ok(shelf) = self.engine.store().shelves() {
+            self.shelves.read(shelf);
+        }
         self.placement = self.place(&snapshot);
+        let before = worktrees_of(&self.snapshot);
+        let after = worktrees_of(&snapshot);
+        if let Some(labels) =
+            super::steps::merged_offer(settings::flag(cx, "offer_merged_cleanup"), &before, &after)
+        {
+            self.merged_offer = Some(labels);
+        }
         self.snapshot = snapshot;
+        self.settle_merged_now();
+        self.arm_shelf_timer(cx);
         self.refilter();
         self.rebuild_rows();
         self.load_logos(cx);
@@ -979,7 +1053,11 @@ impl Shell {
                 .snapshot
                 .project(project)
                 .is_some_and(|entry| entry.worktrees.iter().any(|w| &w.id == worktree)),
-            Main::Live(id) => self.live.get(*id).is_none() && !self.files.contains_key(id),
+            Main::Live(id) => {
+                self.live.get(*id).is_none()
+                    && !self.files.contains_key(id)
+                    && !self.changes.contains_key(id)
+            }
             Main::Empty | Main::Session(_) | Main::Den => false,
         };
         if gone {
@@ -1001,7 +1079,14 @@ impl Shell {
 
     /// Where everything goes in the tree: the history and the live sessions.
     pub(super) fn place(&self, snapshot: &Snapshot) -> Placement {
-        Placement::compute(snapshot).with_live(snapshot, self.live_entries())
+        Placement::compute(snapshot)
+            .with_live(snapshot, self.live_entries())
+            .with_shelves(
+                snapshot,
+                &self.shelves.shelf,
+                &self.running_histories(),
+                self.now(),
+            )
     }
 
     /// The sleeping sessions without a history row, as the tree sees them.
@@ -1014,6 +1099,7 @@ impl Shell {
                 machine: sleeping.machine(),
                 cwd: sleeping.cwd.clone(),
                 agent: sleeping.agent(),
+                account: sleeping.account.clone(),
                 history: None,
                 asleep: Some(sleeping.label.clone().unwrap_or_default()),
             })
@@ -1047,6 +1133,7 @@ impl Shell {
                 machine: session.machine.clone(),
                 cwd: session.cwd.clone(),
                 agent: session.agent,
+                account: session.account.clone(),
                 history: session.history.clone(),
                 asleep: None,
             })
@@ -1097,6 +1184,9 @@ impl Shell {
                 self.placement.merged.contains(&session.id)
                     || self.live.of_history(&session.id).is_some()
                     || self.elsewhere_of(session).is_some()
+                    // What the person put on a shelf is kept in sight there,
+                    // however the sidebar lists the rest.
+                    || self.placement.shelved.contains(&session.id)
             }
             _ => false,
         };
@@ -1107,6 +1197,7 @@ impl Shell {
                     | Kind::Project { .. }
                     | Kind::Worktree { .. }
                     | Kind::Pinned { .. }
+                    | Kind::Shelf { .. }
                     | Kind::Unsorted { .. }
                     | Kind::Folder { .. }
             )
@@ -1211,6 +1302,12 @@ impl Shell {
             chosen.interface_scale,
         )
         .with_prefs(Self::step_prefs(cx))
+        .with_scripts(self.scripts_view())
+        .with_accounts(settings::accounts(cx), settings::default_accounts(cx))
+        .with_account_ask(self.pending_start.as_ref().and_then(|pending| {
+            let machine = self.snapshot.machine(&pending.machine)?;
+            pending.asking(&machine.name)
+        }))
         .with_update_ready(self.ready_update_version())
         .with_dens(self.dens(cx).0, self.dens(cx).1)
         .with_installed(self.installed_agents())
@@ -1226,6 +1323,8 @@ impl Shell {
                 .collect(),
         )
         .with_live(self.live_infos(cx), self.here_live())
+        .with_checkouts(self.snapshot.statuses.clone(), self.running_per_worktree())
+        .with_clock(self.now(), super::shelf::local_offset())
         .with_lion(self.den_lion_info(cx))
         .with_pride(self.den_pride_info(cx))
         .with_files(self.file_info(), self.unsaved_files())
@@ -1618,23 +1717,42 @@ impl Shell {
     /// Pins or unpins the session under the cursor. Pinning puts it on top
     /// of its list; unpinning sends it back to its place by recency. The
     /// other pins of the list stay, in their order.
-    pub(super) fn pin_session_here(&mut self, pinned: bool) {
+    pub(super) fn pin_session_here(&mut self, pinned: bool, cx: &mut Context<Self>) {
         let Some(Order::Session(session, SessionScope::Machine(machine))) = self.order_here()
         else {
             self.engine
                 .report(crate::engine::StatusKind::Info, "Select a session first.");
             return;
         };
-        self.pin_session(session, machine, pinned);
+        self.pin_session(session, machine, pinned, cx);
     }
 
     /// Pins or unpins `session` among the pinned sessions of `machine`.
-    pub(super) fn pin_session(&mut self, session: SessionId, machine: MachineId, pinned: bool) {
+    pub(super) fn pin_session(
+        &mut self,
+        session: SessionId,
+        machine: MachineId,
+        pinned: bool,
+        cx: &mut Context<Self>,
+    ) {
         let rest: Vec<SessionId> = self
             .pinned_ids(&machine)
             .into_iter()
             .filter(|id| id != &session)
             .collect();
+        // Unpinning can be undone: the section as it was is kept for the
+        // banner.
+        // Only a session that was pinned has anything to take back.
+        if !pinned && self.pinned_ids(&machine).contains(&session) {
+            let order = self.pinned_ids(&machine);
+            let title = self
+                .snapshot
+                .sessions
+                .iter()
+                .find(|stored| stored.id == session)
+                .map_or_else(|| "the session".to_owned(), |stored| stored.title.clone());
+            self.offer_unpin_undo(machine.clone(), order, &title, cx);
+        }
         let (next, done) = if pinned {
             (
                 std::iter::once(session).chain(rest).collect(),
@@ -1789,6 +1907,32 @@ impl Shell {
         self.open_session(session, None, cx);
     }
 
+    /// How many live sessions run in each worktree's folder, for the cleanup:
+    /// the same sessions the worktree's screen lists as running.
+    fn running_per_worktree(&self) -> std::collections::HashMap<WorktreeId, usize> {
+        self.snapshot
+            .projects
+            .iter()
+            .flat_map(|entry| entry.worktrees.iter())
+            .filter_map(|worktree| {
+                let running = self
+                    .placement
+                    .live_of_worktree(&worktree.id)
+                    .iter()
+                    .filter(|place| {
+                        let entry = &self.placement.live[**place];
+                        let merged = entry
+                            .history
+                            .as_ref()
+                            .is_some_and(|history| self.placement.merged.contains(history));
+                        !merged && self.live.get(entry.id).is_some()
+                    })
+                    .count();
+                (running > 0).then(|| (worktree.id.clone(), running))
+            })
+            .collect()
+    }
+
     fn live_infos(&self, cx: &App) -> Vec<LiveInfo> {
         self.live
             .all()
@@ -1796,6 +1940,7 @@ impl Shell {
             .map(|session| LiveInfo {
                 id: session.id,
                 label: session.label(),
+                keeps: session.view.read(cx).terminal().is_held(),
                 // Closing a session ends its tabs' programs too.
                 busy: session.busy(cx)
                     || (self.workspaces.lead_of(session.id) == Some(session.id)
@@ -1847,7 +1992,8 @@ impl Shell {
                 .live
                 .get(*id)
                 .map(|session| session.machine.clone())
-                .or_else(|| self.files.get(id).map(|doc| doc.machine.clone())),
+                .or_else(|| self.files.get(id).map(|doc| doc.machine.clone()))
+                .or_else(|| self.changes.get(id).map(|view| view.target.machine.clone())),
             Main::Empty | Main::Den => None,
         };
         let found = if self.pane == Pane::Sidebar {
@@ -1883,6 +2029,7 @@ impl Shell {
                 Kind::Live(entry) => Some((row.machine.clone(), None, entry.cwd.clone())),
                 Kind::Machine(_)
                 | Kind::Pinned { .. }
+                | Kind::Shelf { .. }
                 | Kind::Unsorted { .. }
                 | Kind::More { .. }
                 | Kind::Open
@@ -1914,9 +2061,14 @@ impl Shell {
                     transcript.session.project_id.clone(),
                     transcript.session.cwd.clone(),
                 )),
-                Main::Live(id) => match self.files.get(id) {
-                    Some(doc) => Some((doc.machine.clone(), None, doc.folder.clone())),
-                    None => {
+                Main::Live(id) => match (self.files.get(id), self.changes.get(id)) {
+                    (Some(doc), _) => Some((doc.machine.clone(), None, doc.folder.clone())),
+                    (None, Some(view)) => Some((
+                        view.target.machine.clone(),
+                        Some(view.target.project.clone()),
+                        view.target.path.clone(),
+                    )),
+                    (None, None) => {
                         let session = self.live.get(*id)?;
                         Some((session.machine.clone(), None, session.cwd.clone()))
                     }
@@ -2055,6 +2207,7 @@ impl Shell {
             Kind::Machine(_)
             | Kind::Project { .. }
             | Kind::Pinned { .. }
+            | Kind::Shelf { .. }
             | Kind::Unsorted { .. }
             | Kind::Folder { .. } => {
                 self.toggle(index);
@@ -2194,6 +2347,91 @@ impl Shell {
                     // The job was dropped before it finished: nothing to say.
                     Err(_) => {}
                 }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Removes the worktrees the cleanup ticked, one after the other, in the
+    /// background. Each goes as `git worktree remove` takes it: a worktree git
+    /// refuses is kept and named in the status line, never forced. The
+    /// sessions in the ones removed close and their history is forgotten, as
+    /// for a single removal. While a batch runs another is refused with a
+    /// line saying so, so the first one always reaches its end.
+    pub(super) fn remove_worktrees(
+        &mut self,
+        list: Vec<(ProjectId, WorktreeId)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.merged_busy {
+            self.engine
+                .report(StatusKind::Error, super::steps::REMOVAL_RUNNING);
+            return;
+        }
+        self.merged_busy = true;
+        // Where each one is, while the store still knows: once git has
+        // removed it there is no row to read the folder from.
+        let targets: Vec<(String, Option<(MachineId, String)>)> = list
+            .iter()
+            .map(|(project, worktree)| {
+                let found = self.snapshot.project(project).and_then(|entry| {
+                    entry
+                        .worktrees
+                        .iter()
+                        .find(|candidate| &candidate.id == worktree)
+                        .map(|found| (entry.project.machine_id.clone(), found.clone()))
+                });
+                match found {
+                    Some((machine, found)) => (
+                        found.branch.clone().unwrap_or_else(|| found.path.clone()),
+                        Some((machine, found.path)),
+                    ),
+                    None => ("a worktree".to_owned(), None),
+                }
+            })
+            .collect();
+        let engine = self.engine.clone();
+        self.removing_merged = Some(cx.spawn_in(window, async move |this, cx| {
+            let mut removed = 0;
+            let mut folders = Vec::new();
+            let mut kept = Vec::new();
+            // One at a time: each removal is a git command on the same
+            // repository, and starting them together would race.
+            for ((project, worktree), (name, folder)) in list.into_iter().zip(targets) {
+                match engine.remove_worktree(project, worktree, false).await {
+                    Ok(Ok(Removal::Removed(_))) => {
+                        removed += 1;
+                        folders.push(folder);
+                    }
+                    Ok(Ok(Removal::NeedsForce)) => {
+                        kept.push(format!("{name} (git refused it: it has uncommitted files)"));
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "could not remove a merged worktree");
+                        kept.push(format!("{name} ({error})"));
+                    }
+                    // The job was dropped before it finished: nothing to say.
+                    Err(_) => {}
+                }
+            }
+            this.update_in(cx, |this, window, cx| {
+                this.merged_busy = false;
+                for (machine, path) in folders.into_iter().flatten() {
+                    this.close_live_in(&machine, &path, window, cx);
+                    // Its folder is gone: so are the sessions of the history
+                    // that ran inside it, not left dimmed.
+                    let gone = this.history_in(&machine, &path);
+                    this.engine.submit(Op::ForgetSessions(gone));
+                }
+                let kind = if kept.is_empty() {
+                    StatusKind::Info
+                } else {
+                    StatusKind::Error
+                };
+                this.engine
+                    .report(kind, super::steps::removal_words(removed, &kept));
                 cx.notify();
             })
             .ok();
@@ -2421,6 +2659,9 @@ impl Shell {
         if self.overlay == Overlay::Restore && self.restore_key(stroke, window, cx) {
             return true;
         }
+        if self.overlay == Overlay::Trust && self.trust_key(stroke, window, cx) {
+            return true;
+        }
         if self.overlay == Overlay::Usage && self.usage_key(stroke, window, cx) {
             return true;
         }
@@ -2430,6 +2671,16 @@ impl Shell {
             && self.pane == Pane::Main
             && self.den_open()
             && self.den_key(stroke, window, cx)
+        {
+            return true;
+        }
+        // The changes tab has its own keys while it has the keyboard and no
+        // field of it does.
+        if self.overlay == Overlay::None
+            && self.pane == Pane::Main
+            && self.focused_changes().is_some()
+            && !self.changes_typing(window, cx)
+            && self.changes_key(stroke, cx)
         {
             return true;
         }
@@ -2462,7 +2713,8 @@ impl Shell {
                 | Overlay::NewWorktree
         ) || filtering
             || finding
-            || self.file_has_keyboard();
+            || self.file_has_keyboard()
+            || self.changes_typing(window, cx);
         if self.overlay == Overlay::Palette && self.palette_key(stroke, window, cx) {
             return true;
         }
@@ -2475,6 +2727,11 @@ impl Shell {
             file: self.file_has_keyboard(),
         };
         let Some(command) = keys::resolve(stroke, context) else {
+            // A script of the project in view may have the chord; a command
+            // of the registry has always had its say first.
+            if self.run_script_key(stroke, window, cx) {
+                return true;
+            }
             // Every key that is not Leon's goes to the terminal that has the
             // keyboard; plain text reaches it through the text input path.
             return terminal && !finding && self.terminal_key(stroke, cx);
@@ -2554,7 +2811,7 @@ impl Shell {
                 }
             }
             C::Down | C::Up | C::Top | C::Bottom | C::PageDown | C::PageUp => {
-                self.move_cursor(command, cx)
+                self.move_cursor(command, window, cx)
             }
             C::Expand => {
                 if self.overlay == Overlay::None && self.pane == Pane::Sidebar {
@@ -2575,10 +2832,16 @@ impl Shell {
                 let machine = self.current_machine();
                 self.open_project_on(&machine, window, cx);
             }
-            C::CloneProject | C::NewProject => self.begin_flow(command, window, cx),
+            C::CloneProject | C::NewProject | C::PromptAgents => {
+                self.begin_flow(command, window, cx)
+            }
             C::NewWorktree => self.open_new_worktree(window, cx),
+            C::RunScript => self.begin_scripts(window, cx),
             C::OpenShell => self.open_shell_here(window, cx),
             C::OpenFile => self.begin_flow(command, window, cx),
+            C::OpenChanges => self.open_changes_here(window, cx),
+            C::PushBranch => self.push_here(window, cx),
+            C::ShipChanges => self.ship_here(window, cx),
             C::SaveFile => self.save_file_here(window, cx),
             C::CloseFile => self.close_file_here(window, cx),
             C::TogglePreview => self.toggle_preview(window, cx),
@@ -2588,6 +2851,11 @@ impl Shell {
             C::FindInFile => self.find_in_file(false, window, cx),
             C::ReplaceInFile => self.find_in_file(true, window, cx),
             C::CloseSession if self.focused_file().is_some() => self.close_file_here(window, cx),
+            C::CloseSession if self.focused_changes().is_some() => {
+                if let Some(id) = self.focused_changes() {
+                    self.close_changes(id, window, cx);
+                }
+            }
             C::ContextMenu => self.open_menu_here(window, cx),
             C::Rename
             | C::RemoveMachine
@@ -2598,8 +2866,12 @@ impl Shell {
             | C::TakeOver => self.begin_flow(command, window, cx),
             C::MoveRowUp => self.move_row_here(-1),
             C::MoveRowDown => self.move_row_here(1),
-            C::PinSession => self.pin_session_here(true),
-            C::UnpinSession => self.pin_session_here(false),
+            C::SettleSession => self.settle_here(cx),
+            C::SnoozeSession => self.begin_flow(command, window, cx),
+            C::BringBackSession => self.bring_back_here(cx),
+            C::Undo => self.undo_last(window, cx),
+            C::PinSession => self.pin_session_here(true, cx),
+            C::UnpinSession => self.pin_session_here(false, cx),
             C::RevealTerminal => self.reveal_terminal_here(cx),
             C::CopyPath => self.copy_path_here(cx),
             C::CopyBranch => self.copy_branch_here(cx),
@@ -2632,18 +2904,22 @@ impl Shell {
             }
             C::CloseSession if self.dormant_here().is_some() => {
                 if let Some(id) = self.dormant_here() {
-                    self.close_dormant(id);
+                    self.close_dormant_here(id, cx);
                     cx.notify();
                 }
             }
             C::NewSession
             | C::AddAgent
             | C::RemoveAgent
+            | C::AddAccount
+            | C::RenameAccount
+            | C::RemoveAccount
             | C::CloseSession
             | C::SleepSession
             | C::AddProject
             | C::RemoveProject
             | C::RemoveWorktree
+            | C::RemoveMergedWorktrees
             | C::SetAppearance
             | C::ChooseTheme
             | C::SetInterfaceSize => self.begin_flow(command, window, cx),
@@ -2706,6 +2982,7 @@ impl Shell {
             C::SaveOutput => self.save_terminal(false, cx),
             C::SaveOutputAnsi => self.save_terminal(true, cx),
             C::Quit | C::CloseWindow => self.request_quit(window, cx),
+            C::QuitAndEnd => self.begin_flow(Command::QuitAndEnd, window, cx),
             C::OpenSettingsFile => self.open_settings_file(cx),
             C::RevealSettingsFolder => self.reveal_settings_folder(cx),
             C::About => {
@@ -2758,6 +3035,7 @@ impl Shell {
                 | Overlay::Notes
                 | Overlay::History
                 | Overlay::Restore
+                | Overlay::Trust
                 | Overlay::Problems
                 | Overlay::Connect
                 | Overlay::Usage
@@ -2812,6 +3090,7 @@ impl Shell {
                 self.new_worktree_ui = None;
                 self.focus.focus(window, cx);
             }
+            Overlay::Trust => self.answer_trust(super::scripts::Answer::Cancel, window, cx),
             Overlay::None => {}
         }
     }
@@ -2823,7 +3102,7 @@ impl Shell {
 
     /// Moves the cursor of the pane that has the keyboard (or scrolls the
     /// sheet, while it is open).
-    fn move_cursor(&mut self, command: Command, _cx: &mut Context<Self>) {
+    fn move_cursor(&mut self, command: Command, window: &mut Window, _cx: &mut Context<Self>) {
         use Command as C;
         if matches!(self.overlay, Overlay::Shortcuts | Overlay::Problems) {
             let page = (self.viewport.height.as_f32() * 0.6).max(120.);
@@ -2903,6 +3182,20 @@ impl Shell {
                 };
                 self.home_step(by, _cx);
             }
+            Pane::Main if self.focused_changes().is_some() => {
+                let delta = match command {
+                    C::Down => 1,
+                    C::Up => -1,
+                    C::PageDown => 8,
+                    C::PageUp => -8,
+                    C::Top => i64::MIN / 2,
+                    C::Bottom => i64::MAX / 2,
+                    _ => 0,
+                };
+                if delta != 0 {
+                    self.changes_move(delta, window, _cx);
+                }
+            }
             Pane::Main => {
                 if let Main::Session(transcript) = &self.main {
                     let page = px((self.viewport.height.as_f32() * 0.7).max(120.));
@@ -2962,6 +3255,9 @@ impl Shell {
                     }
                     None => self.resume_session(session, window, cx),
                 }
+            }
+            (Pane::Main, Main::Live(id)) if self.changes.contains_key(id) => {
+                self.changes_open_selected(window, cx)
             }
             (Pane::Main, _) => {}
         }
@@ -3257,12 +3553,13 @@ impl Shell {
     // ----- quitting ------------------------------------------------------------------------------
 
     /// How many live sessions have a program running that quitting would end
-    /// (or may: over SSH nothing can be told).
+    /// (or may: over SSH nothing can be told). A program the keeper of durable
+    /// sessions holds keeps running through a quit, so it is not counted.
     pub(super) fn busy_sessions(&self, cx: &App) -> usize {
         self.live
             .all()
             .iter()
-            .filter(|session| session.busy(cx))
+            .filter(|session| session.busy(cx) && !session.view.read(cx).terminal().is_held())
             .count()
     }
 
@@ -3287,9 +3584,9 @@ impl Shell {
         false
     }
 
-    /// Hangs every terminal up (those on other computers are let go of: their
-    /// programs keep running there), saves what is kept, and ends the
-    /// application.
+    /// Hangs every terminal up (those on other computers, and those the keeper
+    /// holds, are let go of: their programs keep running), saves what is kept,
+    /// and ends the application.
     pub(super) fn quit_now(&mut self, cx: &mut Context<Self>) {
         // A ready update is put in place on the way out when the settings
         // say so and nothing is running: the next start is the new version.
@@ -3319,15 +3616,36 @@ impl Shell {
         for id in self.live.ids() {
             if let Some(session) = self.live.get(id) {
                 let terminal = session.view.read(cx).terminal();
-                if terminal.is_remote() {
-                    // The program on the other computer keeps running; it can
-                    // be attached to again.
+                if self.fate_of(session, cx) == super::keeping::Fate::Detach {
+                    // The program keeps running where it runs (the other
+                    // computer, or under the keeper) and can be attached to
+                    // again.
                     terminal.detach();
                 } else {
                     terminal.kill();
                 }
             }
         }
+        // What the keeper has been told must have reached it before this
+        // process ends. Ending everything also asks it to hang up what this
+        // window holds and to confirm that it did; a hang-up that cannot be
+        // confirmed is said, since a program that survives it comes back as
+        // an unknown running session at the next start.
+        if let Some(durable) = &self.options.durable {
+            let confirmed = if self.leaving() == super::keeping::Leaving::EndAll {
+                durable.end_all()
+            } else {
+                durable.settle()
+            };
+            if !confirmed {
+                let note = "The keeper did not confirm in time that it was told to end the closed sessions; some may still be running, and will be listed at the next start.";
+                tracing::warn!("{note}");
+                self.engine.report(StatusKind::Error, note);
+            }
+        }
+        // A closed session whose banner is still up is closed for good, and
+        // removed from the history now: nothing runs after this.
+        self.settle_undo_before_quit();
         // Text not saved is kept for the next start, and so is what is open.
         self.flush_drafts(cx);
         self.flush_open_files(cx);
@@ -3395,10 +3713,11 @@ impl Shell {
                 let now = cx.background_executor().now();
                 let before = this.banners.len();
                 this.banners.retain(|banner| banner.until > now);
-                if this.banners.len() != before {
+                let undone = this.expire_undo(now);
+                if this.banners.len() != before || undone {
                     cx.notify();
                 }
-                let alive = !this.banners.is_empty();
+                let alive = !this.banners.is_empty() || this.shelves.undo.is_some();
                 if !alive {
                     // Dropping the handle ends the task after this turn.
                     this.banner_ticker = None;
@@ -3418,14 +3737,62 @@ impl Shell {
         colours: &Colours,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
-        if self.banners.is_empty() {
+        let offer = self
+            .merged_offer
+            .as_ref()
+            .map(|labels| self.render_merged_offer(labels, colours, cx));
+        if self.banners.is_empty() && offer.is_none() && self.shelves.undo.is_none() {
             return None;
         }
+        let undo_card = self.shelves.undo.as_ref().map(|pending| {
+            div()
+                .id("undo-banner")
+                .debug_selector(|| "undo-banner".into())
+                .w(px(320.))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .rounded(metrics::RADIUS())
+                .border_1()
+                .border_color(colours.elevated_border)
+                .bg(colours.surface)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(metrics::TEXT_SMALL())
+                        .text_color(colours.text)
+                        .child(pending.text.clone()),
+                )
+                .child(
+                    div()
+                        .id("undo-button")
+                        .debug_selector(|| "undo-button".into())
+                        .flex_none()
+                        .px_2()
+                        .rounded(metrics::RADIUS())
+                        .cursor_pointer()
+                        .font_family(theme::fonts::mono())
+                        .font_features(theme::fonts::mono_features())
+                        .text_size(metrics::TEXT_LABEL())
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colours.signal)
+                        .hover(move |style| style.bg(colours.surface_2))
+                        .child("UNDO")
+                        .on_click(cx.listener(|this, _, window, cx| this.undo_last(window, cx))),
+                )
+                .children(Self::undo_keys().map(|text| super::widgets::key_cap(text, colours)))
+        });
         let cards = self.banners.iter().rev().map(|banner| {
             let id = banner.id;
             let session = banner.note.session;
             let (marker, label) = match banner.note.kind {
                 notify::Kind::Waiting => (colours.warning, "WAIT"),
+                notify::Kind::TurnOver => (colours.info, "READY"),
+                notify::Kind::NeedsAnswer => (colours.warning, "ASKS"),
                 notify::Kind::Finished => (colours.success, "DONE"),
                 notify::Kind::Failed => (colours.error, "FAIL"),
             };
@@ -3521,8 +3888,88 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .children(cards),
+                .children(offer)
+                .children(cards)
+                .children(undo_card),
         )
+    }
+
+    /// The banner that offers the cleanup once a worktree's pull request was
+    /// seen merged. A click opens "Remove merged worktrees…"; the cross
+    /// dismisses it. Showing it removes nothing.
+    fn render_merged_offer(
+        &self,
+        labels: &[String],
+        colours: &Colours,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        div()
+            .id("merged-offer")
+            .debug_selector(|| "merged-offer".into())
+            .w(px(320.))
+            .flex()
+            .flex_row()
+            .rounded(metrics::RADIUS())
+            .border_1()
+            .border_color(colours.elevated_border)
+            .bg(colours.surface)
+            .overflow_hidden()
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.merged_offer = None;
+                this.begin_flow(Command::RemoveMergedWorktrees, window, cx);
+                cx.notify();
+            }))
+            .child(div().w(px(3.)).flex_none().bg(colours.success))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .font_family(theme::fonts::mono())
+                            .font_features(theme::fonts::mono_features())
+                            .text_size(metrics::TEXT_LABEL())
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(colours.success)
+                            .child("MERGED"),
+                    )
+                    .child(
+                        div()
+                            .text_size(metrics::TEXT_SMALL())
+                            .text_color(colours.text)
+                            .child(super::steps::merged_offer_words(labels)),
+                    )
+                    .child(
+                        div()
+                            .text_size(metrics::TEXT_SMALL())
+                            .text_color(colours.text_muted)
+                            .child("Click to review the merged worktrees. Nothing is removed unless you tick it."),
+                    ),
+            )
+            .child(
+                div()
+                    .id("merged-offer-dismiss")
+                    .debug_selector(|| "merged-offer-dismiss".into())
+                    .px_2()
+                    .py_2()
+                    .flex_none()
+                    .cursor_pointer()
+                    .text_size(metrics::TEXT_SMALL())
+                    .text_color(colours.text_faint)
+                    .hover(move |style| style.text_color(colours.text))
+                    .child("✕")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.merged_offer = None;
+                        cx.stop_propagation();
+                        cx.notify();
+                    })),
+            )
     }
 
     fn render_overlay(&self, colours: &Colours, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
@@ -3542,6 +3989,7 @@ impl Shell {
             Overlay::Notes => self.render_notes(colours, cx).into_any_element(),
             Overlay::History => self.render_history_report(colours, cx).into_any_element(),
             Overlay::Restore => self.render_restore(colours, cx).into_any_element(),
+            Overlay::Trust => self.render_trust(colours, cx).into_any_element(),
         };
         let top = match self.overlay {
             Overlay::Palette => self.palette_top(),
@@ -3582,6 +4030,8 @@ impl Render for Shell {
         // What is open is remembered after every change.
         self.watch_workspace(cx);
         self.watch_open_files(cx);
+        self.watch_project_file();
+        self.show_queued_trust(window, cx);
         // Terminals wear the theme and the interface size in use.
         self.sync_settings(cx);
         self.sync_editor_prefs(window, cx);
@@ -3683,6 +4133,15 @@ impl Render for Shell {
 
 /// `rows` (a tree with every node open) with the nodes in `folded` closed: their
 /// rows below go, and they show the chevron of a closed node.
+/// Every worktree of every project of a snapshot, copied out.
+fn worktrees_of(snapshot: &Snapshot) -> Vec<leon_core::Worktree> {
+    snapshot
+        .projects
+        .iter()
+        .flat_map(|entry| entry.worktrees.iter().cloned())
+        .collect()
+}
+
 fn fold_rows(rows: Vec<Row>, folded: &std::collections::HashSet<String>) -> Vec<Row> {
     let mut hidden_below: Option<u8> = None;
     let mut kept = Vec::with_capacity(rows.len());

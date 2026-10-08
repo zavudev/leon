@@ -541,6 +541,8 @@ fn a_session_running_in_another_terminal_is_not_resumed_a_second_time_by_a_resto
             name: None,
             title: None,
             started_at: 0,
+            account: None,
+            keeper: None,
         }],
     };
     h.store.save_workspace(Slot::Previous, &state).unwrap();

@@ -223,6 +223,7 @@ pub fn resume_lines(
     let launch = Launch::Agent {
         kind: agent,
         resume: Some(session.external_id.clone()),
+        account: None,
     };
     let plan = launch::plan(
         &machine,
@@ -811,6 +812,7 @@ mod tests {
             agent: AgentId::CODEX,
             machine: "local".into(),
             account_label: Some("secret-label@example.com".into()),
+            account: None,
             plan: Some("plus".into()),
             source: Some(Source::Local),
             observed_at: Some(NOW - 180),

@@ -141,6 +141,14 @@ fn same_folder(a: &str, b: &str) -> bool {
 /// that was scanned). `leon_pid` is this Leon's pid when the machine is this
 /// computer: what runs below it is Leon's own.
 pub fn resolve(scan: &Scan, sessions: &[Session], leon_pid: Option<u32>) -> Vec<Found> {
+    let ours: Vec<u32> = leon_pid.into_iter().collect();
+    resolve_with(scan, sessions, &ours)
+}
+
+/// [`resolve`] for the processes that are this Leon's: its own pid and, with
+/// durable sessions, the keeper's. An agent below any of them is Leon's own
+/// (`leon_child`), never another Leon's and never offered to be taken over.
+pub fn resolve_with(scan: &Scan, sessions: &[Session], ours: &[u32]) -> Vec<Found> {
     let by_id = |agent: AgentId, id: &str| {
         sessions
             .iter()
@@ -158,12 +166,14 @@ pub fn resolve(scan: &Scan, sessions: &[Session], leon_pid: Option<u32>) -> Vec<
             external_id: None,
             session: None,
             link: None,
-            leon_child: leon_pid.is_some_and(|root| scan.descends_from(process.pid, root)),
+            leon_child: ours
+                .iter()
+                .any(|root| scan.descends_from(process.pid, *root)),
             ancestors: scan.ancestors(process.pid),
             app: scan.owning_app(process.pid),
             holder: scan
                 .ancestor_named(process.pid, &["leon", "leon-host"])
-                .filter(|pid| Some(*pid) != leon_pid)
+                .filter(|pid| !ours.contains(pid))
                 .map_or(Holder::Terminal, Holder::OtherLeon),
         })
         .collect();
@@ -333,6 +343,7 @@ mod tests {
             updated_at: Utc.timestamp_opt(updated, 0).unwrap(),
             message_count: 3,
             sort_order: None,
+            account: None,
         }
     }
 
@@ -503,6 +514,38 @@ mod tests {
         // A second Leon's session is elsewhere for this one.
         let away: Vec<u32> = foreign(&found, true, &[]).iter().map(|f| f.pid).collect();
         assert_eq!(away, [201, 301]);
+    }
+
+    #[test]
+    fn what_the_keeper_holds_is_this_leons_own_and_is_neither_elsewhere_nor_another_leons() {
+        // The window is 100; the keeper it started is 500, a `leon` of its own
+        // in the process tree, and the agent below its shell is 502.
+        let scan = scan(&[
+            "T 100 1 leon",
+            "T 500 1 leon",
+            "T 501 500 /bin/zsh",
+            "T 502 501 claude",
+            "T 600 1 leon",
+            "T 601 600 claude",
+            "A 502 501 pts/1 00:30 claude",
+            "A 601 600 pts/2 00:30 claude",
+        ]);
+        // Without telling it about the keeper, its agent looks like another
+        // Leon's.
+        let blind = resolve(&scan, &[], Some(100));
+        assert_eq!(blind[0].holder, Holder::OtherLeon(500));
+        assert!(!blind[0].leon_child);
+        // Told about it, the agent under the keeper is ours; a stranger's
+        // Leon is still another's.
+        let found = resolve_with(&scan, &[], &[100, 500]);
+        assert!(found[0].leon_child);
+        assert_eq!(found[0].holder, Holder::Terminal);
+        assert!(!found[1].leon_child);
+        assert_eq!(found[1].holder, Holder::OtherLeon(600));
+        // So only the stranger's is elsewhere, and so only it is offered
+        // to be taken over.
+        let away: Vec<u32> = foreign(&found, true, &[]).iter().map(|f| f.pid).collect();
+        assert_eq!(away, [601]);
     }
 
     #[test]

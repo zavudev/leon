@@ -40,10 +40,30 @@ impl SpawnSpec {
 }
 
 /// The command to start: the spec's program, arguments and directory, its
-/// environment, and `TERM` / `COLORTERM`. A variable the spec sets wins over
-/// these two.
+/// environment on top of this process's, and `TERM` / `COLORTERM`. A variable
+/// the spec sets wins over these two.
 pub fn command_builder(spec: &SpawnSpec) -> CommandBuilder {
+    command_builder_with(spec, false)
+}
+
+/// [`command_builder`], with the choice of the environment: `own_environment`
+/// makes the spec's `env` the whole environment of the child (plus `TERM` and
+/// `COLORTERM`, and `SHELL` when the spec has none), instead of this
+/// process's with the spec's on top. A long-lived process that starts
+/// terminals for someone else (the keeper of durable sessions) must not leak
+/// its own, stale environment into them: the one who asks sends the
+/// environment the terminal is to have.
+pub fn command_builder_with(spec: &SpawnSpec, own_environment: bool) -> CommandBuilder {
     let mut command = CommandBuilder::new(&spec.program);
+    if own_environment {
+        // `SHELL` is the one variable the builder invents when it is unset;
+        // keep that so a terminal still knows its shell.
+        let shell = command.get_env("SHELL").map(std::ffi::OsStr::to_owned);
+        command.env_clear();
+        if let Some(shell) = shell {
+            command.env("SHELL", shell);
+        }
+    }
     command.args(&spec.args);
     command.env("TERM", TERM);
     command.env("COLORTERM", COLORTERM);
@@ -95,6 +115,33 @@ mod tests {
         let command = command_builder(&spec);
         assert_eq!(command.get_env("FOO"), Some(OsStr::new("bar")));
         assert_eq!(command.get_env("TERM"), Some(OsStr::new("screen")));
+    }
+
+    // An own environment is the keeper's, and `SHELL` is a unix variable.
+    #[cfg(unix)]
+    #[test]
+    fn an_own_environment_replaces_ours_and_keeps_only_what_a_terminal_needs() {
+        // `PATH` is in every test process's environment.
+        let inherited = command_builder(&SpawnSpec::new("sh"));
+        assert!(inherited.get_env("PATH").is_some());
+        let mut spec = spec();
+        spec.env = vec![("ONLY".into(), "this".into())];
+        let own = command_builder_with(&spec, true);
+        assert_eq!(own.get_env("ONLY"), Some(OsStr::new("this")));
+        assert_eq!(
+            own.get_env("PATH"),
+            None,
+            "the keeper's own PATH is not leaked"
+        );
+        assert_eq!(own.get_env("TERM"), Some(OsStr::new("xterm-256color")));
+        assert!(
+            own.get_env("SHELL").is_some(),
+            "a terminal still knows its shell"
+        );
+        // A shell the spec names wins over the invented one.
+        spec.env.push(("SHELL".into(), "/bin/zsh".into()));
+        let named = command_builder_with(&spec, true);
+        assert_eq!(named.get_env("SHELL"), Some(OsStr::new("/bin/zsh")));
     }
 
     #[test]

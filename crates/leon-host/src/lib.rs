@@ -32,6 +32,8 @@
 pub mod cli;
 pub mod exec;
 mod host;
+#[cfg(unix)]
+pub mod keeper;
 pub mod ptys;
 pub mod ring;
 mod session;

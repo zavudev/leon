@@ -9,10 +9,12 @@
 
 use super::activity::Activity;
 use super::live::LiveState;
+use super::shelf::{self, ShelfKind};
 use super::shell::{Pane, RowDrag, Shell};
 use super::tree::{folder_name, worktree_label, Kind, Row};
 use super::widgets::{
-    activity_light, elsewhere_mark, focus_rule, key_cap, led, mark, mono, section_label, Lion,
+    activity_light, checkout_colour, elsewhere_mark, focus_rule, key_cap, led, mark, mono,
+    section_label, Lion,
 };
 use crate::elsewhere::Holder;
 use crate::engine::MachineState;
@@ -719,11 +721,13 @@ impl Shell {
                                 .text_color(colours.text_faint),
                         )
                     })
+                    .children(self.checkout_mark(index, worktree, colours, cx))
                     .children(activity_word(activity).map(|word| {
                         mono(word)
                             .debug_selector(move || format!("tree-activity-word-{index}"))
                             .text_color(match activity {
                                 Activity::Failed => colours.error,
+                                Activity::TurnOver => colours.info,
                                 _ => colours.warning,
                             })
                     }))
@@ -732,7 +736,16 @@ impl Shell {
             }
             Kind::Session(session) => {
                 let base = self.draggable_row(row, index, base, colours, cx);
-                let name: SharedString = format::agent_name(session.agent).into();
+                let account = session.account.clone();
+                let name: SharedString = match &account {
+                    Some(account) => format!(
+                        "{} ({})",
+                        format::agent_name(session.agent),
+                        leon_core::account::name_of(account)
+                    )
+                    .into(),
+                    None => format::agent_name(session.agent).into(),
+                };
                 let pinned = session.sort_order.is_some();
                 // A session with a terminal of its own folder is that
                 // terminal's row: it shows the terminal's state, not its age.
@@ -762,6 +775,15 @@ impl Shell {
                     Tone::Asleep => colours.text_muted,
                     Tone::Faded => colours.text_faint,
                 };
+                // A snoozed session says when it comes back.
+                let back = match self.shelves.shelf.get(&session.id) {
+                    Some(leon_core::Shelf::Snoozed(until))
+                        if self.placement.shelved.contains(&session.id) =>
+                    {
+                        Some(*until)
+                    }
+                    _ => None,
+                };
                 let name: SharedString = match (&held, tone) {
                     (Some(found), _) => {
                         format!("{name} · {}", self.holder_tip(found, session)).into()
@@ -769,6 +791,14 @@ impl Shell {
                     (None, Tone::Full) => name,
                     (None, Tone::Asleep) => format!("{name} · asleep").into(),
                     (None, Tone::Faded) => format!("{name} · history").into(),
+                };
+                let name: SharedString = match back {
+                    Some(until) => format!(
+                        "{name} · back {}",
+                        shelf::back_at(until, shelf::local_offset())
+                    )
+                    .into(),
+                    None => name,
                 };
                 base.tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
                     .child(self.pin_mark(index, pinned, colours, cx))
@@ -791,6 +821,12 @@ impl Shell {
                             })
                             .child(session.title.clone()),
                     )
+                    .children(account.as_deref().map(|account| {
+                        mono(format::account_tag(account))
+                            .debug_selector(move || format!("tree-account-{index}"))
+                            .flex_none()
+                            .text_color(colours.text_faint)
+                    }))
                     .when(asleep, |this| {
                         this.child(
                             div()
@@ -839,9 +875,15 @@ impl Shell {
                                 .into_any_element();
                             state_label.into_iter().chain([led]).collect()
                         }
-                        None => vec![mono(format::age(self.now(), session.updated_at))
-                            .text_color(colours.text_faint)
-                            .into_any_element()],
+                        None => vec![mono(match back {
+                            Some(until) => {
+                                format!("BACK {}", shelf::back_in(until, self.now()).to_uppercase())
+                            }
+                            None => format::age(self.now(), session.updated_at),
+                        })
+                        .debug_selector(move || format!("tree-age-{index}"))
+                        .text_color(colours.text_faint)
+                        .into_any_element()],
                     })
                     .into_any_element()
             }
@@ -854,7 +896,16 @@ impl Shell {
                     Some(_) => entry.agent.map_or("Shell", format::agent_name).to_owned(),
                     None => session.map_or_else(String::new, |session| session.label()),
                 };
-                let name: SharedString = entry.agent.map_or("Shell", format::agent_name).into();
+                let account = entry.account.clone().filter(|_| entry.agent.is_some());
+                let name: SharedString = match &account {
+                    Some(account) => format!(
+                        "{} ({})",
+                        entry.agent.map_or("Shell", format::agent_name),
+                        leon_core::account::name_of(account)
+                    )
+                    .into(),
+                    None => entry.agent.map_or("Shell", format::agent_name).into(),
+                };
                 let lead = match entry.agent {
                     Some(agent) => agent_icon(agent, px(14.), colours).into_any_element(),
                     None => {
@@ -881,6 +932,12 @@ impl Shell {
                     } else {
                         label().font_weight(FontWeight::MEDIUM).child(text)
                     })
+                    .children(account.as_deref().map(|account| {
+                        mono(format::account_tag(account))
+                            .debug_selector(move || format!("tree-account-{index}"))
+                            .flex_none()
+                            .text_color(colours.text_faint)
+                    }))
                     .when(asleep, |this| {
                         this.child(
                             div()
@@ -917,6 +974,19 @@ impl Shell {
                 .child(chevron)
                 .child(icon(IconName::Pin, px(12.), colours.signal))
                 .child(label().child(section_label("Pinned", colours)))
+                .child(count(*sessions))
+                .into_any_element(),
+            Kind::Shelf { kind, sessions } => base
+                .child(chevron)
+                .child(icon(
+                    match kind {
+                        ShelfKind::Snoozed => IconName::AlarmClock,
+                        ShelfKind::Settled => IconName::Archive,
+                    },
+                    px(12.),
+                    colours.text_muted,
+                ))
+                .child(label().child(section_label(kind.title(), colours)))
                 .child(count(*sessions))
                 .into_any_element(),
             Kind::Unsorted { sessions } => base
@@ -1003,7 +1073,7 @@ impl Shell {
                 this.cursor = Some(index);
                 this.pane = Pane::Sidebar;
                 this.focus.focus(window, cx);
-                this.pin_session_here(!pinned);
+                this.pin_session_here(!pinned, cx);
                 cx.notify();
             }))
             .child(
@@ -1191,7 +1261,8 @@ impl Shell {
     /// from GitHub's record or from nowhere, and nothing is claimed for a
     /// worktree nobody could ask about. What the model does not hold (commits
     /// ahead or behind, uncommitted files, an open or draft pull request) is
-    /// not drawn.
+    /// not part of this mark: [`Self::checkout_mark`] draws it at the end of
+    /// the row.
     fn git_mark(
         &self,
         index: usize,
@@ -1226,6 +1297,43 @@ impl Shell {
                     .child(icon(name, px(13.), colour)),
             )
             .into_any_element()
+    }
+
+    /// The state of a worktree's checkout at the end of its row: the open
+    /// pull request, the changed files and the distance from the upstream, in
+    /// the little room a row has (see [`super::checkout::row_parts`]). Nothing
+    /// when none of it is known, or there is nothing to say; the tooltip tells
+    /// everything known in words.
+    fn checkout_mark(
+        &self,
+        index: usize,
+        worktree: &leon_core::Worktree,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let status = self.snapshot.status(&worktree.id)?;
+        let roomy = crate::settings::get(cx).sidebar_width >= crate::theme::SIDEBAR_ROOMY;
+        let parts = super::checkout::row_parts(status, roomy);
+        if parts.is_empty() {
+            return None;
+        }
+        let tip: SharedString = super::checkout::row_tip(status).unwrap_or_default().into();
+        Some(
+            div()
+                .id(("checkout", index))
+                .debug_selector(move || format!("tree-checkout-{index}"))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .children(
+                    parts.into_iter().map(|part| {
+                        mono(part.text).text_color(checkout_colour(part.tone, colours))
+                    }),
+                )
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                .into_any_element(),
+        )
     }
 
     fn dot(&self, index: usize, activity: Activity, colours: &Palette) -> AnyElement {
@@ -1287,6 +1395,8 @@ impl GitMark {
 pub(super) fn activity_word(activity: Activity) -> Option<&'static str> {
     match activity {
         Activity::Waiting => Some("WAITING"),
+        Activity::TurnOver => Some("READY"),
+        Activity::NeedsYou => Some("ASKS"),
         Activity::Failed => Some("FAILED"),
         _ => None,
     }
@@ -1387,6 +1497,8 @@ mod tests {
     fn only_the_states_that_need_the_person_say_a_word() {
         assert_eq!(activity_word(Activity::Waiting), Some("WAITING"));
         assert_eq!(activity_word(Activity::Failed), Some("FAILED"));
+        assert_eq!(activity_word(Activity::TurnOver), Some("READY"));
+        assert_eq!(activity_word(Activity::NeedsYou), Some("ASKS"));
         for quiet in [Activity::Off, Activity::Idle, Activity::Working] {
             assert_eq!(activity_word(quiet), None);
         }

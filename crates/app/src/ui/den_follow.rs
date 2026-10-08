@@ -81,14 +81,48 @@ struct Tracked {
     subs: HashMap<String, (String, Follower, bool)>,
 }
 
+/// How a [`Followers`] follows: where in a file it starts, and how it looks for
+/// a file it did not find.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Policy {
+    /// Where in a transcript the first poll starts.
+    pub start: Start,
+    /// A transcript that was not found is looked for again at every this-many-th
+    /// poll; zero is every poll. Finding a Codex rollout walks folders.
+    pub retry_after: u32,
+}
+
+impl Default for Policy {
+    /// What the Den reads: everything, and a missing file asked for at every
+    /// poll.
+    fn default() -> Self {
+        Self {
+            start: Start::Beginning,
+            retry_after: 0,
+        }
+    }
+}
+
 /// The transcripts being followed.
 #[derive(Default)]
 pub struct Followers {
     roots: HistoryRoots,
+    policy: Policy,
     tracked: HashMap<u64, Tracked>,
+    /// The sessions whose transcript was not found, with the session each
+    /// asked for and how many polls it skips before the next look.
+    missing: HashMap<u64, (String, u32)>,
 }
 
 impl Followers {
+    /// Followers that read as `policy` says.
+    pub fn new(policy: Policy) -> Self {
+        Self {
+            policy,
+            ..Self::default()
+        }
+    }
+
     /// Where the agents' files are looked for, when the settings move them.
     pub fn set_roots(&mut self, roots: HistoryRoots) {
         if self.roots != roots {
@@ -105,15 +139,27 @@ impl Followers {
 
     fn locate(&self, wanted: &Wanted) -> Option<(PathBuf, Format)> {
         let format = Format::of(wanted.agent)?;
+        // The agent's own folder first, then the folders of the user's
+        // accounts: a session of an account is written in its folder.
         let path = match format {
-            Format::Codex => {
-                find_codex_rollout(self.roots.codex_sessions.as_deref()?, &wanted.session)
-            }
-            _ => find_claude_transcript(
-                self.roots.claude_projects.as_deref()?,
-                &wanted.cwd,
-                &wanted.session,
-            ),
+            Format::Codex => std::iter::once(self.roots.codex_sessions.as_deref())
+                .chain(
+                    self.roots
+                        .accounts
+                        .iter()
+                        .map(|account| account.codex_sessions.as_deref()),
+                )
+                .flatten()
+                .find_map(|root| find_codex_rollout(root, &wanted.session)),
+            _ => std::iter::once(self.roots.claude_projects.as_deref())
+                .chain(
+                    self.roots
+                        .accounts
+                        .iter()
+                        .map(|account| account.claude_projects.as_deref()),
+                )
+                .flatten()
+                .find_map(|root| find_claude_transcript(root, &wanted.cwd, &wanted.session)),
         }?;
         Some((path, format))
     }
@@ -124,6 +170,8 @@ impl Followers {
     /// the window's thread.
     pub fn poll(&mut self, wanted: &[Wanted]) -> Vec<Report> {
         self.tracked
+            .retain(|live, _| wanted.iter().any(|one| one.live == *live));
+        self.missing
             .retain(|live, _| wanted.iter().any(|one| one.live == *live));
         let mut reports = Vec::new();
         for one in wanted {
@@ -136,14 +184,26 @@ impl Followers {
                 self.tracked.remove(&one.live);
             }
             if !self.tracked.contains_key(&one.live) {
+                // Not found a moment ago: not looked for at every poll.
+                if let Some((session, skip)) = self.missing.get_mut(&one.live) {
+                    if *session == one.session && *skip > 0 {
+                        *skip -= 1;
+                        continue;
+                    }
+                }
                 let Some((path, format)) = self.locate(one) else {
+                    if self.policy.retry_after > 0 {
+                        self.missing
+                            .insert(one.live, (one.session.clone(), self.policy.retry_after - 1));
+                    }
                     continue;
                 };
+                self.missing.remove(&one.live);
                 self.tracked.insert(
                     one.live,
                     Tracked {
                         session: one.session.clone(),
-                        follower: Follower::new(&path, format, Start::Beginning),
+                        follower: Follower::new(&path, format, self.policy.start),
                         path,
                         fresh: true,
                         metas: HashMap::new(),
@@ -288,6 +348,7 @@ mod tests {
             claude_projects: Some(projects),
             codex_sessions: None,
             opencode_db: None,
+            accounts: Vec::new(),
         });
         Fixture {
             _dir: dir,
@@ -447,5 +508,68 @@ mod tests {
         let report = f.followers.poll(&[wanted(&[("t-x", Some("aaa111"))])]);
         assert_eq!(report[0].subs[0].agent, "aaa111");
         assert_eq!(report[0].subs[0].tool, "t-x");
+    }
+
+    #[test]
+    fn a_transcript_that_was_not_found_is_looked_for_again_only_every_few_polls() {
+        let mut f = fixture();
+        f.followers = Followers::new(Policy {
+            start: Start::Beginning,
+            retry_after: 3,
+        });
+        f.followers.set_roots(HistoryRoots {
+            claude_projects: Some(f.transcript.parent().unwrap().parent().unwrap().to_owned()),
+            codex_sessions: None,
+            opencode_db: None,
+            accounts: Vec::new(),
+        });
+        assert!(f.followers.poll(&[wanted(&[])]).is_empty(), "not found");
+        append(&f.transcript, &[tool_result("t0")]);
+        // The file exists now, but the next two polls do not look.
+        assert!(f.followers.poll(&[wanted(&[])]).is_empty());
+        assert!(f.followers.poll(&[wanted(&[])]).is_empty());
+        assert_eq!(f.followers.poll(&[wanted(&[])]).len(), 1, "the third looks");
+        // Another session asked for under the same live id is looked for at once.
+        let mut moved = wanted(&[]);
+        moved.session = "ffffffff-0000-4000-8000-000000000009".to_owned();
+        assert!(f.followers.poll(&[moved.clone()]).is_empty());
+        let second = f
+            .transcript
+            .with_file_name(format!("{}.jsonl", moved.session));
+        append(&second, &[tool_result("t0")]);
+        assert!(f.followers.poll(&[moved.clone()]).is_empty(), "skipped");
+        let mut other = moved;
+        other.session = SESSION.to_owned();
+        assert_eq!(
+            f.followers.poll(&[other]).len(),
+            1,
+            "a different session id resets the wait"
+        );
+    }
+
+    #[test]
+    fn the_start_of_a_policy_is_where_a_followed_file_is_first_read() {
+        let mut f = fixture();
+        f.followers = Followers::new(Policy {
+            start: Start::Recent(1),
+            retry_after: 0,
+        });
+        f.followers.set_roots(HistoryRoots {
+            claude_projects: Some(f.transcript.parent().unwrap().parent().unwrap().to_owned()),
+            codex_sessions: None,
+            opencode_db: None,
+            accounts: Vec::new(),
+        });
+        append(
+            &f.transcript,
+            &[
+                assistant_tool("old", "Read", r#"{"file_path":"/work/leon/a.rs"}"#),
+                assistant_tool("new", "Bash", r#"{"command":"ls"}"#),
+            ],
+        );
+        // Only the end of the file is read: the first line is cut off.
+        let report = f.followers.poll(&[wanted(&[])]);
+        assert!(report[0].beats.is_empty(), "{:?}", report[0].beats);
+        assert!(report[0].restarted);
     }
 }

@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::source::{ClaudeFiles, CodexFiles, HistorySource, OpencodeData};
+use crate::source::{ClaudeFiles, CodexFiles, ForAccount, HistorySource, OpencodeData};
 
 /// The locations to import from. An absent entry means "do not import that
 /// agent".
@@ -19,6 +19,69 @@ pub struct HistoryRoots {
     pub codex_sessions: Option<PathBuf>,
     /// The opencode database file.
     pub opencode_db: Option<PathBuf>,
+    /// The folders of the accounts of the agents, beside the agents' own.
+    pub accounts: Vec<AccountRoot>,
+}
+
+/// Where one account of an agent keeps its sessions. Only the agents whose
+/// configuration folder is a verified variable have one (Claude Code and Codex);
+/// an account of any other agent has no history of its own to read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountRoot {
+    /// The id of the account.
+    pub account: String,
+    /// Claude Code's `projects` directory of the account.
+    pub claude_projects: Option<PathBuf>,
+    /// Codex's `sessions` directory of the account.
+    pub codex_sessions: Option<PathBuf>,
+}
+
+/// The folders of the accounts that have one, read for `home` (this computer's
+/// home folder, for the `~` an account's value may start with).
+///
+/// An account whose folder is not an absolute path once `~` is expanded is left
+/// out (a relative path means a different place in every process), and so is
+/// one whose folder is the one the agent already uses by default: its sessions
+/// are imported once, as the agent's own.
+pub fn account_roots(
+    accounts: &[leon_core::Account],
+    home: Option<&Path>,
+    own: &HistoryRoots,
+) -> Vec<AccountRoot> {
+    let home_text = home.map(|home| home.to_string_lossy().into_owned());
+    accounts
+        .iter()
+        .filter_map(|account| {
+            let dir = account.config_dir()?;
+            let dir = PathBuf::from(leon_core::account::expand_home(dir, home_text.as_deref())?);
+            if !dir.is_absolute() {
+                return None;
+            }
+            let mut root = AccountRoot {
+                account: account.id.clone(),
+                claude_projects: None,
+                codex_sessions: None,
+            };
+            match account.agent {
+                leon_core::AgentId::CLAUDE => {
+                    let projects = dir.join("projects");
+                    if own.claude_projects.as_ref() == Some(&projects) {
+                        return None;
+                    }
+                    root.claude_projects = Some(projects);
+                }
+                leon_core::AgentId::CODEX => {
+                    let sessions = dir.join("sessions");
+                    if own.codex_sessions.as_ref() == Some(&sessions) {
+                        return None;
+                    }
+                    root.codex_sessions = Some(sessions);
+                }
+                _ => return None,
+            }
+            Some(root)
+        })
+        .collect()
 }
 
 impl HistoryRoots {
@@ -33,6 +96,20 @@ impl HistoryRoots {
         }
         if let Some(path) = &self.opencode_db {
             sources.push(Box::new(OpencodeData::new(path)));
+        }
+        for account in &self.accounts {
+            if let Some(root) = &account.claude_projects {
+                sources.push(Box::new(ForAccount::new(
+                    Box::new(ClaudeFiles::new(root)),
+                    &account.account,
+                )));
+            }
+            if let Some(root) = &account.codex_sessions {
+                sources.push(Box::new(ForAccount::new(
+                    Box::new(CodexFiles::new(root)),
+                    &account.account,
+                )));
+            }
         }
         sources
     }
@@ -112,6 +189,7 @@ pub fn default_roots_in(home: &Path, variable: impl Fn(&str) -> Option<String>) 
         claude_projects: Some(claude.join("projects")),
         codex_sessions: Some(codex.join("sessions")),
         opencode_db: Some(opencode_db),
+        accounts: Vec::new(),
     }
 }
 
@@ -357,5 +435,90 @@ mod tests {
             .map(|source| source.agent())
             .collect();
         assert_eq!(agents, [AgentId::CODEX, AgentId::OPENCODE]);
+    }
+
+    fn account_of(agent: AgentId, id: &str, variable: &str, value: &str) -> leon_core::Account {
+        leon_core::Account {
+            id: id.into(),
+            agent,
+            name: id.into(),
+            env: vec![(variable.into(), value.into())],
+        }
+    }
+
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn an_accounts_folder_becomes_a_source_of_its_agent_tagged_with_the_account() {
+        let home = Path::new("/home/u");
+        let own = default_roots_in(home, |_| None);
+        let accounts = [
+            account_of(
+                AgentId::CLAUDE,
+                "claude-work",
+                "CLAUDE_CONFIG_DIR",
+                "~/.claude-work",
+            ),
+            account_of(AgentId::CODEX, "codex-lab", "CODEX_HOME", "/data/codex-lab"),
+        ];
+        let found = account_roots(&accounts, Some(home), &own);
+        assert_eq!(
+            found,
+            [
+                AccountRoot {
+                    account: "claude-work".into(),
+                    claude_projects: Some("/home/u/.claude-work/projects".into()),
+                    codex_sessions: None,
+                },
+                AccountRoot {
+                    account: "codex-lab".into(),
+                    claude_projects: None,
+                    codex_sessions: Some("/data/codex-lab/sessions".into()),
+                },
+            ]
+        );
+        let roots = HistoryRoots {
+            accounts: found,
+            ..own
+        };
+        let sources = roots.sources();
+        assert_eq!(sources.len(), 5);
+        let tagged: Vec<(AgentId, Option<&str>)> = sources
+            .iter()
+            .map(|source| (source.agent(), source.account()))
+            .collect();
+        assert_eq!(
+            tagged[3..],
+            [
+                (AgentId::CLAUDE, Some("claude-work")),
+                (AgentId::CODEX, Some("codex-lab"))
+            ]
+        );
+        assert!(tagged[..3].iter().all(|(_, account)| account.is_none()));
+    }
+
+    #[test]
+    fn an_account_without_a_usable_folder_is_left_out() {
+        let home = Path::new("/home/u");
+        let own = default_roots_in(home, |_| None);
+        let none = |accounts: &[leon_core::Account], home: Option<&Path>| {
+            account_roots(accounts, home, &own).is_empty()
+        };
+        // No variable, a relative folder, a `~` that cannot be expanded.
+        let bare = leon_core::Account {
+            env: Vec::new(),
+            ..account_of(AgentId::CLAUDE, "a", "X", "y")
+        };
+        assert!(none(&[bare], Some(home)));
+        let relative = account_of(AgentId::CLAUDE, "b", "CLAUDE_CONFIG_DIR", "work/claude");
+        assert!(none(&[relative], Some(home)));
+        let tilde = account_of(AgentId::CLAUDE, "c", "CLAUDE_CONFIG_DIR", "~/.claude-c");
+        assert!(none(&[tilde], None));
+        // The agent's own folder is not read twice.
+        let same = account_of(AgentId::CODEX, "d", "CODEX_HOME", "/home/u/.codex");
+        assert!(none(&[same], Some(home)));
+        // An agent whose folder variable is not verified has no history here.
+        let other = account_of(AgentId::OPENCODE, "e", "XDG_DATA_HOME", "/data/o");
+        assert!(none(&[other], Some(home)));
     }
 }

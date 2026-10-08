@@ -9,7 +9,9 @@
 //! apart.
 
 use chrono::{DateTime, Utc};
-use leon_core::{AgentId, MachineId, NewMessage, NewSession, Role};
+use std::collections::BTreeMap;
+
+use leon_core::{AgentId, MachineId, NewMessage, NewSession, Role, SessionTokens, TokenCounts};
 
 use crate::normalize::{clip, title_from};
 
@@ -41,6 +43,9 @@ pub struct ParsedSession {
     pub updated_at: DateTime<Utc>,
     /// The transcript, in order.
     pub messages: Vec<NewMessage>,
+    /// What the session used, per model and UTC day, as its transcript counts
+    /// it. Empty when the transcript carries no counts.
+    pub tokens: Vec<SessionTokens>,
     /// How many lines or rows could not be understood and were skipped.
     pub malformed: usize,
 }
@@ -73,6 +78,7 @@ pub(crate) struct SessionBuilder {
     first_user_text: Option<String>,
     messages: Vec<NewMessage>,
     latest: Option<DateTime<Utc>>,
+    counted: Vec<(Option<String>, Option<DateTime<Utc>>, TokenCounts)>,
     malformed: usize,
 }
 
@@ -88,6 +94,7 @@ impl SessionBuilder {
             first_user_text: None,
             messages: Vec::new(),
             latest: None,
+            counted: Vec::new(),
             malformed: 0,
         }
     }
@@ -121,6 +128,22 @@ impl SessionBuilder {
         if let Some(title) = title.map(title_from).filter(|title| !title.is_empty()) {
             self.title = Some(title);
         }
+    }
+
+    /// Records what one model call used. A call without a model is counted
+    /// under the session's model, and one without a time under the time of the
+    /// latest message; both are settled when the session is finished.
+    pub(crate) fn see_tokens(
+        &mut self,
+        model: Option<&str>,
+        at: Option<DateTime<Utc>>,
+        counts: TokenCounts,
+    ) {
+        if counts.is_empty() {
+            return;
+        }
+        let model = model.filter(|model| !model.is_empty()).map(str::to_owned);
+        self.counted.push((model, at, counts));
     }
 
     /// Counts a line or row that could not be understood.
@@ -159,6 +182,7 @@ impl SessionBuilder {
     pub(crate) fn finish(self) -> Option<ParsedSession> {
         let started_at = self.messages.iter().map(|message| message.at).min()?;
         let updated_at = self.latest.unwrap_or(started_at);
+        let tokens = self.tokens_by_day(updated_at);
         let title = self
             .title
             .or(self.first_prompt)
@@ -174,8 +198,26 @@ impl SessionBuilder {
             started_at,
             updated_at,
             messages: self.messages,
+            tokens,
             malformed: self.malformed,
         })
+    }
+
+    /// The recorded calls summed per model and UTC day, in that order.
+    fn tokens_by_day(&self, fallback_time: DateTime<Utc>) -> Vec<SessionTokens> {
+        let mut sums: BTreeMap<(String, String), TokenCounts> = BTreeMap::new();
+        for (model, at, counts) in &self.counted {
+            let model = model
+                .as_deref()
+                .or(self.model.as_deref())
+                .unwrap_or_default()
+                .to_owned();
+            let day = at.unwrap_or(fallback_time).date_naive().to_string();
+            sums.entry((model, day)).or_default().add(counts);
+        }
+        sums.into_iter()
+            .map(|((model, day), counts)| SessionTokens { model, day, counts })
+            .collect()
     }
 }
 
@@ -281,5 +323,38 @@ mod tests {
         assert_eq!(new.machine_id, MachineId::local());
         assert_eq!(new.external_id, "s1");
         assert_eq!(new.agent, AgentId::CLAUDE);
+    }
+
+    #[test]
+    fn calls_are_summed_per_model_and_utc_day_with_the_session_model_as_fallback() {
+        let counts = |input| TokenCounts {
+            input,
+            ..Default::default()
+        };
+        let mut session = builder();
+        session.push(Role::User, "hi", Some(at(1_772_323_200))); // 2026-03-01 00:00 UTC
+        session.see_model(Some("session-model"));
+        session.see_tokens(Some("m1"), Some(at(1_772_323_200 + 10)), counts(1));
+        session.see_tokens(Some("m1"), Some(at(1_772_323_200 + 20)), counts(2));
+        // 23:59:59 UTC of the day before is still the day before, whatever the
+        // zone of the machine.
+        session.see_tokens(Some("m1"), Some(at(1_772_323_199)), counts(4));
+        session.see_tokens(None, Some(at(1_772_323_200 + 30)), counts(8));
+        session.see_tokens(Some("m1"), None, counts(16));
+        session.see_tokens(Some("m1"), Some(at(1_772_323_200)), TokenCounts::default());
+        let parsed = session.finish().unwrap();
+        let got: Vec<_> = parsed
+            .tokens
+            .iter()
+            .map(|t| (t.model.as_str(), t.day.as_str(), t.counts.input))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("m1", "2026-02-28", 4),
+                ("m1", "2026-03-01", 3 + 16),
+                ("session-model", "2026-03-01", 8),
+            ]
+        );
     }
 }

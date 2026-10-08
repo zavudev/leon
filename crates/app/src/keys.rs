@@ -129,6 +129,13 @@ pub enum Command {
     AddAgent,
     /// Removes an agent of your own.
     RemoveAgent,
+    /// Adds an account of an agent: a name and the variables that make the
+    /// agent another account.
+    AddAccount,
+    /// Gives an account another name.
+    RenameAccount,
+    /// Removes an account of an agent.
+    RemoveAccount,
     /// Resumes the history session the keyboard is on, after asking: a click
     /// on a row that has no terminal starts nothing before it is confirmed.
     ResumeSession,
@@ -148,6 +155,10 @@ pub enum Command {
     OpenShell,
     /// Adds a git worktree to a project.
     NewWorktree,
+    /// Runs one of the scripts of the project's `leon.toml` in a new terminal.
+    RunScript,
+    /// Gives one prompt to several agents, each in a worktree of its own.
+    PromptAgents,
     /// Adds a machine: with a code (the relay) or over SSH.
     AddMachine,
     /// Shares this computer: the code, the paired computers, the switch.
@@ -165,6 +176,9 @@ pub enum Command {
     RemoveProject,
     /// Removes a git worktree, after asking.
     RemoveWorktree,
+    /// Removes the merged worktrees the person ticks, after asking. The ones
+    /// with changes, unpushed commits or a running session are listed only.
+    RemoveMergedWorktrees,
     /// Renames the project, machine or live terminal the keyboard is on.
     Rename,
     /// Moves the row the keyboard is on one step up in its list: a project,
@@ -177,6 +191,17 @@ pub enum Command {
     /// Unpins the session the keyboard is on: it goes back to its place by
     /// recency.
     UnpinSession,
+    /// Puts the session the keyboard is on away, on the Settled shelf at the
+    /// bottom of its machine.
+    SettleSession,
+    /// Hides the session the keyboard is on until a time, on the Snoozed
+    /// shelf; it comes back early when it needs you, fails or finishes.
+    SnoozeSession,
+    /// Takes the session the keyboard is on off the Settled or Snoozed shelf.
+    BringBackSession,
+    /// Takes back the last close, sleep, settle, snooze or unpin, while its
+    /// banner is up.
+    Undo,
     /// Removes the SSH machine the keyboard is on, after asking.
     RemoveMachine,
     /// Changes the name, host, user, port or identity file of an SSH machine.
@@ -226,6 +251,14 @@ pub enum Command {
     /// Selects the file that has the keyboard in the file tree, opening the
     /// folders above it.
     RevealInTree,
+    /// Opens the changes of the worktree in view in a tab: the changed files,
+    /// their diffs, and the commit, push and pull request.
+    OpenChanges,
+    /// Pushes the branch of the worktree in view, setting its upstream when
+    /// it has none.
+    PushBranch,
+    /// Commits, pushes and opens a pull request for the worktree in view.
+    ShipChanges,
     // ----- terminal
     /// Splits the focused pane, the new one to its right.
     SplitRight,
@@ -372,7 +405,11 @@ pub enum Command {
     /// Closes what is open over the panes, or goes back one step.
     Close,
     /// Quits the application, after asking while a program runs in a terminal.
+    /// The sessions kept by the keeper of durable sessions keep running.
     Quit,
+    /// Quits the application and ends every session, the ones the keeper
+    /// holds too.
+    QuitAndEnd,
     /// Closes the window, which is the application's only one: the same as
     /// quitting.
     CloseWindow,
@@ -1195,6 +1232,30 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::AddAccount,
+        "Add an account\u{2026}",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::RenameAccount,
+        "Rename an account\u{2026}",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::RemoveAccount,
+        "Remove an account\u{2026}",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::ResumeIn,
         "Resume the session in another worktree…",
         S::Create,
@@ -1248,6 +1309,22 @@ pub const BINDINGS: &[Binding] = &[
         S::Create,
         W::Anywhere,
         &[secondary_shift("n")],
+        true,
+    ),
+    bind(
+        C::RunScript,
+        "Run a script\u{2026}",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::PromptAgents,
+        "One prompt, several agents\u{2026}",
+        S::Create,
+        W::Anywhere,
+        &[],
         true,
     ),
     bind(
@@ -1315,6 +1392,14 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::RemoveMergedWorktrees,
+        "Remove merged worktrees…",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::RemoveMachine,
         "Remove the machine",
         S::Create,
@@ -1356,6 +1441,41 @@ pub const BINDINGS: &[Binding] = &[
         W::Panes,
         &[],
         false,
+    ),
+    bind(
+        C::SettleSession,
+        "Settle the session",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::SnoozeSession,
+        "Snooze the session\u{2026}",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::BringBackSession,
+        "Bring the session back",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::Undo,
+        "Undo the last close, sleep, settle, snooze or unpin",
+        S::Create,
+        W::Anywhere,
+        &[
+            mac(with_alt(secondary("z"))),
+            other(with_alt(secondary_shift("z"))),
+        ],
+        true,
     ),
     bind(
         C::CopyPath,
@@ -1493,6 +1613,33 @@ pub const BINDINGS: &[Binding] = &[
         S::Files,
         W::Anywhere,
         &[with_alt(secondary_shift("f"))],
+        true,
+    ),
+    bind(
+        C::OpenChanges,
+        "Show the changes of the worktree",
+        S::Files,
+        W::Anywhere,
+        &[
+            mac(with_alt(secondary("g"))),
+            other(with_alt(secondary_shift("g"))),
+        ],
+        true,
+    ),
+    bind(
+        C::PushBranch,
+        "Push the branch",
+        S::Files,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::ShipChanges,
+        "Commit, push and open a pull request",
+        S::Files,
+        W::Anywhere,
+        &[],
         true,
     ),
     // Terminal
@@ -2125,6 +2272,14 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::QuitAndEnd,
+        "Quit and end every session",
+        S::Application,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::CloseWindow,
         "Close the window",
         S::Application,
@@ -2214,13 +2369,19 @@ pub fn keywords(command: Command) -> &'static str {
     match command {
         C::ChooseTheme => "colors colours look appearance custom user",
         C::NewThemeFromCurrent => "create custom make theme colors colours file toml",
+        C::RunScript => "project leon.toml command task build test lint run npm cargo make",
+        C::PromptAgents => "compare agents prompt task several parallel worktrees race try each",
         C::AddAgent => "custom cli tool command new agent register any",
         C::RemoveAgent => "custom cli tool delete forget agent unregister",
+        C::AddAccount => "login profile second another work personal config folder claude codex",
+        C::RenameAccount => "login profile change name account",
+        C::RemoveAccount => "login profile delete forget account",
         C::ExportTheme => "save write copy theme colors colours file toml backup",
         C::OpenThemesFolder => "themes folder directory reveal finder custom files",
         C::ReloadThemes => "refresh themes custom files toml",
         C::ShowThemeProblems => "errors warnings invalid validation themes report debug",
         C::Quit => "exit close application",
+        C::QuitAndEnd => "exit close application end stop kill sessions terminals keep running durable keeper hang up",
         C::CheckForUpdates => "update upgrade new version latest release github",
         C::RestartToUpdate => "update upgrade install relaunch restart new version",
         C::ShowReleaseNotes => "changelog what's new changes update version",
@@ -2234,6 +2395,12 @@ pub fn keywords(command: Command) -> &'static str {
         C::SaveFile | C::CloseFile => "edit editor text code source write",
         C::TogglePreview => "markdown md render page split view readme",
         C::RevealInTree => "show select locate explorer sidebar folder",
+        C::RemoveMergedWorktrees => {
+            "worktree worktrees merged pull request pr github branch clean up cleanup prune delete"
+        }
+        C::OpenChanges => "git diff status modified changed files review staged unstaged",
+        C::PushBranch => "git upstream remote origin publish send branch",
+        C::ShipChanges => "git commit push pull request pr github gh ship publish merge review",
         C::QuickOpen => "file name fuzzy find go open path goto ctrl+p",
         C::FindInFile | C::ReplaceInFile => "search editor text code substitute change",
         C::SearchProject => "grep ripgrep find text content files everywhere project code",
@@ -2268,6 +2435,9 @@ pub fn keywords(command: Command) -> &'static str {
         C::DeleteDen => "den layout remove discard",
         C::OpenDensFolder => "dens folder directory reveal finder files json export import share",
         C::ShowUsage | C::RefreshUsage => "limits quota rate tokens credits remaining percent reset five hour weekly claude codex opencode",
+        C::SettleSession | C::BringBackSession => "shelf archive put away done finished sessions sidebar return restore",
+        C::SnoozeSession => "shelf hide later remind wake tomorrow hour sessions sidebar",
+        C::Undo => "revert take back last close sleep settle snooze unpin banner",
         C::OpenSettingsFile => "preferences json edit configuration config file",
         C::RevealSettingsFolder => "preferences json configuration config finder directory data",
         _ => "",
@@ -2450,7 +2620,12 @@ mod tests {
             C::NewSession,
             C::AddAgent,
             C::RemoveAgent,
+            C::AddAccount,
+            C::RenameAccount,
+            C::RemoveAccount,
             C::NewWorktree,
+            C::RunScript,
+            C::PromptAgents,
             C::ResumeSession,
             C::ResumeIn,
             C::ResumeAnyway,
@@ -2466,6 +2641,9 @@ mod tests {
             C::SearchProject,
             C::TogglePreview,
             C::RevealInTree,
+            C::OpenChanges,
+            C::PushBranch,
+            C::ShipChanges,
             C::SplitRight,
             C::SplitDown,
             C::FocusPaneLeft,
@@ -2487,6 +2665,10 @@ mod tests {
             C::MoveRowDown,
             C::PinSession,
             C::UnpinSession,
+            C::SettleSession,
+            C::SnoozeSession,
+            C::BringBackSession,
+            C::Undo,
             C::RemoveMachine,
             C::EditMachine,
             C::WhyOffline,
@@ -2512,6 +2694,7 @@ mod tests {
             C::AddProject,
             C::RemoveProject,
             C::RemoveWorktree,
+            C::RemoveMergedWorktrees,
             C::Refresh,
             C::ProbeMachine,
             C::ToggleAppearance,
@@ -2551,6 +2734,7 @@ mod tests {
             C::Shortcuts,
             C::Close,
             C::Quit,
+            C::QuitAndEnd,
             C::CloseWindow,
             C::About,
             C::CheckForUpdates,
@@ -2610,7 +2794,12 @@ mod tests {
                 | C::NewSession
                 | C::AddAgent
                 | C::RemoveAgent
+                | C::AddAccount
+                | C::RenameAccount
+                | C::RemoveAccount
                 | C::NewWorktree
+                | C::RunScript
+                | C::PromptAgents
                 | C::ResumeSession
                 | C::ResumeIn
                 | C::ResumeAnyway
@@ -2626,6 +2815,9 @@ mod tests {
                 | C::SearchProject
                 | C::TogglePreview
                 | C::RevealInTree
+                | C::OpenChanges
+                | C::PushBranch
+                | C::ShipChanges
                 | C::SplitRight
                 | C::SplitDown
                 | C::FocusPaneLeft
@@ -2648,6 +2840,10 @@ mod tests {
                 | C::MoveRowDown
                 | C::PinSession
                 | C::UnpinSession
+                | C::SettleSession
+                | C::SnoozeSession
+                | C::BringBackSession
+                | C::Undo
                 | C::RemoveMachine
                 | C::EditMachine
                 | C::WhyOffline
@@ -2673,6 +2869,7 @@ mod tests {
                 | C::AddProject
                 | C::RemoveProject
                 | C::RemoveWorktree
+                | C::RemoveMergedWorktrees
                 | C::Refresh
                 | C::ProbeMachine
                 | C::ToggleAppearance
@@ -2712,6 +2909,7 @@ mod tests {
                 | C::Shortcuts
                 | C::Close
                 | C::Quit
+                | C::QuitAndEnd
                 | C::CloseWindow
                 | C::About
                 | C::CheckForUpdates

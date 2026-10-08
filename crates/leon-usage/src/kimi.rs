@@ -134,6 +134,7 @@ pub fn parse_usage(body: &str, machine: &str, now: i64) -> AgentUsage {
         agent: AgentId::KIMI,
         machine: machine.to_owned(),
         account_label: None,
+        account: None,
         plan: None,
         source: Some(Source::VendorApi),
         observed_at: Some(now),

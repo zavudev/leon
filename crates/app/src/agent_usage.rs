@@ -11,7 +11,9 @@ use std::collections::HashMap;
 
 use crate::engine::SourceStatus;
 use leon_core::{AgentId, MachineId, Store, UsagePoint};
-use leon_usage::{series_key, AgentUsage, MachineUsage, PercentDisplay, Reason, State, Thresholds};
+use leon_usage::{
+    series_key_of, AgentUsage, MachineUsage, PercentDisplay, Reason, State, Thresholds,
+};
 use leon_usage::{view, Body, Level};
 
 /// How long the stored observations are kept, in seconds.
@@ -163,6 +165,56 @@ pub fn failure_note(
     ))
 }
 
+/// The sources that were called, one entry per agent: when several accounts of
+/// one agent were read, a failure of any of them is the agent's, so the source
+/// backs off, and a later success of another account does not clear it.
+pub fn fold_called<'a>(
+    called: impl IntoIterator<Item = &'a leon_usage::collect::Called>,
+) -> Vec<leon_usage::collect::Called> {
+    let mut out: Vec<leon_usage::collect::Called> = Vec::new();
+    for (agent, reason) in called {
+        match out.iter_mut().find(|(known, _)| known == agent) {
+            Some((_, kept)) => {
+                if !kept.is_some_and(Reason::is_failure) {
+                    *kept = *reason;
+                }
+            }
+            None => out.push((*agent, *reason)),
+        }
+    }
+    out
+}
+
+/// The folders of the accounts whose limits can be read from them: those of
+/// Claude Code and Codex, the one level above the `projects` and `sessions`
+/// folders the history is read from.
+pub fn account_folders(roots: &leon_history::HistoryRoots) -> Vec<leon_usage::AccountFolder> {
+    roots
+        .accounts
+        .iter()
+        .flat_map(|account| {
+            let claude = account
+                .claude_projects
+                .as_deref()
+                .map(|projects| (AgentId::CLAUDE, projects));
+            let codex = account
+                .codex_sessions
+                .as_deref()
+                .map(|sessions| (AgentId::CODEX, sessions));
+            [claude, codex]
+                .into_iter()
+                .flatten()
+                .filter_map(move |(agent, below)| {
+                    Some(leon_usage::AccountFolder {
+                        account: account.account.clone(),
+                        agent,
+                        folder: below.parent()?.to_path_buf(),
+                    })
+                })
+        })
+        .collect()
+}
+
 /// The observations of one agent's account: the window key and the point.
 pub type Series = (AgentId, String, Vec<(String, UsagePoint)>);
 
@@ -174,7 +226,12 @@ pub fn history_points(collected: &MachineUsage, machine: &str) -> Vec<Series> {
         let State::Known { windows } = &reading.state else {
             continue;
         };
-        let account = series_key(machine, reading.agent, reading.plan.as_deref());
+        let account = series_key_of(
+            machine,
+            reading.agent,
+            reading.plan.as_deref(),
+            reading.account.as_deref(),
+        );
         let mut points: Vec<(String, UsagePoint)> = collected
             .samples
             .iter()
@@ -282,11 +339,17 @@ impl Board {
         self.readings.is_empty()
     }
 
-    /// The reading of `agent` on `machine`.
-    pub fn get(&self, machine: &MachineId, agent: AgentId) -> Option<&AgentUsage> {
-        self.readings
-            .iter()
-            .find(|r| r.agent == agent && r.machine == machine.as_str())
+    /// The reading of `agent` on `machine` for the account with this id, or
+    /// for the agent's own setup with `None`.
+    pub fn get_for(
+        &self,
+        machine: &MachineId,
+        agent: AgentId,
+        account: Option<&str>,
+    ) -> Option<&AgentUsage> {
+        self.readings.iter().find(|r| {
+            r.agent == agent && r.machine == machine.as_str() && r.account.as_deref() == account
+        })
     }
 
     /// The readings the scope asks for, `shown` agents only, in the order of
@@ -308,7 +371,14 @@ impl Board {
             })
             .collect();
         let order = leon_usage::network::switchable_agents();
-        out.sort_by_key(|r| (order.iter().position(|a| *a == r.agent), r.machine.clone()));
+        // An agent's own line first, then its accounts by name.
+        out.sort_by_key(|r| {
+            (
+                order.iter().position(|a| *a == r.agent),
+                r.machine.clone(),
+                r.account.as_deref().map(leon_core::account::name_of),
+            )
+        });
         out
     }
 }
@@ -316,6 +386,7 @@ impl Board {
 /// The one-line notice before a session of `agent` starts, when its limit is
 /// nearly used up: which window, how full, when it resets. `None` when there
 /// is nothing to say (below the critical threshold, unknown, or not read).
+#[cfg(test)]
 pub fn start_notice(
     board: &Board,
     machine: &MachineId,
@@ -324,7 +395,22 @@ pub fn start_notice(
     thresholds: Thresholds,
     display: PercentDisplay,
 ) -> Option<String> {
-    let reading = board.get(machine, agent)?;
+    start_notice_for(board, machine, agent, None, now, thresholds, display)
+}
+
+/// [`start_notice`] for a session of an account of the agent (an id), whose
+/// limit is its own; `None` is the agent's own setup.
+#[allow(clippy::too_many_arguments)] // `start_notice` plus the account
+pub fn start_notice_for(
+    board: &Board,
+    machine: &MachineId,
+    agent: AgentId,
+    account: Option<&str>,
+    now: i64,
+    thresholds: Thresholds,
+    display: PercentDisplay,
+) -> Option<String> {
+    let reading = board.get_for(machine, agent, account)?;
     let v = view(reading, now, thresholds);
     let Body::Ready { meters, .. } = &v.body else {
         return None;
@@ -337,7 +423,7 @@ pub fn start_notice(
         .resets_in
         .map(|s| format!(", resets in {}", leon_usage::compact_duration(s)))
         .unwrap_or_default();
-    let name = agent.name();
+    let name = leon_usage::heading(agent, account);
     // The window is judged on what is used; only the wording follows the
     // setting.
     let state = if leon_usage::percent_round(worst.percent) >= 100 {
@@ -380,6 +466,7 @@ mod tests {
             agent,
             machine: machine.into(),
             account_label: None,
+            account: None,
             plan: Some("plus".into()),
             source: Some(Source::Local),
             observed_at: Some(NOW - 60),
@@ -731,7 +818,7 @@ mod tests {
         let board = Board::load(&store);
         assert_eq!(board.all().len(), 1);
         assert_eq!(
-            board.get(&MachineId::local(), AgentId::CODEX),
+            board.get_for(&MachineId::local(), AgentId::CODEX, None),
             Some(&reading)
         );
     }
@@ -799,5 +886,165 @@ mod tests {
         );
         assert!(expired.contains("Run the agent once"), "{expired}");
         assert!(expired.contains("Leon never does"), "{expired}");
+    }
+
+    // ----- accounts -----------------------------------------------------------
+
+    fn of_account(mut usage: AgentUsage, account: &str) -> AgentUsage {
+        usage.account = Some(account.to_owned());
+        usage
+    }
+
+    #[test]
+    fn an_agents_own_reading_and_its_accounts_are_separate_lines_in_a_stable_order() {
+        let local = MachineId::local();
+        let board = Board::new(vec![
+            of_account(known(AgentId::CLAUDE, "local", 80.0, 3600), "claude-zed"),
+            known(AgentId::CODEX, "local", 10.0, 3600),
+            of_account(known(AgentId::CLAUDE, "local", 20.0, 3600), "claude-ada"),
+            known(AgentId::CLAUDE, "local", 50.0, 3600),
+        ]);
+        // The agent's own line is the one the notice and the lookups mean.
+        assert_eq!(
+            board
+                .get_for(&local, AgentId::CLAUDE, None)
+                .unwrap()
+                .account,
+            None,
+            "an account's line is never the agent's own"
+        );
+        assert_eq!(
+            board
+                .get_for(&local, AgentId::CLAUDE, Some("claude-ada"))
+                .unwrap()
+                .account
+                .as_deref(),
+            Some("claude-ada")
+        );
+        assert!(board
+            .get_for(&local, AgentId::CLAUDE, Some("claude-gone"))
+            .is_none());
+        // Claude Code's own line first, then its accounts by name (an id that is
+        // not registered sorts by the id), then the next agent.
+        let order: Vec<(AgentId, Option<&str>)> = board
+            .select(&Scope::Context, &local, &[AgentId::CLAUDE, AgentId::CODEX])
+            .into_iter()
+            .map(|r| (r.agent, r.account.as_deref()))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                (AgentId::CLAUDE, None),
+                (AgentId::CLAUDE, Some("claude-ada")),
+                (AgentId::CLAUDE, Some("claude-zed")),
+                (AgentId::CODEX, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_notice_before_a_session_judges_the_account_it_starts_as() {
+        let local = MachineId::local();
+        let t = Thresholds {
+            warning: 60.0,
+            critical: 80.0,
+        };
+        let board = Board::new(vec![
+            known(AgentId::CLAUDE, "local", 10.0, 3600),
+            of_account(known(AgentId::CLAUDE, "local", 95.0, 3600), "claude-work"),
+        ]);
+        assert_eq!(
+            start_notice(
+                &board,
+                &local,
+                AgentId::CLAUDE,
+                NOW,
+                t,
+                PercentDisplay::Used
+            ),
+            None,
+            "the agent's own limit is not nearly used up"
+        );
+        let notice = start_notice_for(
+            &board,
+            &local,
+            AgentId::CLAUDE,
+            Some("claude-work"),
+            NOW,
+            t,
+            PercentDisplay::Used,
+        )
+        .unwrap();
+        assert!(notice.contains("Claude Code (claude-work)"), "{notice}");
+        assert!(notice.contains("95%"), "{notice}");
+    }
+
+    #[test]
+    fn a_failure_of_any_account_is_the_agents_and_a_later_success_does_not_clear_it() {
+        let ok = (AgentId::CLAUDE, None);
+        let limited = (AgentId::CLAUDE, Some(Reason::RateLimited(30)));
+        let expired = (AgentId::CLAUDE, Some(Reason::SessionExpired));
+        let other = (AgentId::CODEX, None);
+        assert_eq!(fold_called(&[ok, limited, ok]), [limited]);
+        assert_eq!(fold_called(&[limited, ok]), [limited]);
+        // The first failure is the one kept.
+        assert_eq!(fold_called(&[limited, expired]), [limited]);
+        assert_eq!(fold_called(&[ok, other, ok]), [ok, other]);
+        assert!(fold_called(&[]).is_empty());
+        // A reason that is not a failure (signed out) does not back a source off.
+        let signed_out = (AgentId::CLAUDE, Some(Reason::NotSignedIn));
+        assert_eq!(fold_called(&[limited, signed_out]), [limited]);
+        assert_eq!(fold_called(&[signed_out, ok]), [ok]);
+    }
+
+    #[test]
+    fn only_the_accounts_with_a_folder_of_claude_code_or_codex_are_read_for_limits() {
+        let roots = leon_history::HistoryRoots {
+            accounts: vec![
+                leon_history::AccountRoot {
+                    account: "claude-work".into(),
+                    claude_projects: Some("/h/.claude-work/projects".into()),
+                    codex_sessions: None,
+                },
+                leon_history::AccountRoot {
+                    account: "codex-lab".into(),
+                    claude_projects: None,
+                    codex_sessions: Some("/data/lab/sessions".into()),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            account_folders(&roots),
+            [
+                leon_usage::AccountFolder {
+                    account: "claude-work".into(),
+                    agent: AgentId::CLAUDE,
+                    folder: "/h/.claude-work".into()
+                },
+                leon_usage::AccountFolder {
+                    account: "codex-lab".into(),
+                    agent: AgentId::CODEX,
+                    folder: "/data/lab".into()
+                },
+            ]
+        );
+        assert!(account_folders(&leon_history::HistoryRoots::default()).is_empty());
+    }
+
+    #[test]
+    fn two_accounts_on_one_plan_leave_separate_series_in_the_history() {
+        let mut collected = MachineUsage::default();
+        collected.readings.push(of_account(
+            known(AgentId::CODEX, "local", 40.0, 3600),
+            "codex-lab",
+        ));
+        let own = {
+            let mut c = MachineUsage::default();
+            c.readings.push(known(AgentId::CODEX, "local", 40.0, 3600));
+            c
+        };
+        let key_of = |c: &MachineUsage| history_points(c, "local")[0].1.clone();
+        assert_ne!(key_of(&collected), key_of(&own));
     }
 }

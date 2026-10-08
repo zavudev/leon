@@ -1,7 +1,9 @@
 //! Notifications: what Leon says when a session wants the user or finishes.
 //!
 //! The decision and the wording are pure: [`Event`] is what just happened and
-//! [`note`] words it. The window draws the *geek banner* (the monospace one:
+//! [`note`] words it. A session that wants the user says which of two it is
+//! when its transcript tells (it finished its turn, or it needs an answer)
+//! and only that it waits when nothing does. The window draws the *geek banner* (the monospace one:
 //! what the session is, the folder, the exit code) and the desktop
 //! notification is handed to GPUI, which speaks to the system's notification
 //! centre (notify-rust on Linux, the Notification Center on macOS, a toast on
@@ -9,6 +11,7 @@
 //! [`Options::notify`](super::shell::Options::notify) with a recorder and read
 //! the banners.
 
+use super::activity::Activity;
 use super::live::{LiveId, LiveSession};
 use gpui_kit::{App, SystemNotification};
 use std::path::Path;
@@ -17,9 +20,16 @@ use std::time::Instant;
 /// What a session just did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
-    /// An agent finished its turn, went quiet or rang its bell: it wants the
-    /// user.
+    /// A program in front of a terminal went quiet or rang its bell: it wants
+    /// the user, and nothing tells whether it finished or asks. What every
+    /// session without a followed transcript says.
     Waiting,
+    /// An agent finished its turn, as its transcript says: your move.
+    TurnOver,
+    /// An agent asks something: a question, or a tool call without a result
+    /// in a quiet terminal, which is probably a permission prompt (inferred,
+    /// a transcript does not record the question).
+    NeedsAnswer,
     /// A session's program ended cleanly.
     Finished {
         /// The exit code, always zero.
@@ -42,10 +52,25 @@ impl Event {
         }
     }
 
+    /// The event of a session that just came to read as `activity`, if that
+    /// is one the user is told about.
+    pub fn of_activity(activity: Activity) -> Option<Self> {
+        match activity {
+            Activity::Waiting => Some(Self::Waiting),
+            Activity::TurnOver => Some(Self::TurnOver),
+            Activity::NeedsYou => Some(Self::NeedsAnswer),
+            _ => None,
+        }
+    }
+
     /// What happened, as one line.
     pub fn line(self) -> String {
         match self {
-            Self::Waiting => "finished its turn · waiting for you".to_owned(),
+            Self::Waiting => "waiting for you · quiet, or the bell rang".to_owned(),
+            Self::TurnOver => "finished its turn · your move".to_owned(),
+            Self::NeedsAnswer => {
+                "needs an answer · a question, or probably a permission prompt".to_owned()
+            }
             Self::Finished { code } => format!("exited cleanly · code {code}"),
             Self::Failed { code } => format!("failed · code {code}"),
         }
@@ -55,6 +80,8 @@ impl Event {
     pub fn kind(self) -> Kind {
         match self {
             Self::Waiting => Kind::Waiting,
+            Self::TurnOver => Kind::TurnOver,
+            Self::NeedsAnswer => Kind::NeedsAnswer,
             Self::Finished { .. } => Kind::Finished,
             Self::Failed { .. } => Kind::Failed,
         }
@@ -64,8 +91,12 @@ impl Event {
 /// The kind of a note: what its marker is coloured by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// It wants the user.
+    /// It wants the user, and nothing tells why.
     Waiting,
+    /// An agent finished its turn.
+    TurnOver,
+    /// An agent asks something.
+    NeedsAnswer,
     /// It ended cleanly.
     Finished,
     /// It ended with an error.
@@ -81,7 +112,7 @@ pub struct Note {
     pub session: Option<LiveId>,
     /// Who and where: "Claude Code · feat-notifications".
     pub title: String,
-    /// What happened: "finished its turn · waiting for you · this computer".
+    /// What happened: "finished its turn · your move · mac-mini".
     pub body: String,
 }
 
@@ -185,15 +216,40 @@ mod tests {
 
     #[test]
     fn every_event_reads_as_a_line_and_a_kind() {
-        assert_eq!(Event::Waiting.line(), "finished its turn · waiting for you");
+        assert_eq!(
+            Event::Waiting.line(),
+            "waiting for you · quiet, or the bell rang"
+        );
+        assert_eq!(Event::TurnOver.line(), "finished its turn · your move");
+        assert_eq!(
+            Event::NeedsAnswer.line(),
+            "needs an answer · a question, or probably a permission prompt"
+        );
         assert_eq!(
             Event::Finished { code: 0 }.line(),
             "exited cleanly · code 0"
         );
         assert_eq!(Event::Failed { code: 3 }.line(), "failed · code 3");
         assert_eq!(Event::Waiting.kind(), Kind::Waiting);
+        assert_eq!(Event::TurnOver.kind(), Kind::TurnOver);
+        assert_eq!(Event::NeedsAnswer.kind(), Kind::NeedsAnswer);
         assert_eq!(Event::Finished { code: 0 }.kind(), Kind::Finished);
         assert_eq!(Event::Failed { code: 1 }.kind(), Kind::Failed);
+    }
+
+    #[test]
+    fn only_the_states_that_want_the_user_become_an_event_and_each_its_own() {
+        use Activity::*;
+        assert_eq!(Event::of_activity(Waiting), Some(Event::Waiting));
+        assert_eq!(Event::of_activity(TurnOver), Some(Event::TurnOver));
+        assert_eq!(Event::of_activity(NeedsYou), Some(Event::NeedsAnswer));
+        for quiet in [Off, Idle, Working, Failed] {
+            assert_eq!(Event::of_activity(quiet), None, "{quiet:?}");
+        }
+        // Finished and asking are told apart in words.
+        assert!(Event::TurnOver.line().contains("finished"));
+        assert!(Event::NeedsAnswer.line().contains("needs an answer"));
+        assert!(!Event::Waiting.line().contains("finished"));
     }
 
     #[test]

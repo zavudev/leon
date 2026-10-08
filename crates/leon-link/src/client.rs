@@ -31,6 +31,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::channel::{connect, LinkError, SecureChannel};
 use crate::identity::Identity;
+use crate::local::PlainChannel;
 use crate::pipe::Pipe;
 use crate::relay_client::{dial, DialError, Target};
 
@@ -135,14 +136,58 @@ pub enum PtyEvent {
     Disconnected,
     /// The connection is back and the terminal was re-attached.
     Reconnected,
+    /// Who is in front of the terminal, as a keeper answered a probe
+    /// ([`PtyHandle::probe`]).
+    Foreground(Foreground),
+}
+
+/// Who is in front of a terminal held by a keeper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Foreground {
+    /// The pid of the terminal's own process (the shell).
+    pub pid: Option<u32>,
+    /// Whether the shell, and not a program it started, is in front; absent
+    /// where the keeper's system cannot say.
+    pub shell_in_front: Option<bool>,
+    /// The program in front of the shell, where the keeper's system names it.
+    pub command: Option<String>,
+}
+
+/// What an attach found, as the host answered it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attach {
+    /// Where the replay starts.
+    pub replay_from: u64,
+    /// The host no longer had what the client asked for.
+    pub gap: bool,
+    /// The offset one past the newest byte when it attached: output before it
+    /// is the replay.
+    pub end_offset: u64,
+    /// The terminal's size.
+    pub size: Grid,
+    /// How it ended, if it had.
+    pub exit: Option<Exit>,
+}
+
+/// How the connection is protected.
+pub enum Security {
+    /// A Noise session with the host's pinned key: for a host reached
+    /// through a relay, which is untrusted.
+    Noise {
+        /// This device's keys.
+        identity: Arc<Identity>,
+        /// The host's pinned static key.
+        host_key: [u8; 32],
+    },
+    /// Plain frames: for a keeper on this computer's own socket, whose file
+    /// permissions and peer check are the authentication.
+    Plain,
 }
 
 /// How a client connects.
 pub struct ClientConfig {
-    /// This device's keys.
-    pub identity: Arc<Identity>,
-    /// The host's pinned static key.
-    pub host_key: [u8; 32],
+    /// How the connection is protected.
+    pub security: Security,
     /// Where pipes come from.
     pub dialer: Arc<dyn Dialer>,
     /// The name shown on the host.
@@ -164,12 +209,25 @@ impl ClientConfig {
         device_name: impl Into<String>,
     ) -> Self {
         Self {
-            identity,
-            host_key,
+            security: Security::Noise { identity, host_key },
             dialer,
             device_name: device_name.into(),
             backoff: (Duration::from_secs(1), Duration::from_secs(30)),
             ping_every: Duration::from_secs(20),
+            token: None,
+        }
+    }
+
+    /// A client of a keeper on this computer: plain frames over `dialer`'s
+    /// socket, and quick to try again, since the keeper is either there or
+    /// gone.
+    pub fn local(dialer: Arc<dyn Dialer>, device_name: impl Into<String>) -> Self {
+        Self {
+            security: Security::Plain,
+            dialer,
+            device_name: device_name.into(),
+            backoff: (Duration::from_millis(250), Duration::from_secs(2)),
+            ping_every: Duration::from_secs(10),
             token: None,
         }
     }
@@ -194,6 +252,8 @@ enum Command {
 pub struct PtyStream {
     /// The terminal's id on the host.
     pub pty: u64,
+    /// What attaching found; `None` for a terminal this client opened.
+    pub attach: Option<Attach>,
     /// Its output and lifecycle.
     pub events: mpsc::UnboundedReceiver<PtyEvent>,
     commands: mpsc::Sender<Command>,
@@ -224,6 +284,12 @@ impl PtyStream {
         let _ = self
             .commands
             .try_send(Command::Send(Message::PtyClose { pty: self.pty }));
+    }
+
+    /// Asks a keeper who is in front of the terminal; the answer arrives as
+    /// [`PtyEvent::Foreground`].
+    pub fn probe(&self) {
+        self.handle().probe();
     }
 
     /// A handle that can send while the events are read elsewhere.
@@ -267,6 +333,57 @@ impl PtyHandle {
         let _ = self
             .commands
             .try_send(Command::Send(Message::PtyClose { pty: self.pty }));
+    }
+
+    /// Asks a keeper who is in front of the terminal; the answer arrives as
+    /// [`PtyEvent::Foreground`].
+    pub fn probe(&self) {
+        let _ = self
+            .commands
+            .try_send(Command::Send(Message::PtyProbe { pty: self.pty }));
+    }
+
+    /// Asks a keeper to end the program in front of the terminal's shell
+    /// (SIGTERM to its process group); nothing happens when the shell is in
+    /// front.
+    pub fn terminate_foreground(&self) {
+        let _ = self
+            .commands
+            .try_send(Command::Send(Message::PtyTerminate { pty: self.pty }));
+    }
+
+    /// [`PtyHandle::write`], waiting for room in the client's queue instead of
+    /// dropping the keystrokes when it is full. `false` once the client is
+    /// closed.
+    pub async fn write_wait(&self, bytes: Vec<u8>) -> bool {
+        for chunk in bytes.chunks(leon_wire::MAX_PTY_CHUNK) {
+            let message = Message::PtyData {
+                pty: self.pty,
+                offset: 0,
+                bytes: chunk.to_vec(),
+            };
+            if self.commands.send(Command::Send(message)).await.is_err() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// [`PtyHandle::close`], waiting for room in the queue: a hang-up is never
+    /// dropped. `false` once the client is closed.
+    pub async fn close_wait(&self) -> bool {
+        self.commands
+            .send(Command::Send(Message::PtyClose { pty: self.pty }))
+            .await
+            .is_ok()
+    }
+
+    /// [`PtyHandle::terminate_foreground`], waiting for room in the queue.
+    pub async fn terminate_foreground_wait(&self) -> bool {
+        self.commands
+            .send(Command::Send(Message::PtyTerminate { pty: self.pty }))
+            .await
+            .is_ok()
     }
 }
 
@@ -421,6 +538,7 @@ impl Client {
         {
             Message::PtyOpened { pty, .. } => Ok(PtyStream {
                 pty,
+                attach: None,
                 events,
                 commands: self.commands.clone(),
             }),
@@ -443,13 +561,39 @@ impl Client {
             )
             .await?
         {
-            Message::PtyAttached { pty, .. } => Ok(PtyStream {
+            Message::PtyAttached {
                 pty,
+                replay_from,
+                gap,
+                end_offset,
+                size,
+                exit,
+                ..
+            } => Ok(PtyStream {
+                pty,
+                attach: Some(Attach {
+                    replay_from,
+                    gap,
+                    end_offset,
+                    size,
+                    exit,
+                }),
                 events,
                 commands: self.commands.clone(),
             }),
             _ => Err(ClientError::Protocol),
         }
+    }
+
+    /// Hangs a terminal's program up without holding the terminal: for one
+    /// found in [`Client::pty_list`] that no window shows. Ordered with
+    /// everything this client sends, so a [`Client::pty_list`] after it
+    /// returns only once the host has been told.
+    pub async fn pty_close(&self, pty: u64) {
+        let _ = self
+            .commands
+            .send(Command::Send(Message::PtyClose { pty }))
+            .await;
     }
 
     /// The host's terminals.
@@ -541,11 +685,38 @@ fn classify_dial(error: &DialError) -> (Failure, String) {
     }
 }
 
-async fn establish(config: &ClientConfig) -> Result<(SecureChannel, String), (Failure, String)> {
+/// An established channel, whichever way it is protected.
+enum Wire {
+    Secure(Box<SecureChannel>),
+    Plain(PlainChannel),
+}
+
+impl Wire {
+    async fn send(&mut self, message: &Message) -> Result<(), LinkError> {
+        match self {
+            Wire::Secure(channel) => channel.send(message).await,
+            Wire::Plain(channel) => channel.send(message).await,
+        }
+    }
+
+    async fn recv(&mut self) -> Result<Option<Message>, LinkError> {
+        match self {
+            Wire::Secure(channel) => channel.recv().await,
+            Wire::Plain(channel) => channel.recv().await,
+        }
+    }
+}
+
+async fn establish(config: &ClientConfig) -> Result<(Wire, String), (Failure, String)> {
     let pipe = config.dialer.dial().await.map_err(|e| classify_dial(&e))?;
-    let mut channel = connect(pipe, &config.identity, &config.host_key)
-        .await
-        .map_err(|e| classify(&e))?;
+    let mut channel = match &config.security {
+        Security::Noise { identity, host_key } => Wire::Secure(Box::new(
+            connect(pipe, identity, host_key)
+                .await
+                .map_err(|e| classify(&e))?,
+        )),
+        Security::Plain => Wire::Plain(PlainChannel::new(pipe)),
+    };
     channel
         .send(&Message::Hello {
             protocol: PROTOCOL_VERSION,
@@ -673,7 +844,7 @@ enum Ended {
 
 async fn run_connection(
     config: &ClientConfig,
-    mut channel: SecureChannel,
+    mut channel: Wire,
     commands: &mut mpsc::Receiver<Command>,
     ptys: &mut HashMap<u64, LivePty>,
 ) -> Ended {
@@ -766,6 +937,20 @@ fn on_message(
                 let _ = live
                     .tx
                     .send(PtyEvent::Data(bytes[skip.min(bytes.len())..].to_vec()));
+            }
+        }
+        Message::PtyProbed {
+            pty,
+            pid,
+            shell_in_front,
+            command,
+        } => {
+            if let Some(live) = ptys.get(&pty) {
+                let _ = live.tx.send(PtyEvent::Foreground(Foreground {
+                    pid,
+                    shell_in_front,
+                    command,
+                }));
             }
         }
         Message::PtyExited { pty, exit } => {

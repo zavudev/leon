@@ -117,6 +117,7 @@ pub fn items_for_held(kind: &Kind, local: bool, held: Option<bool>) -> Vec<Item>
         Kind::Project { .. } => [
             Some(Item::new("New worktree…", C::NewWorktree)),
             Some(Item::new_session()),
+            Some(Item::new("One prompt, several agents…", C::PromptAgents)),
             Some(Item::new("Open shell here", C::OpenShell)),
             Some(Item::new("Copy path", C::CopyPath)),
             Some(Item::new("Rename", C::Rename)),
@@ -173,6 +174,8 @@ pub fn items_for_held(kind: &Kind, local: bool, held: Option<bool>) -> Vec<Item>
                 .sort_order
                 .is_some()
                 .then(|| Item::new("Move down", C::MoveRowDown)),
+            Some(Item::new("Settle", C::SettleSession)),
+            Some(Item::new("Snooze\u{2026}", C::SnoozeSession)),
             Some(Item::new("Rename", C::Rename)),
             Some(Item::new("Copy session id", C::CopySessionId)),
             Some(Item::new("Remove from history", C::RemoveFromHistory)),
@@ -202,6 +205,7 @@ pub fn items_for_held(kind: &Kind, local: bool, held: Option<bool>) -> Vec<Item>
         .collect(),
         Kind::Open => vec![Item::new("Open project…", C::OpenProject)],
         Kind::Pinned { .. }
+        | Kind::Shelf { .. }
         | Kind::Unsorted { .. }
         | Kind::More { .. }
         | Kind::NoMatch
@@ -489,6 +493,20 @@ impl Shell {
                 }
             }
         }
+        // On a shelf, "Settle" becomes the way off it; a running session is
+        // not settled.
+        if let Kind::Session(session) = &row.kind {
+            if self.placement.shelved.contains(&session.id) {
+                for item in &mut items {
+                    if item.command == Command::SettleSession {
+                        item.label = "Bring back".into();
+                        item.command = Command::BringBackSession;
+                    }
+                }
+            } else if self.live.of_history(&session.id).is_some() {
+                items.retain(|item| item.command != Command::SettleSession);
+            }
+        }
         (!items.is_empty()).then(|| Menu::new(row.id.clone(), items, at))
     }
 
@@ -727,13 +745,13 @@ impl Shell {
         let launch = crate::launch::Launch::Agent {
             kind: agent,
             resume: None,
+            account: None,
         };
-        self.start_live(
+        self.start_new(
             launch,
             &place.machine,
             &place.cwd,
             super::terminals::Place::Session,
-            None,
             window,
             cx,
         );
@@ -1082,6 +1100,7 @@ mod tests {
             [
                 "New worktree…",
                 "New agent session",
+                "One prompt, several agents…",
                 "Open shell here",
                 "Copy path",
                 "Rename",
@@ -1099,6 +1118,7 @@ mod tests {
             [
                 "New worktree…",
                 "New agent session",
+                "One prompt, several agents…",
                 "Open shell here",
                 "Copy path",
                 "Rename",
@@ -1165,6 +1185,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             message_count: 0,
             sort_order: None,
+            account: None,
         });
         assert_eq!(
             labels(&items_for(&session, true)),
@@ -1172,6 +1193,8 @@ mod tests {
                 "Resume",
                 "Open transcript",
                 "Pin",
+                "Settle",
+                "Snooze\u{2026}",
                 "Rename",
                 "Copy session id",
                 "Remove from history"
@@ -1190,6 +1213,8 @@ mod tests {
                 "Unpin",
                 "Move up",
                 "Move down",
+                "Settle",
+                "Snooze\u{2026}",
                 "Rename",
                 "Copy session id",
                 "Remove from history"
@@ -1204,6 +1229,7 @@ mod tests {
             machine: MachineId::local(),
             cwd: "/".into(),
             agent: None,
+            account: None,
             history: None,
             asleep: None,
         });
@@ -1223,6 +1249,11 @@ mod tests {
     #[test]
     fn rows_with_nothing_to_do_have_no_menu() {
         assert!(items_for(&Kind::Unsorted { sessions: 1 }, true).is_empty());
+        let shelf = Kind::Shelf {
+            kind: super::super::shelf::ShelfKind::Settled,
+            sessions: 2,
+        };
+        assert!(items_for(&shelf, true).is_empty());
         assert!(items_for(&Kind::More { hidden: 3 }, true).is_empty());
     }
 

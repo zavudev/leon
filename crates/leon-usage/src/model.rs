@@ -312,6 +312,11 @@ pub struct AgentUsage {
     pub machine: String,
     /// A label for the account that never identifies it: the plan or nothing.
     pub account_label: Option<String>,
+    /// The id of the account the reading is of (see [`leon_core::Account`]);
+    /// `None` is the agent's own setup. Readings stored before accounts existed
+    /// have none, which is what they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     /// The plan, when known (`plus`, `max`).
     pub plan: Option<String>,
     /// Where the numbers came from; absent when nothing was read.
@@ -363,12 +368,29 @@ pub const MAX_AGE_WITHOUT_RESET: i64 = 2 * HOUR;
 pub const MAX_AGE: i64 = 8 * DAY;
 
 impl AgentUsage {
+    /// What tells this reading from the others of its agent on its machine: the
+    /// machine, and the account when it is one. Maps of history and meters are
+    /// keyed by it, so two accounts of one agent never share a line.
+    pub fn slot(&self) -> String {
+        match &self.account {
+            Some(account) => format!("{}\u{1f}{account}", self.machine),
+            None => self.machine.clone(),
+        }
+    }
+
+    /// The same reading, as the account with this id's.
+    pub fn for_account(mut self, account: &str) -> Self {
+        self.account = Some(account.to_owned());
+        self
+    }
+
     /// A reading with nothing known.
     pub fn unknown(agent: AgentId, machine: &str, reason: Reason) -> Self {
         Self {
             agent,
             machine: machine.to_owned(),
             account_label: None,
+            account: None,
             plan: None,
             source: None,
             observed_at: None,
@@ -456,11 +478,37 @@ mod tests {
             agent: AgentId::CODEX,
             machine: "local".into(),
             account_label: None,
+            account: None,
             plan: Some("plus".into()),
             source: Some(Source::Local),
             observed_at: Some(observed_at),
             state: State::Known { windows },
         }
+    }
+
+    #[test]
+    fn a_reading_stored_before_accounts_existed_still_reads_and_belongs_to_the_agent() {
+        let old = r#"{"agent":"claude","machine":"local","account_label":null,"plan":"max",
+            "source":"vendor_api","observed_at":5,"state":{"state":"unknown","reason":"no_data"}}"#;
+        let usage: AgentUsage = serde_json::from_str(old).unwrap();
+        assert_eq!(usage.account, None);
+        // The agent's own reading writes no `account` at all, so it does not
+        // change for the readers of an older Leon.
+        assert!(!serde_json::to_string(&usage).unwrap().contains("account\""));
+        let work = usage.clone().for_account("claude-work");
+        let json = serde_json::to_string(&work).unwrap();
+        assert_eq!(serde_json::from_str::<AgentUsage>(&json).unwrap(), work);
+    }
+
+    #[test]
+    fn the_slot_of_a_reading_tells_the_accounts_of_one_agent_apart() {
+        let own = reading(1, Vec::new());
+        let work = own.clone().for_account("codex-work");
+        let lab = own.clone().for_account("codex-lab");
+        assert_eq!(own.slot(), "local");
+        assert_ne!(work.slot(), own.slot());
+        assert_ne!(work.slot(), lab.slot());
+        assert!(work.slot().starts_with("local"));
     }
 
     #[test]

@@ -9,18 +9,91 @@
 //! A session that cannot keep up (its queue is full) is detached and told to
 //! reconnect; it resumes from where it was. An exited terminal stays listed for
 //! a retention window, then is reaped.
+//!
+//! What a terminal runs in is a [`Spawner`]: the real one starts a program in a
+//! pseudo-terminal ([`RealSpawner`]); a test hands in a scripted one, so what a
+//! terminal prints, who is in front of it and when it ends are decided by the
+//! test and not by a shell.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use leon_pty::{GridSize, PtyEvent, PtyProcess};
+use leon_pty::{Events, Foreground, GridSize, PtyEvent, PtyProcess};
 use leon_wire::{ErrorCode, Exit, Grid, Message, PtyInfo, SpawnSpec, WireError, MAX_PTY_CHUNK};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, Notify};
 
 use crate::ring::Ring;
+
+/// A running program in a terminal, as the table drives it.
+pub trait Process: Send + Sync {
+    /// Sends keystrokes.
+    fn write(&self, bytes: Vec<u8>);
+    /// Resizes the terminal.
+    fn resize(&self, size: GridSize);
+    /// Hangs the program up.
+    fn kill(&self);
+    /// The pid of the terminal's own process, where the system has one.
+    fn pid(&self) -> Option<u32>;
+    /// Who is in front of the terminal; `None` where that cannot be told.
+    fn foreground(&self) -> Option<Foreground>;
+    /// SIGTERM to the program in front of the shell; `false` when nothing was
+    /// sent.
+    fn terminate_foreground(&self) -> bool;
+}
+
+impl Process for PtyProcess {
+    fn write(&self, bytes: Vec<u8>) {
+        PtyProcess::write(self, bytes);
+    }
+    fn resize(&self, size: GridSize) {
+        PtyProcess::resize(self, size);
+    }
+    fn kill(&self) {
+        PtyProcess::kill(self);
+    }
+    fn pid(&self) -> Option<u32> {
+        self.process_id()
+    }
+    fn foreground(&self) -> Option<Foreground> {
+        PtyProcess::foreground(self)
+    }
+    fn terminate_foreground(&self) -> bool {
+        PtyProcess::terminate_foreground(self)
+    }
+}
+
+/// Starts programs in terminals.
+pub trait Spawner: Send + Sync {
+    /// Starts `spec` in a terminal of `size`. The events end with the
+    /// program's exit.
+    fn spawn(
+        &self,
+        spec: &leon_pty::SpawnSpec,
+        size: GridSize,
+    ) -> Result<(Arc<dyn Process>, Events), String>;
+}
+
+/// The real thing: a pseudo-terminal of this computer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RealSpawner {
+    /// Whether the request's environment is the child's whole environment
+    /// (the keeper), or goes on top of this process's (`leon host`).
+    pub own_environment: bool,
+}
+
+impl Spawner for RealSpawner {
+    fn spawn(
+        &self,
+        spec: &leon_pty::SpawnSpec,
+        size: GridSize,
+    ) -> Result<(Arc<dyn Process>, Events), String> {
+        let (process, events) = PtyProcess::spawn_with(spec, size, self.own_environment)?;
+        Ok((Arc::new(process), events))
+    }
+}
 
 /// Where a session receives what the terminals say.
 #[derive(Clone)]
@@ -46,7 +119,7 @@ struct Hosted {
     ring: Ring,
     exit: Option<Exit>,
     exited_at: Option<Instant>,
-    process: Option<Arc<PtyProcess>>,
+    process: Option<Arc<dyn Process>>,
     subscribers: Vec<Subscriber>,
 }
 
@@ -104,19 +177,67 @@ pub struct PtyTable {
     ring_bytes: usize,
     retention: Duration,
     max_ptys: usize,
+    spawner: Arc<dyn Spawner>,
 }
 
 impl PtyTable {
     /// A table whose terminals keep `ring_bytes` of output and stay listed for
     /// `retention` after they exit.
     pub fn new(ring_bytes: usize, retention: Duration, max_ptys: usize) -> Arc<Self> {
-        Arc::new(Self {
-            inner: Mutex::new(HashMap::new()),
-            next: AtomicU64::new(1),
+        Self::with_spawner(
             ring_bytes,
             retention,
             max_ptys,
+            1,
+            Arc::new(RealSpawner::default()),
+        )
+    }
+
+    /// A table that starts its terminals with `spawner` and numbers them from
+    /// `first_id`. A keeper starts from a random number, so a terminal id kept
+    /// by an app never names a terminal of another keeper that took the place
+    /// of one that died.
+    pub fn with_spawner(
+        ring_bytes: usize,
+        retention: Duration,
+        max_ptys: usize,
+        first_id: u64,
+        spawner: Arc<dyn Spawner>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(HashMap::new()),
+            next: AtomicU64::new(first_id.max(1)),
+            ring_bytes,
+            retention,
+            max_ptys,
+            spawner,
         })
+    }
+
+    /// How many terminals have a program running (a listed one that exited
+    /// does not count).
+    pub fn running(&self) -> usize {
+        self.inner
+            .lock()
+            .values()
+            .filter(|h| h.exit.is_none())
+            .count()
+    }
+
+    /// Who is in front of a terminal: `(pid, foreground)`. Both are `None`
+    /// for a terminal that ended or where the system cannot say.
+    pub fn probe(&self, pty: u64) -> Result<(Option<u32>, Option<Foreground>), WireError> {
+        Ok(match self.process(pty)? {
+            Some(process) => (process.pid(), process.foreground()),
+            None => (None, None),
+        })
+    }
+
+    /// Asks the program in front of a terminal's shell to end.
+    pub fn terminate_foreground(&self, pty: u64) -> Result<bool, WireError> {
+        Ok(self
+            .process(pty)?
+            .is_some_and(|process| process.terminate_foreground()))
     }
 
     /// How many terminals are listed.
@@ -150,10 +271,12 @@ impl PtyTable {
             route: None,
         };
         let (process, events) =
-            PtyProcess::spawn(&pty_spec, to_size(size)).map_err(|message| WireError {
-                code: ErrorCode::SpawnFailed,
-                message,
-            })?;
+            self.spawner
+                .spawn(&pty_spec, to_size(size))
+                .map_err(|message| WireError {
+                    code: ErrorCode::SpawnFailed,
+                    message,
+                })?;
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let started_unix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -170,7 +293,7 @@ impl PtyTable {
                 ring: Ring::new(self.ring_bytes),
                 exit: None,
                 exited_at: None,
-                process: Some(Arc::new(process)),
+                process: Some(process),
                 subscribers: Vec::new(),
             },
         );
@@ -276,7 +399,7 @@ impl PtyTable {
         }
     }
 
-    fn process(&self, pty: u64) -> Result<Option<Arc<PtyProcess>>, WireError> {
+    fn process(&self, pty: u64) -> Result<Option<Arc<dyn Process>>, WireError> {
         let guard = self.inner.lock();
         let hosted = guard.get(&pty).ok_or_else(not_found)?;
         Ok(hosted.process.clone())

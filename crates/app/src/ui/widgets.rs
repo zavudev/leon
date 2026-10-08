@@ -22,6 +22,18 @@ pub fn mono(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
+/// The colour of a part of a checkout's state.
+pub fn checkout_colour(tone: super::checkout::Tone, palette: &Palette) -> Hsla {
+    use super::checkout::Tone;
+    match tone {
+        Tone::Muted => palette.text_muted,
+        Tone::Warning => palette.warning,
+        Tone::Good => palette.success,
+        Tone::Bad => palette.error,
+        Tone::Faint => palette.text_faint,
+    }
+}
+
 /// A section label: mono, uppercase, muted, in the `[ NAME ]` form.
 pub fn section_label(title: &str, palette: &Palette) -> Div {
     mono(format!("[ {} ]", title.to_uppercase())).text_color(palette.text_muted)
@@ -155,8 +167,9 @@ pub fn activity_light(activity: Activity, palette: &Palette) -> Div {
 /// The dot of a worktree or a project: how its terminals are doing, in the
 /// state colours (see `activity.rs`). Every state fits the same ten pixel
 /// square so that labels line up: nothing live is a grey outline, idle a solid
-/// green square, working the same square in a ring, waiting in the warning colour and failed
-/// red.
+/// green square, working the same square in a ring, an agent that finished its
+/// turn in the info colour, waiting in the warning colour, an agent that needs an
+/// answer the same square in a ring and failed red.
 pub fn activity_dot(activity: Activity, palette: &Palette) -> Div {
     let slot = div()
         .flex_none()
@@ -176,7 +189,12 @@ pub fn activity_dot(activity: Activity, palette: &Palette) -> Div {
             .border_1()
             .border_color(palette.success)
             .child(div().size(px(4.)).bg(palette.success)),
+        Activity::TurnOver => slot.child(div().size(px(7.)).bg(palette.info)),
         Activity::Waiting => slot.child(div().size(px(7.)).bg(palette.warning)),
+        Activity::NeedsYou => slot
+            .border_1()
+            .border_color(palette.warning)
+            .child(div().size(px(4.)).bg(palette.warning)),
         Activity::Failed => slot.child(div().size(px(7.)).bg(palette.error)),
     }
 }

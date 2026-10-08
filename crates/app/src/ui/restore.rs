@@ -190,6 +190,8 @@ mod tests {
                     name: Some("my fix".into()),
                     title: Some("ignored".into()),
                     started_at: 0,
+                    account: None,
+                    keeper: None,
                 },
                 SavedTerminal {
                     id: 2,
@@ -202,6 +204,8 @@ mod tests {
                     name: None,
                     title: None,
                     started_at: 0,
+                    account: None,
+                    keeper: None,
                 },
             ],
             ..Default::default()

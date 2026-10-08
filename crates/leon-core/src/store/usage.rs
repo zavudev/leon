@@ -24,6 +24,9 @@ pub struct UsageRow {
     pub machine: MachineId,
     /// The agent.
     pub agent: AgentId,
+    /// The id of the account the reading is of; empty for the agent's own
+    /// setup.
+    pub account: String,
     /// The reading, as the JSON the collector wrote.
     pub payload: String,
     /// When it was collected (Unix seconds).
@@ -48,15 +51,66 @@ impl Store {
         payload: &str,
         collected_at: i64,
     ) -> Result<()> {
+        self.put_usage_reading_for(machine, agent, "", payload, collected_at)
+    }
+
+    /// Replaces the latest reading of `agent` on `machine` for the account with
+    /// this id (empty: the agent's own setup).
+    pub fn put_usage_reading_for(
+        &self,
+        machine: &MachineId,
+        agent: AgentId,
+        account: &str,
+        payload: &str,
+        collected_at: i64,
+    ) -> Result<()> {
         self.write(StoreChange::Usage, |tx| {
             tx.execute(
-                "INSERT INTO usage_reading (machine_id, agent, payload, collected_at)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (machine_id, agent) DO UPDATE
+                "INSERT INTO usage_reading (machine_id, agent, account, payload, collected_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (machine_id, agent, account) DO UPDATE
                  SET payload = excluded.payload, collected_at = excluded.collected_at",
-                params![machine.as_str(), agent.as_str(), payload, collected_at],
+                params![
+                    machine.as_str(),
+                    agent.as_str(),
+                    account,
+                    payload,
+                    collected_at
+                ],
             )?;
             Ok(())
+        })
+    }
+
+    /// Drops the readings of accounts that are not in `keep` (ids), on every
+    /// machine: an account that was removed leaves no line behind. The readings
+    /// of the agents' own setup stay. Announces a change only when it removed
+    /// something.
+    pub fn retain_usage_accounts(&self, keep: &[String]) -> Result<usize> {
+        let stale: Vec<(String, String, String)> = self.read(|connection| {
+            let mut statement = connection.prepare_cached(
+                "SELECT machine_id, agent, account FROM usage_reading WHERE account != ''",
+            )?;
+            let rows =
+                statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })?;
+        let stale: Vec<_> = stale
+            .into_iter()
+            .filter(|(_, _, account)| !keep.contains(account))
+            .collect();
+        if stale.is_empty() {
+            return Ok(0);
+        }
+        self.write(StoreChange::Usage, |tx| {
+            for (machine, agent, account) in &stale {
+                tx.execute(
+                    "DELETE FROM usage_reading
+                     WHERE machine_id = ?1 AND agent = ?2 AND account = ?3",
+                    params![machine, agent, account],
+                )?;
+            }
+            Ok(stale.len())
         })
     }
 
@@ -64,24 +118,26 @@ impl Store {
     pub fn usage_readings(&self) -> Result<Vec<UsageRow>> {
         self.read(|connection| {
             let mut statement = connection.prepare_cached(
-                "SELECT machine_id, agent, payload, collected_at FROM usage_reading
-                 ORDER BY machine_id, agent",
+                "SELECT machine_id, agent, account, payload, collected_at FROM usage_reading
+                 ORDER BY machine_id, agent, account",
             )?;
             let rows = statement.query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             })?;
             let mut out = Vec::new();
             for row in rows {
-                let (machine, agent, payload, collected_at) = row?;
+                let (machine, agent, account, payload, collected_at) = row?;
                 if let Some(agent) = AgentId::parse(&agent) {
                     out.push(UsageRow {
                         machine: MachineId::from_string(machine),
                         agent,
+                        account,
                         payload,
                         collected_at,
                     });
@@ -179,6 +235,35 @@ impl Store {
         })
     }
 
+    /// Forgets the observations of one series (the account key the history
+    /// is stored under) of an agent on a machine. Returns how many points
+    /// were removed; announces a change only when it removed something.
+    pub fn forget_usage_series(
+        &self,
+        machine: &MachineId,
+        agent: AgentId,
+        account: &str,
+    ) -> Result<usize> {
+        let count: i64 = self.read(|connection| {
+            Ok(connection.query_row(
+                "SELECT COUNT(*) FROM usage_history
+                 WHERE machine_id = ?1 AND agent = ?2 AND account = ?3",
+                params![machine.as_str(), agent.as_str(), account],
+                |row| row.get(0),
+            )?)
+        })?;
+        if count == 0 {
+            return Ok(0);
+        }
+        self.write(StoreChange::Usage, |tx| {
+            Ok(tx.execute(
+                "DELETE FROM usage_history
+                 WHERE machine_id = ?1 AND agent = ?2 AND account = ?3",
+                params![machine.as_str(), agent.as_str(), account],
+            )?)
+        })
+    }
+
     /// Forgets every stored observation. The latest readings stay. Returns how
     /// many points were removed.
     pub fn forget_usage_history(&self) -> Result<usize> {
@@ -216,6 +301,57 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].payload, "{\"a\":2}");
         assert_eq!(rows[0].collected_at, 20);
+    }
+
+    #[test]
+    fn each_account_keeps_its_own_reading_and_a_removed_one_leaves_none() {
+        let store = Store::open_in_memory().unwrap();
+        let local = MachineId::local();
+        store
+            .put_usage_reading(&local, AgentId::CLAUDE, "{\"own\":1}", 10)
+            .unwrap();
+        for (account, text) in [("claude-work", "work"), ("claude-home", "home")] {
+            store
+                .put_usage_reading_for(&local, AgentId::CLAUDE, account, text, 20)
+                .unwrap();
+        }
+        store
+            .put_usage_reading_for(&local, AgentId::CLAUDE, "claude-work", "work2", 30)
+            .unwrap();
+        let rows = store.usage_readings().unwrap();
+        let by = |account: &str| {
+            rows.iter()
+                .find(|row| row.account == account)
+                .map(|row| row.payload.as_str())
+        };
+        assert_eq!(rows.len(), 3);
+        assert_eq!(by(""), Some("{\"own\":1}"));
+        assert_eq!(by("claude-work"), Some("work2"));
+        assert_eq!(by("claude-home"), Some("home"));
+
+        let mut listener = store.subscribe();
+        assert_eq!(
+            store
+                .retain_usage_accounts(&["claude-work".to_owned()])
+                .unwrap(),
+            1
+        );
+        assert_eq!(listener.try_next(), Some(StoreChange::Usage));
+        let kept: Vec<String> = store
+            .usage_readings()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.account)
+            .collect();
+        assert_eq!(kept, ["", "claude-work"]);
+        // Nothing to drop: nothing is announced.
+        assert_eq!(
+            store
+                .retain_usage_accounts(&["claude-work".to_owned()])
+                .unwrap(),
+            0
+        );
+        assert_eq!(listener.try_next(), None);
     }
 
     #[test]
@@ -326,6 +462,44 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(store.usage_readings().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn one_series_can_be_forgotten_and_the_others_stay() {
+        let store = Store::open_in_memory().unwrap();
+        let local = MachineId::local();
+        for account in ["a", "b"] {
+            store
+                .record_usage_points(&local, AgentId::CLAUDE, account, &[point(5, 1.0)], 0)
+                .unwrap();
+        }
+        let mut listener = store.subscribe();
+        assert_eq!(
+            store
+                .forget_usage_series(&local, AgentId::CLAUDE, "a")
+                .unwrap(),
+            1
+        );
+        assert_eq!(listener.try_next(), Some(StoreChange::Usage));
+        assert!(store
+            .usage_history(&local, AgentId::CLAUDE, "a", "five_hour", 0)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .usage_history(&local, AgentId::CLAUDE, "b", "five_hour", 0)
+                .unwrap()
+                .len(),
+            1
+        );
+        // Nothing left to forget: nothing is announced.
+        assert_eq!(
+            store
+                .forget_usage_series(&local, AgentId::CLAUDE, "a")
+                .unwrap(),
+            0
+        );
+        assert_eq!(listener.try_next(), None);
     }
 
     #[test]

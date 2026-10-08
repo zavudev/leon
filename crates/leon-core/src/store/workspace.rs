@@ -3,7 +3,8 @@
 //! The window keeps its terminals only for as long as it runs. This module
 //! stores what is needed to open them again: for every terminal its machine,
 //! folder, agent and the agent's own session id (so it can be resumed), the
-//! name the user gave it; the tabs with their pane layout and ratios; which
+//! name the user gave it and, for a durable session, the terminal the keeper
+//! holds for it; the tabs with their pane layout and ratios; which
 //! tab and pane had the focus; the sidebar selection; and whether the last
 //! run ended normally.
 //!
@@ -94,6 +95,18 @@ pub struct SavedWorkspace {
     pub tabs: Vec<SavedTab>,
 }
 
+/// The terminal the keeper of durable local sessions holds for a saved
+/// terminal: its number there, and the token it was opened under (the
+/// keeper's label for it). Both must match what the keeper lists now, so a
+/// number reused by another keeper never attaches to the wrong terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeeperRef {
+    /// The keeper's number for the terminal.
+    pub pty: u64,
+    /// The token the terminal was opened under.
+    pub token: String,
+}
+
 /// One terminal, with what it takes to open it again.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SavedTerminal {
@@ -117,6 +130,11 @@ pub struct SavedTerminal {
     pub title: Option<String>,
     /// When it was started, in milliseconds since the epoch.
     pub started_at: i64,
+    /// The id of the account it ran with; `None` is the agent's own setup.
+    pub account: Option<String>,
+    /// The terminal the keeper holds for it, when it is a durable session;
+    /// `None` for one that lives in the application.
+    pub keeper: Option<KeeperRef>,
 }
 
 /// Everything remembered about the open terminals.
@@ -193,8 +211,9 @@ impl Store {
             for (position, t) in state.terminals.iter().enumerate() {
                 tx.execute(
                     "INSERT INTO saved_terminal (slot, position, id, machine, cwd, agent, session,
-                         confidence, history, name, title, started_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                         confidence, history, name, title, started_at, account,
+                         keeper_pty, keeper_token)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                     params![
                         s,
                         position as i64,
@@ -207,7 +226,10 @@ impl Store {
                         t.history,
                         t.name,
                         t.title,
-                        t.started_at
+                        t.started_at,
+                        t.account,
+                        t.keeper.as_ref().map(|k| k.pty as i64),
+                        t.keeper.as_ref().map(|k| k.token.as_str())
                     ],
                 )?;
             }
@@ -271,7 +293,8 @@ impl Store {
                 });
             }
             let mut statement = connection.prepare(
-                "SELECT id, machine, cwd, agent, session, confidence, history, name, title, started_at
+                "SELECT id, machine, cwd, agent, session, confidence, history, name, title, started_at,
+                        account, keeper_pty, keeper_token
                  FROM saved_terminal WHERE slot = ?1 ORDER BY position",
             )?;
             let terminals = statement
@@ -287,6 +310,14 @@ impl Store {
                         name: row.get(7)?,
                         title: row.get(8)?,
                         started_at: row.get(9)?,
+                        account: row.get(10)?,
+                        keeper: match (row.get::<_, Option<i64>>(11)?, row.get(12)?) {
+                            (Some(pty), Some(token)) => Some(KeeperRef {
+                                pty: pty as u64,
+                                token,
+                            }),
+                            _ => None,
+                        },
                     })
                 })?
                 .collect::<rusqlite::Result<_>>()?;
@@ -340,6 +371,13 @@ mod tests {
             name: Some("my name".into()),
             title: None,
             started_at: 1_000 + id as i64,
+            // One of the three runs with an account, which must come back.
+            account: (id == 2).then(|| "claude-work".to_owned()),
+            // One held by the keeper, which must come back with its token.
+            keeper: (id == 3).then(|| KeeperRef {
+                pty: 7_340_033,
+                token: "k-3".to_owned(),
+            }),
         }
     }
 

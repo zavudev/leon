@@ -18,7 +18,7 @@ use parking_lot::Mutex;
 use portable_pty::{ChildKiller, MasterPty};
 
 use crate::size::GridSize;
-use crate::spec::{command_builder, SpawnSpec};
+use crate::spec::{command_builder_with, SpawnSpec};
 
 /// How long a hung-up child has to exit before its process group is killed.
 #[cfg(unix)]
@@ -37,6 +37,31 @@ pub struct PtyExit {
     pub signal: Option<String>,
 }
 
+/// Who is in front of a terminal, as [`PtyProcess::foreground`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Foreground {
+    /// The child's pid (the shell's).
+    pub pid: u32,
+    /// Whether the shell, and not a program it started, is in front.
+    pub shell_in_front: bool,
+    /// The program in front of the shell (the `comm` of its process group
+    /// leader), where the system can name it.
+    pub command: Option<String>,
+}
+
+/// The name of a process, where the system says it (Linux's `/proc`).
+#[cfg(target_os = "linux")]
+fn command_of(pid: u32) -> Option<String> {
+    let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn command_of(_pid: u32) -> Option<String> {
+    None
+}
+
 /// What a PTY reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PtyEvent {
@@ -44,6 +69,17 @@ pub enum PtyEvent {
     Output(Vec<u8>),
     /// The child ended; the last event.
     Exited(PtyExit),
+}
+
+/// The receiving end of what a PTY reports.
+pub type Events = flume::Receiver<PtyEvent>;
+/// The sending end, for something that stands in for a PTY.
+pub type EventSender = flume::Sender<PtyEvent>;
+
+/// A channel of PTY events, for a scripted terminal: a test that decides what
+/// a terminal prints and when it ends sends them here.
+pub fn event_channel() -> (EventSender, Events) {
+    flume::unbounded()
 }
 
 /// A running child in a pseudo-terminal.
@@ -73,17 +109,26 @@ fn thread(name: &str, work: impl FnOnce() + Send + 'static) {
 }
 
 impl PtyProcess {
-    /// Starts `spec` in a new PTY of `size`.
-    pub fn spawn(
+    /// Starts `spec` in a new PTY of `size`, with this process's environment
+    /// under the spec's.
+    pub fn spawn(spec: &SpawnSpec, size: GridSize) -> Result<(Self, Events), String> {
+        Self::spawn_with(spec, size, false)
+    }
+
+    /// [`PtyProcess::spawn`], with the choice of the environment:
+    /// `own_environment` gives the child the spec's `env` and nothing of this
+    /// process's (see [`command_builder_with`]).
+    pub fn spawn_with(
         spec: &SpawnSpec,
         size: GridSize,
-    ) -> Result<(Self, flume::Receiver<PtyEvent>), String> {
+        own_environment: bool,
+    ) -> Result<(Self, Events), String> {
         let pty = portable_pty::native_pty_system()
             .openpty(size.pty_size())
             .map_err(|error| format!("cannot open a terminal: {error}"))?;
         let mut child = pty
             .slave
-            .spawn_command(command_builder(spec))
+            .spawn_command(command_builder_with(spec, own_environment))
             .map_err(|error| format!("cannot start {}: {error}", spec.program))?;
         drop(pty.slave);
         let reader = pty
@@ -174,6 +219,56 @@ impl PtyProcess {
     /// The child's process id, where the system has one.
     pub fn process_id(&self) -> Option<u32> {
         self.pid
+    }
+
+    /// Who is in front of the terminal: whether the child (the shell) leads
+    /// the terminal's foreground process group, which program does when it
+    /// does not, and the child's pid. `None` where the system cannot say
+    /// (Windows has no foreground process group) or the child is gone.
+    pub fn foreground(&self) -> Option<Foreground> {
+        #[cfg(unix)]
+        {
+            let pid = self.pid?;
+            let leader = self.master.lock().process_group_leader()?;
+            let shell_in_front = leader as u32 == pid;
+            Some(Foreground {
+                pid,
+                shell_in_front,
+                command: if shell_in_front {
+                    None
+                } else {
+                    command_of(leader as u32)
+                },
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+
+    /// Asks the program in front of the shell to end: SIGTERM to the
+    /// terminal's foreground process group. `false` when nothing was sent
+    /// (the shell is in front, the foreground cannot be told, or the signal
+    /// failed).
+    pub fn terminate_foreground(&self) -> bool {
+        #[cfg(unix)]
+        {
+            let Some(pid) = self.pid else { return false };
+            let Some(leader) = self.master.lock().process_group_leader() else {
+                return false;
+            };
+            if leader as u32 == pid || leader <= 1 {
+                return false;
+            }
+            // SAFETY: plain signal delivery to the terminal's foreground
+            // process group, which the pseudo-terminal itself reported.
+            unsafe { libc::kill(-leader, libc::SIGTERM) == 0 }
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
     }
 
     /// Hangs the child up; its process group is killed after a grace period
@@ -272,6 +367,50 @@ mod tests {
         pty.kill();
         let (_, exit) = collect(&events);
         assert!(exit.signal.is_some() || exit.code != 0, "{exit:?}");
+    }
+
+    fn wait_for(what: &str, mut condition: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !condition() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn the_foreground_says_whether_the_shell_or_a_program_is_in_front() {
+        let spec = SpawnSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-i".into()],
+            env: vec![
+                ("ENV".into(), "/dev/null".into()),
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("PS1".into(), "READY> ".into()),
+            ],
+            ..SpawnSpec::default()
+        };
+        let (pty, events) = PtyProcess::spawn(&spec, GridSize::new(80, 24)).unwrap();
+        let mut seen = String::new();
+        while !seen.contains("READY>") {
+            if let PtyEvent::Output(bytes) = events.recv_timeout(Duration::from_secs(20)).unwrap() {
+                seen.push_str(&String::from_utf8_lossy(&bytes));
+            }
+        }
+        let shell = pty.foreground().expect("a foreground on this system");
+        assert_eq!(Some(shell.pid), pty.process_id());
+        assert!(shell.shell_in_front);
+        assert_eq!(shell.command, None);
+        assert!(!pty.terminate_foreground(), "nobody is in front to ask");
+        pty.write(b"cat\n".to_vec());
+        wait_for("cat to take the terminal", || {
+            pty.foreground().is_some_and(|f| !f.shell_in_front)
+        });
+        #[cfg(target_os = "linux")]
+        assert_eq!(pty.foreground().unwrap().command.as_deref(), Some("cat"));
+        assert!(pty.terminate_foreground(), "SIGTERM reached cat");
+        wait_for("the shell to get the terminal back", || {
+            pty.foreground().is_some_and(|f| f.shell_in_front)
+        });
     }
 
     #[test]

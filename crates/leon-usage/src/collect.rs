@@ -145,12 +145,29 @@ pub struct MachineUsage {
 /// agent, machine and plan always give the same key, and nothing identifies
 /// the account.
 pub fn series_key(machine: &str, agent: AgentId, plan: Option<&str>) -> String {
+    series_key_of(machine, agent, plan, None)
+}
+
+/// [`series_key`] for a reading that may be of one of the user's accounts of the
+/// agent (its id): two accounts on the same plan keep separate series.
+pub fn series_key_of(
+    machine: &str,
+    agent: AgentId,
+    plan: Option<&str>,
+    account: Option<&str>,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(machine.as_bytes());
     hasher.update([0]);
     hasher.update(agent.as_str().as_bytes());
     hasher.update([0]);
     hasher.update(plan.unwrap_or("").as_bytes());
+    // Appended only for an account, so the key of the agent's own setup is the
+    // one it always had and its stored history stays where it is.
+    if let Some(account) = account {
+        hasher.update([0]);
+        hasher.update(account.as_bytes());
+    }
     hasher
         .finalize()
         .iter()
@@ -312,6 +329,131 @@ pub async fn collect_machine_on<R: Runner>(
             _ => off(Reason::NotSupported),
         };
         out.readings.push(reading);
+    }
+    out
+}
+
+/// One account of an agent whose configuration folder is read on this computer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountFolder {
+    /// The id of the account.
+    pub account: String,
+    /// Its agent: Claude Code or Codex, the only ones with a verified folder.
+    pub agent: AgentId,
+    /// The absolute folder (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`).
+    pub folder: std::path::PathBuf,
+}
+
+/// Collects the readings of the accounts in `folders`, one [`MachineUsage`] each,
+/// every reading marked as the account's.
+///
+/// Only this computer is read: an account's folder is a folder of this machine,
+/// and the sign-in in it is read here and nowhere else, so for any other machine
+/// there is nothing to report and nothing is made up. Claude Code's account is
+/// read from the vendor with the sign-in of its own folder (when its switch is
+/// on); Codex's from the session logs of its own folder, and from the vendor
+/// when the log is stale and the switch is on. A source that cannot read an
+/// account's folder gives [`Reason::NotSupported`], never the agent's own
+/// numbers.
+#[allow(clippy::too_many_arguments)] // `collect_machine_on` plus the folders
+pub async fn collect_accounts<R: Runner>(
+    runner: &R,
+    machine: &Machine,
+    local_posix: bool,
+    ssh: &SshOptions,
+    policy: &NetworkPolicy,
+    credentials: &dyn Credentials,
+    http: &dyn Http,
+    folders: &[AccountFolder],
+    now: i64,
+) -> Vec<MachineUsage> {
+    if machine.kind != MachineKind::Local || !local_posix {
+        return Vec::new();
+    }
+    let id = machine.id.as_str();
+    let mut out = Vec::with_capacity(folders.len());
+    for AccountFolder {
+        account,
+        agent,
+        folder,
+    } in folders
+    {
+        let agent = *agent;
+        let mut one = MachineUsage::default();
+        let reading = match credentials.for_folder(agent, folder) {
+            _ if !policy.allows(agent) && agent != AgentId::CODEX => {
+                AgentUsage::unknown(agent, id, Reason::SourceDisabled)
+            }
+            None => AgentUsage::unknown(agent, id, Reason::NotSupported),
+            Some(creds) if agent == AgentId::CLAUDE => {
+                let usage = network::claude_usage(policy, &*creds, http, id, now).await;
+                one.called.push((
+                    agent,
+                    match &usage.state {
+                        State::Unknown { reason } => Some(*reason),
+                        State::Known { .. } => None,
+                    },
+                ));
+                usage
+            }
+            Some(creds) if agent == AgentId::CODEX => {
+                let spec = run_on(
+                    machine,
+                    &collect_command().env("CODEX_HOME", folder.to_string_lossy()),
+                    ssh,
+                );
+                let found = match runner.run(&spec).await {
+                    Ok(output) if output.success() => parse_found(&output.stdout),
+                    _ => {
+                        out.push(MachineUsage {
+                            readings: vec![AgentUsage::unknown(agent, id, Reason::Unreachable)
+                                .for_account(account)],
+                            ..Default::default()
+                        });
+                        continue;
+                    }
+                };
+                let Collected { usage, samples } =
+                    codex::parse_rollout_lines(&found.codex_lines, id);
+                one.samples.extend(
+                    samples
+                        .into_iter()
+                        .map(|(kind, sample)| (agent, kind, sample)),
+                );
+                let fresh = usage
+                    .observed_at
+                    .is_some_and(|at| now - at <= codex::LOG_FRESH);
+                if policy.allows(agent) && !fresh {
+                    let backend = network::codex_usage(policy, &*creds, http, id, now).await;
+                    let reason = match &backend.state {
+                        State::Unknown { reason } => Some(*reason),
+                        State::Known { windows } => {
+                            one.samples.extend(windows.iter().map(|w| {
+                                (
+                                    agent,
+                                    w.kind.clone(),
+                                    Sample {
+                                        at: now,
+                                        used_percent: w.used_percent,
+                                    },
+                                )
+                            }));
+                            None
+                        }
+                    };
+                    one.called.push((agent, reason));
+                    if reason.is_none() {
+                        one.readings.push(backend.for_account(account));
+                        out.push(one);
+                        continue;
+                    }
+                }
+                usage
+            }
+            Some(_) => AgentUsage::unknown(agent, id, Reason::NotSupported),
+        };
+        one.readings.push(reading.for_account(account));
+        out.push(one);
     }
     out
 }
@@ -934,5 +1076,248 @@ mod tests {
         // the collection: the command that spends a turn was not run again.
         assert_eq!(runner.calls().len(), 3);
         antigravity::unlatch("latch-box");
+    }
+
+    /// Credentials that can read an account's folder: the folder named `work`
+    /// is signed in, anything else is not.
+    struct Folders;
+    impl Credentials for Folders {
+        fn claude(&self) -> Read<crate::claude::Credential> {
+            Read::Missing
+        }
+        fn opencode_go(&self) -> Read<Secret> {
+            Read::Missing
+        }
+        fn for_folder(
+            &self,
+            agent: AgentId,
+            folder: &std::path::Path,
+        ) -> Option<Box<dyn Credentials>> {
+            Some(Box::new(FolderCreds {
+                agent,
+                signed_in: folder.to_string_lossy().contains("work"),
+            }))
+        }
+    }
+    struct FolderCreds {
+        agent: AgentId,
+        signed_in: bool,
+    }
+    impl Credentials for FolderCreds {
+        fn claude(&self) -> Read<crate::claude::Credential> {
+            match (self.agent, self.signed_in) {
+                (AgentId::CLAUDE, true) => crate::claude::parse_credential(
+                    r#"{"claudeAiOauth":{"accessToken":"tok","subscriptionType":"max"}}"#,
+                )
+                .map_or(Read::Missing, Read::Found),
+                _ => Read::Missing,
+            }
+        }
+        fn opencode_go(&self) -> Read<Secret> {
+            Read::Missing
+        }
+        fn codex(&self) -> Read<crate::codex::Credential> {
+            match (self.agent, self.signed_in) {
+                (AgentId::CODEX, true) => {
+                    crate::codex::parse_credential(r#"{"tokens":{"access_token":"t"}}"#)
+                        .map_or(Read::Missing, Read::Found)
+                }
+                _ => Read::Missing,
+            }
+        }
+    }
+
+    const CLAUDE_ANSWER: &str = r#"{"five_hour":{"utilization":10,"resets_at":1791300000},"seven_day":{"utilization":91,"resets_at":1791300000}}"#;
+
+    fn folder(account: &str, agent: AgentId, path: &str) -> AccountFolder {
+        AccountFolder {
+            account: account.into(),
+            agent,
+            folder: path.into(),
+        }
+    }
+
+    async fn accounts_on(
+        machine: &Machine,
+        policy: &NetworkPolicy,
+        creds: &dyn Credentials,
+        http: &ScriptedHttp,
+        runner: &ScriptedRunner,
+        folders: &[AccountFolder],
+    ) -> Vec<MachineUsage> {
+        collect_accounts(
+            runner,
+            machine,
+            true,
+            &SshOptions::without_multiplexing(),
+            policy,
+            creds,
+            http,
+            folders,
+            1_791_000_000,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_claude_account_is_read_with_the_sign_in_of_its_own_folder() {
+        let http = ScriptedHttp::new().reply(200, CLAUDE_ANSWER);
+        let runner = ScriptedRunner::new();
+        let policy = NetworkPolicy::none().with(AgentId::CLAUDE);
+        let got = accounts_on(
+            &local(),
+            &policy,
+            &Folders,
+            &http,
+            &runner,
+            &[folder("claude-work", AgentId::CLAUDE, "/h/.claude-work")],
+        )
+        .await;
+        assert_eq!(got.len(), 1);
+        let reading = &got[0].readings[0];
+        assert_eq!(reading.account.as_deref(), Some("claude-work"));
+        assert_eq!(reading.agent, AgentId::CLAUDE);
+        assert!(
+            matches!(reading.state, State::Known { .. }),
+            "{:?}",
+            reading.state
+        );
+        assert_eq!(got[0].called, [(AgentId::CLAUDE, None)]);
+        assert_eq!(http.calls(), [crate::claude::URL]);
+        // Claude Code's account runs no command: its numbers come from the vendor.
+        assert!(runner.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_account_that_is_not_signed_in_says_so_and_never_shows_the_agents_own_numbers() {
+        let http = ScriptedHttp::new().reply(200, CLAUDE_ANSWER);
+        let runner = ScriptedRunner::new();
+        let policy = NetworkPolicy::none().with(AgentId::CLAUDE);
+        let got = accounts_on(
+            &local(),
+            &policy,
+            &Folders,
+            &http,
+            &runner,
+            &[folder("claude-other", AgentId::CLAUDE, "/h/.claude-other")],
+        )
+        .await;
+        assert_eq!(
+            got[0].readings[0].state,
+            State::Unknown {
+                reason: Reason::NotSignedIn
+            }
+        );
+        assert_eq!(got[0].readings[0].account.as_deref(), Some("claude-other"));
+        assert!(
+            http.calls().is_empty(),
+            "nothing is called without a sign-in"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_switched_off_source_reads_no_account() {
+        let http = ScriptedHttp::new();
+        let runner = ScriptedRunner::new();
+        let got = accounts_on(
+            &local(),
+            &NetworkPolicy::none(),
+            &Folders,
+            &http,
+            &runner,
+            &[folder("claude-work", AgentId::CLAUDE, "/h/.claude-work")],
+        )
+        .await;
+        assert_eq!(
+            got[0].readings[0].state,
+            State::Unknown {
+                reason: Reason::SourceDisabled
+            }
+        );
+        assert!(http.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_codex_account_reads_the_session_log_of_its_own_folder() {
+        let http = ScriptedHttp::new();
+        let runner = ScriptedRunner::new().reply(output(&[], Some(CODEX_LINE)));
+        let got = accounts_on(
+            &local(),
+            &NetworkPolicy::none(),
+            &NoCredentials,
+            &http,
+            &runner,
+            &[folder("codex-lab", AgentId::CODEX, "/data/codex-lab")],
+        )
+        .await;
+        // A source that cannot read folders gives nothing, not the default's.
+        assert_eq!(
+            got[0].readings[0].state,
+            State::Unknown {
+                reason: Reason::NotSupported
+            }
+        );
+        assert!(runner.calls().is_empty());
+
+        let runner = ScriptedRunner::new().reply(output(&[], Some(CODEX_LINE)));
+        let got = accounts_on(
+            &local(),
+            &NetworkPolicy::none(),
+            &Folders,
+            &http,
+            &runner,
+            &[folder("codex-lab", AgentId::CODEX, "/data/codex-lab")],
+        )
+        .await;
+        let reading = &got[0].readings[0];
+        assert_eq!(reading.account.as_deref(), Some("codex-lab"));
+        assert_eq!(reading.source, Some(Source::Local));
+        assert!(matches!(reading.state, State::Known { .. }));
+        assert_eq!(got[0].samples.len(), 2);
+        let call = &runner.calls()[0];
+        assert_eq!(
+            call.env,
+            [("CODEX_HOME".to_owned(), "/data/codex-lab".to_owned())],
+            "the log is read from the account's folder"
+        );
+        assert!(http.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn only_this_computer_is_read_for_accounts() {
+        let http = ScriptedHttp::new();
+        let runner = ScriptedRunner::new();
+        let policy = NetworkPolicy::all();
+        let folders = [folder("claude-work", AgentId::CLAUDE, "/h/.claude-work")];
+        assert!(
+            accounts_on(&remote(), &policy, &Folders, &http, &runner, &folders)
+                .await
+                .is_empty()
+        );
+        let windows = collect_accounts(
+            &runner,
+            &local(),
+            false,
+            &SshOptions::without_multiplexing(),
+            &policy,
+            &Folders,
+            &http,
+            &folders,
+            1_791_000_000,
+        )
+        .await;
+        assert!(windows.is_empty());
+        assert!(http.calls().is_empty() && runner.calls().is_empty());
+    }
+
+    #[test]
+    fn two_accounts_on_one_plan_keep_separate_series() {
+        let own = series_key_of("local", AgentId::CLAUDE, Some("max"), None);
+        assert_eq!(own, series_key("local", AgentId::CLAUDE, Some("max")));
+        let work = series_key_of("local", AgentId::CLAUDE, Some("max"), Some("claude-work"));
+        let home = series_key_of("local", AgentId::CLAUDE, Some("max"), Some("claude-home"));
+        assert_ne!(work, own);
+        assert_ne!(work, home);
+        assert_eq!(work.len(), own.len());
     }
 }

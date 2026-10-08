@@ -28,10 +28,11 @@ use super::expansion::Expansion;
 use super::filter::{Filter, ProjectMatch};
 use super::live::LiveId;
 use super::model::{ProjectEntry, Snapshot};
+use super::shelf::{self, Section, ShelfKind};
 use chrono::{DateTime, Duration, Utc};
 use leon_core::{
-    AgentId, Machine, MachineId, Project, ProjectId, Session, SessionId, SessionScope, Worktree,
-    WorktreeId,
+    AgentId, Machine, MachineId, Project, ProjectId, Session, SessionId, SessionScope, Shelf,
+    Worktree, WorktreeId,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -61,6 +62,9 @@ pub enum NodeId {
     /// The Pinned section of a machine: its pinned sessions, above the
     /// projects.
     Pinned(MachineId),
+    /// A shelf of a machine, at the bottom of it: the sessions snoozed until a
+    /// time, or put away.
+    Shelf(MachineId, ShelfKind),
     /// A session.
     Session(SessionId),
     /// A live terminal session.
@@ -87,6 +91,7 @@ impl NodeId {
             NodeId::Unsorted(id) => format!("unsorted:{id}"),
             NodeId::Folder(id, cwd) => format!("folder:{id}:{cwd}"),
             NodeId::Pinned(id) => format!("pinned:{id}"),
+            NodeId::Shelf(id, kind) => format!("shelf:{id}:{}", kind.tag()),
             NodeId::Session(id) => format!("session:{id}"),
             NodeId::Live(id) => format!("live:{id}"),
             NodeId::More(parent) => format!("more:{}", parent.key()),
@@ -109,6 +114,8 @@ pub struct LiveEntry {
     pub cwd: String,
     /// The agent, or `None` for a plain shell.
     pub agent: Option<AgentId>,
+    /// The id of the account the agent runs as; `None` is its own setup.
+    pub account: Option<String>,
     /// The history session it was started from, when it resumed one.
     pub history: Option<SessionId>,
     /// For a sleeping session that has no terminal and no history row: what
@@ -150,6 +157,13 @@ pub enum Kind {
         /// The folder on its machine.
         cwd: String,
         /// Sessions that ran in it.
+        sessions: usize,
+    },
+    /// A shelf of a machine, with how many sessions it holds.
+    Shelf {
+        /// Which shelf.
+        kind: ShelfKind,
+        /// The sessions on it.
         sessions: usize,
     },
     /// A session.
@@ -277,6 +291,17 @@ pub struct Placement {
     /// their row is the terminal's row, so the terminal gets no row of its
     /// own, and the row is never left behind "show more".
     pub merged: HashSet<SessionId>,
+    /// The snoozed sessions of each machine, the one that comes back first on
+    /// top. They are in the lists above as well, which the main pane of a
+    /// worktree counts; the tree leaves them out of those lists.
+    pub snoozed: HashMap<MachineId, Vec<usize>>,
+    /// The settled sessions of each machine, newest first. Left out of the
+    /// lists above in the same way.
+    pub settled: HashMap<MachineId, Vec<usize>>,
+    /// Every session on a shelf. A pinned session on a shelf is still in
+    /// `pinned` (the order of the Pinned section is whole, so changing it never
+    /// unpins a session that is away); the Pinned section leaves it out.
+    pub shelved: HashSet<SessionId>,
 }
 
 /// Who owns a path.
@@ -380,6 +405,51 @@ impl Placement {
         self
     }
 
+    /// The same placement with the shelves filled in: which sessions are on the
+    /// Snoozed and the Settled shelf at `now` (see [`shelf::section`]). `running`
+    /// holds the history sessions that have a live terminal.
+    pub fn with_shelves(
+        mut self,
+        snapshot: &Snapshot,
+        shelves: &HashMap<SessionId, Shelf>,
+        running: &HashSet<SessionId>,
+        now: DateTime<Utc>,
+    ) -> Self {
+        self.snoozed.clear();
+        self.settled.clear();
+        self.shelved.clear();
+        for (place, session) in snapshot.sessions.iter().enumerate() {
+            let section =
+                shelf::section(shelves.get(&session.id), running.contains(&session.id), now);
+            let list = match section {
+                Section::Active => continue,
+                Section::Snoozed => &mut self.snoozed,
+                Section::Settled => &mut self.settled,
+            };
+            list.entry(session.machine_id.clone())
+                .or_default()
+                .push(place);
+            self.shelved.insert(session.id.clone());
+        }
+        let comes_back = |place: &usize| match shelves.get(&snapshot.sessions[*place].id) {
+            Some(Shelf::Snoozed(until)) => Some(*until),
+            _ => None,
+        };
+        for places in self.snoozed.values_mut() {
+            places.sort_by_key(comes_back);
+        }
+        self
+    }
+
+    /// The sessions on a shelf of a machine.
+    pub fn on_shelf(&self, machine: &MachineId, kind: ShelfKind) -> &[usize] {
+        let shelf = match kind {
+            ShelfKind::Snoozed => &self.snoozed,
+            ShelfKind::Settled => &self.settled,
+        };
+        shelf.get(machine).map_or(&[], Vec::as_slice)
+    }
+
     /// The live sessions of a worktree.
     pub fn live_of_worktree(&self, id: &WorktreeId) -> &[usize] {
         self.live_in_worktree.get(id).map_or(&[], Vec::as_slice)
@@ -475,12 +545,16 @@ fn pinned_first(snapshot: &Snapshot, places: &mut [usize]) {
 }
 
 /// The sessions of `places` that a list of the tree shows under its parent: a
-/// pinned session is shown in the Pinned section instead.
-fn listed(snapshot: &Snapshot, places: &[usize]) -> Vec<usize> {
+/// pinned session is shown in the Pinned section instead, and one on a shelf
+/// on its shelf.
+fn listed(snapshot: &Snapshot, shelved: &HashSet<SessionId>, places: &[usize]) -> Vec<usize> {
     places
         .iter()
         .copied()
-        .filter(|place| snapshot.sessions[*place].sort_order.is_none())
+        .filter(|place| {
+            let session = &snapshot.sessions[*place];
+            session.sort_order.is_none() && !shelved.contains(&session.id)
+        })
         .collect()
 }
 
@@ -602,6 +676,7 @@ pub fn build_rows_filtered(
         snapshot,
         expansion,
         merged: &placement.merged,
+        shelved: &placement.shelved,
         rows: Vec::new(),
     };
     let headers = machine_headers(snapshot);
@@ -621,6 +696,7 @@ pub fn build_rows_filtered(
                     out.project(entry, placement, now, Some(matched));
                 }
             }
+            out.shelves(placement, &machine.id, Some(&visible));
             continue;
         }
         out.push(
@@ -656,13 +732,14 @@ pub fn build_rows_filtered(
             .flatten()
             .map(|folder| Folder {
                 cwd: folder.cwd.clone(),
-                sessions: listed(snapshot, &folder.sessions),
+                sessions: listed(snapshot, &placement.shelved, &folder.sessions),
             })
             .filter(|folder| !folder.sessions.is_empty())
             .collect();
         if !folders.is_empty() {
             out.unsorted(&machine.id, &folders);
         }
+        out.shelves(placement, &machine.id, None);
     }
     if filter.is_some_and(Filter::is_empty) {
         let home = snapshot
@@ -702,6 +779,8 @@ struct Rows<'a> {
     expansion: &'a Expansion,
     /// The history sessions whose row is their live terminal's row.
     merged: &'a HashSet<SessionId>,
+    /// The sessions on a shelf: their lists leave them out.
+    shelved: &'a HashSet<SessionId>,
     rows: Vec<Row>,
 }
 
@@ -727,6 +806,7 @@ impl Rows<'_> {
         let project = &entry.project;
         let loose = listed(
             self.snapshot,
+            &placement.shelved,
             placement
                 .in_project
                 .get(&project.id)
@@ -736,7 +816,14 @@ impl Rows<'_> {
             + entry
                 .worktrees
                 .iter()
-                .map(|worktree| listed(self.snapshot, placement.of_worktree(&worktree.id)).len())
+                .map(|worktree| {
+                    listed(
+                        self.snapshot,
+                        &placement.shelved,
+                        placement.of_worktree(&worktree.id),
+                    )
+                    .len()
+                })
                 .sum::<usize>();
         let live_loose = if filtered {
             &[][..]
@@ -771,7 +858,11 @@ impl Rows<'_> {
             if matched.is_some_and(|matched| !matched.worktrees.contains(&worktree.id)) {
                 continue;
             }
-            let own = listed(self.snapshot, placement.of_worktree(&worktree.id));
+            let own = listed(
+                self.snapshot,
+                &placement.shelved,
+                placement.of_worktree(&worktree.id),
+            );
             let live = self.shown_live(placement, placement.live_of_worktree(&worktree.id));
             // A worktree with something running in it is open.
             let recent = !live.is_empty()
@@ -870,6 +961,11 @@ impl Rows<'_> {
             .into_iter()
             .flatten()
             .copied()
+            .filter(|place| {
+                !placement
+                    .shelved
+                    .contains(&self.snapshot.sessions[*place].id)
+            })
             .filter(|place| visible.is_none_or(|visible| visible.contains(place)))
             .collect();
         if places.is_empty() {
@@ -902,6 +998,44 @@ impl Rows<'_> {
         }
     }
 
+    /// The shelves of a machine, at the bottom of it: Snoozed, then Settled,
+    /// each folded until it is opened. In a filtered tree, only the sessions
+    /// the filter keeps (`visible`), and the shelf is open.
+    fn shelves(
+        &mut self,
+        placement: &Placement,
+        machine: &MachineId,
+        visible: Option<&HashSet<usize>>,
+    ) {
+        for kind in [ShelfKind::Snoozed, ShelfKind::Settled] {
+            let places: Vec<usize> = placement
+                .on_shelf(machine, kind)
+                .iter()
+                .copied()
+                .filter(|place| visible.is_none_or(|visible| visible.contains(place)))
+                .collect();
+            if places.is_empty() {
+                continue;
+            }
+            let id = NodeId::Shelf(machine.clone(), kind);
+            let filtered = visible.is_some();
+            let open = filtered || self.expansion.is_open(&id.key(), false);
+            self.push(
+                id.clone(),
+                machine,
+                1,
+                (!filtered).then_some(open),
+                Kind::Shelf {
+                    kind,
+                    sessions: places.len(),
+                },
+            );
+            if open {
+                self.capped(&places, &id, machine, 2);
+            }
+        }
+    }
+
     /// Whether a live terminal has no row of its own: it resumed a history
     /// session that the tree shows as its row.
     fn is_merged(&self, entry: &LiveEntry) -> bool {
@@ -924,7 +1058,13 @@ impl Rows<'_> {
     /// the rest. A session with a live terminal is shown whatever the cap
     /// says: it is what is running.
     fn sessions(&mut self, places: &[usize], parent: &NodeId, machine: &MachineId, depth: u8) {
-        let places = listed(self.snapshot, places);
+        let places = listed(self.snapshot, self.shelved, places);
+        self.capped(&places, parent, machine, depth);
+    }
+
+    /// The sessions `places` under `parent`, up to the cap, then the row that
+    /// shows the rest.
+    fn capped(&mut self, places: &[usize], parent: &NodeId, machine: &MachineId, depth: u8) {
         let all = self.expansion.shows_all_under(&parent.key());
         let shown = if all {
             places.len()
@@ -1180,6 +1320,7 @@ mod tests {
             updated_at: at,
             message_count: 1,
             sort_order: None,
+            account: None,
         }
     }
 
@@ -1212,6 +1353,7 @@ mod tests {
             sessions,
             icons: Default::default(),
             dismissed: Vec::new(),
+            statuses: Default::default(),
         }
     }
 
@@ -1232,6 +1374,9 @@ mod tests {
                         format!("worktree {} ({sessions})", worktree_label(worktree))
                     }
                     Kind::Pinned { sessions } => format!("pinned ({sessions})"),
+                    Kind::Shelf { kind, sessions } => {
+                        format!("shelf {} ({sessions})", kind.title())
+                    }
                     Kind::Unsorted { sessions } => format!("unsorted ({sessions})"),
                     Kind::Folder { cwd, sessions } => format!("folder {cwd} ({sessions})"),
                     Kind::Session(session) => format!("session {}", session.id),
@@ -1981,6 +2126,7 @@ mod tests {
             machine: MachineId::from_string(machine),
             cwd: cwd.to_owned(),
             agent: Some(AgentId::CLAUDE),
+            account: None,
             history: None,
             asleep: None,
         }
@@ -2175,5 +2321,243 @@ mod tests {
         assert!(same_folder(r"\\?\C:\a", "C:/a"));
         assert!(!same_folder("/srv/Api", "/srv/api"));
         assert!(!same_folder(r"/srv/a\b", "/srv/a/b"));
+    }
+    // ----- the shelves -----------------------------------------------------------------
+
+    fn shelved(
+        snapshot: &Snapshot,
+        shelves: &[(&str, Shelf)],
+        running: &[&str],
+        at: DateTime<Utc>,
+    ) -> Placement {
+        let shelves = shelves
+            .iter()
+            .map(|(id, shelf)| (SessionId::from_string(*id), *shelf))
+            .collect();
+        let running = running
+            .iter()
+            .map(|id| SessionId::from_string(*id))
+            .collect();
+        Placement::compute(snapshot).with_shelves(snapshot, &shelves, &running, at)
+    }
+
+    fn rows_on(placement: &Placement, snapshot: &Snapshot, expansion: &Expansion) -> Vec<String> {
+        outline(&build_rows(snapshot, placement, expansion, now()))
+    }
+
+    fn back_at_one() -> DateTime<Utc> {
+        now() + Duration::hours(1)
+    }
+
+    #[test]
+    fn the_shelves_are_folded_at_the_bottom_of_their_machine_and_count_their_sessions() {
+        let snapshot = fixture(vec![
+            session("plain", "local", "/srv/api", 1),
+            session("away", "local", "/srv/api", 2),
+            session("later", "local", "/srv/web", 3),
+            session("elsewhere", "box", "/srv/x", 4),
+        ]);
+        let placement = shelved(
+            &snapshot,
+            &[
+                ("away", Shelf::Settled),
+                ("later", Shelf::Snoozed(back_at_one())),
+            ],
+            &[],
+            now(),
+        );
+        let lines = rows_on(&placement, &snapshot, &Expansion::default());
+        let local: Vec<&str> = lines
+            .iter()
+            .map(String::as_str)
+            .take_while(|line| !line.starts_with("machine box"))
+            .collect();
+        assert_eq!(
+            local[local.len() - 2..],
+            ["  shelf Snoozed (1)", "  shelf Settled (1)"],
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("session away")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("session later")),
+            "{lines:?}"
+        );
+        assert!(lines.contains(&"  project api (1)".to_owned()), "{lines:?}");
+        assert!(lines.contains(&"  project web (0)".to_owned()), "{lines:?}");
+    }
+
+    #[test]
+    fn an_open_shelf_lists_snoozed_sessions_by_when_they_come_back_and_settled_ones_newest_first() {
+        let snapshot = fixture(vec![
+            session("old", "local", "/srv/api", 30),
+            session("new", "local", "/srv/api", 3),
+            session("soon", "local", "/srv/api", 10),
+            session("late", "local", "/srv/api", 5),
+        ]);
+        let placement = shelved(
+            &snapshot,
+            &[
+                ("old", Shelf::Settled),
+                ("new", Shelf::Settled),
+                ("late", Shelf::Snoozed(now() + Duration::days(2))),
+                ("soon", Shelf::Snoozed(back_at_one())),
+            ],
+            &[],
+            now(),
+        );
+        let mut expansion = Expansion::default();
+        for kind in [ShelfKind::Snoozed, ShelfKind::Settled] {
+            expansion.set_open(
+                &NodeId::Shelf(MachineId::from_string("local"), kind).key(),
+                true,
+            );
+        }
+        let lines = rows_on(&placement, &snapshot, &expansion);
+        let at = lines
+            .iter()
+            .position(|l| l == "  shelf Snoozed (2)")
+            .expect("snoozed");
+        assert_eq!(
+            lines[at..at + 6],
+            [
+                "  shelf Snoozed (2)",
+                "    session soon",
+                "    session late",
+                "  shelf Settled (2)",
+                "    session new",
+                "    session old",
+            ],
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_session_on_a_shelf_leaves_the_pinned_section_but_not_its_order() {
+        let mut a = session("a", "local", "/srv/api", 5);
+        a.sort_order = Some(0);
+        let mut b = session("b", "local", "/srv/api", 6);
+        b.sort_order = Some(1);
+        let snapshot = fixture(vec![a, b]);
+        let placement = shelved(&snapshot, &[("a", Shelf::Settled)], &[], now());
+        let lines = rows_on(&placement, &snapshot, &Expansion::everything());
+        assert!(lines.contains(&"  pinned (1)".to_owned()), "{lines:?}");
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("session a")).count(),
+            1,
+            "{lines:?}"
+        );
+        // The order the pin operations work on still holds both, so changing
+        // it never unpins the session that is away.
+        let order: Vec<&str> = placement.pinned[&MachineId::from_string("local")]
+            .iter()
+            .map(|place| snapshot.sessions[*place].id.as_str())
+            .collect();
+        assert_eq!(order, ["a", "b"]);
+    }
+
+    #[test]
+    fn a_snooze_that_has_ended_puts_the_session_back_and_a_running_settled_session_never_leaves() {
+        let snapshot = fixture(vec![
+            session("napping", "local", "/srv/api", 1),
+            session("running", "local", "/srv/api", 2),
+        ]);
+        let shelves = [
+            ("napping", Shelf::Snoozed(back_at_one())),
+            ("running", Shelf::Settled),
+        ];
+        let before = shelved(&snapshot, &shelves, &["running"], now());
+        let lines = rows_on(&before, &snapshot, &Expansion::default());
+        assert!(
+            !lines.iter().any(|l| l.contains("session napping")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("session running")),
+            "{lines:?}"
+        );
+        let after = shelved(&snapshot, &shelves, &["running"], back_at_one());
+        let lines = rows_on(&after, &snapshot, &Expansion::default());
+        assert!(
+            lines.iter().any(|l| l.contains("session napping")),
+            "{lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("shelf")), "{lines:?}");
+    }
+
+    #[test]
+    fn a_filtered_tree_shows_a_shelf_with_only_the_sessions_the_filter_keeps() {
+        use crate::ui::filter::{filter, project_labels};
+        let snapshot = fixture(vec![
+            session("in-api", "local", "/srv/api", 1),
+            session("in-web", "local", "/srv/web", 2),
+        ]);
+        let placement = shelved(
+            &snapshot,
+            &[("in-api", Shelf::Settled), ("in-web", Shelf::Settled)],
+            &[],
+            now(),
+        );
+        let found = filter(&snapshot, &project_labels(&snapshot), "api").unwrap();
+        let rows = build_rows_filtered(
+            &snapshot,
+            &placement,
+            &Expansion::default(),
+            now(),
+            Some(&found),
+        );
+        let lines = outline(&rows);
+        assert!(
+            lines.contains(&"  shelf Settled (1)".to_owned()),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&"    session in-api".to_owned()),
+            "{lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("in-web")), "{lines:?}");
+    }
+
+    #[test]
+    fn a_long_shelf_shows_a_few_sessions_and_the_rest_behind_show_more() {
+        let sessions: Vec<Session> = (0..11)
+            .map(|n| session(&format!("s{n:02}"), "local", "/srv/api", n + 1))
+            .collect();
+        let snapshot = fixture(sessions);
+        let all: Vec<(&str, Shelf)> = snapshot
+            .sessions
+            .iter()
+            .map(|s| (s.id.as_str(), Shelf::Settled))
+            .collect();
+        let placement = shelved(&snapshot, &all, &[], now());
+        let mut expansion = Expansion::default();
+        expansion.set_open(
+            &NodeId::Shelf(MachineId::from_string("local"), ShelfKind::Settled).key(),
+            true,
+        );
+        let lines = rows_on(&placement, &snapshot, &expansion);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.starts_with("    session"))
+                .count(),
+            SESSIONS_SHOWN
+        );
+        assert!(lines.contains(&"    more 3".to_owned()), "{lines:?}");
+    }
+
+    #[test]
+    fn a_shelf_has_a_key_of_its_own_per_machine_and_kind() {
+        let local = MachineId::from_string("local");
+        let keys: HashSet<String> = [
+            NodeId::Shelf(local.clone(), ShelfKind::Settled).key(),
+            NodeId::Shelf(local, ShelfKind::Snoozed).key(),
+            NodeId::Shelf(MachineId::from_string("box"), ShelfKind::Settled).key(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(keys.len(), 3);
     }
 }

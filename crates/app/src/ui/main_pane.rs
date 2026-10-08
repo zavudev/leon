@@ -3,12 +3,15 @@
 //! line of the engine.
 
 use super::activity::Activity;
+use super::checkout;
 use super::lines::{empty_frame, frame_ticks};
 use super::live::{LiveId, LiveState};
 use super::shell::{Main, Pane, Shell, Transcript};
 use super::sidebar::live_light;
 use super::tree::worktree_label;
-use super::widgets::{activity_dot, focus_rule, key_cap, led, mono, section_label};
+use super::widgets::{
+    activity_dot, checkout_colour, focus_rule, key_cap, led, mono, section_label,
+};
 use crate::format;
 use crate::icons::{agent_icon, icon, IconName};
 use crate::keys::{self, Command};
@@ -167,9 +170,10 @@ impl Shell {
                     .find(|w| &w.id == worktree)
                     .map(|w| w.path.clone())
             }),
-            Main::Live(id) => match self.files.get(id) {
-                Some(doc) => Some(doc.path.clone()),
-                None => self.live.get(*id).map(|session| session.cwd.clone()),
+            Main::Live(id) => match (self.files.get(id), self.changes.get(id)) {
+                (Some(doc), _) => Some(doc.path.clone()),
+                (None, Some(view)) => Some(view.target.path.clone()),
+                (None, None) => self.live.get(*id).map(|session| session.cwd.clone()),
             },
             Main::Session(transcript) => Some(transcript.session.cwd.clone()),
             Main::Empty | Main::Den => None,
@@ -250,9 +254,19 @@ impl Shell {
                 }
             }
             Main::Live(id) if self.files.contains_key(id) => self.file_heading(&self.files[id]),
+            Main::Live(id) if self.changes.contains_key(id) => {
+                self.changes_heading(&self.changes[id])
+            }
             Main::Live(id) => match self.live.get(*id) {
                 Some(session) => {
-                    let who = session.agent.map_or("SHELL", format::agent_tag);
+                    let who = session.agent.map_or("SHELL", format::agent_tag).to_owned()
+                        + &session
+                            .account
+                            .as_deref()
+                            .filter(|_| session.agent.is_some())
+                            .map_or_else(String::new, |account| {
+                                format!(" · {}", format::account_tag(account))
+                            });
                     // A session the person resumed here anyway, while another
                     // process still holds it, says so.
                     let also = session
@@ -307,8 +321,14 @@ impl Shell {
                     "Session",
                     session.title.clone(),
                     format!(
-                        "{} · {} MESSAGES · {}{held}",
+                        "{}{} · {} MESSAGES · {}{held}",
                         format::agent_tag(session.agent),
+                        session
+                            .account
+                            .as_deref()
+                            .map_or_else(String::new, |account| {
+                                format!(" · {}", format::account_tag(account))
+                            }),
                         session.message_count,
                         session.cwd
                     ),
@@ -510,6 +530,7 @@ impl Shell {
                         Launch::Agent {
                             kind: agent,
                             resume: None,
+                            account: None,
                         },
                         window,
                         cx,
@@ -519,6 +540,17 @@ impl Shell {
         }
         actions = actions
             .child(worktree_divider(colours))
+            .child(worktree_button(
+                "worktree-changes",
+                super::sidebar::tooltip_text(Command::OpenChanges),
+                colours,
+                cx,
+                mono("CHANGES")
+                    .text_color(colours.text_muted)
+                    .into_any_element(),
+                false,
+                |this, window, cx| this.open_changes_of_open_worktree(window, cx),
+            ))
             .child(worktree_button(
                 "worktree-shell",
                 super::sidebar::tooltip_text(Command::OpenShell),
@@ -579,6 +611,19 @@ impl Shell {
                 false,
                 |this, window, cx| this.new_worktree_in_open_project(window, cx),
             ));
+        if leon_core::cleanup::offered(wt) {
+            actions = actions.child(worktree_button(
+                "worktree-remove-merged",
+                super::sidebar::tooltip_text(Command::RemoveMergedWorktrees),
+                colours,
+                cx,
+                mono("REMOVE MERGED")
+                    .text_color(colours.success)
+                    .into_any_element(),
+                false,
+                |this, window, cx| this.begin_flow(Command::RemoveMergedWorktrees, window, cx),
+            ));
+        }
         if !wt.is_main {
             actions = actions.child(worktree_button(
                 "worktree-remove",
@@ -686,6 +731,9 @@ impl Shell {
             )
             .child(list);
 
+        // ----- the state of the checkout: changes, upstream, pull request.
+        let checkout = self.worktree_checkout(&wt.id, colours, cx);
+
         // ----- the details: where it is and what it is.
         let details = self
             .card("worktree-fields", colours)
@@ -734,15 +782,121 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .gap_3()
+                    .children(checkout)
                     .child(sessions)
                     .child(details),
             )
             .into_any_element()
     }
 
+    /// What is known about the checkout of a worktree, in words: the changed
+    /// files, the distance from the upstream and the open pull request, whose
+    /// number opens it. `None` when nothing is known, which is how a machine
+    /// without git or `gh` looks: the card is simply not there.
+    fn worktree_checkout(
+        &self,
+        worktree: &WorktreeId,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let status = self.snapshot.status(worktree)?;
+        let row = |label: &'static str, content: AnyElement| {
+            div()
+                .flex()
+                .gap_4()
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(96.))
+                        .child(mono(label).text_color(colours.text_muted)),
+                )
+                .child(
+                    div()
+                        .debug_selector(move || format!("checkout-{label}"))
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(content),
+                )
+        };
+        let mut card = self
+            .card("worktree-checkout", colours)
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(section_label("State", colours));
+        let mut any = false;
+        if let Some(changed) = status.changed {
+            any = true;
+            let tone = if changed > 0 {
+                checkout::Tone::Warning
+            } else {
+                checkout::Tone::Muted
+            };
+            card = card.child(row(
+                "CHANGES",
+                div()
+                    .text_color(checkout_colour(tone, colours))
+                    .child(checkout::changes_words(changed))
+                    .into_any_element(),
+            ));
+        }
+        if let Some(divergence) = status.divergence {
+            any = true;
+            card = card.child(row(
+                "UPSTREAM",
+                div()
+                    .child(checkout::upstream_words(
+                        divergence.ahead,
+                        divergence.behind,
+                    ))
+                    .into_any_element(),
+            ));
+        }
+        if let Some(pull_request) = &status.pull_request {
+            any = true;
+            let tone = checkout::pull_request_tone(pull_request);
+            let words: SharedString = checkout::pull_request_words(pull_request).into();
+            let colour = checkout_colour(tone, colours);
+            let content = match checkout::openable_url(pull_request) {
+                Some(url) => {
+                    let url = url.to_owned();
+                    let tip: SharedString = format!("Open {url}").into();
+                    let hover = colours.surface_2;
+                    div()
+                        .id("checkout-pull-request")
+                        .debug_selector(|| "checkout-pull-request".into())
+                        .min_w_0()
+                        .truncate()
+                        .cursor_pointer()
+                        .rounded(metrics::RADIUS())
+                        .hover(move |style| style.bg(hover))
+                        .text_color(colour)
+                        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            (this.options.open_url)(cx, &url);
+                        }))
+                        .child(words)
+                        .into_any_element()
+                }
+                None => div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(colour)
+                    .child(words)
+                    .into_any_element(),
+            };
+            card = card.child(row("PULL REQUEST", content));
+        }
+        any.then_some(card)
+    }
+
     /// The agents offered as buttons on the worktree screen: those installed on
     /// the machine, else (nothing is known of it) the built-in three.
-    fn agents_for_buttons(&self, machine: &MachineId) -> Vec<AgentId> {
+    pub(super) fn agents_for_buttons(&self, machine: &MachineId) -> Vec<AgentId> {
         self.installed_agents()
             .into_iter()
             .find(|(id, _)| id == machine)
@@ -913,15 +1067,30 @@ impl Shell {
         let Some(open) = self.shown_worktree() else {
             return;
         };
-        self.start_live(
+        self.start_new(
             launch,
             &open.machine,
             &open.path,
             super::terminals::Place::Session,
-            None,
             window,
             cx,
         );
+    }
+
+    /// Opens the changes of the worktree on screen in a tab.
+    fn open_changes_of_open_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(open) = self.shown_worktree() {
+            self.open_changes(
+                super::changes::Target {
+                    machine: open.machine,
+                    project: open.project,
+                    worktree: Some(open.worktree),
+                    path: open.path,
+                },
+                window,
+                cx,
+            );
+        }
     }
 
     fn copy_open_worktree_path(&mut self, cx: &mut Context<Self>) {
@@ -1210,7 +1379,9 @@ fn activity_word(activity: Activity) -> &'static str {
         Activity::Off => "NO LIVE SESSION",
         Activity::Idle => "IDLE",
         Activity::Working => "WORKING",
+        Activity::TurnOver => "READY",
         Activity::Waiting => "WAITING",
+        Activity::NeedsYou => "ASKS",
         Activity::Failed => "FAILED",
     }
 }

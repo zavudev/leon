@@ -290,11 +290,19 @@ impl Shell {
         if self.files.values().all(|doc| !doc.dirty && !doc.conflict) {
             self.quit_now(cx);
         } else {
+            // The quit is given up, and so is a request to end every session
+            // with it.
+            self.closing.end_held = false;
             self.engine.report(
                 StatusKind::Error,
                 "Not quitting: some files could not be saved.",
             );
         }
+    }
+
+    /// Whether a quit waits for files being saved.
+    pub(in crate::ui) fn quit_pending_saves(&self) -> bool {
+        self.quit_after_saves
     }
 
     /// "Quit without saving": the drafts go with the changes.

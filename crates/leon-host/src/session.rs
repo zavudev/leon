@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, Notify};
 
 use crate::exec;
 use crate::host::{Inner, Shared};
-use crate::ptys::Outbox;
+use crate::ptys::{Outbox, PtyTable};
 use crate::share::{ShareSource, TRANSCRIPT_BUDGET_BYTES};
 
 /// Commands one session may run at the same time.
@@ -136,8 +136,10 @@ fn handle(
     execs: &Arc<AtomicUsize>,
 ) -> bool {
     let reply = |m: Message| out_tx.try_send(m).is_ok();
+    if is_pty_request(&message) {
+        return pty_request(&inner.table, message, outbox, out_tx);
+    }
     match message {
-        Message::Ping { nonce } => reply(Message::Pong { nonce }),
         Message::Exec {
             id,
             spec,
@@ -164,56 +166,6 @@ fn handle(
             });
             true
         }
-        Message::PtyOpen {
-            id,
-            spec,
-            size,
-            label,
-        } => match inner.table.open(&spec, size, &label) {
-            Ok(pty) => {
-                if !reply(Message::PtyOpened { id, pty }) {
-                    return false;
-                }
-                match inner.table.attach(pty, 0, outbox, None) {
-                    Ok(_) => true,
-                    Err(e) => reply(Message::Error {
-                        id: Some(id),
-                        error: e,
-                    }),
-                }
-            }
-            Err(e) => reply(Message::Error {
-                id: Some(id),
-                error: e,
-            }),
-        },
-        Message::PtyData { pty, bytes, .. } => match inner.table.write(pty, bytes) {
-            Ok(()) => true,
-            Err(e) => reply(Message::Error { id: None, error: e }),
-        },
-        Message::PtyResize { pty, size } => match inner.table.resize(pty, size) {
-            Ok(()) => true,
-            Err(e) => reply(Message::Error { id: None, error: e }),
-        },
-        Message::PtyClose { pty } => match inner.table.close(pty) {
-            Ok(()) => true,
-            Err(e) => reply(Message::Error { id: None, error: e }),
-        },
-        Message::PtyList { id } => reply(Message::PtyListing {
-            id,
-            ptys: inner.table.list(),
-        }),
-        Message::PtyAttach {
-            id,
-            pty,
-            from_offset,
-        } => match inner.table.attach(pty, from_offset, outbox, Some(id)) {
-            Ok(_) => true,
-            Err(e) => reply(Message::Error {
-                id: Some(id),
-                error: e,
-            }),
-        },
         Message::ShareState { id } => share_request(
             inner.cfg.share.clone(),
             id,
@@ -263,6 +215,108 @@ fn handle(
             },
         ),
         // Responses and repeated greetings are not requests.
+        _ => reply(error(None, ErrorCode::BadRequest, "unexpected message")),
+    }
+}
+
+/// Whether `message` is a request about terminals (or a liveness probe), which
+/// a relay host and the keeper of local sessions answer in the same way.
+pub(crate) fn is_pty_request(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::Ping { .. }
+            | Message::PtyOpen { .. }
+            | Message::PtyData { .. }
+            | Message::PtyResize { .. }
+            | Message::PtyClose { .. }
+            | Message::PtyList { .. }
+            | Message::PtyAttach { .. }
+            | Message::PtyProbe { .. }
+            | Message::PtyTerminate { .. }
+    )
+}
+
+/// Handles a request for which [`is_pty_request`] holds; `false` ends the
+/// session.
+pub(crate) fn pty_request(
+    table: &Arc<PtyTable>,
+    message: Message,
+    outbox: &Outbox,
+    out_tx: &mpsc::Sender<Message>,
+) -> bool {
+    let reply = |m: Message| out_tx.try_send(m).is_ok();
+    match message {
+        Message::Ping { nonce } => reply(Message::Pong { nonce }),
+        Message::PtyOpen {
+            id,
+            spec,
+            size,
+            label,
+        } => match table.open(&spec, size, &label) {
+            Ok(pty) => {
+                if !reply(Message::PtyOpened { id, pty }) {
+                    return false;
+                }
+                match table.attach(pty, 0, outbox, None) {
+                    Ok(_) => true,
+                    Err(e) => reply(Message::Error {
+                        id: Some(id),
+                        error: e,
+                    }),
+                }
+            }
+            Err(e) => reply(Message::Error {
+                id: Some(id),
+                error: e,
+            }),
+        },
+        Message::PtyData { pty, bytes, .. } => match table.write(pty, bytes) {
+            Ok(()) => true,
+            Err(e) => reply(Message::Error { id: None, error: e }),
+        },
+        Message::PtyResize { pty, size } => match table.resize(pty, size) {
+            Ok(()) => true,
+            Err(e) => reply(Message::Error { id: None, error: e }),
+        },
+        Message::PtyClose { pty } => match table.close(pty) {
+            Ok(()) => true,
+            Err(e) => reply(Message::Error { id: None, error: e }),
+        },
+        Message::PtyList { id } => reply(Message::PtyListing {
+            id,
+            ptys: table.list(),
+        }),
+        Message::PtyAttach {
+            id,
+            pty,
+            from_offset,
+        } => match table.attach(pty, from_offset, outbox, Some(id)) {
+            Ok(_) => true,
+            Err(e) => reply(Message::Error {
+                id: Some(id),
+                error: e,
+            }),
+        },
+        Message::PtyProbe { pty } => match table.probe(pty) {
+            Ok((pid, foreground)) => reply(Message::PtyProbed {
+                pty,
+                pid,
+                shell_in_front: foreground.as_ref().map(|f| f.shell_in_front),
+                command: foreground.and_then(|f| f.command),
+            }),
+            // A terminal that is gone is not worth ending the connection for:
+            // it simply has nobody in front.
+            Err(_) => reply(Message::PtyProbed {
+                pty,
+                pid: None,
+                shell_in_front: None,
+                command: None,
+            }),
+        },
+        Message::PtyTerminate { pty } => match table.terminate_foreground(pty) {
+            Ok(_) => true,
+            Err(e) => reply(Message::Error { id: None, error: e }),
+        },
         _ => reply(error(None, ErrorCode::BadRequest, "unexpected message")),
     }
 }

@@ -31,15 +31,21 @@ mod machines;
 mod migrations;
 mod projects;
 pub mod search;
+mod shelf;
+mod tokens;
 mod usage;
 mod workspace;
 
 pub use history::{
-    history_overview_at, import_cursors_at, set_import_cursor_in, upsert_session_in, AgentOverview,
-    ImportRun, SessionFilter,
+    history_overview_at, import_cursors_at, set_import_cursor_in, set_session_account_in,
+    upsert_session_in, AgentOverview, ImportRun, SessionFilter,
 };
+pub use shelf::Shelf;
+pub use tokens::{set_session_tokens_in, SessionTokens, TokenCounts, TokenRow};
 pub use usage::{UsagePoint, UsageRow};
-pub use workspace::{SavedLayout, SavedState, SavedTab, SavedTerminal, SavedWorkspace, Slot};
+pub use workspace::{
+    KeeperRef, SavedLayout, SavedState, SavedTab, SavedTerminal, SavedWorkspace, Slot,
+};
 
 /// How long a connection waits for a lock held by another connection before
 /// giving up.

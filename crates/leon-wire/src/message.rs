@@ -38,6 +38,8 @@ pub const REPLAY_BUFFER_BYTES: usize = 2 * 1024 * 1024;
 pub const SHARE_SESSIONS_LIMIT: usize = 500;
 
 const MAX_STRING: usize = 64 * 1024;
+/// The longest name of a program a [`Message::PtyProbed`] carries.
+const MAX_COMMAND: usize = 256;
 const MAX_ITEMS: usize = 4096;
 
 /// A command to run, written from the point of view of the host.
@@ -383,6 +385,38 @@ pub enum Message {
         /// What went wrong.
         error: WireError,
     },
+    /// Asks who is in front of a terminal. Only the keeper of durable local
+    /// sessions answers it (a client that holds the terminal's own
+    /// pseudo-terminal can look for itself; one that does not cannot).
+    /// Variants are only ever appended, so every message above keeps its
+    /// encoding and the protocol version stays what it was: a peer that does
+    /// not know this one drops the connection, so it is only sent to a peer
+    /// known to be a keeper.
+    PtyProbe {
+        /// The terminal.
+        pty: u64,
+    },
+    /// Who is in front of a terminal.
+    PtyProbed {
+        /// The terminal.
+        pty: u64,
+        /// The pid of the terminal's own process (the shell), when the system
+        /// has one.
+        pid: Option<u32>,
+        /// Whether the shell, and not a program it started, leads the
+        /// terminal's foreground process group; absent where the system
+        /// cannot say.
+        shell_in_front: Option<bool>,
+        /// The program in front of the shell, where the system names it.
+        command: Option<String>,
+    },
+    /// Asks the program in front of a terminal's shell to end: SIGTERM to
+    /// the terminal's foreground process group. Nothing is sent when the
+    /// shell itself is in front. No answer.
+    PtyTerminate {
+        /// The terminal.
+        pty: u64,
+    },
 }
 
 impl Message {
@@ -440,6 +474,10 @@ impl Message {
                     Ok(())
                 }
             }
+            Message::PtyProbed {
+                command: Some(command),
+                ..
+            } if command.len() > MAX_COMMAND => Err(FrameError::OverLimit("program name")),
             Message::PtyListing { ptys, .. } if ptys.len() > MAX_ITEMS => {
                 Err(FrameError::OverLimit("terminal list"))
             }
@@ -526,7 +564,7 @@ fn shared_sessions(sessions: &[SharedSession]) -> Result<(), FrameError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frame::{decode_frame, encode_frame};
+    use crate::frame::{decode_frame, encode_frame, HEADER_LEN};
 
     fn grid() -> Grid {
         Grid {
@@ -694,6 +732,20 @@ mod tests {
                 id: 8,
                 transcript: None,
             },
+            Message::PtyProbe { pty: 9 },
+            Message::PtyProbed {
+                pty: 9,
+                pid: Some(4242),
+                shell_in_front: Some(false),
+                command: Some("claude".into()),
+            },
+            Message::PtyProbed {
+                pty: 0,
+                pid: None,
+                shell_in_front: None,
+                command: None,
+            },
+            Message::PtyTerminate { pty: u64::MAX },
             Message::Error {
                 id: Some(3),
                 error: WireError {
@@ -729,6 +781,65 @@ mod tests {
                 assert!(decode_frame(&bytes[..cut]).is_err(), "{message:?} at {cut}");
             }
         }
+    }
+
+    /// The index of a variant is its encoding. An old peer reads these as it
+    /// always did, so none may move: new variants go at the end.
+    #[test]
+    fn the_messages_that_existed_keep_their_encoding_and_new_ones_come_after() {
+        let tag = |message: &Message| {
+            let bytes = encode_frame(message).unwrap();
+            bytes[HEADER_LEN]
+        };
+        assert_eq!(tag(&Message::Ping { nonce: 1 }), 13);
+        assert_eq!(tag(&Message::Pong { nonce: 1 }), 14);
+        assert_eq!(tag(&Message::PtyClose { pty: 1 }), 7);
+        assert_eq!(
+            tag(&Message::Error {
+                id: None,
+                error: WireError {
+                    code: ErrorCode::Internal,
+                    message: String::new()
+                }
+            }),
+            19
+        );
+        assert_eq!(tag(&Message::PtyProbe { pty: 1 }), 20);
+        assert_eq!(
+            tag(&Message::PtyProbed {
+                pty: 1,
+                pid: None,
+                shell_in_front: None,
+                command: None
+            }),
+            21
+        );
+        assert_eq!(tag(&Message::PtyTerminate { pty: 1 }), 22);
+        assert_eq!(PROTOCOL_VERSION, 2, "the new messages need no new version");
+    }
+
+    #[test]
+    fn a_program_name_over_the_limit_is_refused_both_ways() {
+        let long = Message::PtyProbed {
+            pty: 1,
+            pid: Some(1),
+            shell_in_front: Some(false),
+            command: Some("x".repeat(MAX_COMMAND + 1)),
+        };
+        assert!(encode_frame(&long).is_err());
+        let payload = postcard::to_allocvec(&long).unwrap();
+        let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+        frame.push(PROTOCOL_VERSION as u8);
+        frame.extend(payload);
+        assert!(decode_frame(&frame).is_err());
+        // At the limit it is fine.
+        let at_limit = Message::PtyProbed {
+            pty: 1,
+            pid: Some(1),
+            shell_in_front: Some(false),
+            command: Some("x".repeat(MAX_COMMAND)),
+        };
+        assert!(encode_frame(&at_limit).is_ok());
     }
 
     #[test]

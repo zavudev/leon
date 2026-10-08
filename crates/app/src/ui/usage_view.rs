@@ -19,10 +19,10 @@ use std::collections::HashMap;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::*;
 use gpui_kit::{div, Context, Div, FontWeight, Hsla, SharedString, Stateful, Task, Window};
-use leon_core::{AgentId, MachineId, UsagePoint};
+use leon_core::{AgentId, MachineId, TokenRow, UsagePoint};
 use leon_usage::{
-    countdown, forecast, series_key, view, AgentUsage, AgentView, Body, Level, Meter,
-    PercentDisplay, Sample, Thresholds,
+    countdown, forecast, series_key_of, view, AgentUsage, AgentView, Body, Level, Meter,
+    PercentDisplay, Period, PriceTable, Sample, Thresholds,
 };
 
 use super::shell::{Overlay, Shell};
@@ -59,6 +59,9 @@ pub struct BarItem {
     pub agent: AgentId,
     /// The machine's id.
     pub machine: String,
+    /// The id of the account this is the line of; `None` is the agent's own
+    /// setup.
+    pub account: Option<String>,
     /// The window shown: `5h`, `wk`, or the reason when nothing is known.
     pub label: String,
     /// The percentage as a fixed-width figure, empty when unknown.
@@ -104,6 +107,10 @@ impl BarItem {
         ITEM + chars as f32 * CHAR
     }
 }
+
+/// What the view says about the user's accounts of the agents: where their
+/// limits can and cannot be read.
+pub const ACCOUNTS_NOTE: &str = "Accounts: the limits of a Claude Code or Codex account are read from its own folder, on this computer only; other agents' accounts have no line of their own, and no number is borrowed from the agent's own.";
 
 /// How many agents the bar lists one by one. With more, the ones with numbers
 /// come first and the rest (signed out, switched off, no data yet) fold into
@@ -161,12 +168,13 @@ pub fn bar_model(
     let mut items = Vec::new();
     for reading in board.select(&Scope::Context, context, shown) {
         let v = view(reading, now, thresholds);
-        let name = agent_name(reading.agent);
+        let name = leon_usage::heading(reading.agent, reading.account.as_deref());
         let item = match &v.body {
             Body::Unknown(leon_usage::Reason::NotInstalled) => continue,
             Body::Unknown(reason) => BarItem {
                 agent: reading.agent,
                 machine: reading.machine.clone(),
+                account: reading.account.clone(),
                 label: reason.short().to_owned(),
                 figure: String::new(),
                 left: false,
@@ -193,6 +201,7 @@ pub fn bar_model(
                 BarItem {
                     agent: reading.agent,
                     machine: reading.machine.clone(),
+                    account: reading.account.clone(),
                     label: primary.kind.short(),
                     figure: display.fixed(primary.percent),
                     left: display == PercentDisplay::Remaining,
@@ -367,7 +376,7 @@ pub fn usage_rows(
                     .iter()
                     .map(|meter| {
                         let points = history
-                            .get(&(reading.machine.clone(), reading.agent, meter.kind.key()))
+                            .get(&(reading.slot(), reading.agent, meter.kind.key()))
                             .map(Vec::as_slice)
                             .unwrap_or_default();
                         window_row(meter, points, now)
@@ -529,7 +538,10 @@ pub fn annotate_bar(model: &mut BarModel, note: &Note<'_>) {
         } else if status.refused {
             item.label = leon_usage::Reason::KeychainDenied.short().to_owned();
         }
-        item.tip = format!("{}\n{text}", agent_name(item.agent));
+        item.tip = format!(
+            "{}\n{text}",
+            leon_usage::heading(item.agent, item.account.as_deref())
+        );
     }
 }
 
@@ -605,6 +617,15 @@ pub struct UsageUi {
     /// The settings the schedule was last given: which agents are shown and
     /// the interval, to tell what changed.
     pub applied: Option<(Vec<AgentId>, i64)>,
+    /// The tokens counted from the transcripts in the period, read from the
+    /// store while the view is open.
+    pub tokens: Vec<TokenRow>,
+    /// The span the tokens are summed over.
+    pub period: Period,
+    /// The prices the tokens are costed at.
+    pub prices: PriceTable,
+    /// What is wrong with the user's price file, when something is.
+    pub price_notes: Vec<String>,
 }
 
 impl Default for UsageUi {
@@ -619,6 +640,10 @@ impl Default for UsageUi {
             jitter: 0,
             next_at: None,
             applied: None,
+            tokens: Vec::new(),
+            period: Period::default(),
+            prices: PriceTable::bundled(),
+            price_notes: Vec::new(),
         }
     }
 }
@@ -632,6 +657,7 @@ impl Shell {
         self.usage.board = Board::load(self.engine.store());
         if self.overlay == Overlay::Usage {
             self.usage_load_history();
+            self.usage_load_tokens();
         }
     }
 
@@ -643,7 +669,12 @@ impl Shell {
             let leon_usage::State::Known { windows } = &reading.state else {
                 continue;
             };
-            let account = series_key(&reading.machine, reading.agent, reading.plan.as_deref());
+            let account = series_key_of(
+                &reading.machine,
+                reading.agent,
+                reading.plan.as_deref(),
+                reading.account.as_deref(),
+            );
             for window in windows {
                 let key = window.kind.key();
                 if let Ok(points) = store.usage_history(
@@ -653,14 +684,14 @@ impl Shell {
                     &key,
                     since,
                 ) {
-                    history.insert((reading.machine.clone(), reading.agent, key), points);
+                    history.insert((reading.slot(), reading.agent, key), points);
                 }
             }
         }
         self.usage.history = history;
     }
 
-    fn usage_now(&self) -> i64 {
+    pub(super) fn usage_now(&self) -> i64 {
         (self.options.now)().timestamp()
     }
 
@@ -705,7 +736,7 @@ impl Shell {
         self.viewport.width.as_f32() - sidebar - metrics::FILES_WIDTH().as_f32()
     }
 
-    fn machine_name_of(&self, id: &str) -> String {
+    pub(super) fn machine_name_of(&self, id: &str) -> String {
         self.snapshot
             .machines
             .iter()
@@ -841,8 +872,8 @@ impl Shell {
         self.close_overlay(window, cx);
         self.overlay = Overlay::Usage;
         self.usage.scope = Scope::Context;
+        self.usage_load_prices(cx);
         self.usage_reload();
-        self.usage_load_history();
         self.usage_read_if_stale(cx);
         self.focus.focus(window, cx);
     }
@@ -869,6 +900,7 @@ impl Shell {
 
     /// Reads the limits again now.
     pub(super) fn refresh_usage(&mut self, cx: &mut Context<Self>) {
+        self.usage_load_prices(cx);
         if self.engine.collects_usage() {
             // The setting in force now, even if the window has not drawn since
             // it changed; a source that backed off or was refused is asked
@@ -896,6 +928,10 @@ impl Shell {
         match stroke.key.as_str() {
             "r" => self.refresh_usage(cx),
             "m" | "d" | "c" => self.usage.detailed = !self.usage.detailed,
+            "t" => {
+                self.usage.period = self.usage.period.next();
+                self.usage_load_tokens();
+            }
             "left" => self.usage_step_scope(-1),
             "right" => self.usage_step_scope(1),
             "s" => {
@@ -989,7 +1025,13 @@ impl Shell {
             let tip = model
                 .folded
                 .iter()
-                .map(|item| format!("{}: {}", agent_name(item.agent), folded_line(item)))
+                .map(|item| {
+                    format!(
+                        "{}: {}",
+                        leon_usage::heading(item.agent, item.account.as_deref()),
+                        folded_line(item)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             cluster = cluster.child(
@@ -1135,7 +1177,10 @@ impl Shell {
     }
 
     /// The chip in the header of a live agent session: that agent's primary
-    /// window, for the machine the session runs on.
+    /// window, for the machine the session runs on. A session of one of the
+    /// user's accounts shows that account's own reading, or nothing when it
+    /// has none (never the agent's own setup's number, which is another
+    /// account's).
     pub(super) fn header_usage_chip(
         &self,
         colours: &Palette,
@@ -1152,7 +1197,10 @@ impl Shell {
         if !settings::usage_agents(cx).contains(&agent) {
             return None;
         }
-        let reading = self.usage.board.get(&session.machine, agent)?;
+        let reading =
+            self.usage
+                .board
+                .get_for(&session.machine, agent, session.account.as_deref())?;
         let v = view(reading, self.usage_now(), settings::usage_thresholds(cx));
         let Body::Ready { primary, .. } = &v.body else {
             return None;
@@ -1286,12 +1334,22 @@ impl Shell {
                         .child(agent_icon(row.view.agent, px(14.), colours))
                         .child(format!(
                             "{} · {} · {}",
-                            agent_name(row.view.agent),
+                            row.view.heading(),
                             row.machine_name,
                             reason
                         )),
                 );
             }
+        }
+        body = body.child(self.render_usage_tokens(colours));
+        if !leon_core::account::all().is_empty() {
+            body = body.child(
+                div()
+                    .debug_selector(|| "usage-accounts-note".into())
+                    .text_size(metrics::TEXT_SMALL())
+                    .text_color(colours.text_faint)
+                    .child(ACCOUNTS_NOTE),
+            );
         }
         self.card("usage-view", colours)
             .w(px(680.))
@@ -1318,6 +1376,15 @@ impl Shell {
                                 cx.notify();
                             },
                         )),
+                    )
+                    .child(
+                        chip("usage-period", self.usage.period.label(), false).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.usage.period = this.usage.period.next();
+                                this.usage_load_tokens();
+                                cx.notify();
+                            }),
+                        ),
                     )
                     .child(div().flex_1())
                     .child(
@@ -1367,6 +1434,7 @@ impl Shell {
                             .then(|| hint("O", "Turn on", colours)),
                     )
                     .child(hint("M", "Mode", colours))
+                    .child(hint("T", "Period", colours))
                     .child(hint("←/→", "Machine", colours))
                     .child(
                         hint("S", "Settings", colours)
@@ -1393,7 +1461,7 @@ impl Shell {
         let display = settings::usage_percent_display(cx);
         let name = format!(
             "{}{}",
-            agent_name(v.agent),
+            v.heading(),
             v.plan
                 .as_ref()
                 .map(|plan| format!(" · {plan}"))
@@ -1642,6 +1710,7 @@ mod tests {
             agent,
             machine: machine.into(),
             account_label: None,
+            account: None,
             plan: Some("max".into()),
             source: Some(Source::Local),
             observed_at: Some(NOW - 60),

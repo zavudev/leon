@@ -35,13 +35,16 @@ mod roots;
 mod session;
 mod source;
 mod survey;
+mod tokens;
 
 pub use importer::{ImportReport, Importer};
 pub use roots::{
-    considered, default_roots, default_roots_in, env_variable, home_dir, HistoryRoots,
+    account_roots, considered, default_roots, default_roots_in, env_variable, home_dir,
+    AccountRoot, HistoryRoots,
 };
 pub use session::ParsedSession;
 pub use source::{
-    ClaudeFiles, CodexFiles, HistoryError, HistorySource, OpencodeData, OpencodeDb, SourceItem,
+    ClaudeFiles, CodexFiles, ForAccount, HistoryError, HistorySource, OpencodeData, OpencodeDb,
+    SourceItem,
 };
 pub use survey::{Place, SkipReason, Survey};

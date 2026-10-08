@@ -24,6 +24,7 @@ use serde::Deserialize;
 
 use crate::opencode::{apply_part, flush, MessageData, PartData, Pending};
 use crate::session::{ParsedSession, SessionBuilder};
+use crate::tokens::opencode_counts;
 
 #[derive(Debug, Deserialize)]
 struct Time {
@@ -122,6 +123,14 @@ pub fn parse_session(info: &[u8], messages: &[JsonMessage]) -> JsonOutcome {
             Some("assistant") => Some(Role::Assistant),
             _ => None,
         };
+        if let (Some(Role::Assistant), Some(tokens)) = (role, &header.data.tokens) {
+            let at = header
+                .time
+                .as_ref()
+                .and_then(|time| time.created)
+                .and_then(DateTime::from_timestamp_millis);
+            session.see_tokens(header.data.model_id.as_deref(), at, opencode_counts(tokens));
+        }
         if header.data.model_id.is_some() {
             model = header.data.model_id.clone();
         }
@@ -243,6 +252,32 @@ mod tests {
         );
         assert_eq!(session.started_at.timestamp_millis(), 1000);
         assert_eq!(session.updated_at.timestamp_millis(), 9000);
+    }
+
+    #[test]
+    fn an_assistant_files_tokens_are_counted_under_its_model_and_day() {
+        let mut turn = assistant();
+        turn.info = bytes(
+            json!({"id": "msg_2", "role": "assistant", "modelID": "model-j",
+            "time": {"created": 86_400_000 + 5},
+            "tokens": {"input": 798, "output": 146, "reasoning": 52,
+                       "cache": {"read": 12416, "write": 3}}}),
+        );
+        let JsonOutcome::Session(session) = parse_session(&session_file(None), &[user(), turn])
+        else {
+            panic!("expected a session");
+        };
+        assert_eq!(session.tokens.len(), 1);
+        let counted = &session.tokens[0];
+        assert_eq!(
+            (counted.model.as_str(), counted.day.as_str()),
+            ("model-j", "1970-01-02")
+        );
+        assert_eq!((counted.counts.input, counted.counts.output), (798, 198));
+        assert_eq!(
+            (counted.counts.cache_read, counted.counts.cache_write),
+            (12416, 3)
+        );
     }
 
     #[test]

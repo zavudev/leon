@@ -12,7 +12,8 @@
 //!   fresh is matched to the session that appears for it (see `crate::learn`)
 //!   and the link is kept, so the tree shows one row (live now, history
 //!   later) and a restore can resume it. A terminal whose program moves to
-//!   another session inside it is relinked by the title the program sets.
+//!   another session inside it is relinked by the process scan (the one agent
+//!   below its shell names another session) and by the title the program sets.
 
 use super::live::LiveId;
 use super::shell::Shell;
@@ -86,6 +87,12 @@ impl Shell {
                     && s.shown_agent().is_some()
                     && s.learned.is_none()
                     && !s.is_paused()
+                    // A terminal the keeper holds has no pid until its first
+                    // answer (half a second): it is looked at again at the
+                    // next pass, instead of being given the less sure
+                    // folder match in the meantime.
+                    && !(s.view.read(cx).terminal().is_held()
+                        && s.view.read(cx).terminal().process_id().is_none())
             })
             .filter_map(|s| {
                 Some(Fresh {
@@ -126,6 +133,31 @@ impl Shell {
                     )
                     .unwrap_or_default();
                 learned.extend(learn::by_folder(&rest, &sessions, &taken));
+            }
+        }
+        // A terminal whose agent holds another session than the one learned
+        // for sure (`/clear`, `/resume`, a new run by hand): the transcript
+        // followed for its light would be the old one.
+        let holding: Vec<learn::Holding> = self
+            .live
+            .all()
+            .iter()
+            .filter(|s| s.machine.is_local() && s.shown_agent().is_some() && !s.is_paused())
+            .filter_map(|s| {
+                let (external, how) = s.learned.as_ref()?;
+                let agent = s.shown_agent()?;
+                super::transcript_watch::trusted(how).then(|| learn::Holding {
+                    id: s.id.0,
+                    agent,
+                    shell_pid: s.view.read(cx).terminal().process_id(),
+                    external: external.clone(),
+                })
+            })
+            .filter(|t| !learned.iter().any(|l| l.id == t.id))
+            .collect();
+        if !holding.is_empty() {
+            if let Some(report) = self.engine.elsewhere(&MachineId::local()) {
+                learned.extend(learn::by_process_again(&holding, &report.found, &taken));
             }
         }
         // A terminal an agent moved to another session in: the title the
@@ -174,6 +206,7 @@ impl Shell {
         if learned.is_empty() {
             return;
         }
+        let mut accounts: Vec<(leon_core::SessionId, String)> = Vec::new();
         for item in learned {
             // A history row is one terminal's: never two.
             let history = item
@@ -182,18 +215,38 @@ impl Shell {
             if let Some(session) = self.live.get_mut(LiveId(item.id)) {
                 // An id already learned keeps how it was learned.
                 if item.how != "id" {
+                    // The agent moved to another session: the row of the old
+                    // one is no longer this terminal's.
+                    if session
+                        .learned
+                        .as_ref()
+                        .is_some_and(|(id, _)| *id != item.external)
+                    {
+                        session.history = None;
+                    }
                     session.learned = Some((item.external, item.how.to_owned()));
                 }
                 if let Some(row) = history {
                     // A fresh link fills what was empty; a title follows the
                     // program, which may have moved on from what was linked.
                     if session.history.is_none() || item.how == "title" {
+                        // The row is the account's too, whatever folder the
+                        // agent kept it in: resuming it starts the same one.
+                        if let Some(account) = &session.account {
+                            accounts.push((row.clone(), account.clone()));
+                        }
                         session.history = Some(row);
                     }
                 }
             }
         }
+        for (session, account) in accounts {
+            self.engine
+                .submit(crate::engine::Op::SetSessionAccount { session, account });
+        }
         self.refresh_live();
+        // A session that knows its id has a transcript to follow.
+        self.status_watch(cx);
         cx.notify();
     }
 }

@@ -25,7 +25,9 @@ use crate::error::{Result, StoreError};
 /// branches that both wanted "version 4". Neither was ever released: the only
 /// public schema is version 3, so version 4 never existed in the wild and this
 /// order (usage, then relay) is the one every database goes through.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13];
+const MIGRATIONS: &[&str] = &[
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18,
+];
 
 const V1: &str = r#"
 CREATE TABLE machine (
@@ -316,6 +318,87 @@ const V13: &str = r#"
 ALTER TABLE session ADD COLUMN custom_title TEXT;
 "#;
 
+/// What was last read about the state of each worktree's checkout (changed
+/// files, distance from the upstream, the open pull request), as the JSON of
+/// the status type. A cache: a row is replaced at every read and goes with its
+/// worktree.
+const V14: &str = r#"
+CREATE TABLE worktree_status (
+    worktree_id TEXT PRIMARY KEY REFERENCES worktree(id) ON DELETE CASCADE,
+    status      TEXT NOT NULL
+) WITHOUT ROWID;
+"#;
+
+/// Where a session stands on the sidebar's shelves (settled, snoozed, or taken
+/// back by hand). A table of its own, keyed by the session's public id, so the
+/// session rows keep their shape and removing a session removes its place.
+const V15: &str = r#"
+CREATE TABLE session_shelf (
+    session_id TEXT PRIMARY KEY REFERENCES session(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL,
+    until      INTEGER
+) WITHOUT ROWID;
+"#;
+
+/// Version 16: the tokens each session used, per model and UTC day, read from
+/// the agents' own transcripts by the history import. Counts only: no text and
+/// no price (a price is applied when the figures are shown). Every session's
+/// rows are replaced as a whole by each import of its transcript, so importing
+/// a file again never counts it twice. Transcripts imported before this
+/// version carry no counts yet, so their cursors are cleared (except the
+/// relay's, which have no transcript file) and the next import reads each file
+/// once more; the stored messages are compared, not rewritten.
+const V16: &str = r#"
+CREATE TABLE token_usage (
+    session_pk     INTEGER NOT NULL REFERENCES session(pk) ON DELETE CASCADE,
+    model          TEXT NOT NULL,
+    day            TEXT NOT NULL,
+    input          INTEGER NOT NULL,
+    output         INTEGER NOT NULL,
+    cache_read     INTEGER NOT NULL,
+    cache_write    INTEGER NOT NULL,
+    cache_write_1h INTEGER NOT NULL,
+    PRIMARY KEY (session_pk, model, day)
+) WITHOUT ROWID;
+
+CREATE INDEX token_usage_by_day ON token_usage (day);
+
+DELETE FROM import_cursor WHERE source_key NOT LIKE 'share:%';
+"#;
+
+/// Version 17: several accounts of one agent. A session and an open terminal
+/// remember the id of the account they run with (`NULL`: the agent's own setup,
+/// as every existing row is), and a usage reading is kept per account: the key
+/// of `usage_reading` gains `account` (empty for the agent's own setup), which
+/// SQLite can only do by building the table again and copying the rows.
+const V17: &str = r#"
+ALTER TABLE session ADD COLUMN account TEXT;
+ALTER TABLE saved_terminal ADD COLUMN account TEXT;
+CREATE TABLE usage_reading_by_account (
+    machine_id   TEXT NOT NULL REFERENCES machine(id) ON DELETE CASCADE,
+    agent        TEXT NOT NULL,
+    account      TEXT NOT NULL DEFAULT '',
+    payload      TEXT NOT NULL,
+    collected_at INTEGER NOT NULL,
+    PRIMARY KEY (machine_id, agent, account)
+) WITHOUT ROWID;
+INSERT INTO usage_reading_by_account (machine_id, agent, account, payload, collected_at)
+    SELECT machine_id, agent, '', payload, collected_at FROM usage_reading;
+DROP TABLE usage_reading;
+ALTER TABLE usage_reading_by_account RENAME TO usage_reading;
+"#;
+
+/// Version 18: durable local sessions. An open terminal remembers the
+/// terminal the keeper holds for it (the keeper's number for it and the
+/// token it was opened under, which names it among the keeper's terminals),
+/// so the next start can attach to it instead of resuming an agent. Both are
+/// `NULL` for every terminal that lives in the application, as every existing
+/// row does.
+const V18: &str = r#"
+ALTER TABLE saved_terminal ADD COLUMN keeper_pty INTEGER;
+ALTER TABLE saved_terminal ADD COLUMN keeper_token TEXT;
+"#;
+
 /// Brings the database up to the latest schema version.
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     let supported = MIGRATIONS.len() as u32;
@@ -372,6 +455,40 @@ mod tests {
             )
             .unwrap();
         assert_eq!((host.as_str(), key), ("box.example", None));
+    }
+
+    #[test]
+    fn a_version_15_database_gains_the_token_table_and_asks_for_its_transcripts_again() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        for (index, sql) in MIGRATIONS[..15].iter().enumerate() {
+            connection.execute_batch(sql).unwrap();
+            connection
+                .pragma_update(None, "user_version", index as u32 + 1)
+                .unwrap();
+        }
+        for key in ["claude:/a.jsonl", "opencode:/db#ses_1", "share:codex:abc"] {
+            connection
+                .execute(
+                    "INSERT INTO import_cursor (machine_id, source_key, fingerprint)
+                     VALUES ('local', ?1, '1:1')",
+                    [key],
+                )
+                .unwrap();
+        }
+        migrate(&mut connection).unwrap();
+        assert_eq!(version(&connection), MIGRATIONS.len() as u32);
+        let kept: Vec<String> = connection
+            .prepare("SELECT source_key FROM import_cursor")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(kept, ["share:codex:abc"]);
+        let tokens: i64 = connection
+            .query_row("SELECT count(*) FROM token_usage", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(tokens, 0);
     }
 
     #[test]
@@ -473,6 +590,129 @@ mod tests {
                 [],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn a_version_14_database_gains_the_shelf_table_and_keeps_its_sessions() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        for (index, sql) in MIGRATIONS.iter().take(14).enumerate() {
+            connection.execute_batch(sql).unwrap();
+            connection
+                .pragma_update(None, "user_version", index as u32 + 1)
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO session (id, agent, external_id, machine_id, cwd, title, started_at, updated_at, message_count)
+                 VALUES ('s', 'claude', 'x', 'local', '/srv/api', 't', 0, 0, 0)",
+                [],
+            )
+            .unwrap();
+        migrate(&mut connection).unwrap();
+        assert_eq!(version(&connection), MIGRATIONS.len() as u32);
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO session_shelf (session_id, kind) VALUES ('s', 'settled')",
+                [],
+            )
+            .unwrap();
+        connection.execute("DELETE FROM session", []).unwrap();
+        let rows: i64 = connection
+            .query_row("SELECT count(*) FROM session_shelf", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "a removed session takes its place with it");
+    }
+
+    #[test]
+    fn a_version_16_database_keeps_its_sessions_and_readings_and_gains_accounts() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        for (index, sql) in MIGRATIONS[..16].iter().enumerate() {
+            connection.execute_batch(sql).unwrap();
+            connection
+                .pragma_update(None, "user_version", index as u32 + 1)
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO session (id, agent, external_id, machine_id, cwd, title, started_at,
+                                      updated_at, message_count)
+                 VALUES ('s', 'claude', 'e', 'local', '/srv/api', 't', 0, 0, 0)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO usage_reading (machine_id, agent, payload, collected_at)
+                 VALUES ('local', 'codex', '{}', 7)",
+                [],
+            )
+            .unwrap();
+
+        migrate(&mut connection).unwrap();
+
+        assert_eq!(version(&connection), MIGRATIONS.len() as u32);
+        let account: Option<String> = connection
+            .query_row("SELECT account FROM session WHERE id = 's'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(account, None);
+        let (agent, account, at): (String, String, i64) = connection
+            .query_row(
+                "SELECT agent, account, collected_at FROM usage_reading",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((agent.as_str(), account.as_str(), at), ("codex", "", 7));
+        // The same agent can now hold a reading per account.
+        connection
+            .execute(
+                "INSERT INTO usage_reading (machine_id, agent, account, payload, collected_at)
+                 VALUES ('local', 'codex', 'codex-work', '{}', 8)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO saved_terminal (slot, position, id, machine, cwd, started_at, account)
+                 VALUES (0, 0, 1, 'local', '/', 0, 'claude-work')",
+                [],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_version_17_database_keeps_its_terminals_and_gains_the_keepers_reference() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        for (index, sql) in MIGRATIONS[..17].iter().enumerate() {
+            connection.execute_batch(sql).unwrap();
+            connection
+                .pragma_update(None, "user_version", index as u32 + 1)
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO saved_terminal (slot, position, id, machine, cwd, started_at)
+                 VALUES (0, 0, 1, 'local', '/srv/api', 5)",
+                [],
+            )
+            .unwrap();
+
+        migrate(&mut connection).unwrap();
+
+        assert_eq!(version(&connection), MIGRATIONS.len() as u32);
+        let (pty, token, cwd): (Option<i64>, Option<String>, String) = connection
+            .query_row(
+                "SELECT keeper_pty, keeper_token, cwd FROM saved_terminal WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((pty, token, cwd.as_str()), (None, None, "/srv/api"));
     }
 
     #[test]

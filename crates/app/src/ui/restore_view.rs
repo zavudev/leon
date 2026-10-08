@@ -19,10 +19,24 @@
 //! A terminal that cannot be reopened (folder gone, agent missing, session id
 //! unknown, already running in another terminal) is listed with the reason
 //! instead of becoming a broken shell.
+//!
+//! With durable sessions on, the terminals the keeper still holds come first
+//! and are not restored but attached to (`reattach_held`): they are running,
+//! so nothing is asked and nothing is resumed, whatever `restore_sessions`
+//! says. Each saved terminal attaches to the keeper's terminal with its number
+//! and token and gets back its place in the saved layout, its focus, its
+//! identity (agent, session id, account, history row, name). A running terminal
+//! the layout does not know is added in a session of its own. Saved terminals
+//! whose keeper terminal is gone (the computer restarted, the keeper stopped,
+//! the program ended) are restored as every saved terminal is. What the screen
+//! shows again is what the keeper kept of the output (2 MiB per terminal);
+//! older scrollback is not restored.
 
+use super::keeping;
 use super::live::LiveId;
 use super::restore::{self, PAUSED_NOTE};
 use super::shell::{Overlay, Shell};
+use super::tree;
 use super::updates_view::pill;
 use super::widgets::section_label;
 use crate::engine::StatusKind;
@@ -57,6 +71,11 @@ pub struct RestoreUi {
     pub last: Option<SavedState>,
     /// The state waiting for its pause to end.
     pub waiting: Option<SavedState>,
+    /// The terminals the keeper holds that the saved ones attach to, by the
+    /// saved id; taken as the terminals are reopened.
+    attach: HashMap<u64, crate::durable::Held>,
+    /// How many saved terminals the keeper no longer held.
+    gone: usize,
     saving: Option<Task<()>>,
     resuming: Option<Task<()>>,
     checking: Option<Task<()>>,
@@ -84,7 +103,13 @@ impl Shell {
             .live
             .all()
             .iter()
-            .filter(|session| session.view.read(cx).terminal().exit_info().is_none())
+            .filter(|session| {
+                // A terminal whose keeper is gone is still what was open: it
+                // is remembered, so the next start can say that its keeper no
+                // longer held it, and resume it as any saved session.
+                let exit = session.view.read(cx).terminal().exit_info();
+                exit.is_none_or(|exit| exit.signal.as_deref() == Some(crate::durable::KEEPER_LOST))
+            })
             .map(|session| session.id)
             .collect();
         let mut workspaces = Vec::new();
@@ -145,6 +170,13 @@ impl Shell {
                     .clone()
                     .filter(|title| !title.ends_with(PAUSED_NOTE)),
                 started_at: session.started_ms,
+                account: session.account.clone(),
+                // Ended with the quit: nothing is there to attach to.
+                keeper: session
+                    .keeper
+                    .as_ref()
+                    .and_then(crate::durable::KeeperSlot::get)
+                    .filter(|_| !self.closing.end_held),
             })
             .collect();
         SavedState {
@@ -245,10 +277,14 @@ impl Shell {
         };
         // This run is not over until it says so.
         let _ = store.set_clean_shutdown(false);
-        let Some(state) = previous.filter(|state| !state.is_empty()) else {
+        let previous = previous.filter(|state| !state.is_empty());
+        let unclean = previous.as_ref().is_some_and(|state| !state.clean_shutdown);
+        // What is still running comes back by itself; the rest is what the
+        // setting is about.
+        let state = self.reattach_held(previous.unwrap_or_default(), window, cx);
+        if state.is_empty() {
             return;
-        };
-        let unclean = !state.clean_shutdown;
+        }
         match settings::text(cx, "restore_sessions").as_str() {
             "always" => {
                 self.restore.unclean = unclean;
@@ -256,6 +292,140 @@ impl Shell {
             }
             "never" => {}
             _ => self.offer_restore(state, unclean, window, cx),
+        }
+    }
+
+    /// Whether the terminals of local sessions are held by the keeper now.
+    pub(super) fn durable_on(&self, cx: &gpui_kit::App) -> bool {
+        keeping::use_keeper(
+            settings::flag(cx, "durable_sessions"),
+            crate::schema::Platform::Unix.here(),
+            true,
+            self.options.durable.is_some(),
+        )
+    }
+
+    /// At start: attaches to the terminals the keeper still holds, each in its
+    /// saved place, and adds the running ones the layout does not know. Returns
+    /// what is left of `state` to restore the usual way (the saved terminals
+    /// whose terminal is gone).
+    ///
+    /// The keeper is asked whatever the setting says: a keeper that answers
+    /// holds programs that are running, and starting the same agent again
+    /// beside one (the setting was turned off, or the layout was lost) would be
+    /// two agents on one session, or a running program nobody could reach. A
+    /// start with no keeper costs nothing.
+    ///
+    /// The layout is restored in **one pass**: each saved terminal either
+    /// attaches or, when it shares a workspace with one that does, comes back
+    /// as every saved terminal does (a paused resume line) in its own pane, so
+    /// a tab holding a survivor and a gone terminal keeps its split, focus and
+    /// place. Workspaces with no survivor follow `restore_sessions`.
+    fn reattach_held(
+        &mut self,
+        mut state: SavedState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> SavedState {
+        if !crate::schema::Platform::Unix.here() {
+            return state;
+        }
+        let Some(service) = self.options.durable.clone() else {
+            return state;
+        };
+        // No keeper running is the ordinary answer after a restart of the
+        // computer: nothing is held, and everything falls back.
+        let held = service.held().unwrap_or_default();
+        let plan = keeping::reattach_plan(&state.terminals, &held);
+        // Left to the other window: not restored here, not resumed.
+        state
+            .terminals
+            .retain(|terminal| !plan.taken.contains(&terminal.id));
+        self.restore.gone = plan.gone.len();
+        let mut notes = Vec::new();
+        if self.restore.gone > 0 {
+            notes.push(keeping::gone_note(self.restore.gone));
+        }
+        if plan.in_use > 0 {
+            notes.push(keeping::in_use_note(plan.in_use));
+        }
+        if !notes.is_empty() {
+            self.engine.report(StatusKind::Info, notes.join(" "));
+        }
+        if plan.attach.is_empty() && plan.orphans.is_empty() {
+            return state;
+        }
+        let ids: HashSet<u64> = plan.attach.iter().map(|(id, _)| *id).collect();
+        let only: HashSet<u64> = ids
+            .union(&keeping::companions(&state, &ids))
+            .copied()
+            .collect();
+        self.restore.attach = plan.attach.into_iter().collect();
+        if !only.is_empty() {
+            self.restore_now(state.clone(), Some(only.clone()), window, cx);
+        }
+        let setting_on = self.durable_on(cx);
+        self.adopt_held(plan.orphans, setting_on, window, cx);
+        state
+            .terminals
+            .retain(|terminal| !only.contains(&terminal.id));
+        state
+    }
+
+    /// Adds the running terminals the saved layout does not know, each in a
+    /// session of its own, as a shell: Leon cannot tell what runs in it, but
+    /// the foreground tells soon enough.
+    fn adopt_held(
+        &mut self,
+        orphans: Vec<crate::durable::Held>,
+        setting_on: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let machine = MachineId::local();
+        let mut added = 0;
+        for held in orphans {
+            let cwd = held
+                .cwd
+                .clone()
+                .or_else(|| dirs::home_dir().map(|home| home.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "/".to_owned());
+            let started = held.started_unix as i64 * 1000;
+            let Some(id) = self.spawn_live_as(
+                Launch::Shell,
+                &machine,
+                &cwd,
+                None,
+                false,
+                None,
+                Some(held),
+                window,
+                cx,
+            ) else {
+                continue;
+            };
+            if let Some(session) = self.live.get_mut(id) {
+                session.started_ms = started;
+            }
+            let root = tree::workspace_root(&self.snapshot, &machine, &cwd);
+            self.workspaces.add_session(machine.as_str(), &root, id);
+            added += 1;
+        }
+        if added > 0 {
+            self.refresh_live();
+            self.engine.report(
+                StatusKind::Info,
+                format!(
+                    "{added} running session{} the saved layout did not know {} added.{}",
+                    if added == 1 { "" } else { "s" },
+                    if added == 1 { "was" } else { "were" },
+                    if setting_on {
+                        ""
+                    } else {
+                        " The setting \"Keep local sessions running\" is off: they end when you close them."
+                    }
+                ),
+            );
         }
     }
 
@@ -327,7 +497,7 @@ impl Shell {
     }
 
     /// What would be done with a saved terminal.
-    fn decide(&self, saved: &SavedTerminal) -> Decision {
+    fn decide(&self, saved: &SavedTerminal, cx: &gpui_kit::App) -> Decision {
         let machine_id = MachineId::from_string(saved.machine.as_str());
         let Some(machine) = self.snapshot.machine(&machine_id).cloned() else {
             return Decision::Cannot("its machine is no longer known".to_owned());
@@ -336,14 +506,16 @@ impl Shell {
             crate::engine::MachineState::Online(Some(report)) => Some(report),
             _ => None,
         };
+        let prefs = Self::launch_prefs(cx);
         let plan = |launch: &Launch| {
-            launch::plan(
+            launch::plan_with(
                 &machine,
                 report.as_ref(),
                 &saved.cwd,
                 launch,
                 &self.engine.ssh(),
                 &*self.options.system,
+                &prefs,
             )
         };
         let why = |error: LaunchError| match error {
@@ -385,6 +557,7 @@ impl Shell {
         let launch = Launch::Agent {
             kind: agent,
             resume: Some(session.clone()),
+            account: saved.account.clone(),
         };
         if let Err(error) = plan(&launch) {
             return Decision::Cannot(why(error));
@@ -461,7 +634,21 @@ impl Shell {
             if !wanted(saved.id) {
                 continue;
             }
-            match self.decide(saved) {
+            // Still running under the keeper: attached, not started.
+            if let Some(held) = self.restore.attach.remove(&saved.id) {
+                match self.attach_saved(saved, held, window, cx) {
+                    Some(id) => {
+                        started.insert(saved.id, id);
+                    }
+                    None => failures.push((
+                        describe(saved),
+                        "it is still running, but could not be attached; it appears at the next start"
+                            .into(),
+                    )),
+                }
+                continue;
+            }
+            match self.decide(saved, cx) {
                 Decision::Cannot(why) => failures.push((describe(saved), why)),
                 Decision::Start { launch, title } => {
                     let machine = MachineId::from_string(saved.machine.as_str());
@@ -526,19 +713,78 @@ impl Shell {
         self.restore.failures = failures;
         let count = started.len();
         let failed = self.restore.failures.len();
+        self.restore.attach.clear();
         if failed > 0 {
             self.restore.report_open = true;
             self.overlay = Overlay::Restore;
             self.restore.offered = None;
         }
+        // What the keeper no longer held is said after the count, which would
+        // otherwise replace it.
+        let kept_note = std::mem::take(&mut self.restore.gone);
+        let note = if kept_note > 0 {
+            format!(" {}", keeping::gone_note(kept_note))
+        } else {
+            String::new()
+        };
         self.engine.report(
             StatusKind::Info,
             match failed {
-                0 => format!("Restored {count} sessions."),
-                _ => format!("Restored {count} sessions; {failed} could not be restored."),
+                0 => format!("Restored {count} sessions.{note}"),
+                _ => format!("Restored {count} sessions; {failed} could not be restored.{note}"),
             },
         );
         cx.notify();
+    }
+
+    /// The session a saved terminal was, attached to the terminal the keeper
+    /// holds for it.
+    fn attach_saved(
+        &mut self,
+        saved: &SavedTerminal,
+        held: crate::durable::Held,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<LiveId> {
+        let machine = MachineId::from_string(saved.machine.as_str());
+        let launch = match restore::agent_of(saved) {
+            Some(kind) => Launch::Agent {
+                kind,
+                resume: saved.session.clone(),
+                account: saved.account.clone(),
+            },
+            None => Launch::Shell,
+        };
+        let history = saved
+            .history
+            .as_deref()
+            .map(leon_core::SessionId::from_string);
+        let id = self.spawn_live_as(
+            launch,
+            &machine,
+            &saved.cwd,
+            history,
+            false,
+            saved.title.clone(),
+            Some(held),
+            window,
+            cx,
+        )?;
+        if let Some(session) = self.live.get_mut(id) {
+            session.name = saved.name.clone();
+            session.started_ms = saved.started_at;
+            // As sure of its session as it was before.
+            session.learned = saved.session.clone().map(|external| {
+                (
+                    external,
+                    saved
+                        .confidence
+                        .clone()
+                        .unwrap_or_else(|| "resumed".to_owned()),
+                )
+            });
+        }
+        Some(id)
     }
 
     /// Wakes every paused agent, [`RESUME_BATCH`] at a time, a second apart.

@@ -20,6 +20,8 @@
 //!   behave identically on local and remote machines.
 //! * [`files`]: reading, writing and listing files, and git marks, as short
 //!   POSIX scripts and the parsers of their answers.
+//! * [`changes`]: the changed files of a checkout and the diff of one.
+//! * [`ship`]: commit, push and pull request, and an agent's help to word them.
 //! * [`search`]: text search in the files of a project, as a script that uses
 //!   ripgrep, `git grep` or `grep`, and the parsers of their answers.
 //! * [`agent`]: how each coding agent is started and resumed.
@@ -33,6 +35,7 @@
 #![warn(missing_docs)]
 
 pub mod agent;
+pub mod changes;
 pub mod command;
 pub mod connect;
 pub mod diagnosis;
@@ -46,18 +49,27 @@ pub mod quote;
 pub mod relay;
 pub mod runner;
 pub mod search;
+pub mod ship;
 pub mod spawn;
 
 pub use agent::{agent_launch, session_command};
+pub use changes::{
+    parse_changes, parse_diff, ChangedFile, Changes, DiffLine, FileDiff, FileStatus, LineKind,
+};
 pub use command::{interactive_on, remote_shell_command, run_on, CommandSpec, SshOptions};
 pub use diagnosis::{classify, Diagnosis, DiagnosisKind, Stage};
-pub use git::{parse_worktree_list, Git, GitError, GitWorktree};
-pub use github::{is_github_url, Github, GithubError};
+pub use git::{parse_status, parse_worktree_list, CheckoutState, Git, GitError, GitWorktree};
+pub use github::{is_github_url, parse_open_pull_requests, Github, GithubError};
 pub use probe::{
     catalogue_tools, parse_probe, probe, probe_command, probe_command_for, probe_script,
     ProbeError, ProbeReport, RemoteOs, MAX_TOOLS,
 };
-pub use quote::{sh_join, sh_quote};
+pub use quote::{sh_join, sh_quote, sh_quote_typed};
 pub use relay::{RelayHub, RoutingRunner};
 pub use runner::{Output, ProcessRunner, RunError, Runner, ScriptedRunner};
+pub use ship::{
+    clean_suggestion, create_pull_request_args, parse_pull_request_url, prefill_pull_request,
+    push_args, split_title_and_body, Commit, PullRequestDraft, PullRequestStart, ShipError, Step,
+    Suggest,
+};
 pub use spawn::{child, std_child};

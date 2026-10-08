@@ -71,6 +71,8 @@ How each coding agent is started and resumed.
 | Agent for a new session | `default_agent` | `ask`, `claude`, `codex`, `opencode`, `grok`, `cursor`, `copilot`, `muse`, `dsh`, `zcode`, `mimo-code`, `amp`, `openclaude`, `antigravity`, `pi`, `omp`, `hermes`, `devin`, `goose`, `auggie`, `autohand`, `crush`, `cline`, `codebuddy`, `codebuff`, `freebuff`, `command-code`, `continue`, `droid`, `kilo`, `kimi`, `kiro`, `mistral-vibe`, `qwen-code`, `rovo`, `gemini`, `aider`, `ante`, `trae`, `qoder`, `qoder-cn`, `prime-agent`, `openclaw`, `jcode` | `ask` | The agent New agent session starts without asking, or ask each time. |
 | Opening a history session | `history_open` | `resume`, `transcript` | `resume` | What Enter or a click on a history session does: resume it in a terminal, or show its transcript. |
 | Your own agents | `custom_agents` | a list of text | empty | Any command line tool, added with Add a custom agent: a name, the command, its arguments and how to resume a session. |
+| Your accounts | `agent_accounts` | a list of text | empty | Several accounts of one agent, added with Add an account: a name and the variables (usually the agent's own configuration folder) that make the agent another account. |
+| Account for a new session | `default_accounts` | a list of text | empty | agent=account lines, such as claude=work, for the account a new session of that agent starts with instead of asking; claude=default is the agent's own setup. An agent with accounts and no line asks each time. |
 | Claude Code | `agent_claude_enabled` | on, off | `on` | Offer Claude Code for new sessions. |
 | Claude Code executable | `agent_claude_executable` | a path | empty | The program that starts Claude Code. Empty lets the login shell find `claude`. |
 | Claude Code arguments, new session | `agent_claude_args` | text | `--dangerously-skip-permissions` | Extra arguments typed after the command of a new Claude Code session. The default, `--dangerously-skip-permissions`, starts it without stopping to ask; empty brings the questions back. |
@@ -236,6 +238,7 @@ What is imported and shown of the agents' history.
 | Detection interval | `elsewhere_interval` | 2 to 120s | `5` | How often, in seconds, this computer is looked at while the window is focused. |
 | Re-import now |  | button |  | Read the agents' history again and sync every project's worktrees. |
 | Restore the last sessions | `restore_sessions` | `ask`, `always`, `never` | `ask` | At start, offer the terminals that were open last time (ask), reopen them (always) or leave them (never; the palette's "Restore last sessions" still brings them back). Agents are resumed where they can be; scrollback is not restored. |
+| Keep local sessions running | `durable_sessions` | on, off | `off` | The terminals (and the agents in them) that Leon opens on this computer keep running when the window closes, when Leon quits and when it crashes, and the next start attaches to them again with the output it missed. A separate background process holds them. Only the last 2 MiB of each terminal's output is kept for that, so older scrollback is not restored; a session that ended meanwhile, or that was lost with the computer's restart, is resumed as before. Takes effect for sessions opened after it is turned on; turning it off leaves the sessions already kept running until they are closed. (macOS and Linux only.) |
 | Resume restored agents | `restore_resume` | `shown`, `all` | `shown` | When a restored agent session is resumed: when its tab is first shown (nothing is spent until you look) or all at once, a few at a time. |
 
 ## Projects
@@ -247,6 +250,8 @@ How projects are found and what they show.
 | Discover projects from session folders | `discover_projects` | on, off | `off` | Add the repositories your sessions ran in as projects. Off by default: the history stays searchable without filling the sidebar. |
 | Detect project logos | `detect_logos` | on, off | `on` | Look in the repository for an icon to show beside the project. |
 | Fetch owner avatars from the Git host | `fetch_avatars` | on, off | `on` | When a repository has no icon, download its owner's avatar from the Git host (GitHub). This is the only network call Leon makes. |
+| Offer to remove merged worktrees | `offer_merged_cleanup` | on, off | `off` | When the pull request of a worktree's branch is merged, show a banner that offers to remove the merged worktrees. Nothing is removed without asking, and a worktree with changes, unpushed commits or a running session is never ticked. |
+| Where new worktrees go | `worktree_location` | text | `{root}-worktrees/{branch}` | The folder of a new worktree: {root} is the project's folder and {branch} the branch name with its slashes turned into dashes. The default puts it next to the project. |
 
 ## Machines
 
@@ -302,7 +307,7 @@ What Leon says when a session wants you or finishes, and how it says it.
 | Setting | Key | Values | Default | Description |
 | --- | --- | --- | --- | --- |
 | Notify | `notify` | on, off | `on` | Say when a session wants you or finishes. |
-| When an agent wants you | `notify_waiting` | on, off | `on` | An agent finished its turn, went quiet or rang the bell. |
+| When an agent wants you | `notify_waiting` | on, off | `on` | An agent finished its turn, needs an answer, went quiet or rang the bell. |
 | When a session ends | `notify_finished` | on, off | `on` | A program ended with exit code zero. |
 | When a session fails | `notify_failed` | on, off | `on` | A program ended with an error. |
 | How to say it | `notify_how` | `both`, `banner`, `system` | `both` | The geek banner in the window, the desktop notification, or both. |
@@ -316,6 +321,7 @@ The sidebar and what quitting asks.
 | --- | --- | --- | --- | --- |
 | Show the sidebar | `sidebar_visible` | on, off | `on` | The tree of machines, projects, worktrees and sessions. |
 | Show inactive sessions | `sidebar_show_inactive` | on, off | `off` | The sidebar also lists the sessions that are not active: sleeping ones and the history of past sessions, with the projects and worktrees that have none running. Off (the default), it lists only the active sessions: a live terminal, or an agent running in another terminal or Leon. |
+| Settle merged work | `sidebar_settle_merged` | on, off | `off` | Put a session on the Settled shelf, at the bottom of its machine, once the pull request of its worktree is merged and its terminal is not live. A session pinned, running, or taken off a shelf by hand stays where it is, and so does one Leon has not been able to check for another terminal (it needs Detect sessions running elsewhere, and a look at the machine that worked). Off by default. |
 | Sidebar width | `sidebar_width` | 220 to 560px | `320` | The sidebar's width in pixels at the 100% interface size. |
 | Show the file tree | `files_visible` | on, off | `off` | The files of the project or worktree in view, with the git state of each. Toggled with a chord, the View menu and the palette. |
 | Confirm before quitting | `quit_confirmation` | `running`, `always`, `never` | `running` | Ask before quitting: only while programs run in terminals, always, or never. |

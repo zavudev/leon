@@ -272,11 +272,48 @@ pub struct AgentSpec {
     /// Code. Absent where it could not be verified; those agents only get
     /// Leon's own label.
     pub rename: Option<String>,
+    /// The arguments, after the command, that make the agent answer one
+    /// instruction without a terminal and exit; the instruction is the last
+    /// argument (it tells the agent not to run commands or change files) and
+    /// what it reads, a diff, is its standard input, as the agent's own
+    /// `--help` says. What it reads is text from the repository, so the form
+    /// also takes away what the agent could do with it: Claude Code runs with
+    /// no tools at all (`--tools ""`) and Codex in its read-only sandbox.
+    /// Absent where that could not be checked against the installed CLI: such
+    /// an agent is never asked to word a commit.
+    pub headless: Option<Vec<String>>,
+    /// How the agent takes a first prompt on its launch line: arguments that
+    /// follow the command, with `{prompt}` as one whole word standing for the
+    /// prompt (`["{prompt}"]` for an agent that reads it as its argument,
+    /// `["--prompt", "{prompt}"]` for one that has a flag for it). Absent
+    /// where the form could not be verified; those agents are not offered a
+    /// prompt.
+    pub prompt: Option<Vec<String>>,
+    /// The environment variable that moves the agent's whole configuration
+    /// folder (its sign-in, settings and sessions), which is what makes a
+    /// second account of the agent: `CLAUDE_CONFIG_DIR` for Claude Code,
+    /// `CODEX_HOME` for Codex. Absent where it was not verified; an account of
+    /// such an agent can still set any variable, but its history and limits are
+    /// not read per account.
+    pub config_env: Option<String>,
     /// The key that stops the agent in the middle of a turn without ending
     /// its session, as the bytes a terminal sends for it: Escape for Claude
     /// Code and for Codex, whose own interfaces say so while they work.
     /// Absent where it is not known; nothing is sent to those.
     pub interrupt: Option<String>,
+}
+
+/// The word that stands for the prompt in [`AgentSpec::prompt`].
+pub const PROMPT_WORD: &str = "{prompt}";
+
+/// Whether `args` are a well formed prompt form: `{prompt}` is a whole word,
+/// once, and no other braces appear.
+pub fn prompt_form_is_well_formed(args: &[String]) -> bool {
+    args.iter().filter(|arg| *arg == PROMPT_WORD).count() == 1
+        && !args
+            .iter()
+            .filter(|arg| *arg != PROMPT_WORD)
+            .any(|arg| arg.contains(['{', '}']))
 }
 
 impl AgentSpec {
@@ -341,6 +378,9 @@ struct Row {
     docs: &'static str,
     exit: &'static str,
     rename: &'static str,
+    headless: &'static [&'static str],
+    prompt: &'static [&'static str],
+    config_env: &'static str,
     interrupt: &'static str,
 }
 
@@ -361,6 +401,9 @@ const fn row(
         docs,
         exit: "",
         rename: "",
+        headless: &[],
+        prompt: &[],
+        config_env: "",
         interrupt: "",
     }
 }
@@ -394,6 +437,27 @@ impl Row {
         self.rename = rename;
         self
     }
+    /// The arguments that make the agent answer one instruction and exit,
+    /// reading standard input, without changing files. Only for agents whose
+    /// form is verified.
+    const fn headless(mut self, headless: &'static [&'static str]) -> Self {
+        self.headless = headless;
+        self
+    }
+    /// How the agent takes a first prompt on its launch line, `{prompt}`
+    /// standing for it. Only for agents whose form was read in the `--help`
+    /// of the installed program.
+    const fn prompt(mut self, prompt: &'static [&'static str]) -> Self {
+        self.prompt = prompt;
+        self
+    }
+    /// The variable that moves the agent's configuration folder. Only for
+    /// agents whose variable is verified (the importers and the usage readers
+    /// already honour these two).
+    const fn config_env(mut self, config_env: &'static str) -> Self {
+        self.config_env = config_env;
+        self
+    }
     /// The key that interrupts a turn, as the bytes a terminal sends. Only
     /// for agents whose key is known.
     const fn interrupt(mut self, interrupt: &'static str) -> Self {
@@ -405,7 +469,13 @@ impl Row {
 /// What a terminal sends for the Escape key.
 const ESCAPE: &str = "\u{1b}";
 
-/// The built-in agents, in display order. The commands are Orca's
+/// The built-in agents, in display order. The prompt forms (`.prompt`) were
+/// read in the `--help` of the installed programs: `claude [prompt]`,
+/// `codex [PROMPT]`, `grok [PROMPT]` ("Initial prompt for the interactive
+/// session"), `cursor-agent [prompt...]` ("Initial prompt for the agent"),
+/// `opencode --prompt` and `gemini -i/--prompt-interactive` ("Execute the
+/// provided prompt and continue in interactive mode"). Every other agent is
+/// left without one until its form is verified. The commands are Orca's
 /// (`src/shared/tui-agent-config.ts`) and the resume forms are those of its
 /// `getAgentResumeArgv`; where Orca has none the agent is launch only. Orca's
 /// pre-trust flags (`--trust`, `--trust-workspace`) are not passed: Leon does
@@ -420,10 +490,23 @@ const ROWS: &[Row] = &[
     .resume(&["--resume", "{id}"])
     .exit("/exit")
     .rename("/rename {name}")
+    .headless(&[
+        "--tools",
+        "",
+        "-p",
+        "--permission-mode",
+        "dontAsk",
+        "--no-session-persistence",
+    ])
+    .prompt(&["{prompt}"])
+    .config_env("CLAUDE_CONFIG_DIR")
     .interrupt(ESCAPE)
     .mark("claude"),
     row("codex", "Codex", "codex", "https://github.com/openai/codex")
         .resume(&["resume", "{id}"])
+        .headless(&["exec", "--sandbox", "read-only"])
+        .prompt(&["{prompt}"])
+        .config_env("CODEX_HOME")
         .interrupt(ESCAPE)
         .mark("codex"),
     row(
@@ -434,12 +517,15 @@ const ROWS: &[Row] = &[
     )
     .resume(&["--session", "{id}"])
     .exit("/exit")
+    .prompt(&["--prompt", "{prompt}"])
     .mark("opencode"),
     row("grok", "Grok", "grok", "https://x.ai/cli")
         .resume(&["--resume", "{id}"])
+        .prompt(&["{prompt}"])
         .mark("grok"),
     row("cursor", "Cursor", "cursor-agent", "https://cursor.com/cli")
         .resume(&["--resume", "{id}"])
+        .prompt(&["{prompt}"])
         .mark("cursor"),
     row(
         "copilot",
@@ -612,6 +698,7 @@ const ROWS: &[Row] = &[
         "https://github.com/google-gemini/gemini-cli",
     )
     .resume(&["--resume", "{id}"])
+    .prompt(&["--prompt-interactive", "{prompt}"])
     .mark("gemini"),
     row("aider", "Aider", "aider", "https://aider.chat/docs/"),
     row(
@@ -718,6 +805,9 @@ fn from_row(row: &Row) -> AgentSpec {
         custom: false,
         exit: (!row.exit.is_empty()).then(|| row.exit.to_owned()),
         rename: (!row.rename.is_empty()).then(|| row.rename.to_owned()),
+        headless: (!row.headless.is_empty()).then(|| words(row.headless)),
+        prompt: (!row.prompt.is_empty()).then(|| words(row.prompt)),
+        config_env: (!row.config_env.is_empty()).then(|| row.config_env.to_owned()),
         interrupt: (!row.interrupt.is_empty()).then(|| row.interrupt.to_owned()),
     }
 }
@@ -777,6 +867,12 @@ pub struct CustomAgent {
     /// cannot be resumed.
     #[serde(default)]
     pub resume_args: String,
+    /// How the agent takes a first prompt, as typed: the arguments that follow
+    /// the command with `{prompt}` as one word standing for the prompt
+    /// (`--prompt {prompt}`); empty means it takes none. It is written in the
+    /// entry of `custom_agents` in `settings.json`.
+    #[serde(default)]
+    pub prompt_args: String,
 }
 
 /// What is wrong with an agent the user typed.
@@ -796,6 +892,9 @@ pub enum CustomError {
     BadResume,
     /// The arguments have a quote that is never closed.
     BadArgs,
+    /// The prompt arguments do not have `{prompt}` as one whole word, once, or
+    /// use other braces.
+    BadPrompt,
 }
 
 impl std::fmt::Display for CustomError {
@@ -810,6 +909,9 @@ impl std::fmt::Display for CustomError {
                 "Resume arguments may use {id} for the session id and no other braces."
             }
             CustomError::BadArgs => "A quote in the arguments is never closed.",
+            CustomError::BadPrompt => {
+                "Prompt arguments use {prompt} once, as a word of its own, and no other braces."
+            }
         })
     }
 }
@@ -899,9 +1001,18 @@ impl CustomAgent {
             command: command.trim().to_owned(),
             args: args.trim().to_owned(),
             resume_args: resume_args.trim().to_owned(),
+            prompt_args: String::new(),
         };
         agent.to_spec(&[])?;
         Ok(agent)
+    }
+
+    /// The agent, taking a first prompt as `prompt_args` says (see
+    /// [`CustomAgent::prompt_args`]).
+    pub fn with_prompt_args(mut self, prompt_args: &str) -> Result<Self, CustomError> {
+        self.prompt_args = prompt_args.trim().to_owned();
+        self.to_spec(&[])?;
+        Ok(self)
     }
 
     /// Checks the agent and makes its spec. `others` are the names of the
@@ -927,9 +1038,17 @@ impl CustomAgent {
         let id = AgentId::parse(&self.id).ok_or(CustomError::BadName)?;
         let (args, closed) = split(&self.args);
         let (resume_words, resume_closed) = split(&self.resume_args);
-        if !closed || !resume_closed {
+        let (prompt_words, prompt_closed) = split(&self.prompt_args);
+        if !closed || !resume_closed || !prompt_closed {
             return Err(CustomError::BadArgs);
         }
+        let prompt = if prompt_words.is_empty() {
+            None
+        } else if prompt_form_is_well_formed(&prompt_words) {
+            Some(prompt_words)
+        } else {
+            return Err(CustomError::BadPrompt);
+        };
         let resume = if resume_words.is_empty() {
             Resume::None
         } else if resume_words.iter().any(|word| word.contains("{id}")) {
@@ -965,6 +1084,9 @@ impl CustomAgent {
             custom: true,
             exit: None,
             rename: None,
+            headless: None,
+            prompt,
+            config_env: None,
             interrupt: None,
         })
     }
@@ -1318,6 +1440,109 @@ mod tests {
             Some("/rename build the thing")
         );
         assert_eq!(claude.unwrap().rename_line("   "), None);
+    }
+
+    #[test]
+    fn only_the_agents_whose_headless_form_was_verified_have_one() {
+        let with: Vec<(&str, Vec<&str>)> = builtin()
+            .iter()
+            .filter_map(|spec| {
+                let args = spec.headless.as_ref()?;
+                Some((spec.id.as_str(), args.iter().map(String::as_str).collect()))
+            })
+            .collect();
+        assert_eq!(
+            with,
+            [
+                (
+                    "claude",
+                    vec![
+                        "--tools",
+                        "",
+                        "-p",
+                        "--permission-mode",
+                        "dontAsk",
+                        "--no-session-persistence"
+                    ]
+                ),
+                ("codex", vec!["exec", "--sandbox", "read-only"]),
+            ]
+        );
+        assert!(
+            custom_specs().iter().all(|spec| spec.headless.is_none()),
+            "a custom agent has no headless form"
+        );
+    }
+
+    #[test]
+    fn only_the_agents_whose_prompt_form_was_verified_have_one() {
+        let with: Vec<(&str, Vec<&str>)> = builtin()
+            .iter()
+            .filter_map(|spec| {
+                spec.prompt.as_ref().map(|form| {
+                    (
+                        spec.id.as_str(),
+                        form.iter().map(String::as_str).collect::<Vec<_>>(),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            with,
+            [
+                ("claude", vec!["{prompt}"]),
+                ("codex", vec!["{prompt}"]),
+                ("opencode", vec!["--prompt", "{prompt}"]),
+                ("grok", vec!["{prompt}"]),
+                ("cursor", vec!["{prompt}"]),
+                ("gemini", vec!["--prompt-interactive", "{prompt}"]),
+            ]
+        );
+        assert!(builtin()
+            .iter()
+            .filter_map(|spec| spec.prompt.as_ref())
+            .all(|form| prompt_form_is_well_formed(form)));
+    }
+
+    #[test]
+    fn a_custom_agent_declares_how_it_takes_a_prompt() {
+        let agent = CustomAgent::new("Prompted", "prompted", "", "", &[])
+            .unwrap()
+            .with_prompt_args("--ask {prompt}")
+            .unwrap();
+        let spec = agent.to_spec(&[]).unwrap();
+        assert_eq!(spec.prompt.unwrap(), ["--ask", "{prompt}"]);
+        let bare = CustomAgent::new("Bare", "bare", "", "", &[]).unwrap();
+        assert_eq!(bare.to_spec(&[]).unwrap().prompt, None);
+    }
+
+    #[test]
+    fn a_prompt_form_that_is_not_well_formed_is_refused() {
+        let agent = || CustomAgent::new("Odd", "odd", "", "", &[]).unwrap();
+        for form in [
+            "--ask",
+            "{prompt} {prompt}",
+            "--ask={prompt}",
+            "{prompt} {id}",
+        ] {
+            assert_eq!(
+                agent().with_prompt_args(form),
+                Err(CustomError::BadPrompt),
+                "{form}"
+            );
+        }
+        assert_eq!(
+            agent().with_prompt_args("'open {prompt}"),
+            Err(CustomError::BadArgs)
+        );
+    }
+
+    #[test]
+    fn an_entry_saved_before_prompts_existed_still_loads() {
+        let old = r#"{"id":"custom-old","name":"Old","command":"old","args":"","resume_args":""}"#;
+        let specs = custom_from_entries(&[old.to_owned()]);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].prompt, None);
     }
 
     #[test]

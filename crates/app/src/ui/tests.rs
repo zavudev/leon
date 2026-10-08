@@ -229,6 +229,31 @@ fn computer() -> Scripted {
     }
 
     fn run(script: &Script, line: &str, cwd: &str) -> Mode {
+        // `sh -c '<setup>' && <rest>`: the shell runs the rest only when the
+        // setup succeeded. A setup that starts with `fail` does not.
+        if let Some((setup, rest)) = line
+            .strip_prefix("sh -c '")
+            .and_then(|tail| tail.split_once("' && "))
+        {
+            script.print(format!("SETUP-RAN {setup}\n"));
+            if setup.starts_with("fail") {
+                script.print(format!("SETUP-FAILED\n{PROMPT}"));
+                return Mode::Shell(String::new());
+            }
+            return run(script, rest, cwd);
+        }
+        // `sh -c '<command>'` alone: a setup with no agent after it.
+        if let Some(command) = line
+            .strip_prefix("sh -c '")
+            .and_then(|tail| tail.strip_suffix('\''))
+        {
+            script.print(format!("SETUP-RAN {command}\n"));
+            if command.starts_with("fail") {
+                script.print(format!("SETUP-FAILED\n{PROMPT}"));
+                return Mode::Shell(String::new());
+            }
+            return run(script, command, cwd);
+        }
         let words = words(line);
         match words.first().map(String::as_str) {
             Some("claude") => {
@@ -243,6 +268,7 @@ fn computer() -> Scripted {
             }
             Some("opencode") => script.print(format!("OPENCODE-RAN\n{PROMPT}")),
             Some("pwd") => script.print(format!("{cwd}\n{PROMPT}")),
+            Some("echo") => script.print(format!("{}\n{PROMPT}", words[1..].join(" "))),
             Some("exit") => {
                 script.exit(words.get(1).and_then(|n| n.parse().ok()).unwrap_or(0));
             }
@@ -346,10 +372,31 @@ fn open_with(
     open_full(cx, runner, settings_file, Picked::Cancelled, |_| {})
 }
 
+thread_local! {
+    /// Where a test moved the clock to, on the thread that runs it.
+    static CLOCK: std::cell::Cell<Option<chrono::DateTime<Utc>>> = const { std::cell::Cell::new(None) };
+}
+
 /// The clock of every test: five minutes after the newest seeded session
-/// would be, on the day the seeds are dated.
+/// would be, on the day the seeds are dated, unless the test moved it
+/// ([`set_clock`]).
 fn fixed_now() -> chrono::DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 10, 4, 12, 5, 0).unwrap()
+    CLOCK
+        .with(std::cell::Cell::get)
+        .unwrap_or_else(|| Utc.with_ymd_and_hms(2026, 10, 4, 12, 5, 0).unwrap())
+}
+
+/// Moves the clock of the test that calls it (each test runs on its own
+/// thread, so no other test sees it).
+fn set_clock(now: chrono::DateTime<Utc>) {
+    CLOCK.with(|clock| clock.set(Some(now)));
+}
+
+thread_local! {
+    /// The keeper the next window opened is given: set by
+    /// [`tests_durable::open_with_keeper`] just before it opens one.
+    static DURABLE: std::cell::RefCell<Option<Arc<dyn crate::durable::Durable>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Opens the window; `picked` is what the folder picker answers and `before`
@@ -458,6 +505,7 @@ fn open_core(
         ssh_dir: ssh.clone(),
         remote: None,
         updates,
+        durable: DURABLE.with(|slot| slot.borrow_mut().take()),
         update_timer: false,
         open_url: Rc::new(move |_, url| urls_in.borrow_mut().push(url.to_owned())),
     };
@@ -641,6 +689,23 @@ impl Harness {
         cx.update(|cx| read(self.shell.read(cx)))
     }
 
+    /// Every command the runner was asked to run, but for the looks at a
+    /// project's `leon.toml` that the window takes by itself when a project on
+    /// a reachable machine comes into view.
+    #[cfg_attr(not(leon_posix_tests), allow(dead_code))]
+    fn commands_asked(&self) -> Vec<leon_remote::CommandSpec> {
+        self.runner
+            .calls()
+            .into_iter()
+            .filter(|call| {
+                !call
+                    .args
+                    .last()
+                    .is_some_and(|arg| arg.ends_with(" leon.toml") || arg.ends_with("/leon.toml"))
+            })
+            .collect()
+    }
+
     fn status(&self) -> String {
         self.engine
             .status()
@@ -772,6 +837,7 @@ fn describe(row: &tree::Row) -> String {
         Kind::Session(session) => format!("session:{}", session.title),
         Kind::Live(entry) => format!("live:{}", entry.id),
         Kind::Pinned { .. } => "pinned".to_owned(),
+        Kind::Shelf { kind, .. } => format!("shelf:{}", kind.title()),
         Kind::Unsorted { .. } => "unsorted".to_owned(),
         Kind::Folder { cwd, .. } => format!("folder:{cwd}"),
         Kind::More { hidden } => format!("more:{hidden}"),
@@ -1218,6 +1284,123 @@ fn a_worktree_screen_offers_its_actions_and_opens_a_session_from_its_list(cx: &m
     h.mouse_on("worktree-session-0".into(), gpui_kit::MouseButton::Left, cx);
     assert_eq!(h.main_kind(cx), "session:add oauth");
     assert!(h.shows("transcript", cx));
+}
+
+/// A pull request as GitHub reports it, for the tests of the state of a
+/// checkout.
+fn open_pull_request(number: u64) -> leon_core::PullRequest {
+    leon_core::PullRequest {
+        number,
+        url: format!("https://github.com/zavudev/leon/pull/{number}"),
+        draft: false,
+        review: leon_core::Review::Approved,
+        checks: leon_core::Checks::Failing,
+    }
+}
+
+#[gpui_kit::test]
+fn a_worktree_row_says_the_state_of_its_checkout_and_nothing_when_there_is_none(
+    cx: &mut TestAppContext,
+) {
+    let h = open(cx, ScriptedRunner::new());
+    let linked = worktree_id(&h, "feature/login");
+    let row = h.row_of(NodeId::Worktree(linked.clone()), cx).unwrap();
+    let selector = format!("tree-checkout-{row}");
+    assert!(!h.shows_dynamic(selector.clone(), cx), "nothing was read");
+
+    // A clean checkout level with its upstream has nothing to say either.
+    h.store
+        .update_worktree_status(&linked, |status| {
+            status.changed = Some(0);
+            status.divergence = Some(leon_core::Divergence::default());
+        })
+        .unwrap();
+    h.settle(cx);
+    assert!(!h.shows_dynamic(selector.clone(), cx));
+
+    h.store
+        .update_worktree_status(&linked, |status| {
+            status.changed = Some(3);
+            status.pull_request = Some(open_pull_request(123));
+        })
+        .unwrap();
+    h.settle(cx);
+    assert!(h.shows_dynamic(selector.clone(), cx), "the state is drawn");
+
+    // The main worktree was not read: it stays quiet.
+    let main = worktree_id(&h, "main");
+    let main_row = h.row_of(NodeId::Worktree(main), cx).unwrap();
+    assert!(!h.shows_dynamic(format!("tree-checkout-{main_row}"), cx));
+}
+
+#[gpui_kit::test]
+fn a_worktree_screen_says_its_checkout_in_words_and_opens_the_pull_request(
+    cx: &mut TestAppContext,
+) {
+    let h = open(cx, ScriptedRunner::new());
+    let linked = worktree_id(&h, "feature/login");
+    let row = h.row_of(NodeId::Worktree(linked.clone()), cx).unwrap();
+    h.shell.update(cx, |shell, _| shell.move_cursor_to(row));
+    h.press("enter", cx);
+    assert_eq!(h.main_kind(cx), "worktree:feature/login");
+    assert!(!h.shows("worktree-checkout", cx), "nothing known, no card");
+
+    h.store
+        .update_worktree_status(&linked, |status| {
+            status.changed = Some(2);
+            status.divergence = Some(leon_core::Divergence {
+                ahead: 1,
+                behind: 0,
+            });
+            status.pull_request = Some(open_pull_request(123));
+        })
+        .unwrap();
+    h.settle(cx);
+    for selector in [
+        "worktree-checkout",
+        "checkout-CHANGES",
+        "checkout-UPSTREAM",
+        "checkout-PULL REQUEST",
+        "checkout-pull-request",
+    ] {
+        assert!(h.shows(selector, cx), "{selector} is drawn");
+    }
+    h.mouse_on(
+        "checkout-pull-request".into(),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
+    assert_eq!(
+        *h.urls.borrow(),
+        ["https://github.com/zavudev/leon/pull/123".to_owned()]
+    );
+}
+
+#[gpui_kit::test]
+fn a_narrow_sidebar_keeps_only_the_first_part_of_the_checkout_on_its_rows(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    let linked = worktree_id(&h, "feature/login");
+    h.store
+        .update_worktree_status(&linked, |status| {
+            status.changed = Some(3);
+            status.pull_request = Some(open_pull_request(123));
+        })
+        .unwrap();
+    h.settle(cx);
+    let row = h.row_of(NodeId::Worktree(linked), cx).unwrap();
+    let width_of = |h: &Harness, cx: &mut TestAppContext| {
+        h.bounds_of(format!("tree-checkout-{row}"), cx)
+            .expect("the state is drawn")
+            .size
+            .width
+    };
+    let roomy = width_of(&h, cx);
+    cx.update(|cx| h.shell.update(cx, |s, cx| s.set_sidebar_width(240, cx)));
+    h.settle(cx);
+    assert!(
+        width_of(&h, cx) < roomy,
+        "a narrow sidebar draws less of it"
+    );
 }
 
 #[gpui_kit::test]
@@ -2709,6 +2892,131 @@ fn removing_a_row_the_store_no_longer_has_says_the_worktree_was_already_gone(
 }
 
 #[gpui_kit::test]
+fn a_pull_request_seen_merged_offers_the_cleanup_only_when_the_setting_is_on(
+    cx: &mut TestAppContext,
+) {
+    let h = open(cx, ScriptedRunner::new());
+    let linked = worktree_id(&h, "feature/login");
+    let def = crate::schema::find("offer_merged_cleanup").unwrap();
+    // GitHub's list left the branch out first (`Some(false)`), then had it
+    // among the merged ones: that change is what is offered.
+    h.store.set_merged(&linked, Some(false)).unwrap();
+    h.settle(cx);
+    h.store.set_merged(&linked, Some(true)).unwrap();
+    h.settle(cx);
+    assert_eq!(
+        h.shell(cx, |shell| shell.merged_offer.clone()),
+        None,
+        "the setting is off by default: nothing is offered"
+    );
+    h.store.set_merged(&linked, Some(false)).unwrap();
+    h.settle(cx);
+    cx.update(|cx| settings::set_value(cx, def, crate::schema::Value::Bool(true)));
+    h.store.set_merged(&linked, Some(true)).unwrap();
+    h.settle(cx);
+    assert_eq!(
+        h.shell(cx, |shell| shell.merged_offer.clone()),
+        Some(vec!["feature/login".to_owned()])
+    );
+    assert!(h.shows_dynamic("merged-offer".into(), cx));
+    assert!(
+        h.runner.calls().is_empty(),
+        "the banner removes nothing: git was not asked"
+    );
+}
+
+/// The listing after the first of two linked worktrees went: the other one
+/// is still there.
+const MAIN_AND_EXTRA: &str = "worktree /srv/api\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/main\n\nworktree /srv/api-worktrees/extra\nHEAD 3333333333333333333333333333333333333333\nbranch refs/heads/extra\n";
+
+#[gpui_kit::test]
+fn ticking_merged_worktrees_removes_each_through_git_one_after_the_other(cx: &mut TestAppContext) {
+    let h = open_full(
+        cx,
+        ScriptedRunner::new()
+            // git removes the first ticked worktree, then lists the project
+            .reply(Output::ok(""))
+            .reply(Output::ok(MAIN_AND_EXTRA))
+            // the first sync asks the remote: not GitHub, so nothing more
+            .reply(Output::ok("git@gitlab.com:zavudev/leon.git\n"))
+            // then the second one, and its list
+            .reply(Output::ok(""))
+            .reply(Output::ok(MAIN_ONLY)),
+        None,
+        Picked::Cancelled,
+        |store| {
+            let api = store
+                .projects(Some(&MachineId::local()))
+                .unwrap()
+                .into_iter()
+                .find(|project| project.name == "api")
+                .unwrap()
+                .id;
+            store
+                .replace_worktrees(
+                    &api,
+                    vec![
+                        NewWorktree {
+                            path: API_ROOT.into(),
+                            branch: Some("main".into()),
+                            head: Some("1111111111111111".into()),
+                            is_main: true,
+                        },
+                        NewWorktree {
+                            path: "/srv/api-worktrees/feature-login".into(),
+                            branch: Some("feature/login".into()),
+                            head: Some("2222222222222222".into()),
+                            is_main: false,
+                        },
+                        NewWorktree {
+                            path: "/srv/api-worktrees/extra".into(),
+                            branch: Some("extra".into()),
+                            head: Some("3333333333333333".into()),
+                            is_main: false,
+                        },
+                    ],
+                )
+                .unwrap();
+            for worktree in store.worktrees(&api).unwrap() {
+                if !worktree.is_main {
+                    store.set_merged(&worktree.id, Some(true)).unwrap();
+                    store
+                        .update_worktree_status(&worktree.id, |status| {
+                            status.changed = Some(0);
+                            status.divergence = Some(leon_core::Divergence::default());
+                        })
+                        .unwrap();
+                }
+            }
+        },
+    );
+    h.press("ctrl-shift-p", cx);
+    h.type_text("remove merged", cx);
+    h.press("enter", cx); // the command: the merged worktrees, none ticked
+    h.press("enter", cx); // ticks the first one
+    h.press("down", cx);
+    h.press("enter", cx); // ticks the second one
+    h.press("down", cx);
+    h.press("down", cx);
+    h.press("enter", cx); // Remove 2 worktrees
+    h.settle(cx);
+    let calls = h.runner.calls();
+    assert_eq!(
+        calls[0].args,
+        ["worktree", "remove", "/srv/api-worktrees/feature-login"]
+    );
+    assert_eq!(
+        calls[3].args,
+        ["worktree", "remove", "/srv/api-worktrees/extra"]
+    );
+    assert_eq!(h.status(), "Removed 2 worktrees.");
+    let api = h.store.projects(Some(&MachineId::local())).unwrap()[0]
+        .id
+        .clone();
+    assert_eq!(h.store.worktrees(&api).unwrap().len(), 1);
+}
+
+#[gpui_kit::test]
 fn a_worktree_git_refuses_for_its_files_asks_before_forcing_them_away(cx: &mut TestAppContext) {
     let h = open(
         cx,
@@ -3008,15 +3316,17 @@ fn the_interface_size_steps_with_the_keys_and_through_the_palette(cx: &mut TestA
 
 #[gpui_kit::test]
 fn secondary_r_refreshes_and_the_status_line_reports_it(cx: &mut TestAppContext) {
-    // Local: two projects. Then the remote machine: its probe, its project.
-    let h = open(
-        cx,
-        ScriptedRunner::new()
-            .reply(Output::ok(MAIN_ONLY))
-            .reply(Output::ok(MAIN_ONLY))
-            .reply(Output::ok(PROBE_OUTPUT))
-            .reply(Output::ok(MAIN_ONLY)),
-    );
+    // Local: two projects, each asked its worktrees, its remote and the state
+    // of its one checkout. Then the remote machine: its probe, its project.
+    let mut runner = ScriptedRunner::new();
+    for _ in 0..6 {
+        runner = runner.reply(Output::ok(MAIN_ONLY));
+    }
+    runner = runner.reply(Output::ok(PROBE_OUTPUT));
+    for _ in 0..3 {
+        runner = runner.reply(Output::ok(MAIN_ONLY));
+    }
+    let h = open(cx, runner);
     h.press("ctrl-r", cx);
     h.settle(cx);
     let status = h.status();
@@ -4475,7 +4785,7 @@ mod live {
 
     /// The project of `real_worktree`, and the queue of git answers a worktree
     /// named `branch` needs; returns where it is added.
-    fn queue_new_worktree(
+    pub(super) fn queue_new_worktree(
         h: &Harness,
         cx: &mut TestAppContext,
         path: &str,
@@ -5429,6 +5739,7 @@ mod live {
                 [
                     "New worktree…",
                     "New agent session",
+                    "One prompt, several agents…",
                     "Open shell here",
                     "Copy path",
                     "Rename",
@@ -5783,6 +6094,8 @@ mod live {
                 "Resume",
                 "Open transcript",
                 "Pin",
+                "Settle",
+                "Snooze\u{2026}",
                 "Rename",
                 "Copy session id",
                 "Remove from history"
@@ -5864,6 +6177,11 @@ mod live {
             h.settle(cx);
         }
         assert!(h.shell(cx, |s| s.live.ids().is_empty()));
+        // The row is gone from the sidebar at once; its history is removed
+        // when the banner that offers Undo goes.
+        assert_eq!(h.row_of(NodeId::Session(id.clone()), cx), None);
+        cx.executor().advance_clock(Duration::from_secs(6));
+        h.settle(cx);
         assert!(
             h.store.session(&id).is_err(),
             "closing removes it from the sidebar, not only its terminal"
@@ -7106,6 +7424,8 @@ mod live {
                 "Resume",
                 "Open transcript",
                 "Pin",
+                "Settle",
+                "Snooze\u{2026}",
                 "Rename",
                 "Copy session id",
                 "Remove from history"
@@ -7196,7 +7516,7 @@ mod live {
             "{}",
             screen(&h, cx, 1)
         );
-        let calls = h.runner.calls();
+        let calls = h.commands_asked();
         assert_eq!(calls.len(), 2, "the probe and the folder: {calls:?}");
         assert!(calls[1]
             .args
@@ -7282,7 +7602,7 @@ mod live {
             h.status()
         );
         assert_eq!(
-            h.runner.calls().len(),
+            h.commands_asked().len(),
             1,
             "the folder was not even asked for"
         );
@@ -7526,6 +7846,10 @@ mod tools;
 mod tests_editor;
 
 #[cfg(leon_posix_tests)]
+#[path = "tests_changes.rs"]
+mod tests_changes;
+
+#[cfg(leon_posix_tests)]
 #[path = "tests_guard.rs"]
 mod tests_guard;
 
@@ -7550,6 +7874,18 @@ mod lines;
 mod tests_prefs;
 
 #[cfg(leon_posix_tests)]
+#[path = "tests_fanout.rs"]
+mod tests_fanout;
+
+#[cfg(leon_posix_tests)]
+#[path = "tests_scripts.rs"]
+mod tests_scripts;
+
+#[cfg(leon_posix_tests)]
+#[path = "tests_accounts.rs"]
+mod tests_accounts;
+
+#[cfg(leon_posix_tests)]
 #[path = "tests_screen.rs"]
 mod tests_screen;
 
@@ -7571,9 +7907,16 @@ mod tests_settings;
 #[path = "tests_updates.rs"]
 mod tests_updates;
 
+#[path = "tests_shelf.rs"]
+mod tests_shelf;
+
 #[cfg(leon_posix_tests)]
 #[path = "tests_restore.rs"]
 mod tests_restore;
+
+#[cfg(leon_posix_tests)]
+#[path = "tests_durable.rs"]
+mod tests_durable;
 
 #[path = "tests_settings_layout.rs"]
 mod tests_settings_layout;
@@ -7598,6 +7941,11 @@ mod elsewhere;
 #[cfg(leon_posix_tests)]
 #[path = "tests_lion.rs"]
 mod lion_in_window;
+
+// The sessions' lights read from the agents' transcripts.
+#[cfg(leon_posix_tests)]
+#[path = "tests_status.rs"]
+mod tests_status;
 
 // The Den: how it opens, its keys, and what it shows of the live sessions.
 #[cfg(leon_posix_tests)]

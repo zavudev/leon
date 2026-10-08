@@ -16,6 +16,7 @@ use crate::change::StoreChange;
 use crate::error::{Result, StoreError};
 use crate::ids::{MachineId, ProjectId, SessionId, WorktreeId};
 use crate::model::{NewWorktree, Project, Session, SessionScope, Worktree};
+use crate::status::WorktreeStatus;
 
 impl Store {
     /// Projects in the order of the sidebar, optionally restricted to one
@@ -429,6 +430,70 @@ impl Store {
         })
     }
 
+    /// What was last read about the state of every worktree's checkout. A
+    /// worktree nothing was read about has no entry; a row the running version
+    /// cannot read is left out rather than failing the whole read.
+    pub fn worktree_statuses(&self) -> Result<HashMap<WorktreeId, WorktreeStatus>> {
+        self.read(|connection| {
+            let mut statement =
+                connection.prepare_cached("SELECT worktree_id, status FROM worktree_status")?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows
+                .into_iter()
+                .filter_map(|(id, text)| {
+                    let status = serde_json::from_str(&text).ok()?;
+                    Some((WorktreeId::from_string(id), status))
+                })
+                .collect())
+        })
+    }
+
+    /// Changes what is known about a worktree's checkout: `change` gets the
+    /// stored status (an unknown one when nothing was read yet) and edits the
+    /// part it has just read, so the git half and the GitHub half, read at
+    /// different times, never overwrite each other. Writes nothing, and wakes
+    /// nobody, when the result is what was already stored. Returns whether the
+    /// row changed.
+    pub fn update_worktree_status(
+        &self,
+        id: &WorktreeId,
+        change: impl FnOnce(&mut WorktreeStatus),
+    ) -> Result<bool> {
+        let changed = self.transact(|tx| {
+            find_worktree(tx, id)?;
+            let stored: Option<String> = tx
+                .prepare_cached("SELECT status FROM worktree_status WHERE worktree_id = ?1")?
+                .query_row([id.as_str()], |row| row.get(0))
+                .optional()?;
+            let before: WorktreeStatus = stored
+                .as_deref()
+                .and_then(|text| serde_json::from_str(text).ok())
+                .unwrap_or_default();
+            let mut after = before.clone();
+            change(&mut after);
+            if after == before && stored.is_some() {
+                return Ok(false);
+            }
+            let text = serde_json::to_string(&after).map_err(|error| {
+                StoreError::Corrupt(format!("cannot write a worktree status: {error}"))
+            })?;
+            tx.prepare_cached(
+                "INSERT INTO worktree_status (worktree_id, status) VALUES (?1, ?2)
+                 ON CONFLICT(worktree_id) DO UPDATE SET status = excluded.status",
+            )?
+            .execute(params![id.as_str(), text])?;
+            Ok(true)
+        })?;
+        if changed {
+            self.notify(StoreChange::Worktrees);
+        }
+        Ok(changed)
+    }
+
     /// Pins `pinned` sessions in this order, as the pinned order of `parent`;
     /// every other session of that parent goes back to automatic (by
     /// recency). Every pinned session must belong to `parent`. The sidebar
@@ -769,6 +834,98 @@ mod tests {
             head: Some("0123abc".into()),
             is_main,
         }
+    }
+
+    #[test]
+    fn the_two_halves_of_a_worktrees_status_are_written_apart_and_kept() {
+        use crate::status::{Checks, Divergence, PullRequest, Review};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("leon.db");
+        let id = {
+            let store = Store::open(&path).unwrap();
+            let project = store.add_project(&local(), "api", "/srv/api").unwrap();
+            let id = store
+                .replace_worktrees(&project.id, vec![worktree("/srv/api", Some("main"), true)])
+                .unwrap()[0]
+                .id
+                .clone();
+            assert!(store.worktree_statuses().unwrap().is_empty());
+            let mut listener = store.subscribe();
+            assert!(store
+                .update_worktree_status(&id, |status| {
+                    status.changed = Some(2);
+                    status.divergence = Some(Divergence {
+                        ahead: 1,
+                        behind: 3,
+                    });
+                })
+                .unwrap());
+            assert_eq!(listener.try_next(), Some(StoreChange::Worktrees));
+            assert!(store
+                .update_worktree_status(&id, |status| {
+                    status.pull_request = Some(PullRequest {
+                        number: 7,
+                        url: "https://github.com/zavudev/leon/pull/7".into(),
+                        draft: false,
+                        review: Review::Approved,
+                        checks: Checks::Passing,
+                    });
+                })
+                .unwrap());
+            id
+        };
+        let store = Store::open(&path).unwrap();
+        let status = store.worktree_statuses().unwrap().remove(&id).unwrap();
+        assert_eq!(status.changed, Some(2), "the second write kept the first");
+        assert_eq!(status.divergence.unwrap().behind, 3);
+        assert_eq!(status.pull_request.unwrap().number, 7);
+    }
+
+    #[test]
+    fn writing_the_status_a_worktree_already_has_wakes_nobody() {
+        let store = Store::open_in_memory().unwrap();
+        let project = store.add_project(&local(), "api", "/srv/api").unwrap();
+        let id = store
+            .replace_worktrees(&project.id, vec![worktree("/srv/api", Some("main"), true)])
+            .unwrap()[0]
+            .id
+            .clone();
+        assert!(store
+            .update_worktree_status(&id, |status| status.changed = Some(0))
+            .unwrap());
+        let mut listener = store.subscribe();
+        assert!(!store
+            .update_worktree_status(&id, |status| status.changed = Some(0))
+            .unwrap());
+        assert_eq!(listener.try_next(), None);
+        assert!(matches!(
+            store.update_worktree_status(&WorktreeId::from_string("nope"), |_| {}),
+            Err(StoreError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn a_removed_worktree_takes_its_status_with_it() {
+        let store = Store::open_in_memory().unwrap();
+        let project = store.add_project(&local(), "api", "/srv/api").unwrap();
+        let both = store
+            .replace_worktrees(
+                &project.id,
+                vec![
+                    worktree("/srv/api", Some("main"), true),
+                    worktree("/srv/api-wt", Some("feature"), false),
+                ],
+            )
+            .unwrap();
+        for worktree in &both {
+            store
+                .update_worktree_status(&worktree.id, |status| status.changed = Some(1))
+                .unwrap();
+        }
+        store
+            .replace_worktrees(&project.id, vec![worktree("/srv/api", Some("main"), true)])
+            .unwrap();
+        assert_eq!(store.worktree_statuses().unwrap().len(), 1);
     }
 
     #[test]

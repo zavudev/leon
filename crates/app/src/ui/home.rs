@@ -142,8 +142,18 @@ pub struct Pride {
     pub here: usize,
     /// Of those, the ones whose program prints.
     pub working: usize,
-    /// Of those, the ones that want the user: quiet, the bell, or a failure.
+    /// Of those, the ones that wait for the user without saying why (quiet,
+    /// or the bell), or failed.
     pub waiting: usize,
+    /// Of those, the agents whose transcript says they need an answer: a
+    /// question, or (inferred) a permission.
+    pub asking: usize,
+    /// Of those, the agents whose transcript says they finished their turn.
+    pub finished: usize,
+    /// Every session in the list of those that want the user, however many
+    /// rows it shows: [`Pride::waiting`], [`Pride::asking`] and
+    /// [`Pride::finished`] together.
+    pub wants: usize,
     /// Sessions that run in another terminal.
     pub elsewhere: usize,
     /// The first of those that wait.
@@ -153,12 +163,21 @@ pub struct Pride {
 }
 
 /// Counts the sessions and picks the rows: at most [`WAITING_ROWS`] of
-/// those that wait, a failure first, and at most [`ELSEWHERE_ROWS`] of
-/// those that run elsewhere, the ones the history knows first.
+/// those that want the user, the most urgent first (a failure, then an
+/// agent that needs an answer, then one that waits, then one that finished),
+/// and at most [`ELSEWHERE_ROWS`] of those that run elsewhere, the ones the
+/// history knows first.
 pub fn pride(here: &[Here], elsewhere: &[Elsewhere]) -> Pride {
-    let wants = |one: &&Here| matches!(one.activity, Activity::Waiting | Activity::Failed);
+    let wants = |one: &&Here| one.activity.wants_you() || one.activity == Activity::Failed;
     let mut waiting: Vec<Here> = here.iter().filter(wants).cloned().collect();
-    waiting.sort_by_key(|one| one.activity != Activity::Failed);
+    // Stable: the sessions of one state keep the order they were started in.
+    waiting.sort_by_key(|one| std::cmp::Reverse(one.activity));
+    let count = |activity: Activity| {
+        waiting
+            .iter()
+            .filter(|one| one.activity == activity)
+            .count()
+    };
     let mut away: Vec<Elsewhere> = elsewhere.to_vec();
     away.sort_by_key(|one| (one.session.is_none(), !one.certain));
     Pride {
@@ -167,10 +186,23 @@ pub fn pride(here: &[Here], elsewhere: &[Elsewhere]) -> Pride {
             .iter()
             .filter(|one| one.activity == Activity::Working)
             .count(),
-        waiting: waiting.len(),
+        waiting: count(Activity::Waiting) + count(Activity::Failed),
+        asking: count(Activity::NeedsYou),
+        finished: count(Activity::TurnOver),
+        wants: waiting.len(),
         elsewhere: elsewhere.len(),
         waiting_rows: waiting.into_iter().take(WAITING_ROWS).collect(),
         elsewhere_rows: away.into_iter().take(ELSEWHERE_ROWS).collect(),
+    }
+}
+
+/// What the row of a session that wants the user says beside its name.
+fn row_note(activity: Activity) -> &'static str {
+    match activity {
+        Activity::Failed => "failed",
+        Activity::NeedsYou => "needs an answer",
+        Activity::TurnOver => "finished its turn",
+        _ => "waits for you",
     }
 }
 
@@ -187,6 +219,13 @@ pub fn headline(pride: &Pride) -> String {
         });
         parts.push(format!("{} working", pride.working));
         parts.push(format!("{} waiting for you", pride.waiting));
+        // Only said when there is one: the transcript tells these apart.
+        if pride.asking > 0 {
+            parts.push(format!("{} need an answer", pride.asking));
+        }
+        if pride.finished > 0 {
+            parts.push(format!("{} finished", pride.finished));
+        }
     }
     if pride.elsewhere > 0 {
         parts.push(format!("{} running elsewhere", pride.elsewhere));
@@ -242,8 +281,8 @@ struct Recent {
     note: String,
 }
 
-struct Model {
-    pride: Pride,
+pub(super) struct Model {
+    pub(super) pride: Pride,
     recents: Vec<Recent>,
 }
 
@@ -264,7 +303,7 @@ impl Shell {
     /// The facts of the home: the sessions of this window by their dot, the
     /// sessions the last look at the processes found elsewhere, and the
     /// newest sessions of the history as the window already holds them.
-    fn home_model(&self) -> Model {
+    pub(super) fn home_model(&self) -> Model {
         let here: Vec<Here> = self
             .live
             .all()
@@ -432,7 +471,7 @@ impl Shell {
             .collect();
         let waits = live
             .iter()
-            .any(|session| matches!(session.activity, Activity::Waiting | Activity::Failed))
+            .any(|session| session.activity.wants_you() || session.activity == Activity::Failed)
             || self.den.cubs.iter().any(|cub| {
                 self.den_open()
                     && matches!(
@@ -695,10 +734,7 @@ impl Shell {
                 .child(headline(pride)),
         );
         for (index, one) in pride.waiting_rows.iter().enumerate() {
-            let note = match one.activity {
-                Activity::Failed => "failed",
-                _ => "waits for you",
-            };
+            let note = row_note(one.activity);
             sessions = sessions.child(row(
                 format!("home-waiting-{index}"),
                 Some(Item::Waiting(index)),
@@ -708,7 +744,7 @@ impl Shell {
                 cx,
             ));
         }
-        if pride.waiting > pride.waiting_rows.len() {
+        if pride.wants > pride.waiting_rows.len() {
             sessions = sessions.child(
                 div()
                     .px(px(8.))
@@ -716,7 +752,7 @@ impl Shell {
                     .text_color(colours.text_faint)
                     .child(format!(
                         "and {} more waiting",
-                        pride.waiting - pride.waiting_rows.len()
+                        pride.wants - pride.waiting_rows.len()
                     )),
             );
         }
@@ -900,6 +936,47 @@ mod tests {
     }
 
     #[test]
+    fn the_transcript_tells_a_finished_agent_from_one_that_asks() {
+        let pride = pride(
+            &[
+                here(1, "idle", Activity::Idle),
+                here(2, "done", Activity::TurnOver),
+                here(3, "quiet", Activity::Waiting),
+                here(4, "asks", Activity::NeedsYou),
+                here(5, "also done", Activity::TurnOver),
+                here(6, "broke", Activity::Failed),
+                here(7, "busy", Activity::Working),
+            ],
+            &[],
+        );
+        assert_eq!(
+            (
+                pride.waiting,
+                pride.asking,
+                pride.finished,
+                pride.wants,
+                pride.working
+            ),
+            (2, 1, 2, 5, 1)
+        );
+        // Most urgent first; the ones of one state in the order they started.
+        let names: Vec<&str> = pride
+            .waiting_rows
+            .iter()
+            .map(|row| row.name.as_str())
+            .collect();
+        assert_eq!(names, ["broke", "asks", "quiet", "done"]);
+        assert_eq!(
+            headline(&pride),
+            "7 sessions here \u{b7} 1 working \u{b7} 2 waiting for you \u{b7} 1 need an answer \u{b7} 2 finished"
+        );
+        assert_eq!(row_note(Activity::NeedsYou), "needs an answer");
+        assert_eq!(row_note(Activity::TurnOver), "finished its turn");
+        assert_eq!(row_note(Activity::Waiting), "waits for you");
+        assert_eq!(row_note(Activity::Failed), "failed");
+    }
+
+    #[test]
     fn the_headline_says_only_what_there_is() {
         assert_eq!(headline(&Pride::default()), "No session is running");
         assert_eq!(
@@ -928,7 +1005,7 @@ mod tests {
             away("last", false, false),
         ];
         let pride = pride(&many, &away);
-        assert_eq!((pride.waiting, pride.waiting_rows.len()), (9, WAITING_ROWS));
+        assert_eq!((pride.wants, pride.waiting_rows.len()), (9, WAITING_ROWS));
         assert_eq!(
             (pride.elsewhere, pride.elsewhere_rows.len()),
             (5, ELSEWHERE_ROWS)

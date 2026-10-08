@@ -14,22 +14,67 @@
 //! * keystrokes, resizes and a hang-up go to the host. Dropping the terminal
 //!   (the window closes, the application quits) only detaches: the program
 //!   keeps running on the host and can be attached to again.
+//!
+//! The same machinery serves the keeper of durable local sessions
+//! (`durable.rs`): the holder is a process on this computer, reached through
+//! a socket instead of a relay, and the terminal is local in every way that
+//! matters (see [`Pump::Keeper`]). What differs is only what is said when the
+//! connection drops, and that the keeper is asked now and then who is in
+//! front of the terminal, since this process no longer holds the
+//! pseudo-terminal to look at itself.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use leon_link::client::{Client, PtyEvent};
+use leon_link::client::{Client, ConnState, PtyEvent, PtyStream};
 use leon_pty::{GridSize, SpawnSpec};
 use leon_remote::RelayHub;
-use leon_term::{Backend, Pty, RemoteFeed, RemoteLink, SpawnError, Terminal, TerminalTheme, Wake};
+use leon_term::{
+    Backend, HeldForeground, Pty, RemoteFeed, RemoteLink, SpawnError, Terminal, TerminalTheme, Wake,
+};
 use leon_wire::{ExecSpec, Grid};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
-enum Op {
+/// How often a keeper is asked who is in front of a terminal.
+const PROBE_EVERY: Duration = Duration::from_millis(500);
+/// Failed attempts to reach the keeper after which it is taken to be gone
+/// (about three seconds with the local client's quick retries).
+const KEEPER_GONE_AFTER: u32 = 4;
+
+pub(crate) enum Op {
     Write(Vec<u8>),
     Resize(GridSize),
     Close,
     Detach,
+    // Only a terminal the keeper holds is terminated, and there is no keeper
+    // on Windows.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Terminate,
+}
+
+/// Where the program of a terminal is held, for [`pump`].
+#[derive(Clone)]
+pub(crate) enum Pump {
+    /// On another computer, reached through a relay.
+    Relay,
+    /// By the keeper on this computer.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Keeper(KeeperPump),
+}
+
+/// What a terminal held by the keeper needs besides the connection.
+#[derive(Clone)]
+pub(crate) struct KeeperPump {
+    /// Where the answers to "who is in front" are left for the terminal.
+    pub(crate) front: Arc<Mutex<Option<HeldForeground>>>,
+    /// Whether the keeper is gone for good: its socket no longer answers. A
+    /// keeper that is slow, full or restarting is not; a terminal is never
+    /// declared lost on a connection that merely dropped.
+    pub(crate) gone: Arc<dyn Fn() -> bool + Send + Sync>,
+    /// Hang-ups asked for and not yet handed to the connection.
+    pub(crate) closing: Arc<AtomicUsize>,
 }
 
 struct Link(mpsc::UnboundedSender<Op>);
@@ -49,7 +94,48 @@ impl RemoteLink for Link {
     }
 }
 
-fn grid(size: GridSize) -> Grid {
+/// The link of a terminal the keeper holds: the same ops, and the answers
+/// the keeper gave about the foreground.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) struct HeldLink {
+    pub(crate) ops: mpsc::UnboundedSender<Op>,
+    pub(crate) front: Arc<Mutex<Option<HeldForeground>>>,
+    /// Counts the hang-ups queued, so a quit can wait until they have been
+    /// handed to the connection.
+    pub(crate) closing: Arc<AtomicUsize>,
+}
+
+impl RemoteLink for HeldLink {
+    fn write(&self, bytes: Vec<u8>) {
+        let _ = self.ops.send(Op::Write(bytes));
+    }
+    fn resize(&self, size: GridSize) {
+        let _ = self.ops.send(Op::Resize(size));
+    }
+    fn close(&self) {
+        self.closing.fetch_add(1, Ordering::SeqCst);
+        if self.ops.send(Op::Close).is_err() {
+            self.closing.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    fn detach(&self) {
+        let _ = self.ops.send(Op::Detach);
+    }
+    fn is_local(&self) -> bool {
+        true
+    }
+    fn foreground(&self) -> Option<HeldForeground> {
+        self.front
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+    fn terminate_foreground(&self) -> bool {
+        self.ops.send(Op::Terminate).is_ok()
+    }
+}
+
+pub(crate) fn grid(size: GridSize) -> Grid {
     Grid {
         cols: size.cols,
         rows: size.rows,
@@ -130,7 +216,7 @@ async fn drive(
     spec: SpawnSpec,
     size: GridSize,
     feed: RemoteFeed,
-    mut ops: mpsc::UnboundedReceiver<Op>,
+    ops: mpsc::UnboundedReceiver<Op>,
 ) {
     let wire = ExecSpec {
         program: spec.program.clone(),
@@ -149,34 +235,156 @@ async fn drive(
             return;
         }
     };
+    pump(client, stream, feed, ops, Pump::Relay).await;
+}
+
+/// Whether the keeper is gone: the connection has been down for several
+/// attempts **and** the socket no longer answers (or the connection was
+/// closed). A connection that dropped while the keeper still answers is the
+/// client's to mend, and its terminals are not declared lost on it.
+fn keeper_gone(client: &Client, keeper: &KeeperPump) -> bool {
+    match client.state() {
+        ConnState::Closed => true,
+        ConnState::Offline { attempt, .. } => attempt >= KEEPER_GONE_AFTER && (keeper.gone)(),
+        _ => false,
+    }
+}
+
+/// A keeper that is gone took its terminals with it: the terminal says so and
+/// ends, marked so that what the window remembers keeps it (see
+/// `crate::durable::KEEPER_LOST`).
+fn lost_keeper(feed: &RemoteFeed) {
+    feed.notice("\n[The keeper of the durable sessions ended, and this terminal with it.]\n");
+    feed.exit(1, Some(crate::durable::KEEPER_LOST.to_owned()));
+}
+
+/// Connects an open terminal to the emulator until it ends or is let go of.
+///
+/// What the holder sent before the terminal was attached (`stream.attach`
+/// says how much) is replayed into the screen without its bells; what comes
+/// after is live. Output is in order and without duplicates also across a
+/// reconnection: the client re-attaches from the last offset it saw.
+pub(crate) async fn pump(
+    client: Client,
+    stream: PtyStream,
+    feed: RemoteFeed,
+    mut ops: mpsc::UnboundedReceiver<Op>,
+    kind: Pump,
+) {
     let handle = stream.handle();
+    let mut replay_left = stream
+        .attach
+        .as_ref()
+        .map_or(0, |a| a.end_offset.saturating_sub(a.replay_from))
+        as usize;
     let mut events = stream.events;
+    let place = match kind {
+        Pump::Relay => "the other computer",
+        Pump::Keeper(_) => "the keeper",
+    };
+    let mut tick = tokio::time::interval(PROBE_EVERY);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut lost = false;
     loop {
         tokio::select! {
             event = events.recv() => match event {
-                Some(PtyEvent::Data(bytes)) => feed.data(&bytes),
+                Some(PtyEvent::Data(bytes)) => {
+                    // The first bytes after an attach are the replay.
+                    let past = replay_left.min(bytes.len());
+                    if past > 0 {
+                        feed.replay(&bytes[..past]);
+                        replay_left -= past;
+                    }
+                    if past < bytes.len() {
+                        feed.data(&bytes[past..]);
+                    }
+                }
                 Some(PtyEvent::Gap) => feed.gap(),
                 Some(PtyEvent::Exited(exit)) => {
                     feed.exit(exit.code, exit.signal);
                     return;
                 }
                 Some(PtyEvent::Gone) => {
-                    feed.notice("\n[This terminal no longer exists on the other computer.]\n");
-                    feed.exit(1, None);
+                    feed.notice(&format!("\n[This terminal no longer exists on {place}.]\n"));
+                    // For a keeper it is remembered as lost, so that the next
+                    // start says it was no longer held.
+                    feed.exit(
+                        1,
+                        matches!(kind, Pump::Keeper(_))
+                            .then(|| crate::durable::KEEPER_LOST.to_owned()),
+                    );
                     return;
                 }
                 Some(PtyEvent::Disconnected) => {
-                    feed.notice("\n[Connection lost. Reconnecting; the program keeps running on the other computer.]\n");
+                    lost = true;
+                    feed.notice(&match kind {
+                        Pump::Relay => "\n[Connection lost. Reconnecting; the program keeps running on the other computer.]\n".to_owned(),
+                        Pump::Keeper(_) => "\n[Connection to the keeper lost. Reconnecting.]\n".to_owned(),
+                    });
                 }
-                Some(PtyEvent::Reconnected) => feed.notice("[Reconnected.]\n"),
+                Some(PtyEvent::Reconnected) => {
+                    lost = false;
+                    feed.notice("[Reconnected.]\n");
+                }
+                Some(PtyEvent::Foreground(report)) => {
+                    if let Pump::Keeper(KeeperPump { front, .. }) = &kind {
+                        let now = Some(HeldForeground {
+                            pid: report.pid,
+                            shell_in_front: report.shell_in_front,
+                            command: report.command,
+                        });
+                        let mut known = front
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        // Nothing prints when an agent starts or returns to
+                        // the shell: the window is woken to look again.
+                        if *known != now {
+                            *known = now;
+                            drop(known);
+                            feed.changed();
+                        }
+                    }
+                }
+                // The connection was closed under this terminal: for a keeper
+                // that is as good as gone.
+                None if matches!(kind, Pump::Keeper(_)) => {
+                    lost_keeper(&feed);
+                    return;
+                }
                 None => return,
             },
             op = ops.recv() => match op {
-                Some(Op::Write(bytes)) => handle.write(bytes),
+                // Keystrokes and hang-ups wait for room in the connection's
+                // queue instead of being dropped when it is full.
+                Some(Op::Write(bytes)) => {
+                    handle.write_wait(bytes).await;
+                }
                 Some(Op::Resize(size)) => handle.resize(grid(size)),
-                Some(Op::Close) => handle.close(),
+                Some(Op::Close) => {
+                    handle.close_wait().await;
+                    if let Pump::Keeper(keeper) = &kind {
+                        keeper.closing.fetch_sub(1, Ordering::SeqCst);
+                    }
+                }
+                Some(Op::Terminate) => {
+                    handle.terminate_foreground_wait().await;
+                }
                 Some(Op::Detach) | None => return,
             },
+            _ = tick.tick(), if matches!(kind, Pump::Keeper(_)) => {
+                if lost {
+                    // A keeper that does not come back took its terminals
+                    // with it (it was killed, or the computer restarted).
+                    if let Pump::Keeper(keeper) = &kind {
+                        if keeper_gone(&client, keeper) {
+                            lost_keeper(&feed);
+                            return;
+                        }
+                    }
+                } else {
+                    handle.probe();
+                }
+            }
         }
     }
 }
@@ -293,5 +501,53 @@ mod tests {
             terminal.screen_text().contains("local-output")
         })
         .await;
+    }
+}
+
+/// The decision that a keeper is gone, with a real client that cannot connect.
+#[cfg(all(test, unix))]
+mod keeper_tests {
+    use super::*;
+    use leon_link::client::ClientConfig;
+    use leon_link::local::UnixDialer;
+
+    fn pump(gone: bool) -> KeeperPump {
+        KeeperPump {
+            front: Arc::default(),
+            gone: Arc::new(move || gone),
+            closing: Arc::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_terminal_is_not_declared_lost_on_a_connection_that_merely_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = ClientConfig::local(
+            Arc::new(UnixDialer {
+                path: dir.path().join("nothing.sock"),
+            }),
+            "t",
+        );
+        config.backoff = (Duration::from_millis(5), Duration::from_millis(10));
+        let client = Client::start(config);
+        // Several failed attempts in a row.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !matches!(client.state(), ConnState::Offline { attempt, .. } if attempt >= KEEPER_GONE_AFTER)
+        {
+            assert!(std::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // The keeper still answers on its socket (it is slow, or full): not gone.
+        assert!(!keeper_gone(&client, &pump(false)));
+        // Its socket refuses: gone.
+        assert!(keeper_gone(&client, &pump(true)));
+        // A connection closed under the terminal is gone too.
+        client.close();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while client.state() != ConnState::Closed {
+            assert!(std::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(keeper_gone(&client, &pump(false)));
     }
 }

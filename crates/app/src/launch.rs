@@ -22,9 +22,19 @@
 //! has it. One that is not installed gets a clear refusal instead of a
 //! terminal that says `command not found`. A machine that was not probed yet
 //! is tried anyway.
+//!
+//! An agent can be started as one of the user's accounts of it (see
+//! `leon_core::Account`): the account's variables are added to the environment
+//! of that terminal, and of no other. On this computer they are the process
+//! environment of the shell; on an SSH machine or over a relay they are the
+//! `env` of the command line the other side runs, each `NAME=value` quoted as one
+//! word, so a value can hold anything and run nothing. A `~` at the start of a
+//! value is the home folder of the machine the terminal is on ([`account_env`]).
 
-use leon_core::{AgentId, AgentSpec, Machine, MachineKind};
-use leon_remote::{agent_launch, interactive_on, sh_quote, CommandSpec, ProbeReport, SshOptions};
+use leon_core::{Account, AgentId, AgentSpec, Machine, MachineKind};
+use leon_remote::{
+    agent_launch, interactive_on, sh_quote, sh_quote_typed, CommandSpec, ProbeReport, SshOptions,
+};
 use leon_term::SpawnSpec;
 use std::path::{Path, PathBuf};
 
@@ -37,6 +47,18 @@ pub enum Launch {
         kind: AgentId,
         /// The agent's own id of the session to resume.
         resume: Option<String>,
+        /// The id of the account to run it as; `None` is the agent's own setup.
+        account: Option<String>,
+    },
+    /// An agent started with a first prompt on its launch line (see
+    /// [`command_line_prompted`]): a new session, never a resumed one.
+    Prompted {
+        /// Which agent.
+        kind: AgentId,
+        /// The prompt, as [`clean_prompt`] returns it.
+        prompt: String,
+        /// The id of the account to run it as; `None` is the agent's own setup.
+        account: Option<String>,
     },
     /// The user's login shell.
     Shell,
@@ -62,6 +84,26 @@ pub enum LaunchError {
         /// The agent.
         agent: AgentId,
     },
+    /// The agent has no verified way to take a prompt on its launch line.
+    NoPromptForm {
+        /// The agent.
+        agent: AgentId,
+    },
+    /// The shell is not a POSIX one: the prompt cannot be quoted for it.
+    PromptNeedsPosixShell,
+    /// The session belongs to an account that is not in the settings any more
+    /// (or is another agent's): starting it as another account would sign it
+    /// in as somebody else.
+    UnknownAccount {
+        /// The account's id.
+        account: String,
+    },
+    /// An account's variable starts with `~` and the home folder of the
+    /// machine is not known (it has not been looked at yet).
+    NoHome {
+        /// The account's name.
+        account: String,
+    },
 }
 
 impl std::fmt::Display for LaunchError {
@@ -79,6 +121,22 @@ impl std::fmt::Display for LaunchError {
                 "{} cannot be resumed from Leon: it starts new sessions only.",
                 crate::format::agent_name(*agent)
             ),
+            Self::NoPromptForm { agent } => write!(
+                f,
+                "{} has no known way to be given a prompt when it starts.",
+                crate::format::agent_name(*agent)
+            ),
+            Self::PromptNeedsPosixShell => f.write_str(
+                "A prompt can only be given to an agent through a POSIX shell (bash, zsh, fish...), not PowerShell or cmd.exe.",
+            ),
+            Self::UnknownAccount { account } => write!(
+                f,
+                "The account {account} is not in your settings any more, so this session was not started: add it again with the same name, or start a new session."
+            ),
+            Self::NoHome { account } => write!(
+                f,
+                "The account {account} uses ~, and this machine's home folder is not known yet: wait for the machine to be checked, or write the folder in full."
+            ),
         }
     }
 }
@@ -94,6 +152,11 @@ pub trait System {
     fn login_shell(&self) -> (String, Vec<String>);
     /// Whether a folder exists.
     fn dir_exists(&self, path: &str) -> bool;
+    /// The home folder of the user of this computer, for the `~` an account's
+    /// variable may start with.
+    fn home_dir(&self) -> Option<String> {
+        None
+    }
 }
 
 /// This computer.
@@ -161,6 +224,10 @@ impl System for RealSystem {
     fn dir_exists(&self, path: &str) -> bool {
         Path::new(path).is_dir()
     }
+
+    fn home_dir(&self) -> Option<String> {
+        dirs::home_dir().map(|home| home.to_string_lossy().into_owned())
+    }
 }
 
 /// The first runnable file called `name` (with the extensions a program has
@@ -219,6 +286,57 @@ pub enum Flavor {
     PowerShell,
     /// `cmd.exe`: double quotes.
     Cmd,
+}
+
+/// The flavour of the shell a terminal on `machine` runs: the one of the
+/// shell of the settings, else the login shell, on this computer; a POSIX
+/// shell anywhere else.
+pub fn shell_flavor(machine: &Machine, system: &dyn System, prefs: &LaunchPrefs) -> Flavor {
+    match machine.kind {
+        MachineKind::Local => {
+            let (program, _) = prefs.shell.clone().unwrap_or_else(|| system.login_shell());
+            flavor_of(&program)
+        }
+        _ => Flavor::Posix,
+    }
+}
+
+/// What the first command of [`chain`] is, which decides how it is typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum First {
+    /// A script of the project: typed as written into the user's own shell.
+    Script,
+    /// The setup of a new worktree: handed to `sh -c` whatever follows it.
+    Setup,
+}
+
+/// The line that types `first`, and then `then` only when `first` succeeded,
+/// with its Enter. `then` is a line as [`Plan::send`] has it (its Enter is
+/// dropped here), or nothing when `first` is all there is to run.
+///
+/// The shell does the sequencing, so it holds where a terminal's process
+/// cannot be asked what became of a command: on this computer, over SSH and
+/// through the relay alike. When `first` fails the terminal stays at its
+/// prompt with the output on the screen and `then` is never typed.
+///
+/// On a POSIX shell a [`First::Setup`] always runs in `sh -c`, with an agent
+/// after it or not, so the text that was shown and trusted means the same in
+/// every shell (`{ ...; }` is not fish, `!` is not history expansion) and what
+/// it exports does not reach `then`. A [`First::Script`] with nothing after it
+/// is typed as it is, in the user's own shell, so that shell's aliases and
+/// history expansion apply; PowerShell and `cmd.exe` type either as written.
+pub fn chain(first: &str, kind: First, then: Option<&str>, flavor: Flavor) -> String {
+    let then = then.map(|line| line.trim_end_matches(['\r', '\n']));
+    let line = match (flavor, then) {
+        (Flavor::Posix, Some(then)) => format!("sh -c {} && {then}", sh_quote_typed(first)),
+        (Flavor::Posix, None) if kind == First::Setup => {
+            format!("sh -c {}", sh_quote_typed(first))
+        }
+        (Flavor::PowerShell, Some(then)) => format!("{first}; if ($?) {{ {then} }}"),
+        (Flavor::Cmd, Some(then)) => format!("{first} && {then}"),
+        (_, None) => first.to_owned(),
+    };
+    format!("{line}\r")
 }
 
 /// The flavour of the shell a program path names.
@@ -288,6 +406,8 @@ pub struct LaunchPrefs {
     /// How each agent starts, by agent; an agent without an entry starts as
     /// the catalogue says.
     pub agents: std::collections::HashMap<AgentId, AgentPrefs>,
+    /// The user's accounts of the agents, to look an account's variables up.
+    pub accounts: Vec<Account>,
 }
 
 static NO_PREFS: AgentPrefs = AgentPrefs {
@@ -304,6 +424,40 @@ impl LaunchPrefs {
 }
 
 pub use leon_core::agent::split_words;
+
+/// The variables the account `account` adds to the launch of `kind`: its own,
+/// in order, with a leading `~` standing for `home`, the home folder of the
+/// machine the terminal is on.
+///
+/// No account is no variable. An account that is not among `accounts`, or
+/// belongs to another agent, is an error: the session is never started as a
+/// different account than the one asked for.
+pub fn account_env(
+    account: Option<&str>,
+    kind: AgentId,
+    accounts: &[Account],
+    home: Option<&str>,
+) -> Result<Vec<(String, String)>, LaunchError> {
+    let Some(id) = account else {
+        return Ok(Vec::new());
+    };
+    let found = leon_core::account::by_id(accounts, id)
+        .filter(|found| found.agent == kind)
+        .ok_or_else(|| LaunchError::UnknownAccount {
+            account: id.to_owned(),
+        })?;
+    found
+        .env
+        .iter()
+        .map(|(name, value)| {
+            leon_core::account::expand_home(value, home)
+                .map(|value| (name.clone(), value))
+                .ok_or_else(|| LaunchError::NoHome {
+                    account: found.name.clone(),
+                })
+        })
+        .collect()
+}
 
 /// The command line that starts an agent in a shell, without the Enter.
 #[cfg(test)]
@@ -346,6 +500,93 @@ pub fn command_line_for(
             .collect::<Vec<_>>()
             .join(" "),
     )
+}
+
+/// The most characters a prompt may have: it is typed into a terminal, and a
+/// line editor is not made for more.
+pub const MAX_PROMPT: usize = 8000;
+
+/// A prompt as it will be typed: line endings are line feeds, tabs are spaces
+/// (a tab typed into a shell completes), and the ends are trimmed. What cannot
+/// be typed safely is refused with the reason: nothing, a control character
+/// (an escape or a bell is a key to the line editor), more than
+/// [`MAX_PROMPT`] characters, a first character that is a dash (the agent
+/// would read the prompt as an option) and a single plain word (the agent
+/// would take it for one of its own commands, like `codex apply`).
+pub fn clean_prompt(text: &str) -> Result<String, String> {
+    let text = text
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\t', " ");
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("Type a prompt.".to_owned());
+    }
+    if text.chars().any(|c| c.is_control() && c != '\n') {
+        return Err(
+            "A prompt cannot hold control characters: a terminal would take them as keys."
+                .to_owned(),
+        );
+    }
+    if text.chars().count() > MAX_PROMPT {
+        return Err(format!(
+            "That prompt is too long: the most is {MAX_PROMPT} characters."
+        ));
+    }
+    if text.starts_with('-') {
+        return Err(
+            "A prompt cannot start with a dash: the agent would read it as an option.".to_owned(),
+        );
+    }
+    // `codex apply` and `claude update` are commands of the agents, and an
+    // agent takes its first word for one before it takes it for a prompt.
+    if text
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(
+            "A prompt of one word could be taken for a command of the agent: write a sentence."
+                .to_owned(),
+        );
+    }
+    Ok(text.to_owned())
+}
+
+/// The command line that starts `spec` with `prompt` (as [`clean_prompt`]
+/// returns it) given on the line, without the Enter: the command, its
+/// arguments, the extra arguments of the settings, and then the agent's own
+/// form for a prompt (`claude 'fix it'`, `opencode --prompt 'fix it'`). The
+/// prompt is quoted for typing into a POSIX shell ([`sh_quote_typed`]: quotes,
+/// `$`, backticks, `!`, backslashes and line breaks included); that is every
+/// shell of a remote machine, and the one of this computer unless it is
+/// PowerShell or `cmd.exe`, which are refused.
+pub fn command_line_prompted(
+    spec: &AgentSpec,
+    prompt: &str,
+    flavor: Flavor,
+    prefs: &AgentPrefs,
+) -> Result<String, LaunchError> {
+    if flavor != Flavor::Posix {
+        return Err(LaunchError::PromptNeedsPosixShell);
+    }
+    let form = spec
+        .prompt
+        .as_ref()
+        .ok_or(LaunchError::NoPromptForm { agent: spec.id })?;
+    let (program, args) = agent_launch(spec, None).ok_or(LaunchError::UnknownAgent(spec.id))?;
+    let program = prefs.executable.clone().unwrap_or(program);
+    let words = std::iter::once(program)
+        .chain(args)
+        .chain(prefs.args.iter().cloned())
+        .map(|word| quote(&word, flavor))
+        .chain(form.iter().map(|word| {
+            if word == leon_core::agent::PROMPT_WORD {
+                sh_quote_typed(prompt)
+            } else {
+                quote(word, flavor)
+            }
+        }));
+    Ok(words.collect::<Vec<_>>().join(" "))
 }
 
 /// What a terminal starts and what is typed into it.
@@ -398,12 +639,22 @@ pub fn plan_with(
 ) -> Result<Plan, LaunchError> {
     let local = matches!(machine.kind, MachineKind::Local);
     // The agent must exist on the machine; its path is the shell's to find.
-    if let Launch::Agent { kind, resume } = launch {
-        let spec = kind.spec().ok_or(LaunchError::UnknownAgent(*kind))?;
+    let mut account_vars = Vec::new();
+    let asked = match launch {
+        Launch::Agent {
+            kind,
+            resume,
+            account,
+        } => Some((*kind, resume.as_deref(), account.as_deref())),
+        Launch::Prompted { kind, account, .. } => Some((*kind, None, account.as_deref())),
+        Launch::Shell => None,
+    };
+    if let Some((kind, resume, account)) = asked {
+        let spec = kind.spec().ok_or(LaunchError::UnknownAgent(kind))?;
         if resume.is_some() && !spec.can_resume() {
-            return Err(LaunchError::CannotResume { agent: *kind });
+            return Err(LaunchError::CannotResume { agent: kind });
         }
-        let own = prefs.agent(*kind).executable.as_deref();
+        let own = prefs.agent(kind).executable.as_deref();
         let present = |program: &str| {
             // A chosen program is a file, or a name the shell finds.
             if Path::new(program).components().count() > 1 {
@@ -427,10 +678,16 @@ pub fn plan_with(
         };
         if !installed {
             return Err(LaunchError::NotInstalled {
-                agent: *kind,
+                agent: kind,
                 machine: machine.name.clone(),
             });
         }
+        let home = if local {
+            system.home_dir()
+        } else {
+            report.and_then(|report| report.home.clone())
+        };
+        account_vars = account_env(account, kind, &prefs.accounts, home.as_deref())?;
     }
     if local && !system.dir_exists(cwd) {
         return Err(LaunchError::NoSuchFolder(cwd.to_owned()));
@@ -440,19 +697,30 @@ pub fn plan_with(
         let flavor = flavor_of(&program);
         let mut command = CommandSpec::new(program).args(args).cwd(cwd);
         command.env = prefs.env.clone();
+        command.env.extend(account_vars);
         (spawn_spec(command), flavor)
     } else {
-        let command = CommandSpec::new("sh").args(["-c", REMOTE_SHELL]).cwd(cwd);
+        let mut command = CommandSpec::new("sh").args(["-c", REMOTE_SHELL]).cwd(cwd);
+        command.env = account_vars;
         (
             spawn_spec(interactive_on(machine, &command, ssh)),
             Flavor::Posix,
         )
     };
     let send = match launch {
-        Launch::Agent { kind, resume } => Some(format!(
+        Launch::Agent { kind, resume, .. } => Some(format!(
             "{}\r",
             command_line_with(*kind, resume.as_deref(), flavor, prefs.agent(*kind))
                 .ok_or(LaunchError::UnknownAgent(*kind))?
+        )),
+        Launch::Prompted { kind, prompt, .. } => Some(format!(
+            "{}\r",
+            command_line_prompted(
+                kind.spec().ok_or(LaunchError::UnknownAgent(*kind))?,
+                prompt,
+                flavor,
+                prefs.agent(*kind),
+            )?
         )),
         Launch::Shell => None,
     };
@@ -537,6 +805,7 @@ mod tests {
         Launch::Agent {
             kind,
             resume: resume.map(str::to_owned),
+            account: None,
         }
     }
 
@@ -942,6 +1211,7 @@ mod tests {
                 &Launch::Agent {
                     kind,
                     resume: resume.map(str::to_owned),
+                    account: None,
                 },
                 &SshOptions::without_multiplexing(),
                 &fake(),
@@ -957,5 +1227,681 @@ mod tests {
         assert!(LaunchError::CannotResume { agent: amp }
             .to_string()
             .contains("new sessions only"));
+    }
+    #[test]
+    fn a_script_alone_is_typed_as_it_is() {
+        for flavor in [Flavor::Posix, Flavor::PowerShell, Flavor::Cmd] {
+            assert_eq!(
+                chain("npm test", First::Script, None, flavor),
+                "npm test\r",
+                "{flavor:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_setup_alone_is_handed_to_sh_on_a_posix_shell_and_typed_as_it_is_elsewhere() {
+        assert_eq!(
+            chain("npm install", First::Setup, None, Flavor::Posix),
+            "sh -c 'npm install'\r"
+        );
+        // Single quotes keep `!` away from history expansion.
+        assert_eq!(
+            chain("echo hi!! && make", First::Setup, None, Flavor::Posix),
+            "sh -c 'echo hi!! && make'\r"
+        );
+        for flavor in [Flavor::PowerShell, Flavor::Cmd] {
+            assert_eq!(
+                chain("npm install", First::Setup, None, flavor),
+                "npm install\r",
+                "{flavor:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_agent_follows_the_command_only_when_it_succeeded() {
+        assert_eq!(
+            chain(
+                "npm install",
+                First::Setup,
+                Some("claude --resume x\r"),
+                Flavor::Posix
+            ),
+            "sh -c 'npm install' && claude --resume x\r"
+        );
+        assert_eq!(
+            chain(
+                "npm install",
+                First::Setup,
+                Some("claude"),
+                Flavor::PowerShell
+            ),
+            "npm install; if ($?) { claude }\r"
+        );
+        assert_eq!(
+            chain("npm install", First::Setup, Some("claude"), Flavor::Cmd),
+            "npm install && claude\r"
+        );
+    }
+
+    #[test]
+    fn a_posix_command_is_quoted_whole() {
+        // A quote in the command cannot end the quoting of the line.
+        assert_eq!(
+            chain(
+                "echo 'a b' && make",
+                First::Setup,
+                Some("claude"),
+                Flavor::Posix
+            ),
+            "sh -c 'echo '\\''a b'\\'' && make' && claude\r"
+        );
+        // And `;` or `||` inside it stay inside it.
+        assert_eq!(
+            chain("a; b || c", First::Setup, Some("claude"), Flavor::Posix),
+            "sh -c 'a; b || c' && claude\r"
+        );
+        // A backslash is written outside the quotes, where fish reads it as
+        // bash does.
+        assert_eq!(
+            chain("echo a\\nb", First::Setup, None, Flavor::Posix),
+            "sh -c 'echo a'\\\\'nb'\r"
+        );
+    }
+
+    #[test]
+    fn the_flavour_of_a_terminal_is_its_shells_or_posix_away_from_here() {
+        let own = LaunchPrefs {
+            shell: Some(("C:\\Windows\\pwsh.exe".to_owned(), Vec::new())),
+            ..LaunchPrefs::default()
+        };
+        assert_eq!(
+            shell_flavor(&local(), &fake(), &LaunchPrefs::default()),
+            Flavor::Posix
+        );
+        assert_eq!(shell_flavor(&local(), &fake(), &own), Flavor::PowerShell);
+        assert_eq!(shell_flavor(&remote(), &fake(), &own), Flavor::Posix);
+    }
+
+    /// The sequencing is the shell's, so it is proved with one. Only where
+    /// there is a POSIX shell to ask.
+    #[cfg(leon_posix_tests)]
+    #[test]
+    fn a_real_shell_runs_the_agent_only_after_the_command_succeeded() {
+        let run = |first: &str| {
+            let line = chain(
+                first,
+                First::Setup,
+                Some("echo AGENT-STARTED"),
+                Flavor::Posix,
+            );
+            let out = std::process::Command::new("/bin/sh")
+                .args(["-c", line.trim_end_matches('\r')])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        assert_eq!(run("echo set-up"), "set-up\nAGENT-STARTED\n");
+        assert_eq!(
+            run("echo set-up; exit 3"),
+            "set-up\n",
+            "a failed setup stops the agent"
+        );
+        assert_eq!(
+            run("false || false"),
+            "",
+            "its own operators stay inside it"
+        );
+        assert_eq!(
+            run("false; true"),
+            "AGENT-STARTED\n",
+            "the last status is the command's"
+        );
+    }
+
+    // ----- a first prompt on the launch line ------------------------------------------------------
+
+    fn prompted(kind: AgentId, prompt: &str) -> Launch {
+        Launch::Prompted {
+            kind,
+            prompt: prompt.to_owned(),
+            account: None,
+        }
+    }
+
+    fn line_of(kind: AgentId, prompt: &str) -> String {
+        command_line_prompted(
+            kind.spec().unwrap(),
+            prompt,
+            Flavor::Posix,
+            &AgentPrefs::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn each_agent_with_a_verified_form_gets_the_prompt_in_that_form() {
+        let prompt = "fix the login bug";
+        assert_eq!(
+            line_of(AgentId::CLAUDE, prompt),
+            "claude 'fix the login bug'"
+        );
+        assert_eq!(line_of(AgentId::CODEX, prompt), "codex 'fix the login bug'");
+        assert_eq!(line_of(AgentId::GROK, prompt), "grok 'fix the login bug'");
+        assert_eq!(
+            line_of(AgentId::CURSOR, prompt),
+            "cursor-agent 'fix the login bug'"
+        );
+        assert_eq!(
+            line_of(AgentId::OPENCODE, prompt),
+            "opencode --prompt 'fix the login bug'"
+        );
+        let gemini = AgentId::parse("gemini").unwrap();
+        assert_eq!(
+            line_of(gemini, prompt),
+            "gemini --prompt-interactive 'fix the login bug'"
+        );
+    }
+
+    // ----- accounts -----------------------------------------------------------
+
+    fn work() -> Account {
+        Account {
+            id: "claude-work".into(),
+            agent: AgentId::CLAUDE,
+            name: "Work".into(),
+            env: vec![("CLAUDE_CONFIG_DIR".into(), "~/.claude work".into())],
+        }
+    }
+
+    fn lab() -> Account {
+        Account {
+            id: "codex-lab".into(),
+            agent: AgentId::CODEX,
+            name: "Lab".into(),
+            env: vec![("CODEX_HOME".into(), "/data/codex-lab".into())],
+        }
+    }
+
+    fn with_accounts() -> LaunchPrefs {
+        LaunchPrefs {
+            env: vec![("FROM_SETTINGS".into(), "1".into())],
+            accounts: vec![work(), lab()],
+            ..LaunchPrefs::default()
+        }
+    }
+
+    fn as_account(kind: AgentId, account: &str) -> Launch {
+        Launch::Agent {
+            kind,
+            resume: None,
+            account: Some(account.to_owned()),
+        }
+    }
+
+    struct Homed(Fake);
+    impl System for Homed {
+        fn find_program(&self, name: &str) -> Option<PathBuf> {
+            self.0.find_program(name)
+        }
+        fn login_shell(&self) -> (String, Vec<String>) {
+            self.0.login_shell()
+        }
+        fn dir_exists(&self, path: &str) -> bool {
+            self.0.dir_exists(path)
+        }
+        fn home_dir(&self) -> Option<String> {
+            Some("/home/me".into())
+        }
+    }
+
+    #[test]
+    fn the_variables_of_an_account_are_resolved_for_the_machine_they_run_on() {
+        let accounts = [work(), lab()];
+        let env = |account: Option<&str>, kind, home: Option<&str>| {
+            account_env(account, kind, &accounts, home)
+        };
+        // No account, no variable.
+        assert_eq!(env(None, AgentId::CLAUDE, None), Ok(Vec::new()));
+        // `~` is the home folder of the machine, whichever it is.
+        assert_eq!(
+            env(Some("claude-work"), AgentId::CLAUDE, Some("/home/me")),
+            Ok(vec![(
+                "CLAUDE_CONFIG_DIR".to_owned(),
+                "/home/me/.claude work".to_owned()
+            )])
+        );
+        assert_eq!(
+            env(Some("claude-work"), AgentId::CLAUDE, Some("/Users/dev")),
+            Ok(vec![(
+                "CLAUDE_CONFIG_DIR".to_owned(),
+                "/Users/dev/.claude work".to_owned()
+            )])
+        );
+        // A value that needs no home does not ask for one.
+        assert_eq!(
+            env(Some("codex-lab"), AgentId::CODEX, None),
+            Ok(vec![(
+                "CODEX_HOME".to_owned(),
+                "/data/codex-lab".to_owned()
+            )])
+        );
+        // A `~` that cannot be expanded is said, not passed on as a literal.
+        assert_eq!(
+            env(Some("claude-work"), AgentId::CLAUDE, None),
+            Err(LaunchError::NoHome {
+                account: "Work".into()
+            })
+        );
+    }
+
+    #[test]
+    fn the_extra_arguments_of_the_settings_come_before_the_prompt() {
+        let prefs = AgentPrefs {
+            executable: Some("/opt/bin/claude".into()),
+            args: vec!["--model".into(), "opus".into()],
+            resume_args: vec!["--ignored".into()],
+        };
+        let line =
+            command_line_prompted(AgentId::CLAUDE.spec().unwrap(), "hi", Flavor::Posix, &prefs)
+                .unwrap();
+        assert_eq!(line, "/opt/bin/claude --model opus hi");
+    }
+
+    #[test]
+    fn an_agent_without_a_verified_form_or_a_posix_shell_is_refused() {
+        let aider = AgentId::parse("aider").unwrap();
+        assert_eq!(
+            command_line_prompted(
+                aider.spec().unwrap(),
+                "hi",
+                Flavor::Posix,
+                &AgentPrefs::default()
+            ),
+            Err(LaunchError::NoPromptForm { agent: aider })
+        );
+        for flavor in [Flavor::PowerShell, Flavor::Cmd] {
+            assert_eq!(
+                command_line_prompted(
+                    AgentId::CLAUDE.spec().unwrap(),
+                    "hi",
+                    flavor,
+                    &AgentPrefs::default()
+                ),
+                Err(LaunchError::PromptNeedsPosixShell)
+            );
+        }
+    }
+
+    /// Reads a line made of plain words and single-quoted ones back into its
+    /// words, as a POSIX shell would (the line has no other quoting).
+    fn words_of(line: &str) -> Vec<String> {
+        let (mut words, mut word, mut open, mut any) = (Vec::new(), String::new(), false, false);
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            match (open, c) {
+                (true, '\'') => open = false,
+                (true, c) => word.push(c),
+                (false, '\'') => (open, any) = (true, true),
+                (false, '\\') => {
+                    word.push(chars.next().unwrap());
+                    any = true;
+                }
+                (false, ' ') => {
+                    if any {
+                        words.push(std::mem::take(&mut word));
+                        any = false;
+                    }
+                }
+                (false, c) => {
+                    word.push(c);
+                    any = true;
+                }
+            }
+        }
+        assert!(!open, "{line}");
+        if any {
+            words.push(word);
+        }
+        words
+    }
+
+    #[test]
+    fn a_prompt_with_quotes_dollars_backticks_and_bangs_is_one_argument_on_one_line() {
+        for prompt in [
+            "it's \"quoted\" and 'single'",
+            "price $5, $HOME and $(reboot) and `reboot`",
+            "wow! !! !$ !history",
+            r"C:\Users\me and \' and \\",
+            "a;b && c | d > e",
+        ] {
+            let line = line_of(AgentId::CLAUDE, prompt);
+            assert!(!line.contains('\n'), "{line}");
+            assert_eq!(words_of(&line), ["claude", prompt], "{line}");
+        }
+    }
+
+    #[test]
+    fn a_prompt_of_several_lines_is_typed_on_a_single_line_without_a_bang() {
+        let line = line_of(AgentId::CODEX, "first!\nsecond's $x `y`\n\nfourth");
+        assert!(
+            !line.contains('\n'),
+            "a line break would run the line: {line}"
+        );
+        assert!(!line.contains('!'), "history expansion reads it: {line}");
+        assert!(line.starts_with("codex \"$(printf '%b' "), "{line}");
+        assert!(line.ends_with(")\""), "{line}");
+    }
+
+    #[test]
+    fn a_prompt_is_typed_as_given_to_a_local_shell_and_over_ssh() {
+        let prompt = "refactor it's \"parser\"\nthen $HOME!";
+        let launch = prompted(AgentId::CLAUDE, prompt);
+        let local = plan(&local(), None, "/srv/api", &launch, &ssh(), &fake()).unwrap();
+        let remote = plan(
+            &remote(),
+            Some(&report(Some("/usr/bin/claude"))),
+            "/srv/api",
+            &launch,
+            &ssh(),
+            &fake(),
+        )
+        .unwrap();
+        let expected = format!("{}\r", line_of(AgentId::CLAUDE, prompt));
+        assert_eq!(local.send.as_deref(), Some(expected.as_str()));
+        assert_eq!(
+            remote.send.as_deref(),
+            Some(expected.as_str()),
+            "the remote login shell is typed into just the same"
+        );
+        // The prompt is in the typed line, not in what ssh runs.
+        assert!(!remote.spawn.args.iter().any(|arg| arg.contains("refactor")));
+    }
+
+    #[test]
+    fn a_prompted_agent_is_checked_for_like_any_other() {
+        let launch = prompted(AgentId::CODEX, "hi");
+        assert_eq!(
+            plan(&local(), None, "/srv/api", &launch, &ssh(), &fake()).unwrap_err(),
+            LaunchError::NotInstalled {
+                agent: AgentId::CODEX,
+                machine: "This machine".into()
+            }
+        );
+        assert_eq!(
+            plan(
+                &local(),
+                None,
+                "/nowhere",
+                &prompted(AgentId::CLAUDE, "hi"),
+                &ssh(),
+                &fake()
+            )
+            .unwrap_err(),
+            LaunchError::NoSuchFolder("/nowhere".into())
+        );
+    }
+
+    #[test]
+    fn a_prompt_is_cleaned_before_it_is_typed() {
+        assert_eq!(clean_prompt("  fix it \n"), Ok("fix it".into()));
+        assert_eq!(
+            clean_prompt("one\r\ntwo\rthree\tfour"),
+            Ok("one\ntwo\nthree four".into())
+        );
+        assert_eq!(clean_prompt("é ✓ 日本語"), Ok("é ✓ 日本語".into()));
+        assert_eq!(clean_prompt("refactor!"), Ok("refactor!".into()));
+        assert_eq!(clean_prompt("fix it"), Ok("fix it".into()));
+    }
+
+    #[test]
+    fn a_prompt_that_cannot_be_typed_safely_is_refused_with_the_reason() {
+        for (text, why) in [
+            ("", "Type a prompt."),
+            (" \n\t ", "Type a prompt."),
+            ("a\u{1b}[31mb", "control characters"),
+            ("a\u{3}b", "control characters"),
+            ("a\u{7f}b", "control characters"),
+            ("a\u{85}b", "control characters"),
+            ("--help", "start with a dash"),
+            ("- a list item", "start with a dash"),
+            ("apply", "one word"),
+            ("  update\n", "one word"),
+            ("log_out-now", "one word"),
+        ] {
+            let error = clean_prompt(text).unwrap_err();
+            assert!(error.contains(why), "{text:?}: {error}");
+        }
+        let sentence = |chars: usize| format!("x {}", "y".repeat(chars - 2));
+        assert!(clean_prompt(&sentence(MAX_PROMPT + 1))
+            .unwrap_err()
+            .contains("too long"));
+        assert!(clean_prompt(&sentence(MAX_PROMPT)).is_ok());
+    }
+
+    /// The quoting is proved with a shell where there is one to ask: what an
+    /// agent would receive as its argument is exactly the prompt.
+    #[cfg(leon_posix_tests)]
+    #[test]
+    fn a_real_shell_hands_the_agent_exactly_the_prompt() {
+        for prompt in [
+            "it's \"quoted\"",
+            "$HOME `id` $(id) !! done\\",
+            "line one\nline two!\n\nit's line four",
+        ] {
+            let line = line_of(AgentId::CLAUDE, prompt).replacen("claude", "printf '%s'", 1);
+            let out = std::process::Command::new("/bin/sh")
+                .args(["-c", &line])
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout), prompt);
+        }
+    }
+
+    #[test]
+    fn an_account_that_is_gone_or_is_another_agents_refuses_instead_of_falling_back() {
+        let accounts = [work()];
+        let gone = LaunchError::UnknownAccount {
+            account: "claude-old".into(),
+        };
+        assert_eq!(
+            account_env(Some("claude-old"), AgentId::CLAUDE, &accounts, Some("/h")),
+            Err(gone.clone())
+        );
+        assert_eq!(
+            account_env(Some("claude-work"), AgentId::CODEX, &accounts, Some("/h")),
+            Err(LaunchError::UnknownAccount {
+                account: "claude-work".into()
+            })
+        );
+        assert!(gone.to_string().contains("claude-old"));
+        // The plan refuses before anything starts.
+        let planned = plan_with(
+            &local(),
+            None,
+            "/srv/api",
+            &as_account(AgentId::CLAUDE, "claude-old"),
+            &ssh(),
+            &fake(),
+            &LaunchPrefs::default(),
+        );
+        assert_eq!(planned, Err(gone));
+    }
+
+    #[test]
+    fn a_local_terminal_gets_the_variables_of_its_account_after_the_settings_ones() {
+        let plan = plan_with(
+            &local(),
+            None,
+            "/srv/api",
+            &as_account(AgentId::CLAUDE, "claude-work"),
+            &ssh(),
+            &Homed(fake()),
+            &with_accounts(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.spawn.env,
+            [
+                ("FROM_SETTINGS".to_owned(), "1".to_owned()),
+                (
+                    "CLAUDE_CONFIG_DIR".to_owned(),
+                    "/home/me/.claude work".to_owned()
+                )
+            ]
+        );
+        // The line typed is the agent's, as it always was: the variables are
+        // the terminal's, not part of what is typed.
+        assert_eq!(plan.send.as_deref(), Some("claude\r"));
+        // Another terminal of the same agent is not touched.
+        let own = plan_with(
+            &local(),
+            None,
+            "/srv/api",
+            &agent(AgentId::CLAUDE, None),
+            &ssh(),
+            &Homed(fake()),
+            &with_accounts(),
+        )
+        .unwrap();
+        assert_eq!(
+            own.spawn.env,
+            [("FROM_SETTINGS".to_owned(), "1".to_owned())]
+        );
+    }
+
+    #[test]
+    fn an_ssh_terminal_sets_the_variables_on_the_remote_line_each_quoted_as_one_word() {
+        let mut hostile = work();
+        hostile.env = vec![
+            ("CLAUDE_CONFIG_DIR".into(), "~/.claude-work".into()),
+            ("NOTE".into(), "it's $(touch /tmp/x); `id` \"q\"".into()),
+        ];
+        let prefs = LaunchPrefs {
+            accounts: vec![hostile],
+            ..LaunchPrefs::default()
+        };
+        let mut found = report(Some("/home/dev/.local/bin/claude"));
+        found.home = Some("/home/dev".into());
+        let plan = plan_with(
+            &remote(),
+            Some(&found),
+            "/srv/api",
+            &as_account(AgentId::CLAUDE, "claude-work"),
+            &ssh(),
+            &fake(),
+            &prefs,
+        )
+        .unwrap();
+        assert_eq!(plan.spawn.program, "ssh");
+        let line = plan.spawn.args.last().unwrap();
+        assert!(
+            line.starts_with("cd /srv/api && exec env 'CLAUDE_CONFIG_DIR=/home/dev/.claude-work' "),
+            "{line}"
+        );
+        assert!(
+            line.contains(r#"'NOTE=it'\''s $(touch /tmp/x); `id` "q"'"#),
+            "{line}"
+        );
+        // Nothing of the variables is typed into the shell.
+        assert_eq!(plan.send.as_deref(), Some("claude\r"));
+        // The settings' own environment is for this computer's terminals only.
+        assert!(!line.contains("FROM_SETTINGS"));
+    }
+
+    #[test]
+    fn a_remote_account_with_a_home_relative_folder_waits_for_the_machine_to_be_known() {
+        let prefs = with_accounts();
+        let asked = |report: Option<&ProbeReport>| {
+            plan_with(
+                &remote(),
+                report,
+                "/srv/api",
+                &as_account(AgentId::CLAUDE, "claude-work"),
+                &ssh(),
+                &fake(),
+                &prefs,
+            )
+        };
+        // Never probed: the home is unknown.
+        assert_eq!(
+            asked(None),
+            Err(LaunchError::NoHome {
+                account: "Work".into()
+            })
+        );
+        let mut found = report(Some("/x/claude"));
+        assert!(matches!(
+            asked(Some(&found)),
+            Err(LaunchError::NoHome { .. })
+        ));
+        found.home = Some("/home/dev".into());
+        assert!(asked(Some(&found)).is_ok());
+    }
+
+    #[test]
+    fn a_relay_terminal_carries_the_variables_in_the_spec_the_host_runs() {
+        let relayed = Machine {
+            id: MachineId::from_string("r1"),
+            name: "their box".into(),
+            kind: MachineKind::Relay {
+                host_id: "host-id".into(),
+                host_key: "00".repeat(32),
+                relay_url: "wss://relay.example".into(),
+                name: "Their computer".into(),
+            },
+        };
+        let mut found = report(Some("/x/claude"));
+        found.home = Some("/home/them".into());
+        let plan = plan_with(
+            &relayed,
+            Some(&found),
+            "/srv/api",
+            &as_account(AgentId::CLAUDE, "claude-work"),
+            &ssh(),
+            &fake(),
+            &with_accounts(),
+        )
+        .unwrap();
+        assert!(plan.spawn.route.is_some(), "the host runs it");
+        assert_eq!(
+            plan.spawn.env,
+            [(
+                "CLAUDE_CONFIG_DIR".to_owned(),
+                "/home/them/.claude work".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn resuming_with_an_account_keeps_the_resume_form_and_the_account() {
+        let launch = Launch::Agent {
+            kind: AgentId::CODEX,
+            resume: Some("abc".into()),
+            account: Some("codex-lab".into()),
+        };
+        let fake = Fake {
+            programs: vec![("codex", "/x/codex")],
+            folders: vec!["/srv/api"],
+        };
+        let plan = plan_with(
+            &local(),
+            None,
+            "/srv/api",
+            &launch,
+            &ssh(),
+            &fake,
+            &with_accounts(),
+        )
+        .unwrap();
+        assert_eq!(plan.send.as_deref(), Some("codex resume abc\r"));
+        assert_eq!(
+            plan.spawn.env,
+            [
+                ("FROM_SETTINGS".to_owned(), "1".to_owned()),
+                ("CODEX_HOME".to_owned(), "/data/codex-lab".to_owned())
+            ]
+        );
     }
 }

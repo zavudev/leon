@@ -11,13 +11,13 @@ use crate::ui::live::LiveId;
 use crate::ui::panes::Layout;
 use leon_core::{SavedState, SavedTerminal, Slot};
 
-fn settings_with(dir: &tempfile::TempDir, json: &str) -> std::path::PathBuf {
+pub(super) fn settings_with(dir: &tempfile::TempDir, json: &str) -> std::path::PathBuf {
     let file = dir.path().join("settings.json");
     std::fs::write(&file, json).unwrap();
     file
 }
 
-fn saved_of(h: &Harness, cx: &mut TestAppContext) -> SavedState {
+pub(super) fn saved_of(h: &Harness, cx: &mut TestAppContext) -> SavedState {
     cx.run_until_parked();
     h.store
         .load_workspace(Slot::Current)
@@ -26,7 +26,7 @@ fn saved_of(h: &Harness, cx: &mut TestAppContext) -> SavedState {
 }
 
 /// A second window whose store holds `state` as the previous run's.
-fn restart(
+pub(super) fn restart(
     cx: &mut TestAppContext,
     settings: Option<std::path::PathBuf>,
     state: &SavedState,
@@ -42,7 +42,12 @@ fn restart(
     )
 }
 
-fn terminal(id: u64, cwd: &str, agent: Option<&str>, session: Option<&str>) -> SavedTerminal {
+pub(super) fn terminal(
+    id: u64,
+    cwd: &str,
+    agent: Option<&str>,
+    session: Option<&str>,
+) -> SavedTerminal {
     SavedTerminal {
         id,
         machine: MachineId::local().as_str().to_owned(),
@@ -54,10 +59,17 @@ fn terminal(id: u64, cwd: &str, agent: Option<&str>, session: Option<&str>) -> S
         name: None,
         title: None,
         started_at: 0,
+        account: None,
+        keeper: None,
     }
 }
 
-fn one_tab_each(cwd: &str, agent: &str, session: Option<&str>, ids: &[u64]) -> SavedState {
+pub(super) fn one_tab_each(
+    cwd: &str,
+    agent: &str,
+    session: Option<&str>,
+    ids: &[u64],
+) -> SavedState {
     use leon_core::{SavedLayout, SavedTab, SavedWorkspace};
     SavedState {
         saved_at: 1,
@@ -87,7 +99,7 @@ fn click(h: &Harness, selector: String, cx: &mut TestAppContext) {
     h.mouse_on(selector, gpui_kit::MouseButton::Left, cx);
 }
 
-fn live_count(h: &Harness, cx: &mut TestAppContext) -> usize {
+pub(super) fn live_count(h: &Harness, cx: &mut TestAppContext) -> usize {
     h.shell(cx, |s| s.live.ids().len())
 }
 
@@ -461,14 +473,32 @@ fn a_paused_session_never_notifies(cx: &mut TestAppContext) {
 use crate::launch::Launch;
 use crate::ui::terminals::Place;
 
-fn start_fresh(h: &Harness, cx: &mut TestAppContext, agent: leon_core::AgentId, cwd: &str) {
+pub(super) fn start_fresh(
+    h: &Harness,
+    cx: &mut TestAppContext,
+    agent: leon_core::AgentId,
+    cwd: &str,
+) {
+    start_fresh_as(h, cx, agent, cwd, None);
+}
+
+/// [`start_fresh`] as an account of the agent (an id from the settings).
+fn start_fresh_as(
+    h: &Harness,
+    cx: &mut TestAppContext,
+    agent: leon_core::AgentId,
+    cwd: &str,
+    account: Option<&str>,
+) {
     let cwd = cwd.to_owned();
+    let account = account.map(str::to_owned);
     cx.update_window(h.window.into(), |_, window, cx| {
         h.shell.update(cx, |s, cx| {
             s.start_live(
                 Launch::Agent {
                     kind: agent,
                     resume: None,
+                    account,
                 },
                 &MachineId::local(),
                 &cwd,
@@ -483,7 +513,13 @@ fn start_fresh(h: &Harness, cx: &mut TestAppContext, agent: leon_core::AgentId, 
     cx.run_until_parked();
 }
 
-fn new_session(h: &Harness, agent: leon_core::AgentId, external: &str, cwd: &str, minute: u32) {
+pub(super) fn new_session(
+    h: &Harness,
+    agent: leon_core::AgentId,
+    external: &str,
+    cwd: &str,
+    minute: u32,
+) {
     new_session_titled(h, agent, external, cwd, "t", minute);
 }
 
@@ -551,6 +587,115 @@ fn a_fresh_agent_learns_its_session_id_and_the_tree_shows_one_row(cx: &mut TestA
     assert_eq!(
         state.terminals[0].confidence.as_deref(),
         Some("newest-in-folder")
+    );
+}
+
+#[gpui_kit::test]
+fn a_session_of_an_account_is_saved_with_it_and_tags_the_history_row_it_is_linked_to(
+    cx: &mut TestAppContext,
+) {
+    let h = open_live(cx);
+    let (_dir, path) = real_worktree(&h, cx);
+    cx.update(|cx| {
+        settings::add_account(
+            cx,
+            leon_core::AgentId::CLAUDE,
+            "Work",
+            "CLAUDE_CONFIG_DIR=/acct/work",
+        )
+    })
+    .unwrap();
+    start_fresh_as(
+        &h,
+        cx,
+        leon_core::AgentId::CLAUDE,
+        &path,
+        Some("claude-work"),
+    );
+    // What the next start reads back: the account is part of the saved terminal.
+    let state = saved_of(&h, cx);
+    assert_eq!(state.terminals[0].account.as_deref(), Some("claude-work"));
+
+    // The session the agent wrote is the terminal's, and its row is tagged by
+    // the engine so that resuming it later starts the same account.
+    new_session(&h, leon_core::AgentId::CLAUDE, "claude-new", &path, 6);
+    h.settle(cx);
+    assert!(h
+        .shell(cx, |s| s.live.get(LiveId(1)).unwrap().history.clone())
+        .is_some());
+    let row = h
+        .store
+        .session_by_external(
+            &MachineId::local(),
+            leon_core::AgentId::CLAUDE,
+            "claude-new",
+        )
+        .unwrap()
+        .expect("imported");
+    assert_eq!(row.account.as_deref(), Some("claude-work"));
+}
+
+fn settings_with_work_account(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    let account = leon_core::Account {
+        id: "claude-work".to_owned(),
+        agent: leon_core::AgentId::CLAUDE,
+        name: "Work".to_owned(),
+        env: vec![("CLAUDE_CONFIG_DIR".to_owned(), "/acct/work".to_owned())],
+    };
+    let json = serde_json::json!({
+        "restore_sessions": "always",
+        "agent_accounts": [serde_json::to_string(&account).unwrap()],
+    });
+    settings_with(dir, &json.to_string())
+}
+
+#[gpui_kit::test]
+fn a_saved_session_of_an_account_comes_back_as_that_account(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let mut state = one_tab_each(&cwd, "claude", Some("sid-7"), &[1]);
+    state.terminals[0].account = Some("claude-work".to_owned());
+    let file = settings_with_work_account(&dir);
+    let h = restart(cx, Some(file), &state);
+    wait_until(&h, cx, "the shell", |h, cx| live_count(h, cx) == 1);
+    wait_until(&h, cx, "the resumed agent", |h, cx| {
+        screen(h, cx, 1).contains("FAKE-CLAUDE --resume sid-7")
+    });
+    assert_eq!(
+        h.shell(cx, |s| s.live.get(LiveId(1)).unwrap().account.clone())
+            .as_deref(),
+        Some("claude-work")
+    );
+    assert!(script_of(&h, 1)
+        .spec()
+        .env
+        .contains(&("CLAUDE_CONFIG_DIR".to_owned(), "/acct/work".to_owned())));
+}
+
+#[gpui_kit::test]
+fn a_saved_session_of_a_removed_account_is_not_restored_as_another_one(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let mut state = one_tab_each(&cwd, "claude", Some("sid-7"), &[1]);
+    state.terminals[0].account = Some("claude-gone".to_owned());
+    let always = settings_with(&dir, r#"{"restore_sessions": "always"}"#);
+    let h = restart(cx, Some(always), &state);
+    cx.run_until_parked();
+    h.settle(cx);
+    assert_eq!(
+        live_count(&h, cx),
+        0,
+        "nothing runs as the account that is gone, nor as the agent's own setup"
     );
 }
 
@@ -720,7 +865,7 @@ fn an_agent_started_in_leon_is_imported_without_a_refresh(cx: &mut TestAppContex
 
 // ----- quitting gently --------------------------------------------------------------------------
 
-fn agent_in_front(cx: &mut TestAppContext) -> (Harness, tempfile::TempDir, String) {
+pub(super) fn agent_in_front(cx: &mut TestAppContext) -> (Harness, tempfile::TempDir, String) {
     let h = open_live(cx);
     let (dir, path) = real_worktree(&h, cx);
     start_fresh(&h, cx, leon_core::AgentId::CLAUDE, &path);
@@ -732,12 +877,12 @@ fn agent_in_front(cx: &mut TestAppContext) -> (Harness, tempfile::TempDir, Strin
 /// Asks to quit and lets the watcher it started register its timer: the
 /// clock is only advanced after that, so no stage depends on whether some
 /// other thread's wake-up happened to run the executor first.
-fn quit(h: &Harness, cx: &mut TestAppContext) {
+pub(super) fn quit(h: &Harness, cx: &mut TestAppContext) {
     cx.update(|cx| h.shell.update(cx, |s, cx| s.quit_now(cx)));
     cx.run_until_parked();
 }
 
-fn pass(cx: &mut TestAppContext, millis: u64) {
+pub(super) fn pass(cx: &mut TestAppContext, millis: u64) {
     cx.executor()
         .advance_clock(std::time::Duration::from_millis(millis));
     cx.run_until_parked();

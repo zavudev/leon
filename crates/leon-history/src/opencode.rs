@@ -23,6 +23,10 @@
 //! * Consecutive text parts of one turn are joined into one message with the
 //!   turn's role. A tool part becomes one [`Role::Tool`] line.
 //! * A row whose JSON cannot be read is counted and skipped.
+//!
+//! Each assistant turn also states what it used (`tokens`: input, output,
+//! reasoning and the cache's reads and writes) and which model answered; those
+//! are read apart from the messages, by the time the turn was created.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -36,6 +40,7 @@ use serde_json::Value;
 
 use crate::normalize::tool_line;
 use crate::session::{ParsedSession, SessionBuilder};
+use crate::tokens::opencode_counts;
 
 /// How long to wait when opencode holds a lock on its database.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -56,6 +61,8 @@ pub(crate) struct MessageData {
     pub(crate) role: Option<String>,
     #[serde(rename = "modelID")]
     pub(crate) model_id: Option<String>,
+    /// What the turn used, as written; a shape nobody knows counts as nothing.
+    pub(crate) tokens: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +97,7 @@ struct TurnData {
     text: Option<String>,
     model: Option<SessionModel>,
     content: Option<Vec<PartData>>,
+    tokens: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -280,11 +288,15 @@ fn read_session_v1(
     let mut turn_model: Option<String> = None;
     {
         let mut statement = connection.prepare_cached(
-            "SELECT id, data FROM message WHERE session_id = ?1 ORDER BY time_created, id",
+            "SELECT id, data, time_created FROM message
+             WHERE session_id = ?1 ORDER BY time_created, id",
         )?;
         let mut rows = statement.query([session_id])?;
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
+            let created = row
+                .get::<_, Option<i64>>(2)?
+                .and_then(DateTime::from_timestamp_millis);
             let data = row.get_ref(1)?.as_bytes().unwrap_or_default();
             match serde_json::from_slice::<MessageData>(data) {
                 Ok(data) => {
@@ -293,6 +305,15 @@ fn read_session_v1(
                         Some("assistant") => Some(Role::Assistant),
                         _ => None,
                     };
+                    if role == Some(Role::Assistant) {
+                        if let Some(tokens) = &data.tokens {
+                            session.see_tokens(
+                                data.model_id.as_deref(),
+                                created,
+                                opencode_counts(tokens),
+                            );
+                        }
+                    }
                     if data.model_id.is_some() {
                         turn_model = data.model_id;
                     }
@@ -416,7 +437,11 @@ fn read_session_v2(
                     }
                 }
                 "assistant" => {
-                    if let Some(model) = turn.model.as_ref().and_then(|model| model.id.as_deref()) {
+                    let model = turn.model.as_ref().and_then(|model| model.id.as_deref());
+                    if let Some(tokens) = &turn.tokens {
+                        session.see_tokens(model, at, opencode_counts(tokens));
+                    }
+                    if let Some(model) = model {
                         turn_model = Some(model.to_owned());
                     }
                     for part in turn.content.unwrap_or_default() {
@@ -1037,6 +1062,65 @@ mod tests {
             ]
         );
         assert_eq!(session.malformed, 0);
+    }
+
+    /// What an assistant turn of a real database recorded.
+    const RECORDED_TOKENS: &str =
+        r#"{"input":798,"output":146,"reasoning":52,"cache":{"read":12416,"write":0}}"#;
+
+    fn counted(session: &ParsedSession) -> Vec<(&str, &str, u64, u64, u64)> {
+        session
+            .tokens
+            .iter()
+            .map(|t| {
+                (
+                    t.model.as_str(),
+                    t.day.as_str(),
+                    t.counts.input,
+                    t.counts.output,
+                    t.counts.cache_read,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_turns_tokens_are_counted_under_its_model_and_day() {
+        let connection = database();
+        connection
+            .execute(
+                "UPDATE message SET data = json_set(data, '$.tokens', json(?1)) WHERE id = 'msg_2'",
+                [RECORDED_TOKENS],
+            )
+            .unwrap();
+        let session = read_session(&connection, "ses_1").unwrap().unwrap();
+        // Reasoning is billed as output, so it is added to it.
+        assert_eq!(
+            counted(&session),
+            [("model-turn", "1970-01-01", 798, 198, 12416)]
+        );
+        // The user's turn states none; nothing is counted for it.
+        assert_eq!(
+            read_session(&database(), "ses_1").unwrap().unwrap().tokens,
+            []
+        );
+    }
+
+    #[test]
+    fn a_v2_turns_tokens_are_counted_under_its_model_and_day() {
+        let connection = database_v2();
+        connection
+            .execute(
+                "UPDATE session_message SET data = json_set(data, '$.tokens', json(?1))
+                 WHERE id = 'msg_2'",
+                [RECORDED_TOKENS],
+            )
+            .unwrap();
+        let session = read_session(&connection, "ses_1").unwrap().unwrap();
+        assert_eq!(
+            counted(&session),
+            [("model-turn", "1970-01-01", 798, 198, 12416)]
+        );
     }
 
     #[test]

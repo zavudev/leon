@@ -251,6 +251,8 @@ impl Shell {
         // The length of the lists of sessions, and whether the inactive
         // ones are listed too.
         self.show_inactive = settings::flag(cx, "sidebar_show_inactive");
+        self.shelves.settle_merged = settings::flag(cx, "sidebar_settle_merged");
+        self.settle_merged_now();
         self.rebuild_rows();
         // The Den may have somebody to follow now: sessions elsewhere. And
         // what the settings say of the Den itself (its picture, its
@@ -296,6 +298,7 @@ impl Shell {
                 .filter_map(|entry| entry.split_once('='))
                 .map(|(name, value)| (name.to_owned(), value.to_owned()))
                 .collect(),
+            accounts: settings::accounts(cx),
             ..crate::launch::LaunchPrefs::default()
         };
         // The catalogue's agents; a custom agent's command and arguments are

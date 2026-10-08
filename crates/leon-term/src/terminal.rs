@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 
 mod scripted;
 
-pub use scripted::{RemoteFeed, RemoteLink, Script, Scripted};
+pub use scripted::{HeldForeground, RemoteFeed, RemoteLink, Script, Scripted};
 
 /// How many lines of scrollback a terminal keeps.
 pub const SCROLLBACK_LINES: usize = 10_000;
@@ -493,7 +493,11 @@ impl Terminal {
     /// cannot say (Windows) or the process has no pid.
     pub fn shell_is_foreground(&self) -> Option<bool> {
         if let Some(script) = &self.script {
-            // Nothing is claimed about a program on another computer.
+            // Nothing is claimed about a program on another computer. The
+            // keeper reports for one it holds on this computer.
+            if script.is_held() {
+                return script.held_foreground()?.shell_in_front;
+            }
             return (!script.is_remote()).then(|| script.shell_is_foreground());
         }
         #[cfg(unix)]
@@ -584,7 +588,12 @@ impl Terminal {
 
     /// The child's process id, where the system has one.
     pub fn process_id(&self) -> Option<u32> {
-        self.pid
+        self.pid.or_else(|| {
+            self.script
+                .as_ref()
+                .and_then(Script::held_foreground)
+                .and_then(|held| held.pid)
+        })
     }
 
     /// Keeps `lines` lines of scrollback from now on; what is already kept is
@@ -875,7 +884,7 @@ impl Drop for Terminal {
         // the hang-up end the rest.
         self.input = None;
         if let Some(script) = &self.script {
-            if script.is_remote() {
+            if script.is_linked() {
                 // Dropping a view lets go of the connection; it does not end
                 // the program on the other computer. Closing it is `kill`.
                 script.detach();
@@ -1806,11 +1815,10 @@ mod foreground_tests {
     #[test]
     fn a_terminal_is_quiet_after_its_prompt() {
         let terminal = shell();
-        assert_eq!(
-            terminal.quiet_for(),
-            None,
-            "nothing printed yet or just now"
-        );
+        // Whether the shell has already printed when the terminal is first
+        // looked at depends on the machine's load, so nothing is asserted
+        // before the output exists.
+        wait_for("the first output", || terminal.quiet_for().is_some());
         wait_for("a quiet prompt", || {
             terminal
                 .quiet_for()
