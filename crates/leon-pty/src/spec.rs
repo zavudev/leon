@@ -117,6 +117,8 @@ mod tests {
         assert_eq!(command.get_env("TERM"), Some(OsStr::new("screen")));
     }
 
+    // An own environment is the keeper's, and `SHELL` is a unix variable.
+    #[cfg(unix)]
     #[test]
     fn an_own_environment_replaces_ours_and_keeps_only_what_a_terminal_needs() {
         // `PATH` is in every test process's environment.

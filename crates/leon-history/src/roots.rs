@@ -446,6 +446,8 @@ mod tests {
         }
     }
 
+    // Unix paths: absolute there, relative on Windows.
+    #[cfg(unix)]
     #[test]
     fn an_accounts_folder_becomes_a_source_of_its_agent_tagged_with_the_account() {
         let home = Path::new("/home/u");
