@@ -159,8 +159,15 @@ pub fn items_for_held(kind: &Kind, local: bool, held: Option<bool>) -> Vec<Item>
                     C::PinSession
                 },
             )),
-            Some(Item::new("Move up", C::MoveRowUp)),
-            Some(Item::new("Move down", C::MoveRowDown)),
+            // Only a pinned session has a place in the Pinned section to move in.
+            session
+                .sort_order
+                .is_some()
+                .then(|| Item::new("Move up", C::MoveRowUp)),
+            session
+                .sort_order
+                .is_some()
+                .then(|| Item::new("Move down", C::MoveRowDown)),
             Some(Item::new("Rename", C::Rename)),
             Some(Item::new("Copy session id", C::CopySessionId)),
             Some(Item::new("Remove from history", C::RemoveFromHistory)),
@@ -185,7 +192,11 @@ pub fn items_for_held(kind: &Kind, local: bool, held: Option<bool>) -> Vec<Item>
         .flatten()
         .collect(),
         Kind::Open => vec![Item::new("Open project…", C::OpenProject)],
-        Kind::Unsorted { .. } | Kind::More { .. } | Kind::NoMatch | Kind::NoActive => Vec::new(),
+        Kind::Pinned { .. }
+        | Kind::Unsorted { .. }
+        | Kind::More { .. }
+        | Kind::NoMatch
+        | Kind::NoActive => Vec::new(),
     }
 }
 
@@ -976,8 +987,6 @@ mod tests {
                 "Resume",
                 "Open transcript",
                 "Pin",
-                "Move up",
-                "Move down",
                 "Rename",
                 "Copy session id",
                 "Remove from history"

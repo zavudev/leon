@@ -36,6 +36,7 @@ icon_assets!(
         Moon,
         PanelLeft,
         PanelLeftClose,
+        Pin,
         Plus,
         RefreshCw,
         Search,
@@ -189,6 +190,7 @@ mod tests {
             IconName::GitMerge,
             IconName::Github,
             IconName::Check,
+            IconName::Pin,
         ] {
             let path = gpui_kit::assets::IconNamed::path(name);
             let loaded = Assets.load(&path).unwrap();

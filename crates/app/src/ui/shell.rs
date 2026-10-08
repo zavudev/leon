@@ -997,6 +997,7 @@ impl Shell {
                 Kind::Machine(_)
                     | Kind::Project { .. }
                     | Kind::Worktree { .. }
+                    | Kind::Pinned { .. }
                     | Kind::Unsorted { .. }
                     | Kind::Folder { .. }
             )
@@ -1253,65 +1254,43 @@ impl Shell {
                     })
                     .unwrap_or_default(),
             }),
-            Kind::Session(session) => {
-                let scope = self.session_scope(session, machine)?;
-                Some(TreeOrder {
-                    order: Order::Session(session.id.clone(), scope.clone()),
-                    rows: self
-                        .sessions_in(&scope)
-                        .iter()
-                        .map(|id| NodeId::Session(id.clone()))
-                        .collect(),
-                })
-            }
+            Kind::Session(session) => Some(TreeOrder {
+                order: Order::Session(session.id.clone(), SessionScope::Machine(machine.clone())),
+                rows: self
+                    .pinned_ids(machine)
+                    .into_iter()
+                    .map(NodeId::Session)
+                    .collect(),
+            }),
             _ => None,
         }
     }
 
-    /// What holds a history session: the worktree its folder is in, else the
-    /// project containing it, else the unsorted folder on its machine.
-    pub(super) fn session_scope(
-        &self,
-        session: &Session,
-        machine: &MachineId,
-    ) -> Option<SessionScope> {
-        let entry = self.snapshot.project(session.project_id.as_ref()?)?;
-        if &entry.project.machine_id != machine {
-            return None;
-        }
-        let worktree = entry
-            .worktrees
-            .iter()
-            .filter(|worktree| tree::ancestors(&session.cwd).any(|folder| folder == worktree.path))
-            .max_by_key(|worktree| worktree.path.len());
-        if let Some(worktree) = worktree {
-            return Some(SessionScope::Worktree(worktree.id.clone()));
-        }
-        Some(SessionScope::Project(entry.project.id.clone()))
+    /// The sessions pinned on a machine, in their pinned order: the Pinned
+    /// section of the sidebar, top first.
+    pub(super) fn pinned_ids(&self, machine: &MachineId) -> Vec<SessionId> {
+        self.placement
+            .pinned
+            .get(machine)
+            .into_iter()
+            .flatten()
+            .map(|place| self.snapshot.sessions[*place].id.clone())
+            .collect()
     }
 
-    /// The sessions of `scope` in the order of the sidebar: pinned first,
-    /// then newest-first.
-    fn sessions_in(&self, scope: &SessionScope) -> Vec<SessionId> {
-        let mut sessions: Vec<&Session> = self
-            .snapshot
-            .sessions
-            .iter()
-            .filter(|session| {
-                self.session_scope(session, &session.machine_id).as_ref() == Some(scope)
-            })
-            .collect();
-        sessions.sort_by_key(|session| {
-            (
-                session.sort_order.is_none(),
-                session.sort_order.unwrap_or(0),
-                std::cmp::Reverse(session.updated_at),
-            )
-        });
-        sessions
-            .into_iter()
-            .map(|session| session.id.clone())
-            .collect()
+    /// Whether `session` is pinned on the machine of `scope`: the rows of the
+    /// Pinned section are the only ones a session can be dropped onto.
+    fn is_pinned_session(&self, session: &SessionId, scope: &SessionScope) -> bool {
+        match scope {
+            SessionScope::Machine(machine) => {
+                self.placement.pinned.get(machine).is_some_and(|places| {
+                    places
+                        .iter()
+                        .any(|place| &self.snapshot.sessions[*place].id == session)
+                })
+            }
+            _ => false,
+        }
     }
 
     /// Whether a row can be moved, so a drag can be started on it.
@@ -1325,10 +1304,12 @@ impl Shell {
                 let rows = self.worktree_order(project);
                 rows.len() > 1 && rows.contains(id)
             }
-            Order::Session(id, scope) => {
-                let rows = self.sessions_in(scope);
-                rows.len() > 1 && rows.contains(id)
-            }
+            // A session can be dropped onto the Pinned section, so it can be
+            // dragged once that section has a row to drop it on.
+            Order::Session(_, scope) => match scope {
+                SessionScope::Machine(machine) => !self.pinned_ids(machine).is_empty(),
+                _ => false,
+            },
         }
     }
 
@@ -1346,7 +1327,9 @@ impl Shell {
         let same_list = match (dragged, target) {
             (Order::Project(_, a), Order::Project(_, b)) => a == b,
             (Order::Worktree(_, a), Order::Worktree(_, b)) => a == b,
-            (Order::Session(_, a), Order::Session(_, b)) => a == b,
+            (Order::Session(_, a), Order::Session(target, b)) => {
+                a == b && self.is_pinned_session(target, b)
+            }
             _ => false,
         };
         let drop = (same_list && dragged != target).then(|| RowDropTarget {
@@ -1363,8 +1346,8 @@ impl Shell {
     }
 
     /// A dragged row was dropped onto `target`, with the drop going after it
-    /// when `after`. Projects and worktrees get the new order; a session is
-    /// pinned there, on top of its parent's list.
+    /// when `after`. Projects and worktrees get the new order; a session takes
+    /// its place in the order of the Pinned section, pinned if it was not.
     pub(super) fn drop_row_here(&mut self, dragged: &Order, target: &Order, after: bool) {
         self.row_drop_target = None;
         match (dragged.clone(), target.clone()) {
@@ -1383,25 +1366,22 @@ impl Shell {
                 }
             }
             (Order::Session(session, scope), Order::Session(target, _)) => {
-                let display = self.sessions_in(&scope);
-                let Some(target_at) = display.iter().position(|id| id == &target) else {
+                let SessionScope::Machine(machine) = scope else {
                     return;
                 };
-                let to = target_at + usize::from(after);
-                let pinned: std::collections::HashSet<SessionId> = self
-                    .snapshot
-                    .sessions
-                    .iter()
-                    .filter(|session| session.sort_order.is_some())
-                    .filter(|session| {
-                        self.session_scope(session, &session.machine_id).as_ref() == Some(&scope)
-                    })
-                    .map(|session| session.id.clone())
-                    .collect();
-                let repinned = tree::repinned(&display, &pinned, &session, to);
+                let pinned = self.pinned_ids(&machine);
+                let done = if pinned.contains(&session) {
+                    "Moved the session."
+                } else {
+                    "Pinned the session."
+                };
+                let Some(ordered) = tree::placed_order(&pinned, &session, &target, after) else {
+                    return;
+                };
                 self.engine.submit(crate::engine::Op::PinSessions {
-                    parent: scope,
-                    pinned: repinned,
+                    parent: SessionScope::Machine(machine),
+                    pinned: ordered,
+                    done,
                 });
             }
             _ => {}
@@ -1446,7 +1426,7 @@ impl Shell {
             )),
             Kind::Session(session) => Some(Order::Session(
                 session.id.clone(),
-                self.session_scope(session, &row.machine)?,
+                SessionScope::Machine(row.machine.clone()),
             )),
             _ => None,
         }
@@ -1491,31 +1471,25 @@ impl Shell {
                 }
             }
             Order::Session(session, scope) => {
-                let display = self.sessions_in(scope);
-                let Some(at) = display.iter().position(|id| id == session) else {
+                let SessionScope::Machine(machine) = scope else {
                     return;
                 };
-                let to = at
-                    .min(display.len().saturating_sub(1))
-                    .saturating_add_signed(delta);
-                let to = to.min(display.len());
-                let pinned: std::collections::HashSet<SessionId> = self
-                    .snapshot
-                    .sessions
-                    .iter()
-                    .filter(|session| session.sort_order.is_some())
-                    .filter(|candidate| {
-                        self.session_scope(candidate, &candidate.machine_id)
-                            .as_ref()
-                            == Some(scope)
-                    })
-                    .map(|session| session.id.clone())
-                    .collect();
-                let repinned = tree::repinned(&display, &pinned, session, to);
-                self.engine.submit(crate::engine::Op::PinSessions {
-                    parent: scope.clone(),
-                    pinned: repinned,
-                });
+                let pinned = self.pinned_ids(machine);
+                let Some(at) = pinned.iter().position(|id| id == session) else {
+                    self.engine.report(
+                        crate::engine::StatusKind::Info,
+                        "Pin the session first, to order it.",
+                    );
+                    return;
+                };
+                let next = tree::stepped_order(&pinned, at, delta);
+                if next != pinned {
+                    self.engine.submit(crate::engine::Op::PinSessions {
+                        parent: SessionScope::Machine(machine.clone()),
+                        pinned: next,
+                        done: "Moved the session.",
+                    });
+                }
             }
         }
     }
@@ -1524,36 +1498,29 @@ impl Shell {
     /// of its list; unpinning sends it back to its place by recency. The
     /// other pins of the list stay, in their order.
     pub(super) fn pin_session_here(&mut self, pinned: bool) {
-        let Some(Order::Session(session, scope)) = self.order_here() else {
+        let Some(Order::Session(session, SessionScope::Machine(machine))) = self.order_here()
+        else {
             self.engine
                 .report(crate::engine::StatusKind::Info, "Select a session first.");
             return;
         };
-        let display = self.sessions_in(&scope);
-        let pins: std::collections::HashSet<SessionId> = self
-            .snapshot
-            .sessions
-            .iter()
-            .filter(|session| session.sort_order.is_some())
-            .filter(|candidate| {
-                self.session_scope(candidate, &candidate.machine_id)
-                    .as_ref()
-                    == Some(&scope)
-            })
-            .map(|session| session.id.clone())
+        let rest: Vec<SessionId> = self
+            .pinned_ids(&machine)
+            .into_iter()
+            .filter(|id| id != &session)
             .collect();
-        let next = if pinned {
-            tree::repinned(&display, &pins, &session, 0)
+        let (next, done) = if pinned {
+            (
+                std::iter::once(session).chain(rest).collect(),
+                "Pinned the session.",
+            )
         } else {
-            display
-                .iter()
-                .filter(|id| *id != &session && pins.contains(id))
-                .cloned()
-                .collect()
+            (rest, "Unpinned the session.")
         };
         self.engine.submit(crate::engine::Op::PinSessions {
-            parent: scope,
+            parent: SessionScope::Machine(machine),
             pinned: next,
+            done,
         });
     }
 
@@ -1774,6 +1741,7 @@ impl Shell {
                 Kind::Folder { cwd, .. } => Some((row.machine.clone(), None, cwd.clone())),
                 Kind::Live(entry) => Some((row.machine.clone(), None, entry.cwd.clone())),
                 Kind::Machine(_)
+                | Kind::Pinned { .. }
                 | Kind::Unsorted { .. }
                 | Kind::More { .. }
                 | Kind::Open
@@ -1941,6 +1909,7 @@ impl Shell {
         match &row.kind {
             Kind::Machine(_)
             | Kind::Project { .. }
+            | Kind::Pinned { .. }
             | Kind::Unsorted { .. }
             | Kind::Folder { .. } => {
                 self.toggle(index);

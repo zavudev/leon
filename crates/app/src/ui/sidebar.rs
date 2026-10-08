@@ -32,6 +32,10 @@ use gpui_kit::{
 };
 use gpui_kit::{HighlightStyle, StyledText};
 
+/// The group every row of the tree belongs to: a part of a row can show only
+/// while the row is hovered (the pin of a session, see `pin_mark`).
+const ROW_GROUP: &str = "tree-row";
+
 /// The ghost shown while a row is dragged: nothing is drawn, the target's
 /// line says where the drop goes.
 struct RowDragGhost;
@@ -439,6 +443,7 @@ impl Shell {
         let base = div()
             .id(("row", index))
             .debug_selector(move || format!("tree-row-{index}"))
+            .group(ROW_GROUP)
             .relative()
             .h(metrics::ROW_HEIGHT())
             .w_full()
@@ -710,6 +715,7 @@ impl Shell {
             Kind::Session(session) => {
                 let base = self.draggable_row(row, index, base, colours, cx);
                 let name: SharedString = format::agent_name(session.agent).into();
+                let pinned = session.sort_order.is_some();
                 // A session with a terminal of its own folder is that
                 // terminal's row: it shows the terminal's state, not its age.
                 let running = self
@@ -747,7 +753,7 @@ impl Shell {
                     (None, Tone::Faded) => format!("{name} · history").into(),
                 };
                 base.tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
-                    .child(chevron)
+                    .child(self.pin_mark(index, pinned, colours, cx))
                     .child(
                         div()
                             .debug_selector(move || format!("tree-agent-{index}"))
@@ -866,6 +872,12 @@ impl Shell {
                 .child(chevron)
                 .child(mono(format!("SHOW {hidden} MORE")).text_color(colours.text_muted))
                 .into_any_element(),
+            Kind::Pinned { sessions } => base
+                .child(chevron)
+                .child(icon(IconName::Pin, px(12.), colours.signal))
+                .child(label().child(section_label("Pinned", colours)))
+                .child(count(*sessions))
+                .into_any_element(),
             Kind::Unsorted { sessions } => base
                 .child(chevron)
                 .child(label().child(section_label("Unsorted", colours)))
@@ -909,6 +921,66 @@ impl Shell {
                 .children(keys::keys_label(Command::OpenProject).map(|text| key_cap(text, colours)))
                 .into_any_element(),
         }
+    }
+
+    /// The pin of a session, in the room a chevron takes: a pinned session
+    /// always shows it, in the accent colour, and any other shows it while its
+    /// row is hovered. Pressing it pins the session at the top of the Pinned
+    /// section, or unpins it.
+    fn pin_mark(
+        &self,
+        index: usize,
+        pinned: bool,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tip: SharedString = tooltip_text(if pinned {
+            Command::UnpinSession
+        } else {
+            Command::PinSession
+        })
+        .into();
+        let hover = colours.surface_2;
+        div()
+            .id(("pin", index))
+            .debug_selector(move || format!("tree-pin-{index}"))
+            .flex_none()
+            .size(px(16.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(metrics::RADIUS())
+            .cursor_pointer()
+            .when(!pinned, |this| {
+                this.invisible()
+                    .group_hover(ROW_GROUP, |style| style.visible())
+            })
+            .hover(move |style| style.bg(hover))
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.cursor = Some(index);
+                this.pane = Pane::Sidebar;
+                this.focus.focus(window, cx);
+                this.pin_session_here(!pinned);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .when(pinned, |this| {
+                        this.debug_selector(move || format!("tree-pinned-{index}"))
+                    })
+                    .child(icon(
+                        IconName::Pin,
+                        px(12.),
+                        if pinned {
+                            colours.signal
+                        } else {
+                            colours.text_muted
+                        },
+                    )),
+            )
+            .into_any_element()
     }
 }
 

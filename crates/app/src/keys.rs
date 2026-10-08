@@ -167,11 +167,11 @@ pub enum Command {
     /// Renames the project, machine or live terminal the keyboard is on.
     Rename,
     /// Moves the row the keyboard is on one step up in its list: a project,
-    /// a worktree or a session (which pins itself there).
+    /// a worktree or a pinned session in the Pinned section.
     MoveRowUp,
     /// Moves the row the keyboard is on one step down in its list.
     MoveRowDown,
-    /// Pins the session the keyboard is on on top of its list.
+    /// Pins the session the keyboard is on at the top of the Pinned section.
     PinSession,
     /// Unpins the session the keyboard is on: it goes back to its place by
     /// recency.

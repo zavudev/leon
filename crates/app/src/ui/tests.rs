@@ -724,6 +724,7 @@ fn describe(row: &tree::Row) -> String {
         Kind::Worktree { worktree, .. } => format!("worktree:{}", tree::worktree_label(worktree)),
         Kind::Session(session) => format!("session:{}", session.title),
         Kind::Live(entry) => format!("live:{}", entry.id),
+        Kind::Pinned { .. } => "pinned".to_owned(),
         Kind::Unsorted { .. } => "unsorted".to_owned(),
         Kind::Folder { cwd, .. } => format!("folder:{cwd}"),
         Kind::More { hidden } => format!("more:{hidden}"),
@@ -1250,8 +1251,16 @@ fn dragging_a_worktree_onto_another_reorders_them(cx: &mut TestAppContext) {
     );
 }
 
+/// Presses the pin of the row of `node`, the way a hand does: the row is
+/// hovered first, which is what shows the pin of a row that is not pinned.
+fn click_pin_of(h: &Harness, node: NodeId, cx: &mut TestAppContext) {
+    let at = h.row_of(node, cx).expect("the row is in the tree");
+    h.hover_on(format!("tree-row-{at}"), cx);
+    h.mouse_on(format!("tree-pin-{at}"), gpui_kit::MouseButton::Left, cx);
+}
+
 #[gpui_kit::test]
-fn dragging_a_session_pins_it_where_it_was_dropped(cx: &mut TestAppContext) {
+fn dragging_a_session_onto_a_pinned_one_pins_it_at_that_place(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
     session_at(
         &h.store,
@@ -1273,18 +1282,17 @@ fn dragging_a_session_pins_it_where_it_was_dropped(cx: &mut TestAppContext) {
     };
     let older = id_of(&h, "fix the login bug");
     let newer = id_of(&h, "brand new");
-    // Both unpinned, newest first: brand new, then fix the login bug. Drop
-    // the older below the newer: it is pinned on top of the list.
+    // The newer one is pinned: it is the first session of the Pinned section.
+    click_pin_of(&h, NodeId::Session(newer.clone()), cx);
+    assert_eq!(h.store.session(&newer).unwrap().sort_order, Some(0));
+    // The older one is dropped below it, in the lower half of its row: it is
+    // pinned right after it.
     let older_row = h.row_of(NodeId::Session(older.clone()), cx).unwrap();
     let newer_row = h.row_of(NodeId::Session(newer.clone()), cx).unwrap();
     h.drag_rows(older_row, newer_row, 0.75, cx);
-    assert_eq!(h.store.session(&older).unwrap().sort_order, Some(0));
-    assert_eq!(
-        h.store.session(&newer).unwrap().sort_order,
-        None,
-        "the other session stays automatic"
-    );
-    // Unpin from the menu: it goes back to recency.
+    assert_eq!(h.store.session(&newer).unwrap().sort_order, Some(0));
+    assert_eq!(h.store.session(&older).unwrap().sort_order, Some(1));
+    // Unpin from the menu: it goes back to its worktree, and the status says so.
     put_cursor(&h, cx, NodeId::Session(older.clone()));
     h.press("m", cx);
     assert!(h.shell(cx, |shell| {
@@ -1296,6 +1304,197 @@ fn dragging_a_session_pins_it_where_it_was_dropped(cx: &mut TestAppContext) {
     h.type_text("unpin", cx);
     h.press("enter", cx);
     assert_eq!(h.store.session(&older).unwrap().sort_order, None);
+    assert!(
+        h.status().contains("Unpinned the session."),
+        "{}",
+        h.status()
+    );
+}
+
+/// Two pinned sessions of the local machine, the newer one pinned last, so on
+/// top of the Pinned section: `(older, newer)`.
+fn pinned_pair(
+    h: &Harness,
+    cx: &mut TestAppContext,
+) -> (leon_core::SessionId, leon_core::SessionId) {
+    session_at(
+        &h.store,
+        &MachineId::local(),
+        API_ROOT,
+        "brand new",
+        0,
+        &[(Role::User, "hello")],
+    );
+    h.settle(cx);
+    let id_of = |title: &str| {
+        h.store
+            .recent_sessions(&leon_core::SessionFilter::default(), 50)
+            .unwrap()
+            .into_iter()
+            .find(|session| session.title == title)
+            .unwrap()
+            .id
+    };
+    let (older, newer) = (id_of("fix the login bug"), id_of("brand new"));
+    click_pin_of(h, NodeId::Session(older.clone()), cx);
+    click_pin_of(h, NodeId::Session(newer.clone()), cx);
+    assert_eq!(h.store.session(&newer).unwrap().sort_order, Some(0));
+    assert_eq!(h.store.session(&older).unwrap().sort_order, Some(1));
+    (older, newer)
+}
+
+#[gpui_kit::test]
+fn dragging_a_pinned_session_reorders_the_pinned_section(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    let (older, newer) = pinned_pair(&h, cx);
+    // The newer one is on top: dropped below the older one, it goes under it.
+    let top = h.row_of(NodeId::Session(newer.clone()), cx).unwrap();
+    let below = h.row_of(NodeId::Session(older.clone()), cx).unwrap();
+    h.drag_rows(top, below, 0.75, cx);
+    assert_eq!(h.store.session(&older).unwrap().sort_order, Some(0));
+    assert_eq!(h.store.session(&newer).unwrap().sort_order, Some(1));
+}
+
+#[gpui_kit::test]
+fn the_menu_moves_a_pinned_session_up_the_pinned_section(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    let (older, newer) = pinned_pair(&h, cx);
+    put_cursor(&h, cx, NodeId::Session(older.clone()));
+    h.press("m", cx);
+    h.type_text("move up", cx);
+    h.press("enter", cx);
+    assert_eq!(h.store.session(&older).unwrap().sort_order, Some(0));
+    assert_eq!(h.store.session(&newer).unwrap().sort_order, Some(1));
+}
+
+#[gpui_kit::test]
+fn the_pinned_section_is_above_the_projects_and_the_newest_pin_is_first(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    session_at(
+        &h.store,
+        &MachineId::local(),
+        API_ROOT,
+        "brand new",
+        0,
+        &[(Role::User, "hello")],
+    );
+    h.settle(cx);
+    let id_of = |title: &str| {
+        h.store
+            .recent_sessions(&leon_core::SessionFilter::default(), 50)
+            .unwrap()
+            .into_iter()
+            .find(|session| session.title == title)
+            .unwrap()
+            .id
+    };
+    click_pin_of(&h, NodeId::Session(id_of("fix the login bug")), cx);
+    click_pin_of(&h, NodeId::Session(id_of("brand new")), cx);
+    // The section comes before the projects, the newest pin on top of it, and
+    // each session is in it once.
+    let outline = h.outline(cx);
+    let section = outline
+        .iter()
+        .position(|line| line == "  pinned")
+        .expect("the Pinned section is shown");
+    assert_eq!(outline[section + 1], "    session:brand new");
+    assert_eq!(outline[section + 2], "    session:fix the login bug");
+    assert!(
+        outline[section + 3].starts_with("  project:"),
+        "{outline:?}"
+    );
+    assert_eq!(
+        outline
+            .iter()
+            .filter(|line| line.trim() == "session:fix the login bug")
+            .count(),
+        1
+    );
+}
+
+#[gpui_kit::test]
+fn the_pin_of_a_session_row_pins_it_and_pressing_it_again_unpins_it(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    let login = h
+        .store
+        .recent_sessions(&leon_core::SessionFilter::default(), 50)
+        .unwrap()
+        .into_iter()
+        .find(|session| session.title == "fix the login bug")
+        .unwrap()
+        .id;
+    let live_before = h.shell(cx, |shell| shell.live.ids().len());
+    click_pin_of(&h, NodeId::Session(login.clone()), cx);
+    assert_eq!(h.store.session(&login).unwrap().sort_order, Some(0));
+    // The pin is a button of its own: pressing it opens nothing, where the
+    // row's click would resume the session and ask first.
+    assert_eq!(h.shell(cx, |shell| shell.live.ids().len()), live_before);
+    assert!(h.shell(cx, |shell| shell.palette.flow.is_none()));
+    // Pinned, the session is in the Pinned section, above the projects, and
+    // its pin stays in sight.
+    let at = h.row_of(NodeId::Session(login.clone()), cx).unwrap();
+    assert!(h.shows_dynamic(format!("tree-pinned-{at}"), cx));
+    assert!(h.shell(cx, |shell| shell.rows[at - 1].kind
+        == Kind::Pinned { sessions: 1 }));
+    let section_above_projects = h.shell(cx, |shell| {
+        let section = shell
+            .rows
+            .iter()
+            .position(|row| matches!(row.kind, Kind::Pinned { .. }));
+        let project = shell
+            .rows
+            .iter()
+            .position(|row| matches!(row.kind, Kind::Project { .. }));
+        matches!((section, project), (Some(section), Some(project)) if section < project)
+    });
+    assert!(section_above_projects);
+    // Pressing the pin again unpins it: it goes back to its worktree, and the
+    // section is gone with its last session.
+    click_pin_of(&h, NodeId::Session(login.clone()), cx);
+    assert_eq!(h.store.session(&login).unwrap().sort_order, None);
+    let at = h.row_of(NodeId::Session(login), cx).unwrap();
+    assert!(!h.shows_dynamic(format!("tree-pinned-{at}"), cx));
+    assert!(!h.shell(cx, |shell| shell
+        .rows
+        .iter()
+        .any(|row| matches!(row.kind, Kind::Pinned { .. }))));
+}
+
+#[gpui_kit::test]
+fn a_session_outside_every_project_can_be_pinned_too(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    session_at(
+        &h.store,
+        &MachineId::local(),
+        "/home/me/notes",
+        "jot",
+        3,
+        &[(Role::User, "hi")],
+    );
+    h.settle(cx);
+    let jot = h
+        .store
+        .recent_sessions(&leon_core::SessionFilter::default(), 50)
+        .unwrap()
+        .into_iter()
+        .find(|session| session.title == "jot")
+        .unwrap()
+        .id;
+    cx.update(|cx| {
+        h.shell.update(cx, |shell, _| {
+            shell.set_open(&NodeId::Unsorted(MachineId::local()).key(), true);
+            shell.set_open(
+                &NodeId::Folder(MachineId::local(), "/home/me/notes".to_owned()).key(),
+                true,
+            );
+        })
+    });
+    // The pinned order of a machine does not need a project: the session goes
+    // to the Pinned section, and its folder has nothing left in it.
+    click_pin_of(&h, NodeId::Session(jot.clone()), cx);
+    assert_eq!(h.store.session(&jot).unwrap().sort_order, Some(0));
+    let at = h.row_of(NodeId::Session(jot), cx).unwrap();
+    assert!(h.shows_dynamic(format!("tree-pinned-{at}"), cx));
 }
 
 #[gpui_kit::test]
@@ -5423,8 +5622,6 @@ mod live {
                 "Resume",
                 "Open transcript",
                 "Pin",
-                "Move up",
-                "Move down",
                 "Rename",
                 "Copy session id",
                 "Remove from history"
@@ -6608,8 +6805,6 @@ mod live {
                 "Resume",
                 "Open transcript",
                 "Pin",
-                "Move up",
-                "Move down",
                 "Rename",
                 "Copy session id",
                 "Remove from history"

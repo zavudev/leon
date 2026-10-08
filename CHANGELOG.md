@@ -1,5 +1,30 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+* A **Pinned** section at the top of every machine, above its projects. A
+  pinned session moves there, on top of the section: the pin at the left of its
+  row, "Pin" in its menu, or dropping a session onto a pinned one pins it, and
+  "Unpin" sends it back to its worktree or folder by recency. Dragging a pinned
+  session, or "Move up" / "Move down", reorders the section. Every session row
+  shows its pin: a pinned one always, the others while the row is hovered.
+  Sessions outside every project can be pinned too.
+
+### Changed
+
+* Pins are one order per machine, not one per worktree or project: a pinned
+  session leaves its worktree or folder for the Pinned section. Pins already set
+  keep their order there. Dropping a session onto one that is not pinned no
+  longer pins it. "Move up" and "Move down" are offered for a pinned session
+  only.
+
+### Fixed
+
+* Unpinning a session says so in the status line ("Unpinned the session."),
+  where it said "Pinned the session.".
+
 ## [0.5.0] - 2026-10-07
 
 ### Added

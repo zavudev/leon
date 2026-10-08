@@ -197,13 +197,16 @@ pub enum Op {
         /// Every worktree of the project in its new order.
         ordered: Vec<WorktreeId>,
     },
-    /// Pin sessions on top of their parent's list, in this order; every
-    /// other session of that parent goes back to automatic (by recency).
+    /// Pin sessions in this order, as the pinned order of their parent (the
+    /// Pinned section of a machine); every other session of that parent goes
+    /// back to automatic (by recency).
     PinSessions {
-        /// The parent whose list is pinned.
+        /// The parent whose pinned order is set.
         parent: leon_core::SessionScope,
         /// The pinned sessions, first row first.
         pinned: Vec<leon_core::SessionId>,
+        /// What the status line says once it is done.
+        done: &'static str,
     },
     /// Give an SSH machine another name.
     RenameMachine {
@@ -1266,9 +1269,13 @@ impl Engine {
                 self.inner.store.reorder_worktrees(&project, &ordered)?;
                 Ok(Some("Moved the worktree.".to_owned()))
             }
-            Op::PinSessions { parent, pinned } => {
+            Op::PinSessions {
+                parent,
+                pinned,
+                done,
+            } => {
                 self.inner.store.pin_sessions(&parent, &pinned)?;
-                Ok(Some("Pinned the session.".to_owned()))
+                Ok(Some(done.to_owned()))
             }
             Op::RenameMachine { machine, name } => self.rename_machine(&machine, &name).map(Some),
             Op::RemoveMachine(machine) => self.remove_machine(&machine).map(Some),
