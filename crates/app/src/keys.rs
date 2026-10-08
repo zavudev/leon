@@ -308,6 +308,22 @@ pub enum Command {
     ShowUsage,
     /// Reads the agents' usage limits again now.
     RefreshUsage,
+    /// The Den: every live session as a lion at work, in the main pane.
+    ShowDen,
+    /// The home: the actions that start things and the sessions at a glance.
+    GoHome,
+    /// Opens the editor of the Den's room, or leaves it.
+    EditDen,
+    /// Chooses the den: a built-in one or one of the user's.
+    ChooseDen,
+    /// Saves the room as a new den of the user's.
+    SaveDenAs,
+    /// Renames the user's den in use.
+    RenameDen,
+    /// Deletes the user's den in use.
+    DeleteDen,
+    /// Shows the dens folder in the file manager.
+    OpenDensFolder,
     /// Explains why a session may be missing: where each agent's history is
     /// looked for and what was found.
     WhyMissing,
@@ -1904,6 +1920,63 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::ShowDen,
+        "Open the Den",
+        S::View,
+        W::Anywhere,
+        &[with_alt(secondary_shift("l"))],
+        true,
+    ),
+    bind(
+        C::GoHome,
+        "Go home",
+        S::View,
+        W::Anywhere,
+        &[with_alt(secondary_shift("h"))],
+        true,
+    ),
+    bind(C::EditDen, "Edit the Den", S::View, W::Anywhere, &[], true),
+    bind(
+        C::ChooseDen,
+        "Choose a den\u{2026}",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::SaveDenAs,
+        "Save the den as\u{2026}",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::RenameDen,
+        "Rename the den\u{2026}",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::DeleteDen,
+        "Delete the den\u{2026}",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::OpenDensFolder,
+        "Open dens folder",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::Larger,
         "Larger interface",
         S::View,
@@ -2069,6 +2142,14 @@ pub fn keywords(command: Command) -> &'static str {
         C::Settings => "preferences options configuration config",
         C::RestoreSessions => "reopen open terminals tabs panes crash power quit previous session workspace",
         C::WhyMissing => "history sessions lost gone disappeared import diagnose opencode claude codex report",
+        C::ShowDen => "lions pride office agents live sessions watch activity pixel narrator who is working",
+        C::GoHome => "home start dashboard quickstart overview nothing open back sessions summary",
+        C::EditDen => "den furniture move place rotate desk decorate customise customize arrange room layout build",
+        C::ChooseDen => "den prefab office library lounge server room nook open plan layout switch pick",
+        C::SaveDenAs => "den layout save copy duplicate keep name new",
+        C::RenameDen => "den layout name title",
+        C::DeleteDen => "den layout remove discard",
+        C::OpenDensFolder => "dens folder directory reveal finder files json export import share",
         C::ShowUsage | C::RefreshUsage => "limits quota rate tokens credits remaining percent reset five hour weekly claude codex opencode",
         C::OpenSettingsFile => "preferences json edit configuration config file",
         C::RevealSettingsFolder => "preferences json configuration config finder directory data",
@@ -2325,6 +2406,14 @@ mod tests {
             C::Settings,
             C::ShowUsage,
             C::RefreshUsage,
+            C::ShowDen,
+            C::GoHome,
+            C::EditDen,
+            C::ChooseDen,
+            C::SaveDenAs,
+            C::RenameDen,
+            C::DeleteDen,
+            C::OpenDensFolder,
             C::WhyMissing,
             C::RestoreSessions,
             C::OpenSettingsFile,
@@ -2468,6 +2557,14 @@ mod tests {
                 | C::Settings
                 | C::ShowUsage
                 | C::RefreshUsage
+                | C::ShowDen
+                | C::GoHome
+                | C::EditDen
+                | C::ChooseDen
+                | C::SaveDenAs
+                | C::RenameDen
+                | C::DeleteDen
+                | C::OpenDensFolder
                 | C::WhyMissing
                 | C::RestoreSessions
                 | C::OpenSettingsFile

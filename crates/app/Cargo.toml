@@ -37,6 +37,7 @@ languages = [
 [dependencies]
 leon-core.workspace = true
 leon-mark.workspace = true
+leon-den.workspace = true
 leon-history.workspace = true
 leon-remote.workspace = true
 leon-host.workspace = true

@@ -252,6 +252,8 @@ impl Shell {
         // ones are listed.
         self.active_only = settings::flag(cx, "sidebar_active_only");
         self.rebuild_rows();
+        // The Den may have somebody to follow now: sessions elsewhere.
+        self.den_watch(cx);
         cx.notify();
     }
 

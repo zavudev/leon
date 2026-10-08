@@ -31,12 +31,14 @@ icon_assets!(
         GitMerge,
         Github,
         Hash,
+        House,
         Info,
         Keyboard,
         Laptop,
         Moon,
         PanelLeft,
         PanelLeftClose,
+        PawPrint,
         Plus,
         RefreshCw,
         Search,
@@ -190,6 +192,8 @@ mod tests {
             IconName::GitMerge,
             IconName::Github,
             IconName::Check,
+            IconName::House,
+            IconName::PawPrint,
         ] {
             let path = gpui_kit::assets::IconNamed::path(name);
             let loaded = Assets.load(&path).unwrap();
