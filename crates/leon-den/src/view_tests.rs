@@ -35,6 +35,7 @@ fn show(cx: &mut TestAppContext) -> (Shown, &mut VisualTestContext) {
             cx.new(|cx| {
                 let style = DenStyle {
                     palette: palette(true),
+                    room: crate::iso::Theme::from_tokens(&crate::testing::tokens(true)),
                     font_family: "monospace".into(),
                     font_size: px(13.),
                 };
@@ -171,6 +172,55 @@ fn a_click_on_a_lion_selects_it_and_tells_the_host(cx: &mut TestAppContext) {
     cx.simulate_mouse_up(floor, MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
     assert_eq!(*shown.events.borrow(), vec![DenEvent::Selected(None)]);
+}
+
+#[gpui_kit::test]
+fn the_right_button_and_the_host_ask_for_the_menu_of_a_lion(cx: &mut TestAppContext) {
+    let (shown, cx) = show(cx);
+    feed(
+        &shown,
+        cx,
+        &[
+            (1, "moss", CubState::Editing),
+            (2, "fern", CubState::Running),
+        ],
+    );
+    shown.clock.set(Duration::from_secs(60));
+    shown.view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+
+    // The right button on a lion selects it and asks for its menu there.
+    let at = middle_of(&shown, cx, 2);
+    cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        *shown.events.borrow(),
+        vec![DenEvent::Selected(Some(2)), DenEvent::Menu { id: 2, at }]
+    );
+    // On the floor it does nothing: the selection stays.
+    shown.events.borrow_mut().clear();
+    let floor = shown
+        .view
+        .update(cx, |view, _| view.window_point(40, 60).unwrap());
+    cx.simulate_mouse_down(floor, MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    assert!(shown.events.borrow().is_empty());
+    assert_eq!(shown.view.read_with(cx, |view, _| view.selected()), Some(2));
+
+    // The host's key: the menu of the selected lion, anchored under it.
+    assert!(shown.view.update(cx, |view, cx| view.menu_selection(cx)));
+    cx.run_until_parked();
+    let events = shown.events.borrow().clone();
+    let [DenEvent::Menu { id: 2, at: under }] = events[..] else {
+        panic!("one menu of fern: {events:?}");
+    };
+    assert!(under.y > at.y, "under the lion, not on it");
+    // With nobody selected there is no menu to ask for.
+    shown.view.update(cx, |view, cx| {
+        view.select(None, cx);
+        assert!(!view.menu_selection(cx));
+    });
 }
 
 #[gpui_kit::test]
@@ -381,4 +431,192 @@ fn typing_in_the_feed_composites_no_new_picture_of_the_room(cx: &mut TestAppCont
     }
     let (_, after, _) = shown.view.read_with(cx, |view, _| view.cost());
     assert_eq!(after, pictures, "the line was typed over the same picture");
+}
+
+#[gpui_kit::test]
+fn the_pixel_art_is_the_picture_until_two_and_a_half_d_is_asked_for_and_whenever_it_cannot_be_drawn(
+    cx: &mut TestAppContext,
+) {
+    use crate::view::Drawn;
+    let (shown, cx) = show(cx);
+    feed(&shown, cx, &[(1, "moss", CubState::WaitingForUser)]);
+    assert_eq!(
+        shown.view.read_with(cx, |view, _| view.drawn()),
+        Drawn::Pixels
+    );
+    let (_, before, _) = shown.view.read_with(cx, |view, _| view.cost());
+
+    shown.view.update(cx, |view, cx| view.set_three_d(true, cx));
+    cx.run_until_parked();
+    let (_, after, _) = shown.view.read_with(cx, |view, _| view.cost());
+    match shown.view.read_with(cx, |view, _| view.drawn()) {
+        // No GPU in this build or on this computer: the same pixel art,
+        // and the view says why.
+        Drawn::Failed(why) => {
+            assert!(!why.is_empty());
+            assert_eq!(after, before, "the picture did not change");
+        }
+        // A GPU: another picture of the same room.
+        Drawn::Iso(_) => assert!(after > before),
+        other => panic!("a paint decides: {other:?}"),
+    }
+    // Either way the lion is found where it is drawn, and its menu opens
+    // under it.
+    shown.clock.set(Duration::from_secs(30));
+    shown.view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    shown.view.update(cx, |view, cx| {
+        view.select(Some(1), cx);
+        assert!(view.menu_selection(cx));
+    });
+    cx.run_until_parked();
+    assert!(shown
+        .events
+        .borrow()
+        .iter()
+        .any(|event| matches!(event, DenEvent::Menu { id: 1, .. })));
+
+    // The room is edited in the picture it is shown in: opening the editor
+    // changes nothing of that, and a piece in hand is one more picture.
+    let drawn = shown.view.read_with(cx, |view, _| view.drawn());
+    shown.view.update(cx, |view, cx| view.start_editing(cx));
+    cx.run_until_parked();
+    assert_eq!(shown.view.read_with(cx, |view, _| view.drawn()), drawn);
+    let (_, before, _) = shown.view.read_with(cx, |view, _| view.cost());
+    shown.view.update(cx, |view, cx| {
+        view.edit(
+            |editor| {
+                editor.pick("plant");
+                editor.point(Some(crate::world::Tile::new(5, 6)));
+                Ok(())
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let (_, after, _) = shown.view.read_with(cx, |view, _| view.cost());
+    assert!(after > before, "the piece in hand is drawn");
+    assert_eq!(shown.view.read_with(cx, |view, _| view.drawn()), drawn);
+    // The pictures a host lists are in 2.5D exactly when the room is.
+    let layout = shown.view.read_with(cx, |view, _| view.layout());
+    let (iso, room, piece) = shown.view.read_with(cx, |view, _| {
+        (
+            view.is_three_d(),
+            view.room_picture(&layout, (120, 72)).is_some(),
+            view.piece_picture("desk", 0, gpui_kit::black(), (56, 56))
+                .is_some(),
+        )
+    });
+    assert_eq!(iso, matches!(drawn, Drawn::Iso(_)));
+    assert_eq!((room, piece), (iso, iso));
+    // Asking for the pixel art again gives it back.
+    shown.view.update(cx, |view, cx| {
+        view.stop_editing(cx);
+        view.set_three_d(false, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        shown.view.read_with(cx, |view, _| view.drawn()),
+        Drawn::Pixels
+    );
+    // Asking twice for the same thing changes nothing.
+    shown
+        .view
+        .update(cx, |view, cx| view.set_three_d(false, cx));
+    assert_eq!(
+        shown.view.read_with(cx, |view, _| view.drawn()),
+        Drawn::Pixels
+    );
+}
+
+#[gpui_kit::test]
+fn the_host_goes_to_who_needs_the_user_wakes_who_is_at_home_and_shows_the_keys(
+    cx: &mut TestAppContext,
+) {
+    let (shown, cx) = show(cx);
+    feed(
+        &shown,
+        cx,
+        &[
+            (1, "moss", CubState::Editing),
+            (2, "fern", CubState::WaitingForUser),
+            (3, "ash", CubState::NeedsPermission),
+        ],
+    );
+    // The most pressing first, then around.
+    shown.view.update(cx, |view, cx| {
+        assert_eq!(view.needy(), 2);
+        assert!(view.select_needy(cx));
+        assert_eq!(view.selected(), Some(3));
+        assert!(view.select_needy(cx));
+        assert_eq!(view.selected(), Some(2));
+        assert!(view.select_needy(cx));
+        assert_eq!(view.selected(), Some(3));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        *shown.events.borrow(),
+        vec![
+            DenEvent::Selected(Some(3)),
+            DenEvent::Selected(Some(2)),
+            DenEvent::Selected(Some(3)),
+        ]
+    );
+    shown.events.borrow_mut().clear();
+
+    // A session at home has a row under the roster: a click wakes it.
+    shown.view.update(cx, |view, cx| {
+        view.set_home(
+            vec![crate::HomeEntry {
+                id: 70,
+                name: "rowan".to_owned(),
+                tint: gpui_kit::rgb(0xd97757).into(),
+            }],
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let row = shown.view.read_with(cx, |view, _| {
+        let (rect, id) = view.scene(|scene| scene.home_rows[0]);
+        assert_eq!(id, 70);
+        view.window_point_of(rect.x + rect.w / 2, rect.y + rect.h / 2)
+    });
+    cx.simulate_mouse_move(row, None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        shown
+            .view
+            .read_with(cx, |view, _| view.read(|den| den.home_hovered())),
+        Some(70)
+    );
+    cx.simulate_mouse_down(row, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(row, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(*shown.events.borrow(), vec![DenEvent::Wake(70)]);
+    assert_eq!(
+        shown.view.read_with(cx, |view, _| view.selected()),
+        Some(3),
+        "the selection is nobody's business here"
+    );
+    shown.events.borrow_mut().clear();
+
+    // The keys, over the room: a click anywhere takes them away and does
+    // nothing else, not even on a lion.
+    let keys = vec![("N".to_owned(), "the next lion that needs you".to_owned())];
+    shown.view.update(cx, |view, cx| {
+        assert!(!view.keys_shown());
+        view.show_keys(Some(keys.clone()), cx);
+        assert!(view.keys_shown());
+    });
+    cx.run_until_parked();
+    assert!(shown
+        .view
+        .read_with(cx, |view, _| view.scene(|scene| scene.keys.is_some())));
+    let at = middle_of(&shown, cx, 1);
+    cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    assert!(!shown.view.read_with(cx, |view, _| view.keys_shown()));
+    assert!(shown.events.borrow().is_empty());
+    assert_eq!(shown.view.read_with(cx, |view, _| view.selected()), Some(3));
 }

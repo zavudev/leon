@@ -51,6 +51,7 @@
 //! fn open(tokens: &Tokens, cubs: &[Cub], cx: &mut App) -> Entity<DenView> {
 //!     let style = DenStyle {
 //!         palette: DenPalette::from_tokens(tokens),
+//!         room: leon_den::iso::Theme::from_tokens(tokens),
 //!         font_family: "JetBrains Mono".into(),
 //!         font_size: px(13.),
 //!     };
@@ -68,6 +69,7 @@ pub mod catalogue;
 pub mod editor;
 pub mod feed;
 pub mod glyphs;
+pub mod iso;
 pub mod layout;
 pub mod model;
 pub mod narrator;
@@ -85,8 +87,8 @@ pub use layout::DenLayout;
 pub use model::{happenings_between, Cub, CubState, Event, Happening, Species, Status, ToolKind};
 pub use narrator::{narrate, Line};
 pub use palette::{DenPalette, Tokens};
-pub use sim::{Den, Frame, RosterEntry, TruthCard, Wake};
-pub use view::{DenEvent, DenStyle, DenView};
+pub use sim::{Den, Frame, HomeEntry, Note, NoteTone, RosterEntry, TruthCard, Wake};
+pub use view::{DenEvent, DenStyle, DenView, Drawn};
 
 #[cfg(test)]
 mod atelier_tests;

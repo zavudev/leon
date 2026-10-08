@@ -160,6 +160,9 @@ pub fn step(now: Option<usize>, count: usize, back: bool) -> Option<usize> {
 
 /// How many device pixels a pixel of art is drawn with in a box of `room`
 /// logical pixels: whole, at least one, at most two pixels of the interface.
+/// How long one render of the strip may spend making pictures in 2.5D.
+pub const THUMB_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+
 pub fn thumb_unit(art: i32, room: f32, scale: f32) -> i32 {
     let most = (2. * scale).floor().max(1.) as i32;
     let fits = (room * scale / art.max(1) as f32).floor() as i32;
@@ -847,6 +850,38 @@ impl Shell {
         Some(made)
     }
 
+    /// A picture in 2.5D for the strip, made once: `make` draws it with the
+    /// view's own GPU, at `(w, h)` device pixels. `None` while the room is
+    /// not drawn in 2.5D (the caller shows the pixel art then), and for a
+    /// picture that is put off: a render makes pictures for
+    /// [`THUMB_BUDGET`] and leaves the rest to the next, so that opening a
+    /// tab of thirty pieces never holds the window.
+    fn den_thumb_iso(
+        &self,
+        key: String,
+        (w, h): (u32, u32),
+        cx: &gpui_kit::App,
+        make: impl FnOnce(&leon_den::DenView) -> Option<gpui_kit::RenderImage>,
+    ) -> Option<Option<Thumb>> {
+        let view = self.den.view.as_ref()?.read(cx);
+        if !view.is_three_d() {
+            return None;
+        }
+        if let Some(found) = self.den.thumbs.borrow().get(&key) {
+            return Some(Some(found.clone()));
+        }
+        let now = std::time::Instant::now();
+        let until = self.den.thumbs_until.get().unwrap_or(now + THUMB_BUDGET);
+        self.den.thumbs_until.set(Some(until));
+        if now >= until {
+            self.den.thumbs_owed.set(true);
+            return Some(None);
+        }
+        let made = (Arc::new(make(view)?), w as i32, h as i32);
+        self.den.thumbs.borrow_mut().insert(key, made.clone());
+        Some(Some(made))
+    }
+
     /// The bar over the room: the den's name and what can be done to it.
     pub(super) fn render_den_bar(&self, colours: &Palette, cx: &mut Context<Self>) -> Div {
         let editing = self.den_editing(cx);
@@ -902,6 +937,41 @@ impl Shell {
             ]);
         }
         let kind = if active.user { "YOURS" } else { "BUILT IN" };
+        use crate::keys::Command;
+        let lion = (!editing && self.den_lion().is_some()).then(|| {
+            if self.den_lion_live().is_some() {
+                vec![
+                    ("den-lion-message", "Message (I)", Command::MessageLion),
+                    ("den-lion-rename", "Rename (R)", Command::Rename),
+                    ("den-lion-home", "Send home (H)", Command::SendLionHome),
+                    ("den-lion-menu", "More (M)", Command::ContextMenu),
+                ]
+            } else {
+                vec![("den-lion-menu", "More (M)", Command::ContextMenu)]
+            }
+        });
+        // How many lions need the user, and the way to the next of them;
+        // and the way to every key.
+        let needy = self
+            .den
+            .view
+            .as_ref()
+            .map_or(0, |view| view.read(cx).needy());
+        let pride: Vec<(&'static str, String, Command, bool)> = if editing {
+            Vec::new()
+        } else {
+            let mut pride = Vec::new();
+            if needy > 0 {
+                let label = if needy == 1 {
+                    "1 needs you (N)".to_owned()
+                } else {
+                    format!("{needy} need you (N)")
+                };
+                pride.push(("den-needy", label, Command::NextNeedyLion, true));
+            }
+            pride.push(("den-keys", "Keys (?)".to_owned(), Command::DenKeys, false));
+            pride
+        };
         div()
             .debug_selector(|| "den-bar".into())
             .flex_none()
@@ -920,6 +990,22 @@ impl Shell {
             )
             .child(mono(kind).text_color(colours.text_faint))
             .child(div().flex_1())
+            // What can be done to the selected lion, with the keys that do
+            // it: the Den has no other place for a hint.
+            .children(pride.into_iter().map(|(id, label, command, lit)| {
+                tool_button(id.into(), label, true, lit, colours).on_click(cx.listener(
+                    move |this, _: &ClickEvent, window, cx| {
+                        this.run_command(command, window, cx);
+                    },
+                ))
+            }))
+            .children(lion.into_iter().flatten().map(|(id, label, command)| {
+                tool_button(id.into(), label, true, false, colours).on_click(cx.listener(
+                    move |this, _: &ClickEvent, window, cx| {
+                        this.run_command(command, window, cx);
+                    },
+                ))
+            }))
             .children(tools.into_iter().map(|(id, label, tool, enabled)| {
                 let lit = id == "den-done";
                 tool_button(id.into(), label, enabled, lit, colours).on_click(cx.listener(
@@ -948,6 +1034,19 @@ impl Shell {
             .and_then(|view| view.read(cx).editor(|editor| editor.brush().clone()))
             .unwrap_or(Brush::Hand);
         let tab = self.den.tab;
+        // The pictures in 2.5D are named by the theme they are drawn in.
+        self.den.thumbs_until.set(None);
+        self.den.thumbs_owed.set(false);
+        let room = leon_den::iso::Theme::from_tokens(&super::den_view::den_tokens(colours));
+        let tone = |color: [f32; 3]| {
+            gpui_kit::Hsla::from(gpui_kit::Rgba {
+                r: color[0],
+                g: color[1],
+                b: color[2],
+                a: 1.,
+            })
+        };
+        let theme = format!("{:?}", room.background.map(|part| (part * 255.) as u8));
         let tabs =
             div()
                 .flex()
@@ -1018,10 +1117,27 @@ impl Shell {
                     let view = entry.view(turn);
                     let art = (view.w.max(view.h + 1)) * 16;
                     let unit = thumb_unit(art, 56., scale);
-                    let made = self.den_thumb(format!("piece-{id}-{turn}"), unit, || {
-                        leon_den::paint::piece(id, turn)
-                    });
                     let held = matches!(&brush, Brush::Piece { id: held, .. } if *held == id);
+                    // In 2.5D the piece is drawn as the room draws it, on
+                    // the ground of its card.
+                    let side = (56. * scale).round() as u32;
+                    let ground = if held {
+                        colours.surface_2
+                    } else {
+                        colours.background
+                    };
+                    let made = self
+                        .den_thumb_iso(
+                            format!("iso-piece-{id}-{turn}-{held}-{theme}-{side}"),
+                            (side, side),
+                            cx,
+                            |view| view.piece_picture(id, turn, ground, (side, side)),
+                        )
+                        .unwrap_or_else(|| {
+                            self.den_thumb(format!("piece-{id}-{turn}"), unit, || {
+                                leon_den::paint::piece(id, turn)
+                            })
+                        });
                     cards.push(card(
                         format!("den-piece-{id}").into(),
                         picture(made),
@@ -1034,13 +1150,33 @@ impl Shell {
             }
             Tab::Floors => {
                 let unit = thumb_unit(16, 32., scale);
-                for floor in leon_den::assets::FLOORS {
-                    let made = self.den_thumb(format!("floor-{}", floor.id), unit, || {
-                        leon_den::paint::floor_tile(floor.id)
-                    });
+                let iso = self
+                    .den
+                    .view
+                    .as_ref()
+                    .is_some_and(|view| view.read(cx).is_three_d());
+                let own = leon_den::assets::floor(&self.den_layout_now(cx).floor).unwrap_or(0);
+                for (index, floor) in leon_den::assets::FLOORS.iter().enumerate() {
+                    // In 2.5D a floor is a tone of the theme: its swatch is
+                    // that tone, as the room lays it.
+                    let shown = if iso {
+                        Some(
+                            div()
+                                .flex_none()
+                                .size(px(32.))
+                                .border_1()
+                                .border_color(colours.elevated_border)
+                                .bg(tone(room.floor_of(index, own)))
+                                .into_any_element(),
+                        )
+                    } else {
+                        picture(self.den_thumb(format!("floor-{}", floor.id), unit, || {
+                            leon_den::paint::floor_tile(floor.id)
+                        }))
+                    };
                     cards.push(card(
                         format!("den-carpet-{}", floor.id).into(),
-                        picture(made),
+                        shown,
                         floor.name.to_owned(),
                         brush == Brush::Carpet(floor.id),
                         Tool::Carpet(Some(floor.id)),
@@ -1069,9 +1205,16 @@ impl Shell {
                         den_store::resolve(folder.as_deref(), &den.id).1.layout
                     };
                     let key = format!("den-{}-{:x}", den.id, fingerprint(&layout));
-                    let made = self.den_thumb(key, 1, || {
-                        Some(leon_den::paint::thumbnail(&layout, &palette))
-                    });
+                    let size = ((120. * scale).round() as u32, (72. * scale).round() as u32);
+                    let made = self
+                        .den_thumb_iso(format!("iso-{key}-{theme}-{}", size.1), size, cx, |view| {
+                            view.room_picture(&layout, size)
+                        })
+                        .unwrap_or_else(|| {
+                            self.den_thumb(key, 1, || {
+                                Some(leon_den::paint::thumbnail(&layout, &palette))
+                            })
+                        });
                     // A whole room is shown small: by the height of the strip.
                     let shown = made.map(|(image, w, h)| {
                         let height = 72.;
@@ -1092,6 +1235,13 @@ impl Shell {
                     ));
                 }
             }
+        }
+        // What was put off is made by the next render.
+        if self.den.thumbs_owed.get() {
+            cx.spawn(async move |this, cx| {
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
         }
         div()
             .debug_selector(|| "den-strip".into())
@@ -1128,7 +1278,7 @@ fn fingerprint(layout: &DenLayout) -> u64 {
 /// is the thing in use and faint when there is nothing for it to do.
 fn tool_button(
     id: SharedString,
-    label: &'static str,
+    label: impl Into<SharedString>,
     enabled: bool,
     lit: bool,
     colours: &Palette,

@@ -106,6 +106,44 @@ impl Room {
 }
 
 fn office() -> Prefab {
+    let mut room = Room::new("The office", 20, 15, "wood", "rock");
+    room.put("double_bookshelf", 1, 0)
+        .put("double_bookshelf", 3, 0)
+        .put("clock", 5, 0)
+        .put("whiteboard", 6, 0)
+        .put("painting", 8, 0)
+        .put("window", 10, 0)
+        .put("telescope", 11, 1)
+        .put("hanging_plant", 12, 0)
+        .put("lion_painting", 13, 0)
+        .put("plant", 15, 1)
+        .put("rack", 16, 1)
+        .put("rack", 17, 1)
+        .put("rack", 18, 1);
+    // Two rows of three desks, two tiles of aisle between any two.
+    for top in [4, 8] {
+        for x in [2, 7, 12] {
+            room.desk(x, top);
+        }
+    }
+    room.nursery(16, 4)
+        .carpet("red", 1, 12, 5, 3)
+        .lounge(1, 12)
+        .put("plant", 6, 11)
+        .put("rug", 9, 13)
+        .put("bin", 13, 12)
+        .put("large_plant", 16, 11);
+    room.done(
+        OFFICE,
+        "Six desks for two in two rows, a sofa and a nursery. Twelve at work.",
+    )
+}
+
+/// The office as it was before it grew: 14 by 11, three desks. The tests
+/// that put a piece on a tile they name are written against this room, so
+/// that the built-in one can change without them.
+#[cfg(test)]
+pub(crate) fn small_office() -> DenLayout {
     let mut room = Room::new("The office", 14, 11, "wood", "rock");
     room.put("double_bookshelf", 1, 0)
         .put("clock", 3, 0)
@@ -125,10 +163,7 @@ fn office() -> Prefab {
         .put("rug", 6, 9)
         .put("bin", 10, 8)
         .nursery(11, 7);
-    room.done(
-        OFFICE,
-        "Three desks for two, a sofa and a nursery. Six at work.",
-    )
+    room.done(OFFICE, "Three desks for two.").layout
 }
 
 fn open_plan() -> Prefab {

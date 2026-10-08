@@ -267,6 +267,17 @@ fn main() {
             std::process::exit(2);
         }
     };
+    let open_den = options.den;
+    // Made-up lions for the Den, in a development build only: a way to
+    // look at a full den without starting a dozen agents.
+    let den_cast = if cfg!(debug_assertions) {
+        std::env::var("LEON_DEN_CAST")
+            .ok()
+            .and_then(|count| count.parse::<usize>().ok())
+            .map_or(0, |count| count.min(40))
+    } else {
+        0
+    };
     let overrides = settings::Overrides {
         appearance: options.theme,
         theme: theme_name,
@@ -307,9 +318,14 @@ fn main() {
                         backend: backend.clone(),
                         remote: Some(remote_services.clone()),
                         updates: Some(update_service_in.clone()),
+                        den_cast,
                         ..ui::Options::default()
                     };
-                    ui::Shell::new(engine, options, window, cx)
+                    let mut shell = ui::Shell::new(engine, options, window, cx);
+                    if open_den {
+                        shell.show_den(window, cx);
+                    }
+                    shell
                 })
             })
             .expect("the main window opens");

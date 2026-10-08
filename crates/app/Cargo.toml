@@ -37,7 +37,8 @@ languages = [
 [dependencies]
 leon-core.workspace = true
 leon-mark.workspace = true
-leon-den.workspace = true
+# The Den, with its room in 2.5D drawn by the GPU.
+leon-den = { workspace = true, features = ["den3d"] }
 leon-history.workspace = true
 leon-remote.workspace = true
 leon-host.workspace = true

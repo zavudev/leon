@@ -155,8 +155,11 @@ cargo run -p leon -- --data-dir /tmp/leon-try --theme dark --theme-name zavu
 ```
 
 Options: `--data-dir <path>` keeps the database and settings elsewhere,
-`--theme <light|dark|system>` overrides the saved appearance for one run, and
-`--theme-name <id>` overrides the saved theme (`leon` or `zavu`) for one run. See [Themes](#themes).
+`--theme <light|dark|system>` overrides the saved appearance for one run,
+`--theme-name <id>` overrides the saved theme (`leon` or `zavu`) for one run
+(see [Themes](#themes)), and `--den` opens on [The Den](docs/DEN.md). A
+development build also reads `LEON_DEN_CAST=<count>`: that many made-up lions
+in the Den, to look at a full one without starting a dozen agents.
 
 The agents themselves are not part of Leon: install the ones you use
 (`claude`, `codex`, `opencode`) on every machine you want to run them on.
@@ -522,6 +525,16 @@ platform (see below).
 | Go home | `⌥⇧⌘H` | `Ctrl+Shift+Alt+H` |
 | Open the Den | `⌥⇧⌘L` | `Ctrl+Shift+Alt+L` |
 | Edit the Den | palette only (`E` in the Den) | palette only (`E` in the Den) |
+| Message the selected lion… | palette only (`I` in the Den) | palette only (`I` in the Den) |
+| Send the selected lion home… | palette only (`H` in the Den) | palette only (`H` in the Den) |
+| Go to the next lion that needs you | palette only (`N` in the Den) | palette only (`N` in the Den) |
+| Interrupt the selected lion | palette only (`X` in the Den) | palette only (`X` in the Den) |
+| Message the pride… | palette only (`P` in the Den) | palette only (`P` in the Den) |
+| Queued messages of the selected lion… | palette only (`Q` in the Den) | palette only (`Q` in the Den) |
+| Hatch a lion… | palette only (`A` in the Den) | palette only (`A` in the Den) |
+| Wake a lion that is at home… | palette only (`W` in the Den) | palette only (`W` in the Den) |
+| Go to a lion… | palette only (`/` in the Den) | palette only (`/` in the Den) |
+| Show the keys of the Den | palette only (`?` in the Den) | palette only (`?` in the Den) |
 | Choose a den… | palette only | palette only |
 | Save the den as… | palette only | palette only |
 | Rename the den… | palette only | palette only |
@@ -1381,9 +1394,11 @@ one the cursor is on.
 ## The Den
 
 `⌥⇧⌘L` (`Ctrl+Shift+Alt+L`), **View > Open the Den** and the palette's **Open the
-Den** show the live sessions as lions at work in a small pixel-art office, in
-the place of the main pane; the sidebar stays. The same chord or `Esc` puts
-back what was there.
+Den** show the live sessions as lions at work in an office, in the place of
+the main pane; the sidebar stays. The same chord or `Esc` puts back what was
+there. The office is drawn in 2.5D in the colours of your theme; with the
+setting `den_3d` off, or on a computer whose graphics card cannot draw it,
+it is the pixel art (`docs/DEN.md`).
 
 | The agent | The lion |
 | --- | --- |
@@ -1450,6 +1465,42 @@ its process ends the lion goes home. Only a process that names its session is
 shown (never a guess by folder), never one this window runs itself; other
 agents and other machines are left out, since nothing could be said of them.
 `den_elsewhere` turns these lions off.
+
+**A lion can be talked to and sent home from the Den.** With a lion selected,
+the bar over the room offers **Message**, **Rename**, **Send home** and
+**More**; the right button on a lion, `M`, `Shift+F10` or the menu key open
+its menu (Open, Message…, Rename…, Pin, Send home, Close), and Rename, Sleep,
+Close and Pin from the palette act on its session, the whole of it, whatever
+the sidebar's cursor is on. **Message** (`I`) asks for a text and types it
+into the session's terminal as a prompt: at once when the agent waits at its
+prompt, otherwise it is kept and typed when the agent next does, one message
+a turn, and the lion's card says how many wait (they are kept in memory: they
+are lost when Leon quits or the session ends, and the status line says when
+one is dropped). A message is never typed into a permission prompt or a
+question of the agent's, which a prompt would answer; and only into a session
+whose transcript Leon follows, since nothing else tells a prompt from a
+question, so a remote session and a lion that runs elsewhere are not
+messaged. **Send home** always asks first: it stops the agent and leaves the
+session in the sidebar, asleep, to be woken where it left off; **Close** is
+the one that takes it out of the sidebar. The card of a lion ends with a
+summary of its session, made of facts alone, in two groups: what you first
+and last wrote to it, the agent's last words and how many messages; then its
+agent and model, its project and branch, its title, for how long it has run,
+tools used and failed, the context used and the sub-agents out.
+
+**The Den is where many agents are steered from.** The roster lists first the
+lions that need you (a permission prompt, then whoever waits longest, then
+one that fainted) and counts them; `N` goes to the next. The card of a lion
+that asks says what it asks in full, the whole command or the question with
+its answers, and `Enter` opens its terminal to answer: Leon types no answer
+itself. `X` interrupts an agent in the middle of a turn, where Leon knows its
+key (Claude Code and Codex: Escape). `Q` lists the messages that wait for a
+lion, to take any back; `P` sends one message to several lions after saying
+who gets it now, for whom it waits and who is left out; a message may have
+several lines (`Shift+Enter`). `A` hatches a lion, a new agent session that
+joins as an egg; the sessions that were sent home are listed under the
+roster and a click or `W` wakes one; `/` goes to a lion by its name, state or
+folder; `?` lists every key. [docs/DEN.md](docs/DEN.md) has the rules.
 
 **The room is yours to change.** **Edit the Den** (the button over the room,
 the palette, or `E`) opens an editor: pick furniture from a strip of pictures

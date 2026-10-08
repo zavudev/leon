@@ -238,6 +238,9 @@ pub struct PaletteState {
     pub setting: Option<&'static Def>,
     /// What is wrong with the text typed as an answer.
     pub error: Option<String>,
+    /// The lines of a message already taken with Shift+Enter, before the
+    /// one in the field: a message for an agent may have several.
+    pub draft: Vec<String>,
     /// The machines and projects it can go to, read when it opened.
     pub world: Option<World>,
     found: Found,
@@ -264,6 +267,7 @@ impl PaletteState {
             flow: None,
             setting: None,
             error: None,
+            draft: Vec::new(),
             world: None,
             found: Found::default(),
             generation: 0,
@@ -313,6 +317,7 @@ impl Shell {
         self.palette.flow = None;
         self.palette.setting = None;
         self.palette.error = None;
+        self.palette.draft.clear();
         self.palette.found = Found::default();
         self.palette.search = None;
         self.palette.world = Some(self.world(cx));
@@ -334,6 +339,7 @@ impl Shell {
         self.palette.flow = None;
         self.palette.setting = None;
         self.palette.error = None;
+        self.palette.draft.clear();
         self.palette.search = None;
         self.palette.found = Found::default();
         self.cancel_text_search();
@@ -402,6 +408,7 @@ impl Shell {
                     step,
                 });
                 self.palette.error = None;
+                self.palette.draft.clear();
                 self.palette.found = Found::default();
                 self.palette.search = None;
                 self.palette.input.update(cx, |field, cx| {
@@ -511,6 +518,29 @@ impl Shell {
                             _ => "Nothing matches.",
                         };
                         items.push(Item::Line(line.into(), "".into()));
+                    }
+                }
+                StepKind::Text {
+                    validate: Validate::Message,
+                    ..
+                } => {
+                    // A message is shown as it will be typed: the lines
+                    // already taken, then the one in the field (a pasted
+                    // text may bring line breaks of its own).
+                    let hint = "Enter to send, Shift+Enter for a new line";
+                    let mut lines: Vec<String> = self.palette.draft.clone();
+                    lines.extend(typed.lines().map(str::to_owned));
+                    if lines.iter().all(|line| line.trim().is_empty()) {
+                        items.push(Item::Line("Type the message.".into(), hint.into()));
+                    } else {
+                        let last = lines.len() - 1;
+                        for (index, line) in lines.into_iter().enumerate() {
+                            let hint = if index == last { hint } else { "" };
+                            items.push(Item::Line(line.into(), hint.into()));
+                        }
+                    }
+                    if let Some(error) = &self.palette.error {
+                        items.push(Item::Line(error.clone().into(), "".into()));
                     }
                 }
                 StepKind::Text { validate, .. } => {
@@ -909,7 +939,50 @@ impl Shell {
         } else {
             stroke.modifiers.control
         };
+        let message = matches!(
+            &self.palette.flow,
+            Some(Flow {
+                step: Step {
+                    kind: StepKind::Text {
+                        validate: Validate::Message,
+                        ..
+                    },
+                    ..
+                },
+                ..
+            })
+        );
         match key {
+            // In a message, Shift+Enter ends a line and goes on to the
+            // next, as it does in the terminal of an agent.
+            "enter" if message && stroke.modifiers.shift && !secondary => {
+                let line = self.palette.input.read(cx).value().to_string();
+                self.palette.draft.extend(line.lines().map(str::to_owned));
+                if line.is_empty() {
+                    self.palette.draft.push(String::new());
+                }
+                self.palette
+                    .input
+                    .update(cx, |field, cx| field.set_value("", window, cx));
+                self.palette.error = None;
+                self.fill_palette(cx);
+                cx.notify();
+                true
+            }
+            // Backspace in an empty field takes the line before back.
+            "backspace"
+                if message
+                    && !self.palette.draft.is_empty()
+                    && self.palette.input.read(cx).value().is_empty() =>
+            {
+                let line = self.palette.draft.pop().unwrap_or_default();
+                self.palette
+                    .input
+                    .update(cx, |field, cx| field.set_value(line, window, cx));
+                self.fill_palette(cx);
+                cx.notify();
+                true
+            }
             "enter" => {
                 self.run_palette_item(self.palette.cursor, secondary, window, cx);
                 true
@@ -999,7 +1072,13 @@ impl Shell {
             ..
         }) = &self.palette.flow
         {
-            let typed = self.palette.input.read(cx).value().to_string();
+            let mut typed = self.palette.input.read(cx).value().to_string();
+            // The lines of a message taken before this one come first.
+            if *validate == Validate::Message && !self.palette.draft.is_empty() {
+                let mut lines = self.palette.draft.clone();
+                lines.push(typed);
+                typed = lines.join("\n");
+            }
             match steps::validate(*validate, &typed) {
                 Ok(value) => self.answer(value, window, cx),
                 Err(why) => {
@@ -1206,6 +1285,13 @@ impl Shell {
             Action::RenameLive(id, name) => {
                 self.rename_live(id, &name, cx);
             }
+            Action::SendHome(id) => self.den_send_home(id, window, cx),
+            Action::MessageLive(id, text) => self.den_message(id, &text, cx),
+            Action::MessagePride(ids, text) => self.den_message_pride(&ids, &text, cx),
+            Action::CancelQueued(id, place) => self.den_cancel_queued(id, place, cx),
+            Action::SelectLion(id) => self.den_select(id, window, cx),
+            Action::WakeHome(key) => self.den_wake(&key, window, cx),
+            Action::HatchSession(intent) => self.den_hatch(intent, window, cx),
             Action::RenameSession(session, live, name) => {
                 self.engine.submit(crate::engine::Op::RenameSession {
                     session,
@@ -1640,6 +1726,13 @@ impl Shell {
         let typed = self.palette.input.read(cx).value().to_string();
         let scope = parse(&typed).0;
         let hints = match (flow.map(|flow| &flow.step.kind), scope) {
+            (
+                Some(StepKind::Text {
+                    validate: Validate::Message,
+                    ..
+                }),
+                _,
+            ) => "ENTER SEND   SHIFT+ENTER NEW LINE   ESC BACK",
             (Some(StepKind::Text { .. }), _) => "ENTER CONTINUE   ESC BACK",
             (Some(_), _) => "ENTER CHOOSE   TAB COMPLETE   ESC BACK",
             (None, Scope::Commands) => "ENTER RUN   CTRL+ENTER RUN AND STAY   ESC CLOSE",

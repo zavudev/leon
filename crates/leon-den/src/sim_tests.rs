@@ -499,12 +499,12 @@ fn a_room_with_nothing_in_it_still_holds_every_lion() {
 fn the_roster_lists_each_lion_in_the_order_it_came_with_its_little_ones_after_it() {
     let mut den = den(&[
         cub(1, "moss", CubState::Delegating),
-        cub(2, "fern", CubState::NeedsPermission),
+        cub(2, "fern", CubState::Running),
     ]);
     den.update(
         &[
             cub(1, "moss", CubState::Delegating),
-            cub(2, "fern", CubState::NeedsPermission),
+            cub(2, "fern", CubState::Mystery),
             little(9, 1, CubState::Reading),
             cub(3, "ash", CubState::Asleep),
         ],
@@ -521,12 +521,75 @@ fn the_roster_lists_each_lion_in_the_order_it_came_with_its_little_ones_after_it
         vec![
             ("moss", "EGG", false),
             ("explore", "READ", true),
-            ("fern", "ASKS", false),
+            ("fern", "???", false),
             ("ash", "ZZZ", false)
         ]
     );
     assert_eq!(roster[0].level, 3);
     assert!(roster[2].status.is_some() && roster[0].status.is_none());
+    assert!(roster.iter().all(|entry| !entry.needs));
+}
+
+#[test]
+fn those_that_need_the_user_come_first_the_most_pressing_and_the_longest_waiting_ahead() {
+    let mut den = den(&[
+        cub(1, "moss", CubState::Editing),
+        cub(2, "fern", CubState::WaitingForUser),
+        cub(3, "ash", CubState::Fainted),
+    ]);
+    assert_eq!(den.needy(), vec![2, 3]);
+    // Later: one more waits, one asks for a permission, and a little one
+    // waits too, which is its parent's business.
+    den.update(
+        &[
+            cub(1, "moss", CubState::Editing),
+            cub(2, "fern", CubState::WaitingForUser),
+            cub(3, "ash", CubState::Fainted),
+            cub(4, "wren", CubState::WaitingForUser),
+            cub(5, "pike", CubState::NeedsPermission),
+            little(9, 1, CubState::WaitingForUser),
+        ],
+        at(LATER),
+    );
+    // The permission prompt, then those that wait, the longest first, then
+    // the one that fainted.
+    assert_eq!(den.needy(), vec![5, 2, 4, 3]);
+    assert_eq!(den.order(), vec![5, 2, 4, 3, 1, 9]);
+    let roster = den.roster();
+    let needs: Vec<bool> = roster.iter().map(|entry| entry.needs).collect();
+    assert_eq!(needs, [true, true, true, true, false, false]);
+    // The key walks them in that order, around the end, from anywhere.
+    assert_eq!(den.select_needy(), Some(5));
+    assert_eq!(den.select_needy(), Some(2));
+    assert_eq!(den.select_needy(), Some(4));
+    assert_eq!(den.select_needy(), Some(3));
+    assert_eq!(den.select_needy(), Some(5), "around the end");
+    den.select(Some(1));
+    assert_eq!(den.select_needy(), Some(5), "from one that needs nothing");
+    // From a little one, as from its parent.
+    den.select(Some(9));
+    assert_eq!(den.select_needy(), Some(5));
+    // Once it works again it is no longer listed, and the rest keep their order.
+    den.update(
+        &[
+            cub(1, "moss", CubState::Editing),
+            cub(2, "fern", CubState::Thinking),
+            cub(3, "ash", CubState::Fainted),
+            cub(4, "wren", CubState::WaitingForUser),
+            cub(5, "pike", CubState::Running),
+        ],
+        at(LATER * 2),
+    );
+    assert_eq!(den.needy(), vec![4, 3]);
+    // Nobody needs the user: the selection stays where it is.
+    let mut calm = den_of(&[cub(1, "moss", CubState::Editing)]);
+    calm.select(Some(1));
+    assert_eq!(calm.select_needy(), None);
+    assert_eq!(calm.selected(), Some(1));
+}
+
+fn den_of(cubs: &[crate::model::Cub]) -> Den {
+    den(cubs)
 }
 
 #[test]

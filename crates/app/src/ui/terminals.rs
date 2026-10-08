@@ -885,15 +885,19 @@ impl Shell {
     /// Whether a close or a sleep from where the keyboard is ends the whole
     /// session: it is, from the session's row in the sidebar. From a terminal
     /// it ends that pane.
+    ///
+    /// From the Den it is the whole session too: a lion is a session, not one
+    /// of its panes.
     fn whole_session_here(&self) -> bool {
-        self.pane == Pane::Sidebar && self.session_here().is_some()
+        self.den_lion_live().is_some()
+            || (self.pane == Pane::Sidebar && self.session_here().is_some())
     }
 
     /// Ends the terminal `id`, or every terminal of its session when `whole`
     /// is set, as [`Self::close_live`] does. The history session that belongs
     /// to it stays in the sidebar, marked as asleep, when `keep` is set, and
     /// leaves the history with it when not.
-    fn end_live(
+    pub(super) fn end_live(
         &mut self,
         id: LiveId,
         whole: bool,
@@ -1027,7 +1031,7 @@ impl Shell {
 
     /// The history session that belongs to a live one: the link the terminal
     /// holds, else the session its learned id names, as the history knows it.
-    fn history_of_live(&self, id: LiveId) -> Option<SessionId> {
+    pub(super) fn history_of_live(&self, id: LiveId) -> Option<SessionId> {
         let session = self.live.get(id)?;
         session.history.clone().or_else(|| {
             let (external, _) = session.learned.as_ref()?;

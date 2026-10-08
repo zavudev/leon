@@ -9,7 +9,7 @@ simple; the tests enforce the ones that can be enforced.
 app (leon)  ── ui, engine, keys, theme, launch, diagnose
  │   ├── leon-term     the embedded terminal (GPUI, PTY, emulator)
  │   ├── leon-mark     the animated lion (GPUI)
- │   ├── leon-den      the Den: live sessions as pixel-art lions (GPUI)
+ │   ├── leon-den      the Den: live sessions as lions in an office, 2.5D or pixel art (GPUI)
  │   ├── leon-remote   commands on this machine or over SSH
  │   ├── leon-history  importers for the agents' own session files
 │   ├── leon-usage    the agents' usage limits, per machine
@@ -21,7 +21,7 @@ leon-usage ── leon-core, leon-remote
 leon-update ── leon-remote (only for `spawn`)
 leon-term ── gpui-kit only (no other Leon crate)
 leon-mark ── gpui-kit only (no other Leon crate)
-leon-den ── gpui-kit and image only (no other Leon crate)
+leon-den ── gpui-kit and image only (no other Leon crate); wgpu behind `den3d`
 ```
 
 | Crate | What it is |
@@ -921,6 +921,37 @@ back. Three layers, each pure where it can be:
   stays a mane. A lion's seed picks its `paint::Look`: one of five bodies,
   six head styles (`atelier::STYLES`), six coats and nine shades of its
   agent's colour, so the sessions of one agent are different lions.
+* **The room in 2.5D (`leon-den::iso`).** A second picture of the same den,
+  from the same `Den` and `Frame`: `iso::room::build` turns the layout and
+  the frame into one mesh of flat-shaded boxes and hairlines (`iso::mesh`),
+  every piece of the catalogue as a few boxes (`iso::pieces`) and every `Act`
+  as a pose of a lion (`iso::lion`), all in colours made from the theme's
+  tokens (`iso::Theme::from_tokens`). `iso::Camera` fits an isometric view to
+  the room and the field, and gives the projection and its inverse on the
+  floor. All of that is plain arithmetic and is tested without a GPU. Only
+  `iso::gpu` (feature `den3d`, which the app turns on) touches `wgpu`: GPUI
+  does not hand out its device, so the Den opens its own (OpenGL on Linux
+  unless `WGPU_BACKEND` is set: a Vulkan readback was some fifty times
+  slower), draws a shadow pass and the room off screen at four samples a
+  pixel, reads the pixels back, and gives GPUI one image, as the pixel art
+  does. The name plates and bubbles are not in that picture: `iso::overlay`
+  lays them out and the view paints them in the host's font, and the same
+  boxes are what the pointer picks lions by (nearest the eye first) and what
+  the truth card stands beside (`scene::build_around`). A walk is continuous
+  there (`Den::glide`): while a lion walks, and only then, the view asks for a
+  picture every 33 ms; settled, it draws at the pace of the pixel art, and an
+  idle den draws nothing. `DenView::set_three_d` asks for it (the app passes
+  the setting `den_3d`, never in a test); the view falls back to the pixel
+  art, silently and for good, when the build has no `den3d`, when no adapter
+  or device can be had, and when a draw fails. `DenView::drawn` says which
+  picture is shown and why. The room is edited in the picture it is shown
+  in: `iso::room::hit` follows the line of points a pixel shows, from the
+  eye, into the boxes of the pieces, the back wall and the floor
+  (`iso::room::Aim` says which of them the hand is after), the view hands
+  the tile to the same `Editor`, and `iso::room::marks` draws the editor's
+  `Marks` as geometry. `DenView::room_picture` and `piece_picture` draw a den
+  or a piece off screen with the same GPU, for a host's lists. Lions that
+  share a tile are put side by side on it, in this picture only.
 * **`ui/den.rs`** is the mapping, pure and tested: `Facts` (what the terminal
   says: the `Activity` of the sidebar's dot, paused, exit code, how long it
   has been quiet) and an optional `Pulse` (what the transcript says) give the
@@ -958,14 +989,57 @@ back. Three layers, each pure where it can be:
   and one per sub-agent that is alive (found by the `meta.json` beside its
   file). `Followers::poll` reads files, so `ui/den_view.rs` calls it on the
   background executor, once every `Options::den_tick` (one second) **while the
-  Den is open and a session is live**; closed, nothing is read. The first read
+  Den is open and a session is live**; closed, nothing is read, unless a
+  message still waits for a session (below). The first read
   of a session is from the start of its file (that is what makes `Lv.` right)
   and is not narrated: it is the past.
+
+* **What is done to a lion.** The view says who is selected
+  (`DenEvent::Selected`, kept in `DenUi::selected`) and asks for a lion's
+  menu (`DenEvent::Menu`, from the right button or `DenView::menu_selection`).
+  While the Den has the keyboard, `Shell::den_lion_live` is what
+  `here_live`, `rename_target` and `whole_session_here` answer, so the
+  existing flows of a session (Rename, Sleep, Close, Pin) act on the lion's
+  whole session with no code of their own; the menu is the tree's `Menu`
+  with `Menu::lion` set (`menu::items_for_lion`). **Send home**
+  (`Command::SendLionHome`) is `end_live(id, whole, keep)` after a
+  confirmation that is always asked. **Message** (`Command::MessageLion`) is
+  decided by `ui/den_post.rs`, pure: `ready` says from the session's `Facts`
+  and `Pulse` whether a prompt may be typed now (the turn over, no call
+  without a result, the terminal quiet), later, or never (no transcript,
+  paused, ended), and `Outbox` keeps the ones that wait, one line a session.
+  `Shell::den_post_tick` runs after every poll of the transcripts and types
+  what is due (`den_type`: a paste, then Enter after
+  `Options::den_submit_after`); the poll goes on with the Den closed while
+  `Outbox::busy`. A call without a result always waits: it is what a
+  permission prompt and a question look like. What the truth card says
+  under a lion's state is `den::notes`, from `den::About` and the `Reading`:
+  first what it asks, in full (`den::asked`, from the `brief` and the
+  `options` a `Beat::Brief` gave the call in flight), then the summary in
+  two groups. It is handed to the view as `leon_den::Note`s with a tone
+  (`DenView::set_notes`); the scene drops lines from the end of a card that
+  has no room, what is asked last.
+
+  The keys of the Den are one table, `den_view::DEN_KEYS`: `Shell::den_key`
+  reads a keystroke from it and `?` lists it over the room
+  (`DenView::show_keys`), so the two cannot differ. Who needs the user is the
+  Den's own order (`leon_den::Den::needy`: by `CubState::needs_user`, then by
+  how long); the roster and the keyboard walk it, and
+  `Command::NextNeedyLion` selects the next. **Interrupt** writes
+  `AgentSpec::interrupt` to the terminal, only in the middle of a turn
+  (`Shell::den_can_interrupt`). The sessions at home are the history
+  sessions in `Shell::slept` and the sleeping ones of `dormant.json` that
+  ran an agent (`Shell::den_home`); the view lists them
+  (`DenView::set_home`) and a click is `DenEvent::Wake`. The flows that ask
+  (`steps::message_pride`, `queued_messages`, `wake_lion`, `go_to_lion`,
+  `hatch_lion`) are pure and know the Den as `steps::PrideInfo`.
 
 * **`ui/den_edit.rs`** and **`ui/den_store.rs`** are the customising. The
   view owns the editor and turns the pointer into its operations
   (`DenView::edit`); the shell adds the bar and the strip of things to pick
-  (thumbnails made from the Den's own art, scaled by whole device pixels),
+  (thumbnails made from the Den's own art, scaled by whole device pixels,
+  or drawn in 2.5D by the view when the room is, a few a render so that a
+  full tab never holds the window: `den_edit::THUMB_BUDGET`),
   the editor's keys, and the files. A den of the user's is
   `dens/<id>.json` beside `settings.json`; the setting `den` holds the id in
   use. Like the theme files, they are written by the shell itself with

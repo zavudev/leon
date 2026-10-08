@@ -72,6 +72,65 @@ pub struct LiveInfo {
     pub busy: bool,
 }
 
+/// The lion selected in the Den, as the flows need to know it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LionInfo {
+    /// Its name, as the Den writes it.
+    pub name: String,
+    /// Its session's terminal; `None` for a session that runs elsewhere.
+    pub live: Option<LiveId>,
+    /// Why nothing can be done to it from here, for a session that runs
+    /// elsewhere.
+    pub elsewhere: Option<String>,
+    /// Why it cannot be sent a message as it is.
+    pub no_message: Option<String>,
+    /// The messages that wait for it, oldest first.
+    pub queued: Vec<String>,
+    /// The folder its session runs in, when it has a terminal here.
+    pub cwd: Option<String>,
+}
+
+/// Whether a lion of the pride can be sent a message, as the flows need to
+/// know it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Post {
+    /// Its agent waits at its prompt: a message is typed at once.
+    Now,
+    /// It is busy: a message waits for it.
+    Later,
+    /// It cannot be messaged, and why.
+    Never(String),
+}
+
+/// A lion of the Den, as the flows that are about several need to know it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrideLion {
+    /// The lion's id.
+    pub id: u64,
+    /// Its name, as the Den writes it.
+    pub name: String,
+    /// What it does, in the words of its truth card.
+    pub state: String,
+    /// Where it runs: its folder, or its project.
+    pub place: String,
+    /// Whether it needs the user.
+    pub needs: bool,
+    /// Whether it can be sent a message; `None` for a lion without a
+    /// terminal here.
+    pub post: Option<Post>,
+}
+
+/// The Den, as the flows need to know it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrideInfo {
+    /// Whether the Den is what the main pane shows.
+    pub open: bool,
+    /// Its lions, the little ones left out, in the order of its roster.
+    pub lions: Vec<PrideLion>,
+    /// The sessions that were sent home: what wakes each, and its name.
+    pub home: Vec<(String, String)>,
+}
+
 /// The file the keyboard is on, as the flows need to know it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileInfo {
@@ -226,6 +285,10 @@ pub struct World {
     pub live: Vec<LiveInfo>,
     /// The live session the keyboard is on or that is on screen.
     pub here_live: Option<LiveId>,
+    /// The lion selected in the Den, while the Den has the keyboard.
+    pub lion: Option<LionInfo>,
+    /// The Den and its lions.
+    pub pride: PrideInfo,
     /// The file the keyboard is on.
     pub file: Option<FileInfo>,
     /// The names of the files with changes that were not saved.
@@ -308,6 +371,8 @@ impl World {
             here,
             live: Vec::new(),
             here_live: None,
+            lion: None,
+            pride: PrideInfo::default(),
             file: None,
             unsaved: Vec::new(),
             machine_row: None,
@@ -376,6 +441,18 @@ impl World {
     pub fn with_live(mut self, live: Vec<LiveInfo>, here_live: Option<LiveId>) -> Self {
         self.live = live;
         self.here_live = here_live;
+        self
+    }
+
+    /// The same world knowing the lion selected in the Den.
+    pub fn with_lion(mut self, lion: Option<LionInfo>) -> Self {
+        self.lion = lion;
+        self
+    }
+
+    /// The same world knowing the Den and its lions.
+    pub fn with_pride(mut self, pride: PrideInfo) -> Self {
+        self.pride = pride;
         self
     }
 
@@ -487,6 +564,10 @@ impl Choice {
 pub enum Validate {
     /// Anything but nothing.
     Required,
+    /// A message for an agent: anything but nothing, and it may have
+    /// several lines, which are kept (the palette takes a line with
+    /// Shift+Enter).
+    Message,
     /// Anything, nothing included.
     Optional,
     /// A branch name git accepts.
@@ -507,6 +588,8 @@ pub fn validate(how: Validate, text: &str) -> Result<String, String> {
         Validate::Optional => Ok(text.to_owned()),
         Validate::Required if text.is_empty() => Err("Type a name.".to_owned()),
         Validate::Required => Ok(text.to_owned()),
+        Validate::Message if text.is_empty() => Err("Type a message.".to_owned()),
+        Validate::Message => Ok(text.to_owned()),
         Validate::Branch => address::validate_branch(text)
             .map(|()| text.to_owned())
             .map_err(str::to_owned),
@@ -591,6 +674,24 @@ pub enum Action {
     /// Put a live session to sleep: its terminal ends, and the session stays
     /// in the sidebar to be resumed.
     SleepLive(LiveId),
+    /// Send a lion home from the Den: the whole session is put to sleep.
+    SendHome(LiveId),
+    /// Type a message into a live session as a prompt, now or when its
+    /// agent next waits.
+    MessageLive(LiveId, String),
+    /// Type one message into several live sessions, each now or when its
+    /// agent next waits.
+    MessagePride(Vec<LiveId>, String),
+    /// Take back a message that waits for a live session (its place in the
+    /// line, the oldest at 0), or all of them.
+    CancelQueued(LiveId, Option<usize>),
+    /// Select a lion in the Den.
+    SelectLion(u64),
+    /// Wake a session that was sent home: what the Den knows it by.
+    WakeHome(String),
+    /// Start an agent session from the Den and stay there: it joins as an
+    /// egg.
+    HatchSession(SessionIntent),
     /// Open the file at this path, as typed: relative to the folder the
     /// keyboard is in, or absolute.
     OpenFile(String),
@@ -733,6 +834,13 @@ pub fn is_flow(command: Command) -> bool {
             | Command::SaveDenAs
             | Command::RenameDen
             | Command::DeleteDen
+            | Command::MessageLion
+            | Command::SendLionHome
+            | Command::MessagePride
+            | Command::QueuedMessages
+            | Command::HatchLion
+            | Command::WakeLion
+            | Command::GoToLion
     )
 }
 
@@ -761,6 +869,13 @@ pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
         Command::RemoveAgent => remove_agent(answers),
         Command::CloseSession => close_session(answers, world),
         Command::SleepSession => sleep_session(answers, world),
+        Command::MessageLion => message_lion(answers, world),
+        Command::SendLionHome => send_lion_home(answers, world),
+        Command::MessagePride => message_pride(answers, world),
+        Command::QueuedMessages => queued_messages(answers, world),
+        Command::HatchLion => hatch_lion(answers, world),
+        Command::WakeLion => wake_lion(answers, world),
+        Command::GoToLion => go_to_lion(answers, world),
         Command::OpenFile => open_file(answers),
         Command::SaveFile => save_file(answers, world),
         Command::CloseFile => close_file(answers, world),
@@ -1339,6 +1454,432 @@ fn sleep_session(answers: &[String], world: &World) -> Outcome {
             Custom::No,
         ),
         [confirmed, ..] if confirmed == "yes" => Outcome::Run(Action::SleepLive(id)),
+        _ => Outcome::Run(Action::Nothing),
+    }
+}
+
+/// The live lion a flow of the Den is about, or why there is none.
+fn lion_here(world: &World) -> Result<(&LionInfo, LiveId), String> {
+    let Some(lion) = &world.lion else {
+        return Err("Select a lion in the Den first.".to_owned());
+    };
+    match (lion.live, &lion.elsewhere) {
+        (Some(live), None) => Ok((lion, live)),
+        (_, Some(why)) => Err(why.clone()),
+        (None, None) => Err(format!("{} has no terminal here.", lion.name)),
+    }
+}
+
+/// A message to the lion selected in the Den: its text is all that is asked.
+fn message_lion(answers: &[String], world: &World) -> Outcome {
+    let (lion, live) = match lion_here(world) {
+        Ok(found) => found,
+        Err(why) => return Outcome::Refuse(why),
+    };
+    if let Some(why) = &lion.no_message {
+        return Outcome::Refuse(why.clone());
+    }
+    match answers {
+        [] => text(
+            "Message",
+            format!("Message to {}", lion.name),
+            Validate::Message,
+        ),
+        [message, ..] => Outcome::Run(Action::MessageLive(live, message.clone())),
+    }
+}
+
+/// The messages that wait for the selected lion: one of them, or all, can
+/// be taken back before it is typed.
+fn queued_messages(answers: &[String], world: &World) -> Outcome {
+    let (lion, live) = match lion_here(world) {
+        Ok(found) => found,
+        Err(why) => return Outcome::Refuse(why),
+    };
+    if lion.queued.is_empty() {
+        return Outcome::Refuse(format!("No message is queued for {}.", lion.name));
+    }
+    match answers {
+        [] => {
+            let mut rows: Vec<Choice> = lion
+                .queued
+                .iter()
+                .enumerate()
+                .map(|(place, message)| {
+                    let flat = message.split_whitespace().collect::<Vec<_>>().join(" ");
+                    Choice::new(
+                        format!("{}. {flat}", place + 1),
+                        "take this one back: it will not be typed",
+                        place.to_string(),
+                    )
+                })
+                .collect();
+            if lion.queued.len() > 1 {
+                rows.push(Choice::new(
+                    format!("Take all {} back", lion.queued.len()),
+                    format!("none of them is typed into {}", lion.name),
+                    "all",
+                ));
+            }
+            rows.push(Choice::new(
+                "Keep them",
+                format!("they are typed when {} next waits at its prompt", lion.name),
+                "keep",
+            ));
+            choices("Queued", rows, Custom::No)
+        }
+        [chosen, ..] if chosen == "all" => Outcome::Run(Action::CancelQueued(live, None)),
+        [chosen, ..] => match chosen.parse::<usize>() {
+            Ok(place) if place < lion.queued.len() => {
+                Outcome::Run(Action::CancelQueued(live, Some(place)))
+            }
+            _ => Outcome::Run(Action::Nothing),
+        },
+    }
+}
+
+/// The lions a message to the pride can go to: those with a terminal here
+/// that can be messaged.
+fn reachable(world: &World) -> Vec<&PrideLion> {
+    world
+        .pride
+        .lions
+        .iter()
+        .filter(|lion| matches!(lion.post, Some(Post::Now | Post::Later)))
+        .collect()
+}
+
+/// The names of some lions, as a sentence lists them.
+fn names(lions: &[&PrideLion]) -> String {
+    lions
+        .iter()
+        .map(|lion| lion.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One message to several lions. First who: all that wait at their prompt,
+/// all that can be messaged, or lions picked one by one. Then the message,
+/// then a confirmation that names who gets it now, for whom it waits, and
+/// who is left out and why.
+fn message_pride(answers: &[String], world: &World) -> Outcome {
+    if !world.pride.open {
+        return Outcome::Refuse("Open the Den first: a message goes to its lions.".to_owned());
+    }
+    let all = reachable(world);
+    if all.is_empty() {
+        return Outcome::Refuse(
+            "No lion can be messaged: each needs a terminal here and a transcript Leon follows."
+                .to_owned(),
+        );
+    }
+    let waiting: Vec<&PrideLion> = all
+        .iter()
+        .copied()
+        .filter(|lion| lion.post == Some(Post::Now))
+        .collect();
+    let Some((who, rest)) = answers.split_first() else {
+        let mut rows = Vec::new();
+        if !waiting.is_empty() {
+            rows.push(Choice::new(
+                format!("Those that wait at their prompt ({})", waiting.len()),
+                names(&waiting),
+                "waiting",
+            ));
+        }
+        rows.push(Choice::new(
+            format!("All that can be messaged ({})", all.len()),
+            names(&all),
+            "all",
+        ));
+        rows.push(Choice::new(
+            "Choose lions\u{2026}",
+            "one at a time",
+            "choose",
+        ));
+        return choices("To", rows, Custom::No);
+    };
+    // Who was chosen, and what is left of the answers after that.
+    let (chosen, rest): (Vec<&PrideLion>, &[String]) = match who.as_str() {
+        "waiting" => (waiting, rest),
+        "all" => (all.clone(), rest),
+        "choose" => {
+            let mut picked: Vec<&PrideLion> = Vec::new();
+            let mut left = rest;
+            loop {
+                let offer = |picked: &[&PrideLion]| {
+                    let mut rows: Vec<Choice> = all
+                        .iter()
+                        .filter(|lion| !picked.iter().any(|one| one.id == lion.id))
+                        .map(|lion| {
+                            let when = match lion.post {
+                                Some(Post::Now) => "typed at once",
+                                _ => "queued until it waits",
+                            };
+                            Choice::new(
+                                lion.name.clone(),
+                                format!("{}, {}: {when}", lion.state, lion.place),
+                                lion.id.to_string(),
+                            )
+                        })
+                        .collect();
+                    if !picked.is_empty() {
+                        rows.insert(
+                            0,
+                            Choice::new(
+                                format!("Done: {} chosen", picked.len()),
+                                names(picked),
+                                "done",
+                            ),
+                        );
+                    }
+                    choices("To", rows, Custom::No)
+                };
+                match left.split_first() {
+                    None => return offer(&picked),
+                    Some((answer, after)) if answer == "done" && !picked.is_empty() => {
+                        left = after;
+                        break;
+                    }
+                    Some((answer, after)) => {
+                        let found = answer
+                            .parse::<u64>()
+                            .ok()
+                            .and_then(|id| all.iter().copied().find(|lion| lion.id == id));
+                        match found {
+                            Some(lion) if !picked.iter().any(|one| one.id == lion.id) => {
+                                picked.push(lion);
+                            }
+                            Some(_) => {}
+                            None => return Outcome::Run(Action::Nothing),
+                        }
+                        left = after;
+                        // Everybody is chosen: there is nobody left to ask of.
+                        if picked.len() == all.len() {
+                            break;
+                        }
+                    }
+                }
+            }
+            (picked, left)
+        }
+        _ => return Outcome::Run(Action::Nothing),
+    };
+    if chosen.is_empty() {
+        return Outcome::Refuse("Nobody waits at their prompt now.".to_owned());
+    }
+    let Some((message, rest)) = rest.split_first() else {
+        return text(
+            "Message",
+            format!("Message to {}", names(&chosen)),
+            Validate::Message,
+        );
+    };
+    let now: Vec<&PrideLion> = chosen
+        .iter()
+        .copied()
+        .filter(|lion| lion.post == Some(Post::Now))
+        .collect();
+    let later: Vec<&PrideLion> = chosen
+        .iter()
+        .copied()
+        .filter(|lion| lion.post == Some(Post::Later))
+        .collect();
+    match rest {
+        [] => {
+            let mut said = Vec::new();
+            if !now.is_empty() {
+                said.push(format!("typed now into {}", names(&now)));
+            }
+            if !later.is_empty() {
+                said.push(format!(
+                    "queued for {} until each waits at its prompt",
+                    names(&later)
+                ));
+            }
+            // Who is left out of "all", and why: said before, not after.
+            let skipped: Vec<String> = world
+                .pride
+                .lions
+                .iter()
+                .filter_map(|lion| match &lion.post {
+                    Some(Post::Never(why)) => Some(format!("{} ({why})", lion.name)),
+                    None => Some(format!("{} (runs elsewhere)", lion.name)),
+                    _ => None,
+                })
+                .collect();
+            if who != "choose" && !skipped.is_empty() {
+                said.push(format!("left out: {}", skipped.join("; ")));
+            }
+            let count = match chosen.len() {
+                1 => "1 lion".to_owned(),
+                n => format!("{n} lions"),
+            };
+            choices(
+                "Confirm",
+                vec![
+                    Choice::new(format!("Send to {count}"), said.join("; "), "yes"),
+                    Choice::new("Cancel", "nothing is typed anywhere", "no"),
+                ],
+                Custom::No,
+            )
+        }
+        [confirmed, ..] if confirmed == "yes" => Outcome::Run(Action::MessagePride(
+            chosen.iter().map(|lion| LiveId(lion.id)).collect(),
+            message.clone(),
+        )),
+        _ => Outcome::Run(Action::Nothing),
+    }
+}
+
+/// A new agent session from the Den: the questions of a new session, always
+/// from the first (where), whatever row the sidebar's cursor was left on.
+fn hatch_lion(answers: &[String], world: &World) -> Outcome {
+    // A lion is hatched in a worktree: said with what to do about it, since
+    // the Den has no project of its own to fall back on.
+    if world.projects.iter().all(|info| info.worktrees.is_empty()) {
+        return Outcome::Refuse(
+            "A lion is hatched in a project: add one first (+ in the sidebar).".to_owned(),
+        );
+    }
+    let mut anywhere = world.clone();
+    anywhere.here = None;
+    // Where the selected lion works is offered first, never taken: a second
+    // agent in a worktree shares its files, which is for the user to choose.
+    if answers.is_empty() {
+        if let Some((worktree, name)) = lion_worktree(world) {
+            if let Outcome::Ask(Step {
+                prompt,
+                kind:
+                    StepKind::Choices {
+                        mut choices,
+                        custom,
+                    },
+            }) = worktree_choices(&anywhere)
+            {
+                if let Some(at) = choices.iter().position(|choice| choice.value == worktree) {
+                    let mut beside = choices.remove(at);
+                    beside.detail = format!("where {name} works: the two would share its files");
+                    choices.insert(0, beside.current(true));
+                }
+                return Outcome::Ask(Step {
+                    prompt,
+                    kind: StepKind::Choices { choices, custom },
+                });
+            }
+        }
+    }
+    match new_session(answers, &anywhere) {
+        Outcome::Run(Action::StartSession(intent)) => Outcome::Run(Action::HatchSession(intent)),
+        other => other,
+    }
+}
+
+/// The worktree the selected lion's session runs in (the deepest one that
+/// holds its folder), and the lion's name.
+fn lion_worktree(world: &World) -> Option<(String, String)> {
+    let lion = world.lion.as_ref()?;
+    let cwd = lion.cwd.as_deref()?.trim_end_matches(['/', '\\']);
+    world
+        .projects
+        .iter()
+        .flat_map(|info| info.worktrees.iter())
+        .filter(|worktree| {
+            let root = worktree.path.trim_end_matches(['/', '\\']);
+            cwd == root
+                || cwd
+                    .strip_prefix(root)
+                    .is_some_and(|rest| rest.starts_with(['/', '\\']))
+        })
+        .max_by_key(|worktree| worktree.path.len())
+        .map(|worktree| (worktree.id.as_str().to_owned(), lion.name.clone()))
+}
+
+/// Waking a session that was sent home: which one is all that is asked.
+fn wake_lion(answers: &[String], world: &World) -> Outcome {
+    if world.pride.home.is_empty() {
+        return Outcome::Refuse("Nobody is at home: no session was sent home.".to_owned());
+    }
+    match answers {
+        [] => choices(
+            "Wake",
+            world
+                .pride
+                .home
+                .iter()
+                .map(|(key, name)| {
+                    Choice::new(
+                        name.clone(),
+                        "starts its agent again where the session left off",
+                        key.clone(),
+                    )
+                })
+                .collect(),
+            Custom::No,
+        ),
+        [key, ..] if world.pride.home.iter().any(|(known, _)| known == key) => {
+            Outcome::Run(Action::WakeHome(key.clone()))
+        }
+        _ => Outcome::Run(Action::Nothing),
+    }
+}
+
+/// Going to a lion: which one is all that is asked. Those that need the
+/// user are listed first, as in the roster.
+fn go_to_lion(answers: &[String], world: &World) -> Outcome {
+    if world.pride.lions.is_empty() {
+        return Outcome::Refuse("The Den is empty: no agent session is live.".to_owned());
+    }
+    match answers {
+        [] => choices(
+            "Lion",
+            world
+                .pride
+                .lions
+                .iter()
+                .map(|lion| {
+                    // Its state and its place are in what is typed against:
+                    // "waiting" and the project's name find it as its own
+                    // name does.
+                    Choice::new(
+                        format!("{} ({}, {})", lion.name, lion.state, lion.place),
+                        if lion.needs { "needs you" } else { "" },
+                        lion.id.to_string(),
+                    )
+                })
+                .collect(),
+            Custom::No,
+        ),
+        [id, ..] => match id.parse::<u64>() {
+            Ok(id) if world.pride.lions.iter().any(|lion| lion.id == id) => {
+                Outcome::Run(Action::SelectLion(id))
+            }
+            _ => Outcome::Run(Action::Nothing),
+        },
+    }
+}
+
+/// Sending a lion home always asks: it is done from a picture of the
+/// session, not from its terminal, and what it ends is said first.
+fn send_lion_home(answers: &[String], world: &World) -> Outcome {
+    let (lion, live) = match lion_here(world) {
+        Ok(found) => found,
+        Err(why) => return Outcome::Refuse(why),
+    };
+    match answers {
+        [] => choices(
+            "Confirm",
+            vec![
+                Choice::new(
+                    format!("Send {} home", lion.name),
+                    "stops its agent now; the session stays in the sidebar, asleep, and you can wake it where it left off",
+                    "yes",
+                ),
+                Choice::new("Cancel", "keep it working", "no"),
+            ],
+            Custom::No,
+        ),
+        [confirmed, ..] if confirmed == "yes" => Outcome::Run(Action::SendHome(live)),
         _ => Outcome::Run(Action::Nothing),
     }
 }
@@ -2254,6 +2795,8 @@ mod tests {
             }),
             live: Vec::new(),
             here_live: None,
+            lion: None,
+            pride: PrideInfo::default(),
             file: None,
             unsaved: Vec::new(),
             machine_row: None,
@@ -3747,6 +4290,460 @@ mod tests {
         assert_eq!(
             advance(Command::CloseSession, &[], &world),
             Outcome::Run(Action::CloseLive(LiveId(1)))
+        );
+    }
+
+    // ----- the Den's lions -------------------------------------------------------------
+
+    fn lion(live: Option<LiveId>) -> LionInfo {
+        LionInfo {
+            name: "MOSS".into(),
+            live,
+            elsewhere: None,
+            no_message: None,
+            queued: Vec::new(),
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn a_message_to_a_lion_asks_for_its_text_and_is_refused_with_the_reason() {
+        // Nobody is selected.
+        assert_eq!(
+            advance(Command::MessageLion, &[], &world()),
+            Outcome::Refuse("Select a lion in the Den first.".into())
+        );
+        let known = world().with_lion(Some(lion(Some(LiveId(3)))));
+        let Outcome::Ask(step) = advance(Command::MessageLion, &[], &known) else {
+            panic!("a question");
+        };
+        assert_eq!(step.prompt, "Message");
+        assert_eq!(
+            step.kind,
+            StepKind::Text {
+                placeholder: "Message to MOSS".into(),
+                validate: Validate::Message
+            }
+        );
+        assert_eq!(
+            advance(Command::MessageLion, &["run the tests".into()], &known),
+            Outcome::Run(Action::MessageLive(LiveId(3), "run the tests".into()))
+        );
+        // One that cannot be messaged says why, before anything is asked.
+        let mut paused = lion(Some(LiveId(3)));
+        paused.no_message = Some("MOSS is paused.".into());
+        assert_eq!(
+            advance(Command::MessageLion, &[], &world().with_lion(Some(paused))),
+            Outcome::Refuse("MOSS is paused.".into())
+        );
+        // One that runs elsewhere has no terminal here.
+        let mut away = lion(None);
+        away.elsewhere = Some("MOSS runs elsewhere.".into());
+        for command in [Command::MessageLion, Command::SendLionHome] {
+            assert_eq!(
+                advance(command, &[], &world().with_lion(Some(away.clone()))),
+                Outcome::Refuse("MOSS runs elsewhere.".into())
+            );
+        }
+    }
+
+    #[test]
+    fn sending_a_lion_home_always_asks_and_says_what_it_does() {
+        // Not busy, and the setting says not to ask about closing: it asks
+        // all the same.
+        let prefs = Prefs {
+            confirm_close: false,
+            ..Prefs::default()
+        };
+        let known = with(prefs).with_lion(Some(lion(Some(LiveId(3)))));
+        let Outcome::Ask(step) = advance(Command::SendLionHome, &[], &known) else {
+            panic!("a question");
+        };
+        let StepKind::Choices { choices, custom } = step.kind else {
+            panic!("choices");
+        };
+        assert_eq!(custom, Custom::No);
+        assert_eq!(choices[0].label, "Send MOSS home");
+        assert_eq!(
+            choices[0].detail,
+            "stops its agent now; the session stays in the sidebar, asleep, and you can wake it where it left off"
+        );
+        assert_eq!(
+            (choices[1].label.as_str(), choices[1].detail.as_str()),
+            ("Cancel", "keep it working")
+        );
+        assert_eq!(
+            advance(Command::SendLionHome, &["yes".into()], &known),
+            Outcome::Run(Action::SendHome(LiveId(3)))
+        );
+        assert_eq!(
+            advance(Command::SendLionHome, &["no".into()], &known),
+            Outcome::Run(Action::Nothing)
+        );
+        assert_eq!(
+            advance(Command::SendLionHome, &[], &world()),
+            Outcome::Refuse("Select a lion in the Den first.".into())
+        );
+    }
+
+    fn pride_lion(id: u64, name: &str, post: Option<Post>) -> PrideLion {
+        PrideLion {
+            id,
+            name: name.into(),
+            state: "Thinking".into(),
+            place: "leon".into(),
+            needs: false,
+            post,
+        }
+    }
+
+    fn pride() -> PrideInfo {
+        PrideInfo {
+            open: true,
+            lions: vec![
+                pride_lion(1, "MOSS", Some(Post::Now)),
+                pride_lion(2, "FERN", Some(Post::Later)),
+                pride_lion(3, "ASH", Some(Post::Never("it is paused".into()))),
+                pride_lion(4, "WREN", None),
+            ],
+            home: vec![("s:abc".into(), "Fix the build".into())],
+        }
+    }
+
+    fn rows_of(outcome: &Outcome) -> Vec<(String, String, String)> {
+        let Outcome::Ask(Step {
+            kind: StepKind::Choices { choices, .. },
+            ..
+        }) = outcome
+        else {
+            panic!("expected choices, got {outcome:?}");
+        };
+        choices
+            .iter()
+            .map(|choice| {
+                (
+                    choice.label.clone(),
+                    choice.detail.clone(),
+                    choice.value.clone(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_queued_messages_of_a_lion_are_listed_and_one_or_all_are_taken_back() {
+        let mut waiting = lion(Some(LiveId(3)));
+        // Nothing waits: nothing to list.
+        assert_eq!(
+            advance(
+                Command::QueuedMessages,
+                &[],
+                &world().with_lion(Some(waiting.clone()))
+            ),
+            Outcome::Refuse("No message is queued for MOSS.".into())
+        );
+        waiting.queued = vec!["run the\ntests".into(), "then commit".into()];
+        let known = world().with_lion(Some(waiting));
+        let rows = rows_of(&advance(Command::QueuedMessages, &[], &known));
+        let labels: Vec<&str> = rows.iter().map(|row| row.0.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "1. run the tests",
+                "2. then commit",
+                "Take all 2 back",
+                "Keep them"
+            ]
+        );
+        assert_eq!(rows[0].1, "take this one back: it will not be typed");
+        assert_eq!(
+            advance(Command::QueuedMessages, &strings(&["1"]), &known),
+            Outcome::Run(Action::CancelQueued(LiveId(3), Some(1)))
+        );
+        assert_eq!(
+            advance(Command::QueuedMessages, &strings(&["all"]), &known),
+            Outcome::Run(Action::CancelQueued(LiveId(3), None))
+        );
+        for kept in ["keep", "9"] {
+            assert_eq!(
+                advance(Command::QueuedMessages, &strings(&[kept]), &known),
+                Outcome::Run(Action::Nothing)
+            );
+        }
+        assert_eq!(
+            advance(Command::QueuedMessages, &[], &world()),
+            Outcome::Refuse("Select a lion in the Den first.".into())
+        );
+    }
+
+    #[test]
+    fn a_message_to_the_pride_says_who_gets_it_now_who_later_and_who_is_left_out() {
+        // The Den is closed: there is no pride to message.
+        assert_eq!(
+            advance(Command::MessagePride, &[], &world()),
+            Outcome::Refuse("Open the Den first: a message goes to its lions.".into())
+        );
+        let known = world().with_pride(pride());
+        let who = rows_of(&advance(Command::MessagePride, &[], &known));
+        assert_eq!(
+            who.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
+            [
+                "Those that wait at their prompt (1)",
+                "All that can be messaged (2)",
+                "Choose lions\u{2026}"
+            ]
+        );
+        assert_eq!(
+            (who[0].1.as_str(), who[1].1.as_str()),
+            ("MOSS", "MOSS, FERN")
+        );
+        // The message is asked next, and may have several lines.
+        let Outcome::Ask(step) = advance(Command::MessagePride, &strings(&["all"]), &known) else {
+            panic!("a question");
+        };
+        assert_eq!(
+            step.kind,
+            StepKind::Text {
+                placeholder: "Message to MOSS, FERN".into(),
+                validate: Validate::Message
+            }
+        );
+        // Then what will happen, before anything is typed.
+        let confirm = rows_of(&advance(
+            Command::MessagePride,
+            &strings(&["all", "pull and rebuild"]),
+            &known,
+        ));
+        assert_eq!(confirm[0].0, "Send to 2 lions");
+        assert_eq!(
+            confirm[0].1,
+            "typed now into MOSS; queued for FERN until each waits at its prompt; \
+             left out: ASH (it is paused); WREN (runs elsewhere)"
+        );
+        assert_eq!(
+            (confirm[1].0.as_str(), confirm[1].1.as_str()),
+            ("Cancel", "nothing is typed anywhere")
+        );
+        assert_eq!(
+            advance(
+                Command::MessagePride,
+                &strings(&["all", "pull and rebuild", "yes"]),
+                &known
+            ),
+            Outcome::Run(Action::MessagePride(
+                vec![LiveId(1), LiveId(2)],
+                "pull and rebuild".into()
+            ))
+        );
+        assert_eq!(
+            advance(
+                Command::MessagePride,
+                &strings(&["all", "pull and rebuild", "no"]),
+                &known
+            ),
+            Outcome::Run(Action::Nothing)
+        );
+        // Only those that wait.
+        assert_eq!(
+            advance(
+                Command::MessagePride,
+                &strings(&["waiting", "go on", "yes"]),
+                &known
+            ),
+            Outcome::Run(Action::MessagePride(vec![LiveId(1)], "go on".into()))
+        );
+        let one = rows_of(&advance(
+            Command::MessagePride,
+            &strings(&["waiting", "go on"]),
+            &known,
+        ));
+        assert_eq!(one[0].0, "Send to 1 lion");
+    }
+
+    #[test]
+    fn the_lions_of_a_message_can_be_chosen_one_at_a_time_and_never_those_that_cannot_be_messaged()
+    {
+        let known = world().with_pride(pride());
+        let first = rows_of(&advance(
+            Command::MessagePride,
+            &strings(&["choose"]),
+            &known,
+        ));
+        // Only those that can be messaged are on offer, with what would happen.
+        assert_eq!(
+            first
+                .iter()
+                .map(|row| (row.0.as_str(), row.1.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("MOSS", "Thinking, leon: typed at once"),
+                ("FERN", "Thinking, leon: queued until it waits")
+            ]
+        );
+        // One chosen: the other is still on offer, under the way on.
+        let second = rows_of(&advance(
+            Command::MessagePride,
+            &strings(&["choose", "2"]),
+            &known,
+        ));
+        assert_eq!(
+            second.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
+            ["Done: 1 chosen", "MOSS"]
+        );
+        assert_eq!(second[0].1, "FERN");
+        // Done: the message, then the confirmation, which leaves nobody out
+        // unasked for.
+        let Outcome::Ask(step) = advance(
+            Command::MessagePride,
+            &strings(&["choose", "2", "done"]),
+            &known,
+        ) else {
+            panic!("a question");
+        };
+        assert!(matches!(
+            step.kind,
+            StepKind::Text { ref placeholder, .. } if placeholder == "Message to FERN"
+        ));
+        let confirm = rows_of(&advance(
+            Command::MessagePride,
+            &strings(&["choose", "2", "done", "stop"]),
+            &known,
+        ));
+        assert_eq!(
+            confirm[0].1,
+            "queued for FERN until each waits at its prompt"
+        );
+        assert_eq!(
+            advance(
+                Command::MessagePride,
+                &strings(&["choose", "2", "done", "stop", "yes"]),
+                &known
+            ),
+            Outcome::Run(Action::MessagePride(vec![LiveId(2)], "stop".into()))
+        );
+        // Everybody chosen: the message is asked without "done".
+        assert!(matches!(
+            advance(
+                Command::MessagePride,
+                &strings(&["choose", "1", "2"]),
+                &known
+            ),
+            Outcome::Ask(Step {
+                kind: StepKind::Text { .. },
+                ..
+            })
+        ));
+        // One that cannot be messaged is no answer.
+        assert_eq!(
+            advance(Command::MessagePride, &strings(&["choose", "3"]), &known),
+            Outcome::Run(Action::Nothing)
+        );
+        // Nobody can be messaged at all.
+        let mut none = pride();
+        none.lions.clear();
+        assert!(matches!(
+            advance(Command::MessagePride, &[], &world().with_pride(none)),
+            Outcome::Refuse(why) if why.starts_with("No lion can be messaged")
+        ));
+    }
+
+    #[test]
+    fn a_lion_is_gone_to_by_its_name_its_state_or_its_place() {
+        assert_eq!(
+            advance(Command::GoToLion, &[], &world()),
+            Outcome::Refuse("The Den is empty: no agent session is live.".into())
+        );
+        let mut den = pride();
+        den.lions[1].needs = true;
+        den.lions[1].state = "Waiting for you".into();
+        let known = world().with_pride(den);
+        let rows = rows_of(&advance(Command::GoToLion, &[], &known));
+        assert_eq!(rows[0].0, "MOSS (Thinking, leon)");
+        assert_eq!(
+            (rows[1].0.as_str(), rows[1].1.as_str()),
+            ("FERN (Waiting for you, leon)", "needs you")
+        );
+        // One that runs elsewhere can be gone to as well.
+        assert_eq!(rows.len(), 4);
+        assert_eq!(
+            advance(Command::GoToLion, &strings(&["4"]), &known),
+            Outcome::Run(Action::SelectLion(4))
+        );
+        assert_eq!(
+            advance(Command::GoToLion, &strings(&["77"]), &known),
+            Outcome::Run(Action::Nothing)
+        );
+    }
+
+    #[test]
+    fn a_session_at_home_is_woken_by_choosing_it_and_a_lion_is_hatched_as_a_session_is_started() {
+        assert_eq!(
+            advance(Command::WakeLion, &[], &world()),
+            Outcome::Refuse("Nobody is at home: no session was sent home.".into())
+        );
+        let known = world().with_pride(pride());
+        let rows = rows_of(&advance(Command::WakeLion, &[], &known));
+        assert_eq!(
+            rows,
+            [(
+                "Fix the build".to_owned(),
+                "starts its agent again where the session left off".to_owned(),
+                "s:abc".to_owned()
+            )]
+        );
+        assert_eq!(
+            advance(Command::WakeLion, &strings(&["s:abc"]), &known),
+            Outcome::Run(Action::WakeHome("s:abc".into()))
+        );
+        assert_eq!(
+            advance(Command::WakeLion, &strings(&["s:gone"]), &known),
+            Outcome::Run(Action::Nothing)
+        );
+        // Hatching asks where first, whatever row the sidebar's cursor is
+        // on, then which agent, and the session it starts stays in the Den.
+        let world = world();
+        assert!(world.here.is_some());
+        let first = advance(Command::HatchLion, &[], &world);
+        assert_eq!(labels(&first)[..2], ["web / main", "api / main"]);
+        // Beside a selected lion, its worktree is offered first and said
+        // to be shared: it is still a question, never taken.
+        let mut works = lion(Some(LiveId(1)));
+        works.cwd = Some("/srv/api/src".into());
+        let beside = advance(
+            Command::HatchLion,
+            &[],
+            &world.clone().with_lion(Some(works)),
+        );
+        assert_eq!(labels(&beside)[..2], ["api / main", "web / main"]);
+        let Outcome::Ask(Step {
+            kind: StepKind::Choices { choices, .. },
+            ..
+        }) = &beside
+        else {
+            panic!("a question");
+        };
+        assert_eq!(
+            choices[0].detail,
+            "where MOSS works: the two would share its files"
+        );
+        assert!(choices[0].current);
+        let agent = advance(Command::HatchLion, &strings(&["a1"]), &world);
+        assert_eq!(labels(&agent)[..2], ["Claude Code", "Codex"]);
+        assert!(matches!(
+            advance(Command::HatchLion, &strings(&["a1", "claude"]), &world),
+            Outcome::Run(Action::HatchSession(SessionIntent { agent, .. })) if agent == AgentId::CLAUDE
+        ));
+    }
+
+    #[test]
+    fn a_message_keeps_its_lines_and_an_empty_one_is_no_answer() {
+        assert_eq!(
+            validate(Validate::Message, "  first line\n\nsecond line \n"),
+            Ok("first line\n\nsecond line".to_owned())
+        );
+        assert_eq!(
+            validate(Validate::Message, " \n "),
+            Err("Type a message.".to_owned())
         );
     }
 

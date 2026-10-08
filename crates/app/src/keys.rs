@@ -309,12 +309,38 @@ pub enum Command {
     ShowUsage,
     /// Reads the agents' usage limits again now.
     RefreshUsage,
-    /// The Den: every live session as a lion at work, in the main pane.
+    /// The Den: every live agent session as a lion at work, in the main pane.
     ShowDen,
     /// The home: the actions that start things and the sessions at a glance.
     GoHome,
     /// Opens the editor of the Den's room, or leaves it.
     EditDen,
+    /// Asks for a message and types it into the session of the lion selected
+    /// in the Den, now or when its agent next waits at its prompt.
+    MessageLion,
+    /// Sends the lion selected in the Den home, after asking: its agent is
+    /// stopped and its session stays in the sidebar, asleep.
+    SendLionHome,
+    /// Opens the Den if it is closed and selects the next lion that needs
+    /// the user: one that asks for a permission, waits, or fainted.
+    NextNeedyLion,
+    /// Sends the agent of the lion selected in the Den its interrupt key,
+    /// where that key is known: the turn stops and the session goes on.
+    InterruptLion,
+    /// Asks for a message and for who gets it, then types it into the
+    /// sessions of several lions, now or when each next waits.
+    MessagePride,
+    /// Lists the messages that wait for the lion selected in the Den, to
+    /// take one or all of them back.
+    QueuedMessages,
+    /// Starts a new agent session from the Den: it joins as an egg.
+    HatchLion,
+    /// Wakes a session that was sent home.
+    WakeLion,
+    /// Asks which lion and selects it in the Den.
+    GoToLion,
+    /// Shows the keys of the Den over the room, or takes them away.
+    DenKeys,
     /// Chooses the den: a built-in one or one of the user's.
     ChooseDen,
     /// Saves the room as a new den of the user's.
@@ -1938,6 +1964,86 @@ pub const BINDINGS: &[Binding] = &[
     ),
     bind(C::EditDen, "Edit the Den", S::View, W::Anywhere, &[], true),
     bind(
+        C::MessageLion,
+        "Message the selected lion\u{2026}",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::SendLionHome,
+        "Send the selected lion home\u{2026}",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::NextNeedyLion,
+        "Go to the next lion that needs you",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::InterruptLion,
+        "Interrupt the selected lion",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::MessagePride,
+        "Message the pride\u{2026}",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::QueuedMessages,
+        "Queued messages of the selected lion\u{2026}",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::HatchLion,
+        "Hatch a lion\u{2026}",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::WakeLion,
+        "Wake a lion that is at home\u{2026}",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::GoToLion,
+        "Go to a lion\u{2026}",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::DenKeys,
+        "Show the keys of the Den",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::ChooseDen,
         "Choose a den\u{2026}",
         S::View,
@@ -2146,6 +2252,16 @@ pub fn keywords(command: Command) -> &'static str {
         C::ShowDen => "lions pride office agents live sessions watch activity pixel narrator who is working",
         C::GoHome => "home start dashboard quickstart overview nothing open back sessions summary",
         C::EditDen => "den furniture move place rotate desk decorate customise customize arrange room layout build",
+        C::MessageLion => "den lion agent session prompt send tell ask talk write say type queue chat",
+        C::SendLionHome => "den lion agent session sleep stop end close pause rest later resume wake",
+        C::NextNeedyLion => "den lion agent session waiting attention permission asks blocked next who needs me jump",
+        C::InterruptLion => "den lion agent session stop escape cancel halt turn abort break",
+        C::MessagePride => "den lions agents sessions prompt send tell all everyone broadcast several many",
+        C::QueuedMessages => "den lion agent session queue waiting cancel take back unsend pending prompts",
+        C::HatchLion => "den lion new agent session start create egg add spawn",
+        C::WakeLion => "den lion agent session home asleep sleeping resume restart bring back",
+        C::GoToLion => "den lion agent session find search select jump name project",
+        C::DenKeys => "den keyboard shortcuts help keys map what can i press",
         C::ChooseDen => "den prefab office library lounge server room nook open plan layout switch pick",
         C::SaveDenAs => "den layout save copy duplicate keep name new",
         C::RenameDen => "den layout name title",
@@ -2410,6 +2526,16 @@ mod tests {
             C::ShowDen,
             C::GoHome,
             C::EditDen,
+            C::MessageLion,
+            C::SendLionHome,
+            C::NextNeedyLion,
+            C::InterruptLion,
+            C::MessagePride,
+            C::QueuedMessages,
+            C::HatchLion,
+            C::WakeLion,
+            C::GoToLion,
+            C::DenKeys,
             C::ChooseDen,
             C::SaveDenAs,
             C::RenameDen,
@@ -2561,6 +2687,16 @@ mod tests {
                 | C::ShowDen
                 | C::GoHome
                 | C::EditDen
+                | C::MessageLion
+                | C::SendLionHome
+                | C::NextNeedyLion
+                | C::InterruptLion
+                | C::MessagePride
+                | C::QueuedMessages
+                | C::HatchLion
+                | C::WakeLion
+                | C::GoToLion
+                | C::DenKeys
                 | C::ChooseDen
                 | C::SaveDenAs
                 | C::RenameDen

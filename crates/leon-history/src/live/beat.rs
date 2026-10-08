@@ -113,6 +113,15 @@ impl TaskOutcome {
 pub enum Beat {
     /// The user sent a message.
     Prompt,
+    /// What the user wrote, where the transcript says: the words of a
+    /// [`Beat::Prompt`], which it follows. It opens nothing by itself: a
+    /// message without words (an image alone) is a prompt all the same.
+    Heard {
+        /// What they wrote, as [`heard`] gives it.
+        text: String,
+        /// When, in seconds since the Unix epoch, if the transcript says.
+        at: Option<i64>,
+    },
     /// Something other than the user started the agent again: a background
     /// task reported back or another agent sent a message.
     Woken,
@@ -138,6 +147,20 @@ pub enum Beat {
         kind: ToolKind,
         /// The short subject of the call (see [`detail`]); may be empty.
         detail: String,
+    },
+    /// More of a tool call than its caption holds, for somebody who has to
+    /// decide on it: the whole command, the whole path, the question asked
+    /// and the answers on offer (see [`brief`]). It follows the call's
+    /// [`Beat::ToolStarted`], and is only written when it says more.
+    Brief {
+        /// The id of the call.
+        id: String,
+        /// The command, the path, the address or the question, on one line
+        /// of at most [`MAX_BRIEF_CHARS`] characters.
+        text: String,
+        /// The answers a question offers, by their labels, at most
+        /// [`MAX_OPTIONS`]; empty for anything but a question.
+        options: Vec<String>,
     },
     /// The result of a tool call arrived.
     ToolFinished {
@@ -192,6 +215,11 @@ pub enum Beat {
     },
 }
 
+/// The longest [`Beat::Brief`] kept, in characters.
+pub const MAX_BRIEF_CHARS: usize = 600;
+/// The most answers of a question a [`Beat::Brief`] keeps.
+pub const MAX_OPTIONS: usize = 6;
+
 /// The most characters of a message kept in a [`Beat::Said`]: enough for
 /// any answer a person reads in one go, and a bound on what a follower of
 /// many sessions holds.
@@ -215,6 +243,51 @@ pub fn speech(text: &str) -> String {
     cut
 }
 
+/// What stands in a prompt for a text the user pasted.
+pub const PASTED: &str = "[pasted text]";
+
+/// A message of the user as a [`Beat::Heard`] carries it: their own words.
+///
+/// The interface writes more than was typed into the same text. A picture
+/// leaves a marker (`[Image #1]`) and a long paste is wrapped in
+/// `<pasted_content>`; neither is something the user said. The markers are
+/// taken out and each paste becomes [`PASTED`], then the text is cleaned and
+/// cut as [`speech`] does. A message of pictures alone is empty.
+pub fn heard(text: &str) -> String {
+    let mut own = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<pasted_content") {
+        own.push_str(&rest[..start]);
+        own.push_str(PASTED);
+        rest = match rest[start..].find("</pasted_content>") {
+            Some(end) => &rest[start + end + "</pasted_content>".len()..],
+            // A paste that never closes runs to the end of the message.
+            None => "",
+        };
+    }
+    own.push_str(rest);
+    let mut clean = String::with_capacity(own.len());
+    let mut rest = own.as_str();
+    while let Some(start) = rest.find("[Image #") {
+        let after = &rest[start + "[Image #".len()..];
+        let digits = after.chars().take_while(char::is_ascii_digit).count();
+        if digits > 0 && after[digits..].starts_with(']') {
+            clean.push_str(rest[..start].trim_end_matches(' '));
+            // One space stays where the marker stood between two words.
+            let tail = after[digits + 1..].trim_start_matches(' ');
+            if !clean.is_empty() && !clean.ends_with('\n') && !tail.is_empty() {
+                clean.push(' ');
+            }
+            rest = tail;
+        } else {
+            clean.push_str(&rest[..start + "[Image #".len()]);
+            rest = after;
+        }
+    }
+    clean.push_str(rest);
+    speech(&clean)
+}
+
 /// A time of a transcript (RFC 3339) in seconds since the Unix epoch.
 pub(crate) fn seconds(timestamp: Option<&str>) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(timestamp?)
@@ -223,6 +296,21 @@ pub(crate) fn seconds(timestamp: Option<&str>) -> Option<i64> {
 }
 
 impl Beat {
+    /// The [`Beat::Brief`] of a call, when it has one (see [`brief`]).
+    pub(crate) fn brief_of(
+        id: &str,
+        kind: ToolKind,
+        name: &str,
+        input: Option<&Value>,
+        detail: &str,
+    ) -> Option<Self> {
+        brief(kind, name, input, detail).map(|(text, options)| Self::Brief {
+            id: id.to_owned(),
+            text,
+            options,
+        })
+    }
+
     /// A [`Beat::Said`] with this text and no time.
     pub fn said(text: &str) -> Self {
         Self::Said {
@@ -294,6 +382,82 @@ pub fn detail(kind: ToolKind, input: Option<&Value>) -> String {
     };
     let found = found.or_else(|| tool_detail(input)).unwrap_or_default();
     truncate_chars(&found, MAX_DETAIL_CHARS)
+}
+
+/// What a [`Beat::Brief`] says of a call, when it says more than the
+/// call's `detail` does:
+///
+/// * [`ToolKind::Ask`]: the first question and the labels of its answers
+///   (`questions[0]` of `AskUserQuestion` and of `request_user_input`); with
+///   several questions, how many more there are.
+/// * `ExitPlanMode`: the plan.
+/// * [`ToolKind::Run`]: the whole command.
+/// * [`ToolKind::Edit`] and [`ToolKind::Read`]: the whole path.
+/// * [`ToolKind::Web`]: the whole address.
+///
+/// Everything else has none. The text is one line of at most
+/// [`MAX_BRIEF_CHARS`] characters.
+pub fn brief(
+    kind: ToolKind,
+    name: &str,
+    input: Option<&Value>,
+    detail: &str,
+) -> Option<(String, Vec<String>)> {
+    let fields = input?.as_object()?;
+    let flat = |value: &Value| -> Option<String> {
+        let text = match value {
+            Value::String(text) => text.clone(),
+            Value::Array(items) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" "),
+            _ => return None,
+        };
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        (!text.is_empty()).then(|| truncate_chars(&text, MAX_BRIEF_CHARS))
+    };
+    let field = |keys: &[&str]| keys.iter().find_map(|key| fields.get(*key).and_then(flat));
+    let (text, options) = match kind {
+        ToolKind::Ask => {
+            let questions = fields.get("questions").and_then(Value::as_array);
+            let first = questions.and_then(|all| all.first());
+            let asked = first
+                .and_then(|one| one.get("question").and_then(flat))
+                .or_else(|| field(&["question", "prompt"]))?;
+            let more = questions.map_or(0, |all| all.len().saturating_sub(1));
+            let asked = match more {
+                0 => asked,
+                1 => format!("{asked} (and 1 more question)"),
+                more => format!("{asked} (and {more} more questions)"),
+            };
+            let options = first
+                .and_then(|one| one.get("options"))
+                .or_else(|| fields.get("options"))
+                .and_then(Value::as_array)
+                .map(|options| {
+                    options
+                        .iter()
+                        .filter_map(|option| {
+                            option.get("label").and_then(flat).or_else(|| flat(option))
+                        })
+                        .take(MAX_OPTIONS)
+                        .map(|label| truncate_chars(&label, MAX_DETAIL_CHARS))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (asked, options)
+        }
+        _ if name.eq_ignore_ascii_case("ExitPlanMode") => (field(&["plan"])?, Vec::new()),
+        ToolKind::Run => (field(&["command", "cmd"])?, Vec::new()),
+        ToolKind::Edit | ToolKind::Read => (
+            field(&["file_path", "filePath", "notebook_path", "path", "file"])?,
+            Vec::new(),
+        ),
+        ToolKind::Web => (field(&["url"])?, Vec::new()),
+        _ => return None,
+    };
+    (text != detail || !options.is_empty()).then_some((text, options))
 }
 
 /// A JSON value as one line with single spaces: a string's first non-blank

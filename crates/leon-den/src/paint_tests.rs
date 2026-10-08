@@ -41,7 +41,7 @@ fn count(picture: &Bitmap, color: [u8; 4]) -> usize {
 fn the_picture_is_the_map_a_pixel_of_art_for_a_pixel() {
     let den = den(&[]);
     let room = picture(&den, 0, true);
-    assert_eq!((room.w, room.h), (14 * TILE, 11 * TILE));
+    assert_eq!((room.w, room.h), (20 * TILE, 15 * TILE));
     // An empty den is its backdrop and its furniture: more than the
     // backdrop alone.
     assert_ne!(&room, den.world().backdrop());
