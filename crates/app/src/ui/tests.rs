@@ -3272,6 +3272,26 @@ fn the_question_mark_opens_the_shortcuts_sheet_and_escape_closes_it(cx: &mut Tes
 }
 
 #[gpui_kit::test]
+fn the_sheets_search_filters_the_lines_and_typing_stays_in_its_field(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    h.type_text("?", cx);
+    assert!(h.shows("sheet-search", cx));
+    // The letters go to the field, not to the commands they are keys of.
+    h.type_text("palette", cx);
+    assert_eq!(h.shell(cx, |s| s.sheet_query.clone()), "palette");
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Shortcuts);
+    assert!(!h.shows("sheet-empty", cx));
+    h.type_text("zzzz", cx);
+    assert!(h.shows("sheet-empty", cx));
+    // The first Escape clears the search; the second closes the sheet.
+    h.press("escape", cx);
+    assert_eq!(h.shell(cx, |s| s.sheet_query.clone()), "");
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Shortcuts);
+    h.press("escape", cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+}
+
+#[gpui_kit::test]
 fn the_sidebar_tools_open_the_sheet(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
     let mut visual = VisualTestContext::from_window(h.window.into(), cx);
