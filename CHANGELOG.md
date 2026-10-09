@@ -60,6 +60,31 @@
 * The memory's tables are schema 19 of the database. A Leon older than this
   one refuses a database this one has opened.
 
+## [0.8.0] - 2026-10-09
+
+### Added
+
+* **A memory every agent in a project shares.** A decision one agent saves is
+  there for the next one, whichever agent it is, as soon as its terminal opens.
+  The store lives in `leon.db` (migration V19, which only appends tables):
+  entries per project and a global scope, full-text search, pins, topics that
+  revise an entry in place, duplicate detection, and soft delete with restore.
+* **`leon memory`** on the command line: `add`, `edit`, `show`, `search`,
+  `list`, `pin`, `unpin`, `forget`, `restore`, `purge`, `context`, `path`,
+  `status`, `enable`, `disable` and `mcp`. Each project gets a memory file,
+  rendered within a budget (12 KB by default, a setting); every terminal Leon
+  opens gets `LEON_MEMORY` and `LEON_BIN`.
+* **Opt-in discovery.** `leon memory enable` writes a managed block into
+  `AGENTS.md`, `CLAUDE.md` and `GEMINI.md`, and `--mcp` adds the stdio MCP server
+  to `.mcp.json`. `disable` puts the files back byte for byte. Nothing is written
+  until the user says yes.
+* **Leon asks once** when a project is added, opened from a folder or cloned,
+  and says what the memory gets it. "Never for this project" and "Do not ask
+  again" are both there. Projects found by discovery and remote hosts are never
+  asked.
+* Two settings under Agents (`memory_budget`, `memory_offer`) and two palette
+  commands.
+
 ## [0.7.0] - 2026-10-08
 
 ### Added
