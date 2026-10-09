@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.7.1] - 2026-10-08
+
+### Added
+
+* The keyboard shortcuts sheet has a search field under its title. It keeps the
+  shortcuts whose name or keys contain every word typed, in all its blocks,
+  ignoring case, and says so when none match. Typing goes to the field while
+  the sheet is open; the arrows, the page keys, Home and End still scroll it,
+  and Escape clears the search before it closes the sheet.
+
+### Fixed
+
+* A repository inside a WSL distribution, opened from Windows as
+  `\\wsl.localhost\<distro>\...`, no longer fails with "detected dubious
+  ownership". Git runs with that folder as a safe directory, for the commands
+  that go through the shared git helper (the worktree and branch commands among
+  them). The commands that build their own git spec, such as the changes view,
+  the file list and the relay, do not get it yet. Not yet confirmed on Windows.
+
 ## [0.7.0] - 2026-10-08
 
 ### Added
