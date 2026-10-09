@@ -54,8 +54,9 @@ chrono.workspace = true
 flume.workspace = true
 dirs.workspace = true
 gpui-kit.workspace = true
-# Decodes the bundled application icon: the `image` GPUI already uses.
-image = { version = "0.25", default-features = false, features = ["png"] }
+# Decodes the bundled application icon, and reads the size of the pictures
+# the viewer shows: the `image` GPUI already uses, with the formats it decodes.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }
 regex = "1"
 serde.workspace = true
 serde_json.workspace = true

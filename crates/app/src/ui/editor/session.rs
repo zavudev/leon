@@ -15,9 +15,9 @@
 
 use super::super::live::LiveId;
 use super::super::shell::Shell;
-use super::document::EditorDoc;
-use super::preview::{is_markdown, ViewMode};
-use crate::files::FileContent;
+use super::document::{image_format, EditorDoc};
+use super::preview::{has_page, ViewMode};
+use crate::files::{FileContent, ImageContent};
 use crate::settings;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -204,6 +204,25 @@ impl Shell {
             let mut shown: Vec<LiveId> = Vec::new();
             for entry in saved.files {
                 let machine = leon_core::MachineId::from_string(entry.machine.clone());
+                // A picture of this computer is read as bytes, not as text.
+                if machine.is_local() && image_format(&entry.path).is_some() {
+                    let Ok(reading) = this.update(cx, |_, cx| {
+                        super::actions::read_picture(entry.path.clone(), cx)
+                    }) else {
+                        return;
+                    };
+                    // Gone or unreadable: skipped quietly.
+                    let Ok(content) = reading.await else {
+                        continue;
+                    };
+                    let opened = this.update(cx, |this, cx| {
+                        this.finish_restore_image(machine, entry, content, cx)
+                    });
+                    if let Ok(Some(id)) = opened {
+                        shown.push(id);
+                    }
+                    continue;
+                }
                 let Ok(reading) = this.update(cx, |this, _| {
                     this.engine.check_file(machine.clone(), entry.path.clone())
                 }) else {
@@ -256,12 +275,34 @@ impl Shell {
         self.workspaces
             .add_folder_tab(machine.as_str(), &folder, id);
         self.go_to_line(id, Some(entry.line + 1), window, cx);
-        if is_markdown(&entry.path) {
+        if has_page(&entry.path) {
             match ViewMode::parse(&entry.mode) {
                 ViewMode::Edit => {}
                 mode => self.set_view_mode(id, mode, window, cx),
             }
         }
+        cx.notify();
+        entry.active.then_some(id)
+    }
+
+    /// [`Self::finish_restore`] for a picture.
+    fn finish_restore_image(
+        &mut self,
+        machine: leon_core::MachineId,
+        entry: SavedFile,
+        content: ImageContent,
+        cx: &mut gpui_kit::Context<Self>,
+    ) -> Option<LiveId> {
+        let folder = self.file_folder(&machine, &entry.path);
+        if self.file_leaf(&machine, &entry.path, &folder).is_some() {
+            return None;
+        }
+        let id = self.live.next_id();
+        let doc = EditorDoc::open_image(machine, entry.path, folder, content);
+        let (machine, folder) = (doc.machine.clone(), doc.folder.clone());
+        self.files.insert(id, doc);
+        self.workspaces
+            .add_folder_tab(machine.as_str(), &folder, id);
         cx.notify();
         entry.active.then_some(id)
     }

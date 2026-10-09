@@ -16,13 +16,22 @@
 //!   rows, and the icon of each file).
 //! * [`preview`]: the rendered page of a Markdown file, beside the editor or
 //!   instead of it.
+//! * [`viewer`]: zoom and pan of a picture and of the page of an SVG file.
 //! * [`actions`]: opening, saving, reloading and closing, and the questions
 //!   they ask (`steps.rs` has the flows, `palette.rs` runs their answers).
 //!
+//! A picture (PNG, JPEG, GIF, WebP, BMP, ICO or TIFF) on this computer is a
+//! leaf too, drawn instead of an editor: [`document::Body::Image`] holds its
+//! bytes, and the viewer reads them again when the file changes on disk. It has
+//! no text, so it is never saved, searched or kept as a draft, like a file
+//! that is not text. SVG is text, in the editor, with a drawn page beside it or
+//! instead of it like a Markdown file has (see [`preview`]). A picture on another
+//! machine is not shown yet (its bytes would have to cross the wire).
+//!
 //! The editor is gpui-component's code editor: the language by file name and
 //! extension, line numbers, indent guides, search, tabs of four columns. A
-//! file that is not text, or that is above the limit of the engine's reads,
-//! shows what it is instead of an editor.
+//! file that is not text and not a picture, or that is above the limit of the
+//! engine's reads, shows what it is instead of an editor.
 
 mod actions;
 mod document;
@@ -35,6 +44,7 @@ mod preview;
 mod quick;
 mod session;
 mod view;
+mod viewer;
 
 #[cfg(all(test, leon_posix_tests))]
 pub use document::Body;

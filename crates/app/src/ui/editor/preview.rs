@@ -77,6 +77,27 @@ pub fn is_markdown(path: &str) -> bool {
     })
 }
 
+/// Whether a file is SVG: text that is also a picture, so its page is drawn
+/// from the text.
+pub fn is_svg(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.rsplit_once('.')
+        .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("svg"))
+}
+
+/// Whether a file has a page beside its text: Markdown and SVG.
+pub fn has_page(path: &str) -> bool {
+    is_markdown(path) || is_svg(path)
+}
+
+/// The text of an SVG file as the picture it draws.
+fn svg_page(text: &str) -> std::sync::Arc<gpui_kit::Image> {
+    std::sync::Arc::new(gpui_kit::Image::from_bytes(
+        gpui_kit::ImageFormat::Svg,
+        text.as_bytes().to_vec(),
+    ))
+}
+
 /// The largest picture embedded in a page.
 const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -312,7 +333,7 @@ impl Shell {
     fn previewable(&self, id: LiveId) -> bool {
         self.files
             .get(&id)
-            .is_some_and(|doc| doc.state().is_some() && is_markdown(&doc.path))
+            .is_some_and(|doc| doc.state().is_some() && has_page(&doc.path))
     }
 
     /// The file on screen shows its rendered page and no editor.
@@ -334,7 +355,7 @@ impl Shell {
         if !self.previewable(id) {
             self.engine.report(
                 crate::engine::StatusKind::Info,
-                "Only a Markdown file has a preview.",
+                "Only a Markdown or SVG file has a preview.",
             );
             return;
         }
@@ -357,7 +378,9 @@ impl Shell {
         let base = parent_of(&self.files[&id].path).to_owned();
         let doc = self.files.get_mut(&id).expect("checked above");
         doc.mode = mode;
-        if mode.shows_page() && doc.preview.is_none() {
+        if mode.shows_page() && is_svg(&doc.path) {
+            doc.svg = Some(svg_page(&text));
+        } else if mode.shows_page() && doc.preview.is_none() {
             let first = prepare(&text, &base, false);
             doc.preview = Some(cx.new(|cx| TextViewState::markdown(&first, cx)));
         }
@@ -384,7 +407,27 @@ impl Shell {
         let Some(doc) = self.files.get_mut(&id) else {
             return;
         };
-        if !doc.mode.shows_page() || doc.preview.is_none() {
+        if !doc.mode.shows_page() {
+            return;
+        }
+        if is_svg(&doc.path) {
+            doc.preview_task = Some(cx.spawn(async move |this, cx| {
+                if !pause.is_zero() {
+                    cx.background_executor().timer(pause).await;
+                }
+                this.update(cx, |this, cx| {
+                    if let Some(doc) = this.files.get_mut(&id) {
+                        if let Some(text) = doc.text(cx) {
+                            doc.svg = Some(svg_page(&text));
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }));
+            return;
+        }
+        if doc.preview.is_none() {
             return;
         }
         doc.preview_task = Some(cx.spawn(async move |this, cx| {
@@ -468,7 +511,44 @@ impl Shell {
                     )
                     .into_any_element()
             });
-        let body = match (doc.mode, page) {
+        self.compose_page(id, doc.mode, editor, page, colours, cx)
+    }
+
+    /// The leaf of an SVG file: its text, its drawn page, or both.
+    pub(in crate::ui) fn render_svg_body(
+        &self,
+        id: LiveId,
+        doc: &EditorDoc,
+        editor: AnyElement,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let page = doc
+            .svg
+            .clone()
+            .filter(|_| doc.mode.shows_page())
+            .map(|image| {
+                div()
+                    .debug_selector(move || format!("preview-{}", id.0))
+                    .size_full()
+                    .min_w_0()
+                    .child(self.render_viewer(id, image, None, colours, cx))
+                    .into_any_element()
+            });
+        self.compose_page(id, doc.mode, editor, page, colours, cx)
+    }
+
+    /// The editor and the page as `mode` says, under the toolbar.
+    fn compose_page(
+        &self,
+        id: LiveId,
+        mode: ViewMode,
+        editor: AnyElement,
+        page: Option<AnyElement>,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let body = match (mode, page) {
             (ViewMode::Split, Some(page)) => div()
                 .size_full()
                 .flex()
@@ -490,7 +570,7 @@ impl Shell {
             .size_full()
             .flex()
             .flex_col()
-            .child(self.render_preview_toolbar(id, doc.mode, colours, cx))
+            .child(self.render_preview_toolbar(id, mode, colours, cx))
             .child(div().flex_1().min_h_0().child(body))
             .into_any_element()
     }
@@ -556,6 +636,12 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn svg_and_markdown_names_have_a_page_and_nothing_else_does() {
+        assert!(is_svg("/p/logo.SVG") && has_page("/p/logo.svg") && has_page("/p/a.md"));
+        assert!(!has_page("/p/a.png") && !has_page("/p/svg") && !has_page("/p/a.svg.txt"));
+    }
 
     #[test]
     fn only_markdown_names_have_a_preview() {

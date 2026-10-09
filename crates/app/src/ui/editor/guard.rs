@@ -180,6 +180,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.check_pictures(window, cx);
         let ids: Vec<LiveId> = self
             .files
             .iter()
@@ -200,6 +201,38 @@ impl Shell {
                 };
                 this.update_in(cx, |this, window, cx| {
                     this.apply_external(id, content, window, cx)
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    /// Reads the pictures that changed on disk again: they have no text to
+    /// lose, so what is drawn simply follows the file.
+    fn check_pictures(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pictures: Vec<(LiveId, String, crate::files::Stamp)> = self
+            .files
+            .iter()
+            .filter(|(_, doc)| doc.machine.is_local())
+            .filter_map(|(id, doc)| Some((*id, doc.path.clone(), doc.picture()?.stamp)))
+            .collect();
+        for (id, path, stamp) in pictures {
+            let reading = cx.background_executor().spawn(async move {
+                let path = std::path::Path::new(&path);
+                // Gone or the same: nothing to show again.
+                match crate::files::stamp_of(path) {
+                    Some(now) if now != stamp => crate::files::read_image(path).ok(),
+                    _ => None,
+                }
+            });
+            cx.spawn_in(window, async move |this, cx| {
+                let Some(content) = reading.await else { return };
+                this.update(cx, |this, cx| {
+                    if let Some(doc) = this.files.get_mut(&id) {
+                        doc.show_picture(content);
+                    }
+                    cx.notify();
                 })
                 .ok();
             })
