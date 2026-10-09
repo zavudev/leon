@@ -508,6 +508,9 @@ pub struct Shell {
     pub(super) filter_input: Entity<InputState>,
     pub(super) filter_query: String,
     pub(super) filter: Option<Filter>,
+    /// The shortcuts sheet's search field and the text it holds.
+    pub(super) sheet_search: Entity<InputState>,
+    pub(super) sheet_query: String,
     /// What each project is called, where several share a name.
     pub(super) labels: std::collections::HashMap<ProjectId, String>,
     /// The project logos read from the store.
@@ -668,6 +671,8 @@ impl Shell {
         let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter projects"));
         let labels = filter::project_labels(&snapshot);
         let find_input = find::new_input(window, cx);
+        let sheet_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search the shortcuts"));
 
         let own_window = window.window_handle();
         let weak = cx.weak_entity();
@@ -699,6 +704,15 @@ impl Shell {
                     this.find_changed(cx);
                 }
             }),
+            cx.subscribe_in(
+                &sheet_search,
+                window,
+                |this, _, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.sheet_changed(cx);
+                    }
+                },
+            ),
             cx.subscribe_in(
                 &settings_ui.search,
                 window,
@@ -839,6 +853,8 @@ impl Shell {
             filter_input,
             filter_query: String::new(),
             filter: None,
+            sheet_search,
+            sheet_query: String::new(),
             labels,
             logos: Logos::default(),
             history_scroll: ScrollHandle::new(),
@@ -2690,6 +2706,9 @@ impl Shell {
         if self.overlay == Overlay::Share && self.share_key(stroke, window, cx) {
             return true;
         }
+        if self.overlay == Overlay::Shortcuts && self.sheet_key(stroke, window, cx) {
+            return true;
+        }
         // Escape closes the search bar of the editor, which has the keyboard
         // while it is open: it is not "go back to the sidebar".
         if stroke.key == "escape" && self.editor_search_has_keyboard(window, cx) {
@@ -2711,6 +2730,7 @@ impl Shell {
                 | Overlay::Pair
                 | Overlay::AddProject
                 | Overlay::NewWorktree
+                | Overlay::Shortcuts
         ) || filtering
             || finding
             || self.file_has_keyboard()
@@ -3020,7 +3040,11 @@ impl Shell {
                     self.overlay = Overlay::Shortcuts;
                     self.sheet_scroll
                         .set_offset(gpui_kit::point(px(0.), px(0.)));
-                    self.focus.focus(window, cx);
+                    self.sheet_query.clear();
+                    self.sheet_search.update(cx, |field, cx| {
+                        field.set_value("", window, cx);
+                        field.focus(window, cx);
+                    });
                 }
             }
             C::Close => match self.overlay {
@@ -3102,7 +3126,12 @@ impl Shell {
 
     /// Moves the cursor of the pane that has the keyboard (or scrolls the
     /// sheet, while it is open).
-    fn move_cursor(&mut self, command: Command, window: &mut Window, _cx: &mut Context<Self>) {
+    pub(super) fn move_cursor(
+        &mut self,
+        command: Command,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
         use Command as C;
         if matches!(self.overlay, Overlay::Shortcuts | Overlay::Problems) {
             let page = (self.viewport.height.as_f32() * 0.6).max(120.);
