@@ -11,12 +11,15 @@
 
 use super::super::shell::Shell;
 use super::drafts::Draft;
-use crate::files::{FileContent, FileRevision};
+use crate::files::{FileContent, FileRevision, ImageContent, Stamp};
 use gpui_kit::component::input::{EditorState, InputEvent, TabSize};
 use gpui_kit::component::text::TextViewState;
-use gpui_kit::{App, AppContext as _, Context, Entity, Subscription, Task, Window};
+use gpui_kit::{
+    App, AppContext as _, Context, Entity, Image, ImageFormat, Subscription, Task, Window,
+};
 use leon_core::MachineId;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 /// The editor settings that are plain values: line numbers, indent guides,
 /// wrapping and the tab.
@@ -147,6 +150,33 @@ pub fn language_of(path: &str) -> &'static str {
     }
 }
 
+/// The format of a picture the viewer shows, by the extension of its name.
+/// SVG is not one: it is text, and stays in the editor where it can be
+/// changed.
+pub fn image_format(path: &str) -> Option<ImageFormat> {
+    let (_, extension) = file_name(path).rsplit_once('.')?;
+    Some(match extension.to_ascii_lowercase().as_str() {
+        "png" => ImageFormat::Png,
+        "jpg" | "jpeg" => ImageFormat::Jpeg,
+        "gif" => ImageFormat::Gif,
+        "webp" => ImageFormat::Webp,
+        "bmp" => ImageFormat::Bmp,
+        "ico" => ImageFormat::Ico,
+        "tif" | "tiff" => ImageFormat::Tiff,
+        _ => return None,
+    })
+}
+
+/// The width and height of a picture, read from its header; `None` for bytes
+/// that are not a picture of a format the build knows.
+fn dimensions_of(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
 /// The last name of a path.
 pub fn file_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
@@ -189,6 +219,8 @@ pub enum Body {
     Binary(u64),
     /// More than the editor opens: said instead of shown.
     TooBig(u64),
+    /// A picture, drawn instead of an editor.
+    Image(Picture),
     /// What `Open anyway` showed of such a file: its bytes as lossy text, in
     /// an editor that cannot change them. Never saved.
     Lossy {
@@ -199,6 +231,33 @@ pub enum Body {
         /// How many bytes the file has.
         size: u64,
     },
+}
+
+/// A picture open in a leaf: its bytes, held for the toolkit to decode off the
+/// UI thread, and what is known of it.
+pub struct Picture {
+    /// What is drawn. A picture read again is another image (the toolkit
+    /// caches by the bytes), so a file that changed on disk is drawn anew.
+    pub image: Arc<Image>,
+    /// The size of the file, in bytes.
+    pub size: u64,
+    /// Width and height in pixels, when the header said.
+    pub dimensions: Option<(u32, u32)>,
+    /// What the file was on disk when the bytes were read.
+    pub stamp: Stamp,
+}
+
+impl Picture {
+    /// A picture from the bytes of a file named `path`.
+    fn new(path: &str, bytes: Vec<u8>, stamp: Stamp) -> Option<Self> {
+        let format = image_format(path)?;
+        Some(Self {
+            size: bytes.len() as u64,
+            dimensions: dimensions_of(&bytes),
+            image: Arc::new(Image::from_bytes(format, bytes)),
+            stamp,
+        })
+    }
 }
 
 /// The most of a file that `Open anyway` shows.
@@ -248,6 +307,11 @@ pub struct EditorDoc {
     pub preview: Option<Entity<TextViewState>>,
     /// The pending update of the page with the text.
     pub preview_task: Option<Task<()>>,
+    /// The page of an SVG file: the text as a picture, made when it is first
+    /// shown and again after each pause in the typing.
+    pub svg: Option<Arc<Image>>,
+    /// Zoom and pan of a picture or of the page of an SVG file.
+    pub view: super::viewer::Viewport,
     _change: Option<Subscription>,
 }
 
@@ -263,28 +327,7 @@ impl EditorDoc {
         window: &mut Window,
         cx: &mut Context<Shell>,
     ) -> Self {
-        let mut doc = Self {
-            machine,
-            language: language_of(&path),
-            path,
-            folder,
-            body: Body::Binary(0),
-            revision: None,
-            saved: 0,
-            dirty: false,
-            conflict: false,
-            saving: false,
-            close_after_save: false,
-            eol: Eol::Lf,
-            bom: false,
-            check: None,
-            external: None,
-            draft_task: None,
-            mode: super::preview::ViewMode::Edit,
-            preview: None,
-            preview_task: None,
-            _change: None,
-        };
+        let mut doc = Self::new(machine, path, folder, Body::Binary(0));
         match content {
             FileContent::Text { text, revision } => {
                 let decoded = decode(&text);
@@ -306,6 +349,70 @@ impl EditorDoc {
             FileContent::TooBig { size } => doc.body = Body::TooBig(size),
         }
         doc
+    }
+
+    /// A picture that was read. It has no text, so nothing is saved, searched
+    /// or kept as a draft: it is the same as a file that is not text, except
+    /// that it is drawn. A file above the limit of the viewer says so instead.
+    pub fn open_image(
+        machine: MachineId,
+        path: String,
+        folder: String,
+        content: ImageContent,
+    ) -> Self {
+        let body = match content {
+            ImageContent::Bytes { bytes, stamp } => match Picture::new(&path, bytes, stamp) {
+                Some(picture) => Body::Image(picture),
+                None => Body::Binary(0),
+            },
+            ImageContent::TooBig { size } => Body::TooBig(size),
+        };
+        Self::new(machine, path, folder, body)
+    }
+
+    /// Replaces the picture with what the file holds now.
+    pub fn show_picture(&mut self, content: ImageContent) {
+        let ImageContent::Bytes { bytes, stamp } = content else {
+            return;
+        };
+        if let Some(picture) = Picture::new(&self.path, bytes, stamp) {
+            self.body = Body::Image(picture);
+        }
+    }
+
+    /// The picture, when the file is one.
+    pub fn picture(&self) -> Option<&Picture> {
+        match &self.body {
+            Body::Image(picture) => Some(picture),
+            _ => None,
+        }
+    }
+
+    fn new(machine: MachineId, path: String, folder: String, body: Body) -> Self {
+        Self {
+            machine,
+            language: language_of(&path),
+            path,
+            folder,
+            body,
+            revision: None,
+            saved: 0,
+            dirty: false,
+            conflict: false,
+            saving: false,
+            close_after_save: false,
+            eol: Eol::Lf,
+            bom: false,
+            check: None,
+            external: None,
+            draft_task: None,
+            mode: super::preview::ViewMode::Edit,
+            preview: None,
+            preview_task: None,
+            svg: None,
+            view: super::viewer::Viewport::default(),
+            _change: None,
+        }
     }
 
     /// The editor for `text`: line numbers, indent guides, search, tabs of
@@ -472,6 +579,37 @@ mod tests {
         ] {
             assert_eq!(detect(path), language, "{path}");
         }
+    }
+
+    #[test]
+    fn pictures_are_known_by_their_extension_and_svg_stays_text() {
+        for (path, format) in [
+            ("/p/a.png", Some(ImageFormat::Png)),
+            ("/p/A.JPG", Some(ImageFormat::Jpeg)),
+            ("C:\\p\\a.jpeg", Some(ImageFormat::Jpeg)),
+            ("a.webp", Some(ImageFormat::Webp)),
+            ("a.tif", Some(ImageFormat::Tiff)),
+            ("a.gif", Some(ImageFormat::Gif)),
+            ("a.bmp", Some(ImageFormat::Bmp)),
+            ("a.ico", Some(ImageFormat::Ico)),
+            ("/p/logo.svg", None),
+            ("/p/png", None),
+            ("/p.png/readme", None),
+            ("/p/a.png.txt", None),
+        ] {
+            assert_eq!(image_format(path), format, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_picture_says_its_size_from_the_header_and_nothing_for_garbage() {
+        let mut png = Vec::new();
+        image::RgbaImage::new(3, 2)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        assert_eq!(dimensions_of(&png), Some((3, 2)));
+        assert_eq!(dimensions_of(b"not a picture at all"), None);
+        assert_eq!(dimensions_of(b""), None);
     }
 
     #[test]

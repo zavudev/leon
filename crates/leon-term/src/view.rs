@@ -82,6 +82,17 @@ pub enum ViewEvent {
     },
 }
 
+/// What a click on a file printed in the output can do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileChoice {
+    /// Open it in the host's editor.
+    Here,
+    /// Open it with the program the system has for it.
+    System,
+    /// Show the folder it is in.
+    Folder,
+}
+
 /// Where the grid was last drawn, for turning pointer positions into cells.
 #[derive(Clone, Copy, Debug, Default)]
 struct Metrics {
@@ -398,14 +409,15 @@ impl TerminalView {
         if event.button == MouseButton::Left {
             let (col, row, _) = self.cell_at(event.position);
             if let Some(link) = self.terminal.link_at(col, row) {
-                if let Some((path, line)) = crate::files::parse(&link) {
+                if event.modifiers.secondary() {
+                    // The secondary key opens at once: a file in the editor,
+                    // anything else where the system opens it.
                     self.link_prompt = None;
                     self.link_clicked = true;
-                    cx.emit(ViewEvent::OpenFile { path, line });
-                } else if event.modifiers.secondary() {
-                    self.link_prompt = None;
-                    self.link_clicked = true;
-                    cx.open_url(&link);
+                    match crate::files::parse(&link) {
+                        Some((path, line)) => cx.emit(ViewEvent::OpenFile { path, line }),
+                        None => cx.open_url(&link),
+                    }
                 } else {
                     self.link_prompt = Some(LinkPrompt {
                         uri: link,
@@ -564,6 +576,22 @@ impl TerminalView {
             cx.notify();
         }
     }
+
+    /// The offer made for a file was answered: the file opens in the host's
+    /// editor, where the system opens such files, or its folder is shown.
+    fn open_file_prompt(&mut self, choice: FileChoice, cx: &mut Context<Self>) {
+        let Some(prompt) = self.link_prompt.take() else {
+            return;
+        };
+        if let Some((path, line)) = crate::files::parse(&prompt.uri) {
+            match choice {
+                FileChoice::Here => cx.emit(ViewEvent::OpenFile { path, line }),
+                FileChoice::System => cx.open_with_system(std::path::Path::new(&path)),
+                FileChoice::Folder => cx.reveal_path(std::path::Path::new(&path)),
+            }
+        }
+        cx.notify();
+    }
 }
 
 impl EntityInputHandler for TerminalView {
@@ -696,13 +724,57 @@ impl Render for TerminalView {
             } else {
                 current_metrics.cell.height * prompt.row.saturating_sub(1) as f32
             };
+            let file = crate::files::parse(&prompt.uri).is_some();
+            let button = |id: &'static str, label: &'static str| {
+                div()
+                    .id(id)
+                    .debug_selector(move || id.to_owned())
+                    .px_2()
+                    .py_1()
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(theme.cursor).text_color(theme.background))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(label)
+            };
+            let row = if file {
+                let choice = |this: &mut Self, choice, cx: &mut Context<Self>| {
+                    this.open_file_prompt(choice, cx);
+                    cx.stop_propagation();
+                };
+                div()
+                    .flex()
+                    .child(button("terminal-open-here", "Open here").on_click(
+                        cx.listener(move |this, _, _, cx| choice(this, FileChoice::Here, cx)),
+                    ))
+                    .child(
+                        button("terminal-open-system", "Open with system default").on_click(
+                            cx.listener(move |this, _, _, cx| choice(this, FileChoice::System, cx)),
+                        ),
+                    )
+                    .child(button("terminal-open-folder", "Open folder").on_click(
+                        cx.listener(move |this, _, _, cx| choice(this, FileChoice::Folder, cx)),
+                    ))
+            } else {
+                div().child(
+                    button("terminal-open-link", "Open link").on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            if this
+                                .link_prompt
+                                .as_ref()
+                                .is_some_and(|prompt| prompt.uri == uri)
+                            {
+                                this.open_link_prompt(cx);
+                            }
+                            cx.stop_propagation();
+                        },
+                    )),
+                )
+            };
             div()
-                .id("terminal-open-link")
+                .id("terminal-link-offer")
                 .absolute()
                 .left(padding + current_metrics.cell.width * col as f32)
                 .top(padding + top)
-                .px_2()
-                .py_1()
                 .rounded_sm()
                 .border_1()
                 .border_color(theme.cursor)
@@ -710,20 +782,7 @@ impl Render for TerminalView {
                 .text_color(theme.cursor)
                 .text_size(font.size * 0.9)
                 .shadow_sm()
-                .cursor_pointer()
-                .hover(move |style| style.bg(theme.cursor).text_color(theme.background))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if this
-                        .link_prompt
-                        .as_ref()
-                        .is_some_and(|prompt| prompt.uri == uri)
-                    {
-                        this.open_link_prompt(cx);
-                    }
-                    cx.stop_propagation();
-                }))
-                .child("Open link")
+                .child(row)
         });
         div()
             .id("terminal")
@@ -1262,6 +1321,63 @@ mod tests {
         visual.simulate_mouse_up(second, MouseButton::Left, Modifiers::secondary_key());
         assert_eq!(cx.opened_url().as_deref(), Some("https://two.example"));
         assert_eq!(terminal.selection_text(), None);
+    }
+
+    #[gpui_kit::test]
+    fn a_click_on_a_file_offers_three_ways_to_open_it_and_the_secondary_key_opens_it_here(
+        cx: &mut TestAppContext,
+    ) {
+        // Short, so it does not wrap on the 80 columns.
+        let file = std::env::temp_dir().join("leon-link-offer.txt");
+        std::fs::write(&file, "x").unwrap();
+        let manifest = file.to_str().unwrap();
+        let (view, terminal) = show(cx, &format!("printf 'See {manifest}'; read hold"));
+        terminal.set_file_base(Some("/".to_owned()));
+        wait_until(cx, "the path", || terminal.screen_text().contains(manifest));
+        // Printed before the base was set: look again.
+        terminal.set_file_base(Some("/".to_owned()));
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let seen = opened.clone();
+        cx.update(|cx| {
+            cx.subscribe(&view, move |_, event: &ViewEvent, _| {
+                if let ViewEvent::OpenFile { path, .. } = event {
+                    seen.borrow_mut().push(path.clone());
+                }
+            })
+            .detach();
+        });
+        let metrics = cx.update(|cx| view.read(cx).metrics.get());
+        let at = Point {
+            x: metrics.origin.x + metrics.cell.width * 8.5,
+            y: metrics.origin.y + metrics.cell.height * 0.5,
+        };
+        let window = cx.windows()[0];
+        let click = |cx: &mut TestAppContext, modifiers: Modifiers| {
+            let mut visual = VisualTestContext::from_window(window, cx);
+            visual.simulate_mouse_down(at, MouseButton::Left, modifiers);
+            visual.simulate_mouse_up(at, MouseButton::Left, modifiers);
+        };
+
+        click(cx, Modifiers::none());
+        assert!(opened.borrow().is_empty(), "a plain click only offers");
+        let prompt = cx.update(|cx| view.read(cx).link_prompt.clone()).unwrap();
+        assert!(crate::files::parse(&prompt.uri).is_some());
+        let mut visual = VisualTestContext::from_window(window, cx);
+        for id in [
+            "terminal-open-here",
+            "terminal-open-system",
+            "terminal-open-folder",
+        ] {
+            assert!(visual.debug_bounds(id).is_some(), "{id}");
+        }
+        drop(visual);
+
+        cx.update(|cx| view.update(cx, |view, cx| view.open_file_prompt(FileChoice::Here, cx)));
+        assert_eq!(*opened.borrow(), [manifest.to_owned()]);
+        assert_eq!(cx.update(|cx| view.read(cx).link_prompt.clone()), None);
+
+        click(cx, Modifiers::secondary_key());
+        assert_eq!(opened.borrow().len(), 2, "the secondary key opens at once");
     }
 
     #[gpui_kit::test]

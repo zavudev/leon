@@ -10,9 +10,9 @@ use super::super::live::LiveId;
 use super::super::shell::{Main, Overlay, Pane, Shell};
 use super::super::steps::FileInfo;
 use super::super::workspace;
-use super::document::{parent_of, resolve, EditorDoc};
+use super::document::{image_format, parent_of, resolve, EditorDoc};
 use crate::engine::StatusKind;
-use crate::files::{FileContent, WriteOutcome};
+use crate::files::{FileContent, ImageContent, WriteOutcome};
 use crate::keys::Command;
 use gpui_kit::component::input::Position;
 use gpui_kit::{App, Context, FocusHandle, Focusable as _, Window};
@@ -135,6 +135,11 @@ impl Shell {
             self.go_to_line(id, line, window, cx);
             return;
         }
+        // A picture on this computer is drawn, not read as text.
+        if machine.is_local() && image_format(&path).is_some() {
+            self.open_image(machine, path, folder, window, cx);
+            return;
+        }
         let reading = self.engine.read_file(machine.clone(), path.clone());
         cx.spawn_in(window, async move |this, cx| {
             // A failure is already on the status line.
@@ -147,6 +152,50 @@ impl Shell {
             .ok();
         })
         .detach();
+    }
+
+    /// Reads a picture of this computer and opens it in a tab.
+    fn open_image(
+        &mut self,
+        machine: MachineId,
+        path: String,
+        folder: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let reading = read_picture(path.clone(), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = reading.await;
+            this.update_in(cx, |this, window, cx| match answer {
+                Ok(content) => this.finish_open_image(machine, path, folder, content, window, cx),
+                Err(error) => this.engine.report(StatusKind::Error, error.to_string()),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn finish_open_image(
+        &mut self,
+        machine: MachineId,
+        path: String,
+        folder: String,
+        content: ImageContent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Asked twice before the first answer came: one tab is enough.
+        if let Some(id) = self.file_leaf(&machine, &path, &folder) {
+            self.open_live(id, window, cx);
+            return;
+        }
+        let id = self.live.next_id();
+        let doc = EditorDoc::open_image(machine, path, folder, content);
+        let (machine, folder) = (doc.machine.clone(), doc.folder.clone());
+        self.files.insert(id, doc);
+        self.workspaces
+            .add_folder_tab(machine.as_str(), &folder, id);
+        self.open_live(id, window, cx);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -515,4 +564,13 @@ impl Shell {
         let closed = self.workspaces.close(id);
         self.after_close(closed, was_open, &doc.machine, &doc.folder, window, cx);
     }
+}
+
+/// The bytes of a picture of this computer, read off the UI thread.
+pub(super) fn read_picture(
+    path: String,
+    cx: &gpui_kit::App,
+) -> gpui_kit::Task<Result<ImageContent, crate::files::FileError>> {
+    cx.background_executor()
+        .spawn(async move { crate::files::read_image(std::path::Path::new(&path)) })
 }

@@ -122,6 +122,82 @@ pub fn read(path: &Path) -> Result<FileContent, FileError> {
     })
 }
 
+/// The most of a picture that the viewer reads. Photos are far bigger than
+/// the text the editor opens, so this is not [`MAX_FILE_BYTES`].
+pub const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// What changed a picture on disk: when it was modified (nanoseconds) and how
+/// big it is. Enough to tell the viewer to read it again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stamp {
+    modified: u128,
+    size: u64,
+}
+
+impl Stamp {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |since| since.as_nanos());
+        Self {
+            modified,
+            size: meta.len(),
+        }
+    }
+}
+
+/// A picture read from this computer.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ImageContent {
+    /// Its bytes, undecoded.
+    Bytes {
+        /// The file's bytes.
+        bytes: Vec<u8>,
+        /// What the file was when they were read.
+        stamp: Stamp,
+    },
+    /// More than [`MAX_IMAGE_BYTES`].
+    TooBig {
+        /// How big it is.
+        size: u64,
+    },
+}
+
+/// Reads the bytes of a picture, up to [`MAX_IMAGE_BYTES`].
+pub fn read_image(path: &Path) -> Result<ImageContent, FileError> {
+    let shown = path.display().to_string();
+    let file = std::fs::File::open(path).map_err(|e| io_error("read", path, e))?;
+    let meta = file.metadata().map_err(|e| io_error("read", path, e))?;
+    if !meta.is_file() {
+        return Err(FileError::NotAFile(shown));
+    }
+    if meta.len() > MAX_IMAGE_BYTES {
+        return Ok(ImageContent::TooBig { size: meta.len() });
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(file, MAX_IMAGE_BYTES + 1),
+        &mut bytes,
+    )
+    .map_err(|e| io_error("read", path, e))?;
+    if bytes.len() as u64 > MAX_IMAGE_BYTES {
+        return Ok(ImageContent::TooBig {
+            size: bytes.len() as u64,
+        });
+    }
+    Ok(ImageContent::Bytes {
+        bytes,
+        stamp: Stamp::of(&meta),
+    })
+}
+
+/// What a picture is on disk now, without reading it; `None` when it is gone.
+pub fn stamp_of(path: &Path) -> Option<Stamp> {
+    std::fs::metadata(path).ok().map(|meta| Stamp::of(&meta))
+}
+
 /// Saves `contents` to `path`. `expected` is the revision the file was read
 /// with; `None` creates a file that must not exist yet. A file that is not
 /// what was read is a [`WriteOutcome::Conflict`], not an error.
@@ -421,6 +497,25 @@ mod tests {
             WriteOutcome::Conflict
         );
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_picture_is_read_whole_with_its_stamp_and_the_stamp_follows_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.png");
+        std::fs::write(&path, [0x89, b'P', b'N', b'G', 0, 1]).unwrap();
+        let ImageContent::Bytes { bytes, stamp } = read_image(&path).unwrap() else {
+            panic!("bytes");
+        };
+        assert_eq!(bytes, [0x89, b'P', b'N', b'G', 0, 1]);
+        assert_eq!(stamp_of(&path), Some(stamp));
+        std::fs::write(&path, [0x89, b'P', b'N', b'G', 0, 1, 2]).unwrap();
+        assert_ne!(stamp_of(&path), Some(stamp), "another size is another file");
+        assert!(matches!(
+            read_image(&dir.path().join("gone.png")),
+            Err(FileError::Missing(_))
+        ));
+        assert_eq!(stamp_of(&dir.path().join("gone.png")), None);
     }
 
     #[test]

@@ -282,3 +282,160 @@ fn the_editor_settings_apply_to_files_that_are_open(cx: &mut TestAppContext) {
     );
     let _ = language;
 }
+
+/// A picture of `width` x `height` pixels, written as a PNG.
+fn picture(path: &std::path::Path, width: u32, height: u32) {
+    image::RgbaImage::new(width, height).save(path).unwrap();
+}
+
+/// The size the only open picture says it has.
+fn dimensions(h: &Harness, cx: &mut TestAppContext) -> Option<(u32, u32)> {
+    h.shell(cx, |s| {
+        s.files
+            .values()
+            .find_map(|doc| doc.picture())
+            .and_then(|picture| picture.dimensions)
+    })
+}
+
+#[gpui_kit::test]
+fn a_picture_is_drawn_not_edited_and_follows_the_file(cx: &mut TestAppContext) {
+    let (h, _settings, _dir, path) = project(cx);
+    let file = std::path::Path::new(&path).join("logo.png");
+    picture(&file, 3, 2);
+    open_by_chord(&h, cx, "logo.png");
+    assert_eq!(dimensions(&h, cx), Some((3, 2)));
+    let id = h.shell(cx, |s| *s.files.keys().next().unwrap());
+    assert!(h.shows_dynamic(format!("file-image-{}", id.0), cx));
+    assert!(h.shows_dynamic(format!("file-image-facts-{}", id.0), cx));
+
+    // Nothing to save, search or keep: it is not text.
+    h.press("ctrl-s", cx);
+    h.settle(cx);
+    assert!(h.shell(cx, |s| s.unsaved_files().is_empty()));
+
+    // Opened again, it is the same tab.
+    open_again(&h, cx, "logo.png");
+    assert_eq!(h.shell(cx, |s| s.files.len()), 1);
+
+    // Another picture in its place: it is read again when the window comes
+    // to the front.
+    picture(&file, 5, 4);
+    cx.update_window(h.window.into(), |_, window, cx| {
+        h.shell
+            .update(cx, |shell, cx| shell.check_external_changes(window, cx))
+    })
+    .unwrap();
+    wait_until(&h, cx, "the new picture", |h, cx| {
+        dimensions(h, cx) == Some((5, 4))
+    });
+}
+
+fn open_again(h: &Harness, cx: &mut TestAppContext, typed: &str) {
+    h.press_chord("cmd-shift-o", "ctrl-shift-alt-o", cx);
+    h.type_text(typed, cx);
+    h.press("enter", cx);
+    h.settle(cx);
+}
+
+#[gpui_kit::test]
+fn an_open_picture_comes_back_after_a_restart(cx: &mut TestAppContext) {
+    let (h, settings, _dir, path) = project(cx);
+    picture(&std::path::Path::new(&path).join("logo.png"), 3, 2);
+    open_by_chord(&h, cx, "logo.png");
+    open_by_chord(&h, cx, "a.txt");
+    end(&h, cx);
+
+    let second = window_in(cx, &settings);
+    wait_until(&second, cx, "both tabs", |h, cx| {
+        h.shell(cx, |s| s.files.len() == 2 && !s.restoring_files)
+    });
+    assert_eq!(dimensions(&second, cx), Some((3, 2)));
+    let mut names = second.shell(cx, |s| {
+        s.files
+            .values()
+            .map(|doc| doc.name().to_owned())
+            .collect::<Vec<_>>()
+    });
+    names.sort();
+    assert_eq!(names, ["a.txt", "logo.png"]);
+}
+
+/// What the only open file's viewport says: zoom and pan.
+fn viewport(h: &Harness, cx: &mut TestAppContext) -> (f32, (f32, f32)) {
+    h.shell(cx, |s| {
+        let doc = s.files.values().next().unwrap();
+        (doc.view.zoom, doc.view.pan)
+    })
+}
+
+#[gpui_kit::test]
+fn the_wheel_zooms_a_picture_a_drag_moves_it_and_a_double_click_fits_it(cx: &mut TestAppContext) {
+    use gpui_kit::{Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TouchPhase};
+    let (h, _settings, _dir, path) = project(cx);
+    picture(&std::path::Path::new(&path).join("logo.png"), 300, 200);
+    open_by_chord(&h, cx, "logo.png");
+    let id = h.shell(cx, |s| *s.files.keys().next().unwrap());
+    h.settle(cx);
+    let bounds = h.bounds_of(format!("viewer-{}", id.0), cx).unwrap();
+    let centre = bounds.center();
+    assert_eq!(viewport(&h, cx), (1.0, (0.0, 0.0)));
+
+    let mut visual = VisualTestContext::from_window(h.window.into(), cx);
+    let wheel = |lines: f32| ScrollWheelEvent {
+        position: centre,
+        delta: ScrollDelta::Lines(gpui_kit::point(0.0, lines)),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    };
+    visual.simulate_event(wheel(5.0));
+    let (zoom, pan) = viewport(&h, cx);
+    assert!(zoom > 1.5, "the wheel up zooms in: {zoom}");
+    assert!(pan.0.abs() < 1.0 && pan.1.abs() < 1.0, "about the centre");
+
+    let mut visual = VisualTestContext::from_window(h.window.into(), cx);
+    let to = centre + gpui_kit::point(gpui_kit::px(30.), gpui_kit::px(-10.));
+    visual.simulate_mouse_down(centre, MouseButton::Left, Modifiers::none());
+    visual.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    visual.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    let (_, pan) = viewport(&h, cx);
+    assert_eq!(pan, (30.0, -10.0));
+
+    let mut visual = VisualTestContext::from_window(h.window.into(), cx);
+    visual.simulate_event(wheel(-100.0));
+    assert!(viewport(&h, cx).0 <= 0.11, "and down zooms out, to a limit");
+    let mut visual = VisualTestContext::from_window(h.window.into(), cx);
+    visual.simulate_event(gpui_kit::MouseDownEvent {
+        position: centre,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 2,
+        first_mouse: false,
+    });
+    assert_eq!(viewport(&h, cx), (1.0, (0.0, 0.0)), "a double click fits");
+}
+
+#[gpui_kit::test]
+fn an_svg_file_is_text_with_a_page_drawn_from_it(cx: &mut TestAppContext) {
+    let (h, _settings, _dir, path) = project(cx);
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10" fill="#c00"/></svg>"##;
+    std::fs::write(std::path::Path::new(&path).join("logo.svg"), svg).unwrap();
+    open_by_chord(&h, cx, "logo.svg");
+    let id = h.shell(cx, |s| *s.files.keys().next().unwrap());
+    assert!(h.shell(cx, |s| s.files[&id].state().is_some()), "text");
+    assert!(!h.shows_dynamic(format!("preview-{}", id.0), cx));
+
+    h.press_chord("cmd-alt-v", "ctrl-shift-alt-v", cx);
+    assert_eq!(h.shell(cx, |s| s.files[&id].mode), ViewMode::Split);
+    h.settle(cx);
+    assert!(h.shows_dynamic(format!("preview-{}", id.0), cx));
+    assert!(h.shows_dynamic(format!("file-image-{}", id.0), cx));
+    assert!(h.shell(cx, |s| s.files[&id].svg.is_some()));
+
+    // The page follows the text.
+    let before = h.shell(cx, |s| s.files[&id].svg.as_ref().unwrap().id);
+    h.type_text("<!-- hi -->", cx);
+    wait_until(&h, cx, "the page to follow", |h, cx| {
+        h.shell(cx, |s| s.files[&id].svg.as_ref().unwrap().id != before)
+    });
+}

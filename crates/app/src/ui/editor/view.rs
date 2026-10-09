@@ -2,7 +2,7 @@
 
 use super::super::live::LiveId;
 use super::super::shell::Shell;
-use super::document::{Body, EditorDoc};
+use super::document::{image_format, Body, EditorDoc, Picture};
 use crate::theme::{metrics, px, Palette};
 use gpui_kit::component::input::Editor;
 use gpui_kit::prelude::*;
@@ -37,10 +37,25 @@ impl Shell {
                     .into_any_element();
                 if super::preview::is_markdown(&doc.path) {
                     self.render_markdown_body(id, doc, editor, colours, cx)
+                } else if super::preview::is_svg(&doc.path) {
+                    self.render_svg_body(id, doc, editor, colours, cx)
                 } else {
                     editor
                 }
             }
+            Body::Image(picture) => {
+                let viewer =
+                    self.render_viewer(id, picture.image.clone(), picture.dimensions, colours, cx);
+                picture_view(id, picture, viewer, colours)
+            }
+            Body::Binary(size) if image_format(&doc.path).is_some() => placeholder(
+                "image-elsewhere",
+                format!(
+                    "{} is a picture on another machine, which Leon does not show yet.",
+                    doc.name()
+                ),
+                colours,
+            ),
             Body::Binary(size) => self.placeholder_with_action(
                 id,
                 "binary",
@@ -273,6 +288,41 @@ impl Shell {
             format!("{machine} \u{b7} {}{state}", doc.path),
         )
     }
+}
+
+/// A picture under which its size in pixels and bytes are said.
+fn picture_view(
+    id: LiveId,
+    picture: &Picture,
+    viewer: AnyElement,
+    colours: &Palette,
+) -> AnyElement {
+    let facts = match picture.dimensions {
+        Some((width, height)) => {
+            format!("{width} \u{d7} {height} \u{b7} {}", size_text(picture.size))
+        }
+        None => size_text(picture.size),
+    };
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .child(div().flex_1().min_h_0().child(viewer))
+        .child(
+            div()
+                .debug_selector(move || format!("file-image-facts-{}", id.0))
+                .flex_none()
+                .px(px(12.))
+                .h(px(24.))
+                .flex()
+                .items_center()
+                .border_t_1()
+                .border_color(colours.border)
+                .text_size(metrics::TEXT_SMALL())
+                .text_color(colours.text_faint)
+                .child(facts),
+        )
+        .into_any_element()
 }
 
 /// A leaf that says what the file is instead of showing it.

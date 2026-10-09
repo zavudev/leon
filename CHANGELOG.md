@@ -1,5 +1,25 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+* A viewer for pictures. A PNG, JPEG, GIF, WebP, BMP, ICO or TIFF file on this
+  computer opens in a tab like a text file does, from the file tree, the quick
+  open, a typed path or a link in the terminal, drawn to fit the pane (never
+  larger than it is) with its size in pixels and bytes under it. It is read
+  again when the file changes on disk, and the tab comes back after a restart.
+  Pictures above 64 MB say so instead of opening. The wheel zooms about the
+  pointer, a drag moves the picture and a double click fits it again.
+  Pictures on another machine are not shown yet.
+* An SVG file stays text in the editor and, like a Markdown file, can show its
+  drawn page beside the text or instead of it (the same preview chord and
+  Edit / Split / Preview buttons); the page follows the text as it is typed
+  and zooms and pans like a picture.
+* A click on a file printed in the terminal offers **Open here**, **Open with
+  system default** and **Open folder**; Cmd or Ctrl and click opens it in
+  Leon at once, as before.
+
 ## [0.8.0] - 2026-10-09
 
 ### Added

@@ -423,12 +423,12 @@ fn a_markdown_file_goes_from_text_to_both_to_the_page_and_back(cx: &mut TestAppC
 }
 
 #[gpui_kit::test]
-fn a_file_that_is_not_markdown_has_no_preview(cx: &mut TestAppContext) {
+fn a_file_that_is_not_markdown_or_svg_has_no_preview(cx: &mut TestAppContext) {
     let (h, _dir, _file) = with_file(cx, "notes.txt", b"hello\n");
     assert!(!h.shows_dynamic("preview-toolbar-2".into(), cx));
     toggle_preview(&h, cx);
     assert_eq!(mode(&h, cx), ViewMode::Edit);
-    assert_eq!(h.status(), "Only a Markdown file has a preview.");
+    assert_eq!(h.status(), "Only a Markdown or SVG file has a preview.");
 }
 
 #[gpui_kit::test]
