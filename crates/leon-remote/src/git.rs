@@ -381,10 +381,28 @@ impl<'a, R: Runner> Git<'a, R> {
 /// command needing credentials fails instead of waiting for input nobody can
 /// give.
 pub(crate) fn git<const N: usize>(cwd: &str, args: [&str; N]) -> CommandSpec {
-    CommandSpec::new("git")
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .cwd(cwd)
+    let mut spec = CommandSpec::new("git");
+    if let Some(directory) = wsl_share_safe_directory(cwd) {
+        spec = spec.args(["-c", &format!("safe.directory={directory}")]);
+    }
+    spec.args(args).env("GIT_TERMINAL_PROMPT", "0").cwd(cwd)
+}
+
+/// The `safe.directory` value that lets Git for Windows read a repository on
+/// a WSL share, or `None` for any other path.
+///
+/// Files under `\\wsl.localhost\<distro>` (or the older `\\wsl$\<distro>`)
+/// belong to the Linux user, which Windows does not map to the Windows user,
+/// so git refuses them with "detected dubious ownership" and exits 128. Git
+/// names such a repository as `//wsl.localhost/<distro>/...`, and it accepts
+/// that name from the command line, which is the only scope where a
+/// `safe.directory` entry is honoured.
+fn wsl_share_safe_directory(cwd: &str) -> Option<String> {
+    let unified = cwd.replace('\\', "/");
+    let is_wsl = ["//wsl.localhost/", "//wsl$/"]
+        .iter()
+        .any(|prefix| unified.starts_with(prefix));
+    is_wsl.then(|| unified.trim_end_matches('/').to_owned())
 }
 
 /// Refuses a value git would read as an option. Branch names and paths come
@@ -988,6 +1006,34 @@ prunable gitdir file points to non-existent location
             PathBuf::from(r"\\?\UNC\host\share")
         );
         assert_eq!(plain_path(PathBuf::from("/tmp/x")), PathBuf::from("/tmp/x"));
+    }
+
+    #[test]
+    fn a_wsl_share_gets_a_safe_directory_and_other_paths_do_not() {
+        assert_eq!(
+            wsl_share_safe_directory(r"\\wsl.localhost\Ubuntu\home\calmizir\proyectos\zavu")
+                .as_deref(),
+            Some("//wsl.localhost/Ubuntu/home/calmizir/proyectos/zavu")
+        );
+        assert_eq!(
+            wsl_share_safe_directory(r"\\wsl$\Ubuntu\home\me\api\").as_deref(),
+            Some("//wsl$/Ubuntu/home/me/api")
+        );
+        assert_eq!(wsl_share_safe_directory(r"C:\Users\me\api"), None);
+        assert_eq!(wsl_share_safe_directory(r"\\server\share\api"), None);
+        assert_eq!(wsl_share_safe_directory("/home/me/api"), None);
+
+        let spec = git(r"\\wsl.localhost\Ubuntu\home\me\api", ["worktree", "list"]);
+        assert_eq!(
+            spec.args,
+            [
+                "-c",
+                "safe.directory=//wsl.localhost/Ubuntu/home/me/api",
+                "worktree",
+                "list"
+            ]
+        );
+        assert_eq!(git("/srv/api", ["status"]).args, ["status"]);
     }
 
     #[tokio::test]
