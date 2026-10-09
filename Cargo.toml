@@ -7,6 +7,7 @@ members = [
     "crates/leon-history",
     "crates/leon-remote",
     "crates/leon-usage",
+    "crates/leon-memory",
     "crates/leon-term",
     "crates/leon-pty",
     "crates/leon-host",
@@ -29,6 +30,7 @@ leon-core = { path = "crates/leon-core" }
 leon-history = { path = "crates/leon-history" }
 leon-remote = { path = "crates/leon-remote" }
 leon-usage = { path = "crates/leon-usage" }
+leon-memory = { path = "crates/leon-memory" }
 leon-term = { path = "crates/leon-term" }
 leon-mark = { path = "crates/leon-mark" }
 leon-den = { path = "crates/leon-den" }

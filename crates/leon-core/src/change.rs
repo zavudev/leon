@@ -25,6 +25,8 @@ pub enum StoreChange {
     Sessions,
     /// Usage readings or their history changed.
     Usage,
+    /// The memory agents share was added to, changed or forgotten.
+    Memory,
     /// Anything may have changed; re-read everything that is displayed.
     Everything,
 }

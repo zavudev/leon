@@ -321,6 +321,8 @@ pub const NOT_IN_MENUS: &[(Command, &str)] = &[
     ),
     (C::AddProject, "palette: asks for a path"),
     (C::RemoveProject, "palette and the tree's menu: needs a row"),
+    (C::EnableMemory, "palette: asks for a project"),
+    (C::DisableMemory, "palette: asks for a project"),
     (
         C::RemoveWorktree,
         "palette and the tree's menu: needs a row",

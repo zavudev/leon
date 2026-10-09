@@ -35,6 +35,9 @@ mod keys;
 mod launch;
 mod learn;
 mod logging;
+mod memory;
+mod memory_cli;
+mod memory_offer;
 mod menus;
 mod pair;
 mod platform;
@@ -97,6 +100,12 @@ fn main() {
             arguments[1..].to_vec(),
             product::data_dir(),
         ));
+    }
+
+    // `leon memory ...` is the shared memory's command line, also without a
+    // window: what agents run from a terminal of Leon.
+    if let Some((data_dir, rest)) = memory_cli::intercept(&arguments) {
+        std::process::exit(memory_cli::run(data_dir, rest));
     }
 
     let options = match cli::parse(arguments) {
@@ -245,6 +254,15 @@ fn main() {
         .with_time_limit(SLOW_COMMAND_TIME_LIMIT),
     ));
     engine.set_icon_fetcher(Arc::new(avatar::CurlFetcher));
+    // The shared memory: the engine writes the memory files below the data
+    // folder, and a terminal of this computer is told where they and this
+    // program are.
+    engine.set_memory_dir(data_dir.clone());
+    let memory_terminals = std::env::current_exe().ok().map(|bin| memory::Terminals {
+        bin,
+        default_data_dir: data_dir == product::data_dir(),
+        data_dir: data_dir.clone(),
+    });
     // What the computers paired with this one share of their own Leon: pulled
     // from their Leon through the relay into this one's store.
     engine.set_relay_hub(hub.clone());
@@ -373,6 +391,7 @@ fn main() {
                         updates: Some(update_service_in.clone()),
                         durable: durable.clone(),
                         den_cast,
+                        memory: memory_terminals.clone(),
                         ..ui::Options::default()
                     };
                     let mut shell = ui::Shell::new(engine, options, window, cx);

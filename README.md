@@ -147,6 +147,10 @@ Leon updates itself from these same releases and from nowhere else: see
 [Updates](#updates). The Linux and Windows builds have not been tried by a human
 yet (see the [changelog](CHANGELOG.md)); please report what you find.
 
+`leon memory ...` is the command line of the [memory agents share](#a-memory-the-agents-share)
+(`leon memory --help`), and `leon host ...` runs the sharing service
+([Connecting a machine](#connecting-a-machine)); neither opens a window.
+
 The agents themselves are not part of Leon: install the ones you use (`claude`,
 `codex`, `opencode`, or any of the [agents Leon knows](#agents)) on every machine
 you want to run them on.
@@ -469,6 +473,8 @@ platform (see below).
 | New project… | palette only | palette only |
 | Add a remote project by path… | palette only | palette only |
 | Remove a project | palette only | palette only |
+| Turn on agent memory for this project | palette only | palette only |
+| Turn off agent memory for this project | palette only | palette only |
 | Remove a worktree | palette only | palette only |
 | Remove merged worktrees… | palette only | palette only |
 | Remove the machine | palette only | palette only |
@@ -1501,6 +1507,61 @@ a test fails when it is stale.
   Leon never fetches an icon from the network. `crates/app/assets/ASSETS.md`
   records every mark with its source and licence.
 
+## A memory the agents share
+
+What one session decides or finds out is gone when it ends, and the next agent
+never knew it. Leon keeps a small local memory that every agent started in one
+of its terminals can read and write, for one project (with all its git
+worktrees) or for all of them:
+
+```sh
+"$LEON_BIN" memory add --kind decision "Money is integer cents: floats rounded wrong in the invoice total."
+"$LEON_BIN" memory add --topic auth/token-format "Tokens are opaque, 32 bytes."   # again later: revises it
+"$LEON_BIN" memory search cents
+"$LEON_BIN" memory show 5e8c1a07         # one entry in full
+"$LEON_BIN" memory list
+"$LEON_BIN" memory edit 5e8c1a07 --kind convention
+"$LEON_BIN" memory pin 5e8c1a07          # in full and first in the memory file
+"$LEON_BIN" memory forget 5e8c1a07       # restore brings it back for 30 days
+"$LEON_BIN" memory context               # the memory file: what an agent reads
+```
+
+A terminal of Leon on this computer has `LEON_BIN` (the running Leon; `leon` is
+not reliably on the `PATH`) and `LEON_MEMORY` (the memory file of the
+project the terminal is in). That alone changes nothing: an agent uses the
+memory once something tells it to, and **that step is yours**. Leon writes
+nothing into a project or an agent's configuration by itself.
+
+* Leon asks once when you open, clone or create a project on this computer
+  (**Turn on agent memory for …?**, with what it would write); `Enter` turns
+  it on, `Esc` is "not now", and it can be told never to ask for that project
+  or at all (Settings, Agents, **Offer agent memory when a project is added**).
+* `leon memory enable`, run in the project, or the palette's **Turn on agent
+  memory for this project**, writes a short managed block into the instruction
+  files that exist (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`; `AGENTS.md` is
+  created when there is none). The block names no path, so it can be
+  committed; outside Leon it tells the agent to ignore it. `--dry-run` shows
+  what would change, and `leon memory disable` puts every file back byte for
+  byte.
+* `leon memory enable --mcp` also registers `leon memory mcp`, an MCP server
+  with `memory_search`, `memory_get`, `memory_add`, `memory_update`, `memory_pin`,
+  `memory_list`, `memory_forget` and `memory_context`, in the project's `.mcp.json` for Claude Code, and prints
+  what to run for Codex and opencode.
+* `leon memory status` says what is on and where the files are.
+
+Entries are notes of at most 8,000 characters with a kind (`decision`,
+`convention`, `discovery`, `preference`, `note`). The memory file is a summary
+of them, not a dump: pinned entries in full, every other entry on one line
+(`memory show <id>` reads it whole), within a size you set (Settings, Agents,
+**Memory file size**; 12,000 bytes unless you say otherwise). The memory is kept from
+degrading with use: a text that is known already is not saved twice, a fact
+saved under a `--topic` is revised in place, entries can be pinned, an
+entry can be edited, and forgetting is soft (`restore`, then gone for good
+after 30 days or with `forget --hard`). They live in Leon's database
+on this computer and nowhere else; nothing is captured automatically, terminals
+on other machines do not get it, and the window has no view of it yet.
+[`docs/MEMORY.md`](docs/MEMORY.md) has the whole of it.
+
 ## Usage
 
 How much of each agent's limits is left, per machine. The footer under the main
@@ -2202,6 +2263,7 @@ exit status: a way to check the terminal against a real agent
 ## More
 
 * [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): crates, rules, the terminal.
+* [`docs/MEMORY.md`](docs/MEMORY.md): the memory agents share, its command line, the block and MCP.
 * [`docs/SETTINGS.md`](docs/SETTINGS.md) and [`docs/THEMES.md`](docs/THEMES.md): settings and themes.
 * [`docs/RELEASING.md`](docs/RELEASING.md): how a release is cut, signed and published.
 * [`docs/media/`](docs/media) and [`scripts/media/`](scripts/media): the screenshots and clips of this README, and how they are made.

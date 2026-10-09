@@ -242,6 +242,15 @@ impl Shell {
         if prefs != self.engine.prefs() {
             self.engine.set_prefs(prefs);
         }
+        // The memory files are as large as the setting says: a change of it
+        // writes them all again.
+        let budget = settings::memory_budget(cx);
+        if budget != self.engine.memory_budget() {
+            self.engine.set_memory_budget(budget);
+            self.engine.submit(crate::engine::Op::RewriteMemoryFiles);
+        }
+        self.engine
+            .set_memory_offer(settings::flag(cx, crate::memory_offer::SETTING_KEY));
         let before = self.engine.usage_policy();
         self.engine.set_usage_policy(settings::usage_policy(cx));
         self.usage_settings_changed(before, cx);

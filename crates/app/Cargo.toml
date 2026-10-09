@@ -47,6 +47,7 @@ leon-pty.workspace = true
 leon-wire.workspace = true
 leon-term.workspace = true
 leon-usage.workspace = true
+leon-memory.workspace = true
 leon-update.workspace = true
 
 chrono.workspace = true

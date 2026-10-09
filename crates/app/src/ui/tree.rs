@@ -1354,6 +1354,7 @@ mod tests {
             icons: Default::default(),
             dismissed: Vec::new(),
             statuses: Default::default(),
+            memory: Default::default(),
         }
     }
 

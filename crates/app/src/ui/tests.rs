@@ -504,6 +504,7 @@ fn open_core(
         pick_key: Rc::new(move |_| Task::ready(key_answer_in.borrow().clone())),
         ssh_dir: ssh.clone(),
         remote: None,
+        memory: None,
         updates,
         durable: DURABLE.with(|slot| slot.borrow_mut().take()),
         update_timer: false,

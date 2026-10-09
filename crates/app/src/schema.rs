@@ -655,6 +655,29 @@ const BASE: &[Def] = &[
         K::Choice(OPEN_MODES),
         D::Text("resume"),
     ),
+    def(
+        crate::memory::BUDGET_KEY,
+        S::Agents,
+        "Memory file size",
+        "The most bytes of the summary of the shared memory that an agent reads when it starts. `leon memory search` and `show` reach the rest.",
+        "memory context budget size notes agents remember bytes",
+        K::Number {
+            min: crate::memory::BUDGET_RANGE.0,
+            max: crate::memory::BUDGET_RANGE.1,
+            step: 1000,
+            unit: " bytes",
+        },
+        D::Int(crate::memory::DEFAULT_BUDGET),
+    ),
+    def(
+        crate::memory_offer::SETTING_KEY,
+        S::Agents,
+        "Offer agent memory when a project is added",
+        "Ask whether a project's agents should share Leon's memory when you open, clone or create it here. Off: nothing is asked.",
+        "memory ask question offer project add open clone agents",
+        K::Toggle,
+        D::Bool(true),
+    ),
     // ----- sessions and history
     def(
         "import_on_start",

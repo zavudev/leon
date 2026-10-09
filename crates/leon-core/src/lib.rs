@@ -35,6 +35,10 @@ pub use model::{
     Session, SessionScope, Worktree,
 };
 pub use status::{Checks, Divergence, PullRequest, Review, WorktreeStatus};
+pub use store::memory::{
+    Memory, MemoryChoice, MemoryCounts, MemoryError, MemoryHit, MemoryKind, MemoryPatch,
+    MemoryScope, NewMemory, Saved as SavedMemory,
+};
 pub use store::search::{
     fts_query, snippet_segments, SearchHit, SearchQuery, SNIPPET_ELLIPSIS, SNIPPET_END,
     SNIPPET_START,

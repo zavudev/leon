@@ -795,12 +795,20 @@ pub fn notifications(cx: &App) -> Notifications {
 pub fn start_engine(cx: &App, engine: &crate::engine::Engine) {
     engine.set_prefs(engine_prefs(cx, engine));
     engine.set_usage_policy(usage_policy(cx));
+    engine.set_memory_budget(memory_budget(cx));
+    engine.set_memory_offer(flag(cx, crate::memory_offer::SETTING_KEY));
     // Usage limits are not read here: the window starts them once it is up
     // (`Engine::start_usage`), so that the first keychain prompt, if any,
     // never comes before there is a window to read it against.
     if flag(cx, "import_on_start") {
         engine.submit(crate::engine::Op::Refresh);
     }
+}
+
+/// The size a memory file may have, in bytes: the setting, as the command
+/// line reads it from the file.
+pub fn memory_budget(cx: &App) -> usize {
+    crate::memory::budget_of(Some(int(cx, crate::memory::BUDGET_KEY)))
 }
 
 /// How many seconds between two scheduled readings of the usage limits.
