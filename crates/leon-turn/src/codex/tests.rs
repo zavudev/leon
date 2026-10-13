@@ -967,6 +967,17 @@ fn what_it_offers_is_its_servers_models_and_the_modes_of_the_protocol() {
         ]
     );
     assert_eq!(options.default_mode.as_deref(), Some("auto"));
+    // What its configuration names is what a turn runs with.
+    assert_eq!(options.default_model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(options.default_effort.as_deref(), Some("medium"));
+    // A configuration that names neither: its own choice, and how hard
+    // that one thinks unasked.
+    let unset = parse_options(&format!(
+        "{MODELS}\n{}\n",
+        r#"{"id":"leon-config","result":{"config":{"approval_policy":"on-request","sandbox_mode":"workspace-write"}}}"#
+    ));
+    assert_eq!(unset.default_model.as_deref(), Some("gpt-6.1-sol"));
+    assert_eq!(unset.default_effort.as_deref(), Some("low"));
     let models: Vec<(&str, &str, Vec<&str>)> = options
         .models
         .iter()

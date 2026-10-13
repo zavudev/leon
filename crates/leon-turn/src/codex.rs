@@ -1305,6 +1305,9 @@ pub fn parse_options(text: &str) -> AgentOptions {
         assumed: true,
         ..AgentOptions::default()
     };
+    let (mut set_model, mut set_effort) = (None::<String>, None::<String>);
+    let mut listed_model = None::<String>;
+    let mut efforts_unasked: Vec<(String, String)> = Vec::new();
     for line in text.lines() {
         let line = line.trim_end_matches('\r');
         if let Some(version) = line.strip_prefix("leon-version:") {
@@ -1318,6 +1321,26 @@ pub fn parse_options(text: &str) -> AgentOptions {
         match value["id"].as_str() {
             Some("leon-models") if result["data"].is_array() => {
                 options.assumed = false;
+                // Its own choice, and how hard each one thinks unasked.
+                let name = |model: &Value| {
+                    model["model"]
+                        .as_str()
+                        .or(model["id"].as_str())
+                        .map(str::to_owned)
+                };
+                listed_model = blocks(&result["data"])
+                    .iter()
+                    .find(|model| model["isDefault"].as_bool() == Some(true))
+                    .and_then(name);
+                efforts_unasked = blocks(&result["data"])
+                    .iter()
+                    .filter_map(|model| {
+                        Some((
+                            name(model)?,
+                            model["defaultReasoningEffort"].as_str()?.to_owned(),
+                        ))
+                    })
+                    .collect();
                 options.models = blocks(&result["data"])
                     .iter()
                     .filter(|model| model["hidden"].as_bool() != Some(true))
@@ -1335,6 +1358,7 @@ pub fn parse_options(text: &str) -> AgentOptions {
                                 .map(|effort| text_of(&effort["reasoningEffort"]))
                                 .filter(|effort| !effort.is_empty())
                                 .collect(),
+                            resolves_to: None,
                         })
                     })
                     .collect();
@@ -1367,10 +1391,27 @@ pub fn parse_options(text: &str) -> AgentOptions {
                 options.default_mode =
                     mode_named(&config["approval_policy"], &config["sandbox_mode"])
                         .map(str::to_owned);
+                let set = |value: &Value| {
+                    value
+                        .as_str()
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_owned)
+                };
+                set_model = set(&config["model"]);
+                set_effort = set(&config["model_reasoning_effort"]);
             }
             _ => {}
         }
     }
+    // What its configuration names, else its own choice.
+    options.default_model = set_model.or(listed_model);
+    options.default_effort = set_effort.or_else(|| {
+        let model = options.default_model.as_ref()?;
+        efforts_unasked
+            .iter()
+            .find(|(id, _)| id == model)
+            .map(|(_, effort)| effort.clone())
+    });
     options
 }
 

@@ -2046,8 +2046,9 @@ impl Shell {
         }
         let from_row = || match &self.rows.get(self.cursor?)?.kind {
             Kind::Live(entry) => Some(entry.id),
-            // A history session with a terminal is that terminal's row.
-            Kind::Session(session) => self.live.of_history(&session.id).map(|live| live.id),
+            // A history session with a terminal or a conversation is that
+            // one's row.
+            Kind::Session(session) => self.running_of_history(&session.id),
             _ => None,
         };
         let from_main = || match &self.main {
@@ -2316,7 +2317,10 @@ impl Shell {
                 // A session with a terminal is only brought forward; one
                 // without starts its agent, so that asks first.
                 // Reading its transcript starts nothing, so it never asks.
-                if self.live.of_history(&session.id).is_some()
+                if let Some(conversation) = self.chat_of_history(&session.id) {
+                    // Its conversation is open: this row is that one's.
+                    self.show_session(conversation, window, cx);
+                } else if self.live.of_history(&session.id).is_some()
                     || crate::settings::text(cx, "history_open") == "transcript"
                 {
                     self.open_history(session.clone(), window, cx);

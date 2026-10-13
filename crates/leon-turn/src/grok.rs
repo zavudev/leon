@@ -118,11 +118,16 @@ pub fn parse_options(text: &str) -> AgentOptions {
         let Some(id) = rest.split_whitespace().next() else {
             continue;
         };
+        // `(default)` marks the one it answers with when none is asked for.
+        if rest.contains("(default)") {
+            options.default_model = Some(id.to_owned());
+        }
         options.models.push(AgentModel {
             id: id.to_owned(),
             label: id.to_owned(),
             description: None,
             efforts: EFFORTS.iter().map(|effort| (*effort).to_owned()).collect(),
+            resolves_to: None,
         });
     }
     // Without its models nothing was heard from it: what is offered is a guess.

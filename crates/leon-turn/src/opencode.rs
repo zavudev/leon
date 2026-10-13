@@ -130,6 +130,7 @@ pub fn parse_options(text: &str) -> AgentOptions {
                     label: format!("{name} · {provider}"),
                     description: None,
                     efforts: EFFORTS.iter().map(|effort| (*effort).to_owned()).collect(),
+                    resolves_to: None,
                 });
             }
             _ => {}

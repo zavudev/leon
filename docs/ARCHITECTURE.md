@@ -1595,6 +1595,18 @@ While a list is open, `chat_key` gives it the arrows, `Ctrl+N`/`Ctrl+P`,
 where the person types. `leon-mobile` gets the same adapters and drops the
 commands at its boundary, which keeps its generated bindings as they were.
 
+**What the agent runs with.** A conversation that asked for no model and no
+effort still says which ones the next turn uses: `AgentOptions::default_model`
+and `default_effort`, read when the agent is asked what it offers. Claude Code
+answers a second request, `get_settings`, whose `applied` is the model and the
+effort after every settings file and default was weighed; Codex's
+configuration names them, or its list marks its own choice and how hard that
+one thinks unasked; Grok marks a model in its list. `AgentModel::resolves_to`
+is the model an entry stands for, so that what a turn says it answers with
+(`claude-opus-5-5`) is shown as the entry a person knows (`complete::model_named`,
+`model_shown`, `effort_shown`). A history row whose conversation is open is
+that conversation's (`Shell::running_of_history`), as it is a terminal's.
+
 **Which agents.** Claude Code, Codex, and the three that serve the Agent
 Client Protocol: opencode, Grok (`grok agent stdio`) and Cursor
 (`cursor-agent acp`). The last three share `leon_turn::acp`; a `Dialect` says

@@ -921,7 +921,7 @@ impl Shell {
             .iter()
             .filter(|stored| self.slept.contains(&stored.id))
             // One that runs again is in the room, not at home.
-            .filter(|stored| self.live.of_history(&stored.id).is_none())
+            .filter(|stored| self.running_of_history(&stored.id).is_none())
             .map(|stored| {
                 (
                     Home::Slept(stored.id.clone()),
