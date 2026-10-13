@@ -211,7 +211,7 @@ impl Shell {
             // A history row is one terminal's: never two.
             let history = item
                 .history
-                .filter(|row| self.live.of_history(row).is_none());
+                .filter(|row| self.running_of_history(row).is_none());
             if let Some(session) = self.live.get_mut(LiveId(item.id)) {
                 // An id already learned keeps how it was learned.
                 if item.how != "id" {

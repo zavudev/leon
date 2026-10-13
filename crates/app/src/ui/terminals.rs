@@ -1703,12 +1703,7 @@ impl Shell {
         // Waking it ends its sleep.
         self.slept.remove(&session.id);
         // One terminal per history session: look at the one that has it.
-        if let Some(running) = self
-            .live
-            .of_history(&session.id)
-            .map(|live| live.id)
-            .or_else(|| self.chat_of_history(&session.id))
-        {
+        if let Some(running) = self.running_of_history(&session.id) {
             self.show_session(running, window, cx);
             return;
         }
@@ -1765,7 +1760,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         // Asked twice while it was being checked: it is running here now.
-        if let Some(running) = self.live.of_history(&session.id).map(|live| live.id) {
+        if let Some(running) = self.running_of_history(&session.id) {
             self.show_session(running, window, cx);
             return;
         }
@@ -1843,7 +1838,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(running) = self.live.of_history(&session.id).map(|live| live.id) {
+        if let Some(running) = self.running_of_history(&session.id) {
             self.show_session(running, window, cx);
             return;
         }
@@ -1884,7 +1879,7 @@ impl Shell {
             );
             return;
         }
-        if let Some(running) = self.live.of_history(&session.id).map(|live| live.id) {
+        if let Some(running) = self.running_of_history(&session.id) {
             self.show_session(running, window, cx);
             return;
         }
@@ -2087,7 +2082,7 @@ impl Shell {
         match found {
             Target::Ready => {
                 // Asked twice while it was being checked: it is running now.
-                if let Some(running) = self.live.of_history(&session.id).map(|live| live.id) {
+                if let Some(running) = self.running_of_history(&session.id) {
                     self.show_session(running, window, cx);
                     return;
                 }
@@ -2164,9 +2159,7 @@ impl Shell {
             },
             Pane::Sidebar => match &self.rows.get(self.cursor?)?.kind {
                 tree::Kind::Live(entry) => Some(entry.id),
-                tree::Kind::Session(session) => {
-                    self.live.of_history(&session.id).map(|live| live.id)
-                }
+                tree::Kind::Session(session) => self.running_of_history(&session.id),
                 _ => None,
             },
             Pane::Files => None,

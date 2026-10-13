@@ -447,6 +447,26 @@ fn a_conversation_and_the_session_its_agent_wrote_are_one_row(cx: &mut TestAppCo
         h.shows("tree-live-led-1", cx),
         "the row carries the conversation's light"
     );
+
+    // Looked away from and come back to by that row, it is the conversation
+    // again: nothing asks to resume what never stopped.
+    let row = h.row_of(NodeId::Session(session.clone()), cx).unwrap();
+    cx.update_window(h.window.into(), |_, window, cx| {
+        h.shell.update(cx, |shell, cx| {
+            shell.main = Main::Empty;
+            shell.activate(row, window, cx);
+        })
+    })
+    .unwrap();
+    h.settle(cx);
+    assert_eq!(h.main_kind(cx), "live:1");
+    assert_eq!(h.shell(cx, |shell| shell.overlay), Overlay::None);
+    h.shell(cx, |shell| {
+        assert_eq!(shell.chats.len(), 1);
+        assert!(shell.live.all().is_empty(), "no terminal was started");
+        // The keys that act on the session under the cursor find it too.
+        assert_eq!(shell.running_of_history(&session), Some(LiveId(1)));
+    });
 }
 
 #[gpui_kit::test]
