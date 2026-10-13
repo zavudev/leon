@@ -628,6 +628,10 @@ pub struct AgentModel {
     /// The efforts it can be asked for, the lightest first; none when it has
     /// no such setting.
     pub efforts: Vec<String>,
+    /// The model this entry stands for, where the id is a name of the
+    /// agent's for it (`opus` for `claude-opus-5-5`): what a turn says it
+    /// answers with.
+    pub resolves_to: Option<String>,
 }
 
 /// Something of the agent's own that a prompt can ask for by name: a
@@ -673,6 +677,11 @@ pub struct AgentOptions {
     pub default_mode: Option<String>,
     /// Its models. A turn started with none uses that computer's default.
     pub models: Vec<AgentModel>,
+    /// The model a turn answers with when none is asked for, when known: an
+    /// id of [`Self::models`] where it is one of them.
+    pub default_model: Option<String>,
+    /// The effort a turn thinks with when none is asked for, when known.
+    pub default_effort: Option<String>,
     /// What a prompt can ask it for by name, as it lists them.
     pub commands: Vec<AgentCommand>,
     /// It asks before acting and waits for an answer.
@@ -688,17 +697,24 @@ pub struct AgentOptions {
 }
 
 /// The command that asks Claude Code what it offers: its version, the modes
-/// its help lists, and the answer to the opening request. `$1` is the
-/// program and `$2` the request.
-pub const OPTIONS_SCRIPT: &str = r#"printf 'leon-version:%s\n' "$("$1" --version 2>/dev/null | head -n 1)"
-"$1" --help 2>/dev/null | tr -s ' \n' ' ' | sed -n 's/.*--permission-mode <mode>[^(]*(choices: \([^)]*\)).*/leon-modes:\1/p'
+/// its help lists, and the answers to the requests it is given. `$1` is the
+/// program and what follows are the requests, one a line.
+pub const OPTIONS_SCRIPT: &str = r#"program=$1; shift
+printf 'leon-version:%s\n' "$("$program" --version 2>/dev/null | head -n 1)"
+"$program" --help 2>/dev/null | tr -s ' \n' ' ' | sed -n 's/.*--permission-mode <mode>[^(]*(choices: \([^)]*\)).*/leon-modes:\1/p'
 echo
-printf '%s\n' "$2" | "$1" -p --input-format stream-json --output-format stream-json --verbose --no-session-persistence 2>/dev/null
+printf '%s\n' "$@" | "$program" -p --input-format stream-json --output-format stream-json --verbose --no-session-persistence 2>/dev/null
 exit 0"#;
 
-/// What [`OPTIONS_SCRIPT`] is given after the program: the opening request.
+/// What [`OPTIONS_SCRIPT`] is given after the program: the opening request,
+/// whose answer lists what it offers, and the request for its settings,
+/// whose answer says what a turn would run with (`applied`: the model and
+/// the effort, after every file and default was weighed).
 pub fn options_arguments() -> Vec<String> {
-    vec![hello("leon-options")]
+    vec![
+        hello("leon-options"),
+        control_request("leon-settings", json!({ "subtype": "get_settings" })),
+    ]
 }
 
 /// Reads the output of [`OPTIONS_SCRIPT`].
@@ -709,6 +725,8 @@ pub fn parse_options(text: &str) -> AgentOptions {
         live_changes: true,
         ..AgentOptions::default()
     };
+    // The model a turn would run with, and the one the settings name.
+    let (mut applied, mut chosen) = (None::<String>, None::<String>);
     for line in text.lines() {
         let line = line.trim_end_matches('\r');
         if let Some(version) = line.strip_prefix("leon-version:") {
@@ -725,6 +743,19 @@ pub fn parse_options(text: &str) -> AgentOptions {
                 continue;
             }
             let answer = &value["response"]["response"];
+            // The answer about its settings: what a turn would run with.
+            if answer["applied"].is_object() {
+                applied = answer["applied"]["model"].as_str().map(str::to_owned);
+                chosen = answer["effective"]["model"].as_str().map(str::to_owned);
+                options.default_effort = answer["applied"]["effort"]
+                    .as_str()
+                    .filter(|effort| !effort.is_empty())
+                    .map(str::to_owned);
+                continue;
+            }
+            if !answer["models"].is_array() {
+                continue;
+            }
             options.default_mode = answer["current_permission_mode"]
                 .as_str()
                 .map(str::to_owned);
@@ -743,6 +774,10 @@ pub fn parse_options(text: &str) -> AgentOptions {
                             .iter()
                             .map(text_of)
                             .collect(),
+                        resolves_to: model["resolvedModel"]
+                            .as_str()
+                            .filter(|name| !name.is_empty())
+                            .map(str::to_owned),
                     })
                 })
                 .collect();
@@ -759,6 +794,27 @@ pub fn parse_options(text: &str) -> AgentOptions {
                 .collect();
         }
     }
+    options.default_model = applied.map(|applied| {
+        // The entry a person would know it by: the one their settings name,
+        // else the first that is that model and not "whatever is default".
+        let stands_for = |model: &&AgentModel| {
+            model.resolves_to.as_deref() == Some(applied.as_str()) || model.id == applied
+        };
+        options
+            .models
+            .iter()
+            .filter(stands_for)
+            .find(|model| Some(&model.id) == chosen.as_ref())
+            .or_else(|| {
+                options
+                    .models
+                    .iter()
+                    .filter(stands_for)
+                    .find(|model| model.id != "default")
+            })
+            .or_else(|| options.models.iter().find(stands_for))
+            .map_or(applied.clone(), |model| model.id.clone())
+    });
     if options.modes.is_empty() {
         options.assumed = true;
         options.modes = ["default", "acceptEdits", "plan", "bypassPermissions"]
@@ -1413,6 +1469,102 @@ leon-modes:\"acceptEdits\", \"auto\", \"bypassPermissions\", \"manual\", \"dontA
         assert!(options.models[1].efforts.is_empty());
         assert!(options.questions && options.follow_ups && options.live_changes);
         assert!(!options.assumed);
+    }
+
+    /// What Claude Code 2.1.296 answered, cut to what is read: its models,
+    /// then its settings as it weighed them.
+    const OFFERED: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"leon-options","response":{"models":[{"value":"default","resolvedModel":"claude-opus-5-5","displayName":"Default (recommended)","supportedEffortLevels":["low","medium","high"]},{"value":"opus","resolvedModel":"claude-opus-5-5","displayName":"Opus 5.5","supportedEffortLevels":["low","medium","high"]},{"value":"fable","resolvedModel":"claude-fable-5-1","displayName":"Fable 5.1","supportedEffortLevels":["low","medium","high"]}],"current_permission_mode":"auto"}}}"#;
+
+    fn settings(effective: &str, applied: &str) -> String {
+        format!(
+            r#"{{"type":"control_response","response":{{"subtype":"success","request_id":"leon-settings","response":{{"effective":{effective},"sources":[],"applied":{applied}}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn what_a_turn_would_run_with_is_asked_and_named_as_a_person_knows_it() {
+        // Both requests are written, each on its line.
+        let asked = options_arguments();
+        assert_eq!(asked.len(), 2);
+        assert!(asked[0].contains(r#""subtype":"initialize""#));
+        assert!(asked[1].contains(r#""subtype":"get_settings""#));
+        assert!(asked.iter().all(|line| !line.contains('\n')));
+
+        // The settings name a model: that entry, not "whatever is default".
+        let text = format!(
+            "{OFFERED}\n{}\n",
+            settings(
+                r#"{"model":"opus"}"#,
+                r#"{"model":"claude-opus-5-5","effort":"medium"}"#
+            )
+        );
+        let options = parse_options(&text);
+        assert_eq!(
+            options.models.len(),
+            3,
+            "the settings are not a list of models"
+        );
+        assert_eq!(options.default_mode.as_deref(), Some("auto"));
+        assert_eq!(options.default_model.as_deref(), Some("opus"));
+        assert_eq!(options.default_effort.as_deref(), Some("medium"));
+        assert_eq!(
+            options.models[0].resolves_to.as_deref(),
+            Some("claude-opus-5-5")
+        );
+
+        // They name none: the entry that is that model.
+        let unnamed = format!(
+            "{OFFERED}\n{}\n",
+            settings("{}", r#"{"model":"claude-fable-5-1","effort":"high"}"#)
+        );
+        let options = parse_options(&unnamed);
+        assert_eq!(options.default_model.as_deref(), Some("fable"));
+        assert_eq!(options.default_effort.as_deref(), Some("high"));
+
+        // A model it does not list is still what it runs with.
+        let own = format!(
+            "{OFFERED}\n{}\n",
+            settings(
+                r#"{"model":"my-model"}"#,
+                r#"{"model":"my-model","effort":null}"#
+            )
+        );
+        let options = parse_options(&own);
+        assert_eq!(options.default_model.as_deref(), Some("my-model"));
+        assert_eq!(options.default_effort, None);
+
+        // An older Claude Code that does not answer for its settings.
+        let options = parse_options(&format!("{OFFERED}\n"));
+        assert_eq!(options.default_model, None);
+        assert_eq!(options.default_effort, None);
+    }
+
+    /// The script itself, with a stand-in that says what it was written.
+    #[cfg(unix)]
+    #[test]
+    fn the_script_writes_every_request_to_the_agent() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("claude");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\ncase \"$1\" in --version) echo '9.9 (Stand-in)';; --help) echo;; *) sed 's/^/got:/';; esac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", OPTIONS_SCRIPT, "leon"])
+            .arg(&program)
+            .args(options_arguments())
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.contains("leon-version:9.9 (Stand-in)"), "{text}");
+        let got: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("got:"))
+            .collect();
+        assert_eq!(got, options_arguments());
     }
 
     #[test]

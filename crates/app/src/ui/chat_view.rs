@@ -766,16 +766,14 @@ impl Shell {
             let current = chat.mode.as_ref().or(options.default_mode.as_ref())?;
             options.modes.iter().find(|mode| &mode.id == current)
         });
-        let model = chat
-            .model
-            .as_ref()
-            .or(chat.conversation.model.as_ref())
-            .map(|model| {
-                chat.options
-                    .as_ref()
-                    .and_then(|options| options.models.iter().find(|have| &have.id == model))
-                    .map_or_else(|| model.clone(), |found| found.label.clone())
-            });
+        // What the next turn runs with: what was asked for here, else what
+        // the agent itself is set up with. "Default" is only said while
+        // nothing is known of the agent yet.
+        let model = crate::chat::complete::model_shown(
+            chat.options.as_ref(),
+            chat.model.as_deref(),
+            chat.conversation.model.as_deref(),
+        );
         let can_pick_mode = chat
             .options
             .as_ref()
@@ -809,7 +807,9 @@ impl Shell {
             );
         }
         if !chat.efforts().is_empty() {
-            let label = chat.effort.as_deref().map_or_else(
+            let effort =
+                crate::chat::complete::effort_shown(chat.options.as_ref(), chat.effort.as_deref());
+            let label = effort.map_or_else(
                 || "DEFAULT EFFORT".to_owned(),
                 |effort| {
                     format!(

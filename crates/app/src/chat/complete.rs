@@ -244,9 +244,14 @@ pub fn mode_rows(query: &str, options: &AgentOptions, current: Option<&str>) -> 
 /// The agent's models that answer `query`, after the agent's own choice;
 /// `current` is the one the conversation asked for, if it asked.
 pub fn model_rows(query: &str, options: &AgentOptions, current: Option<&str>) -> Vec<Row> {
+    // What "default" is, where the agent said.
+    let own = model_shown(Some(options), None, None);
     let mut rows = vec![Row {
         label: "Default".to_owned(),
-        detail: Some("The one the agent is set up with on this computer.".to_owned()),
+        detail: Some(match own {
+            Some(own) => format!("{own}: the one the agent is set up with."),
+            None => "The one the agent is set up with.".to_owned(),
+        }),
         note: None,
         current: current.is_none(),
         warn: false,
@@ -269,25 +274,81 @@ pub fn model_rows(query: &str, options: &AgentOptions, current: Option<&str>) ->
     rows
 }
 
+/// The model of the agent's list that `name` is: the one with that id, or
+/// one that stands for it (`opus` for `claude-opus-5-5`, which is what a
+/// turn says it answers with). Among several that stand for it, the agent's
+/// own choice, then one that is not "whatever is default".
+pub fn model_named<'a>(options: &'a AgentOptions, name: &str) -> Option<&'a AgentModel> {
+    let by_id = options.models.iter().find(|model| model.id == name);
+    let stands_for = |model: &&AgentModel| model.resolves_to.as_deref() == Some(name);
+    by_id
+        .or_else(|| {
+            options
+                .models
+                .iter()
+                .filter(stands_for)
+                .find(|model| Some(&model.id) == options.default_model.as_ref())
+        })
+        .or_else(|| {
+            options
+                .models
+                .iter()
+                .filter(stands_for)
+                .find(|model| model.id != "default")
+        })
+        .or_else(|| options.models.iter().find(stands_for))
+}
+
 /// The model a turn would answer with: the one `asked` for, else the one the
-/// agent says is `answering`, else the first it lists, which is its own
-/// choice wherever it marks one.
+/// agent says is `answering`, else the one it is set up with, else the first
+/// it lists, which is its own choice wherever it marks one.
 pub fn model_in_use<'a>(
     options: &'a AgentOptions,
     asked: Option<&str>,
     answering: Option<&str>,
 ) -> Option<&'a AgentModel> {
-    let named = |id: Option<&str>| {
-        options
-            .models
-            .iter()
-            .find(|model| Some(model.id.as_str()) == id)
-    };
     match asked {
         // One asked for that is not listed has no efforts anybody knows of.
-        Some(_) => named(asked),
-        None => named(answering).or(options.models.first()),
+        Some(asked) => options.models.iter().find(|model| model.id == asked),
+        None => answering
+            .and_then(|name| model_named(options, name))
+            .or_else(|| {
+                options
+                    .default_model
+                    .as_deref()
+                    .and_then(|name| model_named(options, name))
+            })
+            .or(options.models.first()),
     }
+}
+
+/// The name of the model the next turn answers with, for whoever looks at
+/// the conversation: the one asked for, else the one the last turn said it
+/// answered with, else the one the agent is set up with. A model nobody
+/// lists is named as it is written. `None` until anything is known.
+pub fn model_shown(
+    options: Option<&AgentOptions>,
+    asked: Option<&str>,
+    answering: Option<&str>,
+) -> Option<String> {
+    let label = |name: &str| {
+        options
+            .and_then(|options| model_named(options, name))
+            .map_or_else(|| name.to_owned(), |model| model.label.clone())
+    };
+    asked
+        .or(answering)
+        .or(options.and_then(|options| options.default_model.as_deref()))
+        .map(label)
+}
+
+/// The effort the next turn thinks with: the one asked for, else the one the
+/// agent is set up with. `None` when neither is known.
+pub fn effort_shown<'a>(
+    options: Option<&'a AgentOptions>,
+    asked: Option<&'a str>,
+) -> Option<&'a str> {
+    asked.or(options.and_then(|options| options.default_effort.as_deref()))
 }
 
 /// The efforts a turn can be asked for, the lightest first: those of
@@ -331,10 +392,18 @@ fn effort_detail(effort: &str) -> Option<&'static str> {
 
 /// The efforts that answer `query`, the lightest first, after the agent's
 /// own choice; `current` is the one the conversation asked for, if it asked.
-pub fn effort_rows(query: &str, efforts: &[String], current: Option<&str>) -> Vec<Row> {
+pub fn effort_rows(
+    query: &str,
+    efforts: &[String],
+    current: Option<&str>,
+    own: Option<&str>,
+) -> Vec<Row> {
     let mut rows = vec![Row {
         label: "Default".to_owned(),
-        detail: Some("As the agent is set up on this computer.".to_owned()),
+        detail: Some(match own {
+            Some(own) => format!("{}: as the agent is set up.", effort_label(own)),
+            None => "As the agent is set up.".to_owned(),
+        }),
         note: None,
         current: current.is_none(),
         warn: false,
@@ -522,16 +591,100 @@ mod tests {
                     label: "Opus".into(),
                     description: None,
                     efforts: vec!["low".into(), "high".into(), "xhigh".into()],
+                    resolves_to: Some("claude-opus-5-5".into()),
                 },
                 AgentModel {
                     id: "anthropic/claude-haiku".into(),
                     label: "claude-haiku · anthropic".into(),
                     description: None,
                     efforts: Vec::new(),
+                    resolves_to: None,
                 },
             ],
             ..AgentOptions::default()
         }
+    }
+
+    /// The same agent, set up to answer with its first model at high effort.
+    fn set_up() -> AgentOptions {
+        AgentOptions {
+            default_model: Some("opus".into()),
+            default_effort: Some("high".into()),
+            ..options()
+        }
+    }
+
+    #[test]
+    fn what_is_shown_is_what_the_agent_runs_with_until_something_else_is_asked_for() {
+        let set_up = set_up();
+        // Nothing asked for, no turn yet: the agent's own.
+        assert_eq!(
+            model_shown(Some(&set_up), None, None).as_deref(),
+            Some("Opus")
+        );
+        assert_eq!(effort_shown(Some(&set_up), None), Some("high"));
+        // What a turn says it answers with is the model's own name: it is
+        // shown as the entry a person knows it by.
+        assert_eq!(
+            model_shown(Some(&set_up), None, Some("claude-opus-5-5")).as_deref(),
+            Some("Opus")
+        );
+        // What is asked for here stands before both.
+        assert_eq!(
+            model_shown(
+                Some(&set_up),
+                Some("anthropic/claude-haiku"),
+                Some("claude-opus-5-5")
+            )
+            .as_deref(),
+            Some("claude-haiku \u{b7} anthropic")
+        );
+        assert_eq!(effort_shown(Some(&set_up), Some("low")), Some("low"));
+        // A model nobody lists is named as it is written.
+        assert_eq!(
+            model_shown(Some(&set_up), None, Some("my-model")).as_deref(),
+            Some("my-model")
+        );
+        // An agent that said nothing of how it is set up: nothing to show.
+        assert_eq!(model_shown(Some(&options()), None, None), None);
+        assert_eq!(effort_shown(Some(&options()), None), None);
+        assert_eq!(model_shown(None, None, None), None);
+    }
+
+    #[test]
+    fn the_efforts_offered_are_those_of_the_model_the_agent_runs_with() {
+        // Set up with a model that has none, nothing asked for.
+        let plain = AgentOptions {
+            default_model: Some("anthropic/claude-haiku".into()),
+            ..options()
+        };
+        assert!(efforts(Some(&plain), None, None).is_empty());
+        assert_eq!(efforts(Some(&set_up()), None, None).len(), 3);
+        // The model a turn answered with, by its own name.
+        assert_eq!(
+            model_in_use(&plain, None, Some("claude-opus-5-5")).map(|model| model.id.as_str()),
+            Some("opus")
+        );
+    }
+
+    #[test]
+    fn the_lists_say_what_default_is() {
+        let set_up = set_up();
+        assert_eq!(
+            model_rows("", &set_up, None)[0].detail.as_deref(),
+            Some("Opus: the one the agent is set up with.")
+        );
+        assert_eq!(
+            model_rows("", &options(), None)[0].detail.as_deref(),
+            Some("The one the agent is set up with.")
+        );
+        let listed = efforts(Some(&set_up), None, None);
+        assert_eq!(
+            effort_rows("", listed, None, Some("high"))[0]
+                .detail
+                .as_deref(),
+            Some("High: as the agent is set up.")
+        );
     }
 
     fn labels(rows: &[Row]) -> Vec<&str> {
@@ -663,19 +816,19 @@ mod tests {
         assert!(of(Some("gone"), None).is_empty());
         assert!(efforts(None, None, None).is_empty());
 
-        let rows = effort_rows("", &of(None, None), Some("high"));
+        let rows = effort_rows("", &of(None, None), Some("high"), None);
         assert_eq!(labels(&rows), ["Default", "Low", "High", "Extra high"]);
         assert!(rows[2].current && !rows[0].current);
         assert_eq!(rows[0].pick, Pick::Effort(None));
         assert_eq!(rows[3].pick, Pick::Effort(Some("xhigh".into())));
-        assert!(effort_rows("", &of(None, None), None)[0].current);
+        assert!(effort_rows("", &of(None, None), None, None)[0].current);
         // By its words, or by the word the agent has for it.
         assert_eq!(
-            labels(&effort_rows("extra", &of(None, None), None)),
+            labels(&effort_rows("extra", &of(None, None), None, None)),
             ["Extra high"]
         );
         assert_eq!(
-            labels(&effort_rows("xh", &of(None, None), None)),
+            labels(&effort_rows("xh", &of(None, None), None, None)),
             ["Extra high"]
         );
         assert_eq!(effort_label("minimal"), "Minimal");
