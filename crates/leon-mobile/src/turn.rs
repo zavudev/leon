@@ -285,7 +285,7 @@ impl Bridged {
         let mut step = Step::default();
         let mut start = 0;
         for at in 0..=bytes.len() {
-            if at < bytes.len() && bytes[at] != 0x1E {
+            if at < bytes.len() && bytes[at] != leon_turn::bridge::CLOSE {
                 continue;
             }
             let end = (at + 1).min(bytes.len());
@@ -412,7 +412,7 @@ mod tests {
     }
 
     fn ready_line(line: &str) -> Vec<u8> {
-        format!("\x1eleon-ready\x1e{line}\r\n").into_bytes()
+        format!("\x1b]5379;leon-ready\x07{line}\r\n").into_bytes()
     }
 
     #[test]
@@ -429,7 +429,7 @@ mod tests {
             .data(b"Welcome to zsh\r\n{\"type\":\"result\"}\r\n", now)
             .write
             .is_empty());
-        let effects = engine.data(b"\x1eleon-ready\x1e", now);
+        let effects = engine.data(b"\x1b]5379;leon-ready\x07", now);
         assert_eq!(numbers(&effects.write), [1001, 1002]);
         let written = text(&effects.write);
         assert!(written.contains("\"subtype\":\"initialize\""));
@@ -449,7 +449,7 @@ mod tests {
         assert_eq!(engine.unsent(), 1);
         // Nothing more is written while its acknowledgement is awaited.
         assert!(engine.tick(now + Duration::from_secs(1)).write.is_empty());
-        let acked = engine.data(b"\x1eleon-ack:51:a.q1\x1e", now);
+        let acked = engine.data(b"\x1b]5379;leon-ack:51:a.q1\x07", now);
         assert_eq!(
             acked.events,
             [TurnEvent::QuestionResolved { id: "q1".into() }]
@@ -486,7 +486,7 @@ mod tests {
         let again = engine.tick(now + RESEND_AFTER);
         assert_eq!(numbers(&again.write), [51]);
         // The bridge says it arrived damaged: at once.
-        let damaged = engine.data(b"\x1eleon-nak:51\x1e", now + RESEND_AFTER);
+        let damaged = engine.data(b"\x1b]5379;leon-nak:51\x07", now + RESEND_AFTER);
         assert_eq!(numbers(&damaged.write), [51]);
         // Written while the connection was dropping: again when it is back.
         engine.disconnected();
@@ -505,7 +505,7 @@ mod tests {
         ));
         assert_eq!(text(&done.write), "X 51\n");
         assert!(engine
-            .data(b"\x1eleon-ack:51:end\x1e", now)
+            .data(b"\x1b]5379;leon-ack:51:end\x07", now)
             .write
             .is_empty());
         assert!(engine.tick(now + Duration::from_secs(30)).write.is_empty());
@@ -524,7 +524,7 @@ mod tests {
         // serve, refused by the first process, acknowledged; then a question
         // answered and acknowledged; then one still open.
         let replay = format!(
-            "noise\r\n\x1eleon-ready\x1e{}\r\n\x1eleon-ack:7:r.h1\x1e{ASK}\r\n\x1eleon-ack:8:a.q1\x1e{}\r\n",
+            "noise\r\n\x1b]5379;leon-ready\x07{}\r\n\x1b]5379;leon-ack:7:r.h1\x07{ASK}\r\n\x1b]5379;leon-ack:8:a.q1\x07{}\r\n",
             r#"{"type":"control_request","request_id":"h1","request":{"subtype":"hook_callback"}}"#,
             ASK.replace("q1", "q2").replace("t1", "t2"),
         );

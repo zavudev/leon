@@ -65,7 +65,7 @@ pub async fn run(spec: &ExecSpec, timeout_ms: Option<u32>) -> Result<ExecOutput,
         .map(|ms| Duration::from_millis(u64::from(ms)))
         .unwrap_or(DEFAULT_TIMEOUT)
         .min(MAX_TIMEOUT);
-    let mut command = child(&spec.program);
+    let mut command = child(leon_pty::spec::program(&spec.program));
     command
         .args(&spec.args)
         .envs(spec.env.iter().map(|(name, value)| (name, value)))
@@ -78,7 +78,7 @@ pub async fn run(spec: &ExecSpec, timeout_ms: Option<u32>) -> Result<ExecOutput,
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     if let Some(cwd) = &spec.cwd {
-        command.current_dir(cwd);
+        command.current_dir(leon_pty::spec::folder(cwd));
     }
     let mut child = command.spawn().map_err(|error| WireError {
         code: ErrorCode::SpawnFailed,

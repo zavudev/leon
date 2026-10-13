@@ -387,10 +387,10 @@ mod tests {
         }
     }
 
-    const READY: &[u8] = b"\x1eleon-ready\x1e";
+    const READY: &[u8] = b"\x1b]5379;leon-ready\x07";
 
     fn ack(seq: u64) -> Vec<u8> {
-        format!("\x1eleon-ack:{seq}:m\x1e").into_bytes()
+        format!("\x1b]5379;leon-ack:{seq}:m\x07").into_bytes()
     }
 
     #[test]
@@ -521,7 +521,7 @@ mod tests {
         assert_eq!(link.write(now + Duration::from_secs(1)), None);
         assert_eq!(link.write(now + RESEND_AFTER), Some(first.clone()));
         // One that arrived broken is not waited for.
-        link.heard(b"\x1eleon-nak:1\x1e");
+        link.heard(b"\x1b]5379;leon-nak:1\x07");
         assert_eq!(link.write(now + RESEND_AFTER), Some(first));
     }
 
@@ -562,7 +562,7 @@ mod tests {
         link.write(now);
         link.heard(&ack(1));
         assert_eq!(link.write(now), Some(b"X 2\n".to_vec()));
-        link.heard(b"\x1eleon-ack:2:end\x1e");
+        link.heard(b"\x1b]5379;leon-ack:2:end\x07");
         assert_eq!(link.waiting(), 0);
     }
 }

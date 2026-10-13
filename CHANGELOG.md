@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+* A conversation started from the phone on a Windows computer now starts.
+  The computer could not find `sh` ("cannot start sh: … El sistema no puede
+  encontrar el archivo especificado"); it now uses the one Git for Windows
+  installs when `PATH` has none. The marks the agent's terminal answers with
+  are now written in a form the Windows pseudo-console passes on, and a
+  folder the phone learnt as `/c/Users/…` is started in as `C:/Users/…`.
+
 ## [0.10.0] - 2026-10-13
 
 ### Added

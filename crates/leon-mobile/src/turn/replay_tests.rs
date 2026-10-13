@@ -33,7 +33,7 @@ mod codex {
         // The first process wrote `turn/start` (acknowledged), was asked,
         // and went away.
         let replay = format!(
-            "mise noise\r\n\x1eleon-ready\x1e{{\"id\":\"leon-init\",\"result\":{{}}}}\r\n{THREAD}\r\n\x1eleon-ack:5:h.turn\x1e{TURN}\r\n{COMMAND}\r\n{ASK_COMMAND}\r\n"
+            "mise noise\r\n\x1b]5379;leon-ready\x07{{\"id\":\"leon-init\",\"result\":{{}}}}\r\n{THREAD}\r\n\x1b]5379;leon-ack:5:h.turn\x07{TURN}\r\n{COMMAND}\r\n{ASK_COMMAND}\r\n"
         );
         let mut engine = Engine::attached(fresh(), 9000, replay.len() as u64, now);
         let read = engine.data(replay.as_bytes(), now);
@@ -55,7 +55,7 @@ mod codex {
 
         // The same turn, its `turn/start` never acknowledged: once caught up,
         // the question in its place is what gets written.
-        let replay = format!("\x1eleon-ready\x1e{THREAD}\r\n");
+        let replay = format!("\x1b]5379;leon-ready\x07{THREAD}\r\n");
         let mut engine = Engine::attached(fresh(), 9000, replay.len() as u64, now);
         let read = engine.data(replay.as_bytes(), now);
         let written: String = read
@@ -88,7 +88,7 @@ mod opencode {
         // The first process wrote the prompt (acknowledged), was asked, and
         // went away.
         let replay = format!(
-            "shell noise\r\n\x1eleon-ready\x1e{}\r\n{}\r\n\x1eleon-ack:5:h.turn\x1e{}\r\n",
+            "shell noise\r\n\x1b]5379;leon-ready\x07{}\r\n{}\r\n\x1b]5379;leon-ack:5:h.turn\x07{}\r\n",
             lines[0],
             lines[1],
             lines[2..=asked].join("\r\n")
@@ -113,7 +113,7 @@ mod opencode {
 
         // The same turn, its prompt never acknowledged: once caught up, the
         // question in its place is what gets written.
-        let replay = format!("\x1eleon-ready\x1e{}\r\n{}\r\n", lines[0], lines[1]);
+        let replay = format!("\x1b]5379;leon-ready\x07{}\r\n{}\r\n", lines[0], lines[1]);
         let mut engine = Engine::attached(fresh(), 9000, replay.len() as u64, now);
         let read = engine.data(replay.as_bytes(), now);
         let written: String = read

@@ -35,14 +35,20 @@
 //!   given to the bridge as arguments: it is then delivered whether or not
 //!   the client stays connected after starting the turn.
 //!
-//! Marks are written between two record separators (0x1E), a byte no JSON
-//! line holds unescaped, without a line end of their own: [`Marks`] takes
-//! them out of the output wherever they fall, even inside a line the agent
-//! was printing.
+//! Marks are written as an operating system command of their own
+//! (`ESC ]5379;… BEL`), without a line end: ESC and BEL are bytes no JSON
+//! line holds unescaped, terminals ignore a command they do not know, and
+//! the Windows pseudo-console passes it on (it drops a lone control byte
+//! such as a record separator). [`Marks`] takes them out of the output
+//! wherever they fall, even inside a line the agent was printing.
 
-/// The byte around a mark.
-const FENCE: u8 = 0x1E;
-/// A mark is short; a fence followed by more than this is not one.
+/// The byte that opens a mark.
+const OPEN: u8 = 0x1B;
+/// The byte that closes a mark.
+pub const CLOSE: u8 = 0x07;
+/// What follows [`OPEN`] in a mark.
+const PREFIX: &str = "]5379;";
+/// A mark is short; an opening followed by more than this is not one.
 const MARK_MAX: usize = 200;
 /// The most bytes of a message on one terminal line. With the header it
 /// stays far below the 4096 bytes a terminal hands over at once.
@@ -72,7 +78,7 @@ trap 'exit 129' HUP
 trap 'exit 143' TERM
 (
     printf '%s' "$init"
-    printf '\036leon-ready\036' >&3
+    printf '\033]5379;leon-ready\007' >&3
     last=0; cur=; buf=; count=0
     while IFS= read -r line <&4; do
         kind=${line%% *}; rest=${line#* }
@@ -84,12 +90,12 @@ trap 'exit 143' TERM
         E) rest=${rest#* }; want=${rest%% *}; tag=${rest#* }
            if [ "$seq" = "$cur" ] && [ "$count" = "$want" ]; then
                if [ "$seq" -gt "$last" ]; then printf '%s\n' "$buf"; last=$seq; fi
-               printf '\036leon-ack:%s:%s\036' "$seq" "$tag" >&3
+               printf '\033]5379;leon-ack:%s:%s\007' "$seq" "$tag" >&3
            else
-               printf '\036leon-nak:%s\036' "$seq" >&3
+               printf '\033]5379;leon-nak:%s\007' "$seq" >&3
            fi
            cur=; buf=; count=0 ;;
-        X) printf '\036leon-ack:%s:end\036' "$seq" >&3; exit 0 ;;
+        X) printf '\033]5379;leon-ack:%s:end\007' "$seq" >&3; exit 0 ;;
         esac
     done
 ) > "$pipe" &
@@ -186,7 +192,7 @@ pub enum Mark {
 }
 
 fn parse_mark(text: &[u8]) -> Option<Mark> {
-    let text = std::str::from_utf8(text).ok()?;
+    let text = std::str::from_utf8(text).ok()?.strip_prefix(PREFIX)?;
     if text == "leon-ready" {
         return Some(Mark::Ready);
     }
@@ -206,35 +212,41 @@ fn parse_mark(text: &[u8]) -> Option<Mark> {
 /// Takes the bridge's marks out of a terminal's output.
 #[derive(Debug, Default)]
 pub struct Marks {
-    /// The bytes after an opening fence, while the closing one is awaited.
+    /// The bytes after an opening byte, while the closing one is awaited.
     open: Option<Vec<u8>>,
 }
 
 impl Marks {
     /// Splits `bytes` into what the agent printed (appended to `output`) and
-    /// the marks among it (appended to `marks`), in order.
+    /// the marks among it (appended to `marks`), in order. Anything else
+    /// between the two bytes (a terminal's own sequences) stays output.
     pub fn push(&mut self, bytes: &[u8], output: &mut Vec<u8>, marks: &mut Vec<Mark>) {
         for &byte in bytes {
             match (&mut self.open, byte) {
-                (None, FENCE) => self.open = Some(Vec::new()),
+                (None, OPEN) => self.open = Some(Vec::new()),
                 (None, _) => output.push(byte),
-                (Some(inside), FENCE) => {
+                (Some(inside), CLOSE) => {
                     match parse_mark(inside) {
-                        Some(mark) => {
-                            marks.push(mark);
-                            self.open = None;
-                        }
-                        // Not a mark: what was held is output, and this
-                        // fence may open a real one.
+                        Some(mark) => marks.push(mark),
                         None => {
+                            output.push(OPEN);
                             output.extend_from_slice(inside);
-                            inside.clear();
+                            output.push(CLOSE);
                         }
                     }
+                    self.open = None;
+                }
+                // Not a mark: what was held is output, and this byte may
+                // open a real one.
+                (Some(inside), OPEN) => {
+                    output.push(OPEN);
+                    output.extend_from_slice(inside);
+                    inside.clear();
                 }
                 (Some(inside), _) => {
                     inside.push(byte);
                     if inside.len() > MARK_MAX || byte == b'\n' {
+                        output.push(OPEN);
                         output.extend_from_slice(inside);
                         self.open = None;
                     }
@@ -313,9 +325,9 @@ mod tests {
     #[test]
     fn marks_are_taken_out_wherever_they_fall() {
         let (output, marks) = split(&[
-            b"noise\n\x1eleon-ready\x1e{\"a\":",
-            b"\x1eleon-ack:12:a.q1\x1e1}\n\x1eleon-",
-            b"nak:13\x1e",
+            b"noise\n\x1b]5379;leon-ready\x07{\"a\":",
+            b"\x1b]5379;leon-ack:12:a.q1\x071}\n\x1b]5379;leon-",
+            b"nak:13\x07",
         ]);
         assert_eq!(output, "noise\n{\"a\":1}\n");
         assert_eq!(
@@ -332,15 +344,16 @@ mod tests {
     }
 
     #[test]
-    fn a_fence_that_opens_no_mark_loses_nothing_but_itself() {
-        let (output, marks) = split(&[b"a\x1enot a mark\x1eleon-ready\x1eb\x1eline\nend"]);
-        assert_eq!(output, "anot a markbline\nend");
+    fn what_opens_no_mark_is_output_whole() {
+        let (output, marks) =
+            split(&[b"a\x1b[6n\x1b]0;title\x07\x1b]5379;leon-ready\x07b\x1bline\nend"]);
+        assert_eq!(output, "a\x1b[6n\x1b]0;title\x07b\x1bline\nend");
         assert_eq!(marks, [Mark::Ready]);
         let long = vec![b'z'; MARK_MAX + 50];
-        let mut bytes = vec![FENCE];
+        let mut bytes = vec![OPEN];
         bytes.extend_from_slice(&long);
         let (output, marks) = split(&[&bytes]);
-        assert_eq!(output.len(), long.len());
+        assert_eq!(output.len(), long.len() + 1);
         assert!(marks.is_empty());
     }
 

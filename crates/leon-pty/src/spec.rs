@@ -54,7 +54,7 @@ pub fn command_builder(spec: &SpawnSpec) -> CommandBuilder {
 /// its own, stale environment into them: the one who asks sends the
 /// environment the terminal is to have.
 pub fn command_builder_with(spec: &SpawnSpec, own_environment: bool) -> CommandBuilder {
-    let mut command = CommandBuilder::new(&spec.program);
+    let mut command = CommandBuilder::new(program(&spec.program));
     if own_environment {
         // `SHELL` is the one variable the builder invents when it is unset;
         // keep that so a terminal still knows its shell.
@@ -71,9 +71,64 @@ pub fn command_builder_with(spec: &SpawnSpec, own_environment: bool) -> CommandB
         command.env(name, value);
     }
     if let Some(cwd) = &spec.cwd {
-        command.cwd(cwd);
+        command.cwd(folder(cwd));
     }
     command
+}
+
+/// The program to start for `name`.
+///
+/// A client that drives agents (the phone, a relay) asks for `sh`: its
+/// scripts are POSIX. Windows has no `sh` on `PATH` unless someone put it
+/// there, but Git for Windows ships one with everything those scripts use
+/// (`mkfifo`, `stty`), so on Windows `sh` is that one when `PATH` has none.
+/// Any other name, and `sh` everywhere else, is started as it is.
+pub fn program(name: &str) -> std::ffi::OsString {
+    #[cfg(windows)]
+    if name == "sh" {
+        if let Some(sh) = git_sh(std::env::var_os("PATH"), std::env::var_os("ProgramFiles")) {
+            return sh.into_os_string();
+        }
+    }
+    name.into()
+}
+
+/// The folder to start in for `path`. On Windows a path that `sh` above
+/// printed (`/c/Users/me`) is the drive's (`C:/Users/me`); everything else
+/// is used as it is.
+pub fn folder(path: &str) -> String {
+    let b = path.as_bytes();
+    if cfg!(windows)
+        && b.len() >= 2
+        && b[0] == b'/'
+        && b[1].is_ascii_alphabetic()
+        && (b.len() == 2 || b[2] == b'/')
+    {
+        let drive = char::from(b[1]).to_ascii_uppercase();
+        return format!("{drive}:/{}", path.get(3..).unwrap_or(""));
+    }
+    path.to_owned()
+}
+
+/// `sh.exe` on `path`, else the one of the Git for Windows whose `git.exe`
+/// is on `path` (`<Git>\cmd\git.exe` → `<Git>\bin\sh.exe`), else the one in
+/// the default install folder under `program_files`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn git_sh(
+    path: Option<std::ffi::OsString>,
+    program_files: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    let dirs: Vec<_> = path.iter().flat_map(std::env::split_paths).collect();
+    let on_path = dirs.iter().map(|dir| dir.join("sh.exe"));
+    let beside_git = dirs
+        .iter()
+        .filter(|dir| dir.join("git.exe").is_file())
+        .filter_map(|dir| Some(dir.parent()?.join("bin").join("sh.exe")));
+    let installed = program_files.map(|dir| std::path::Path::new(&dir).join(r"Git\bin\sh.exe"));
+    on_path
+        .chain(beside_git)
+        .chain(installed)
+        .find(|sh| sh.is_file())
 }
 
 #[cfg(test)]
@@ -142,6 +197,40 @@ mod tests {
         spec.env.push(("SHELL".into(), "/bin/zsh".into()));
         let named = command_builder_with(&spec, true);
         assert_eq!(named.get_env("SHELL"), Some(OsStr::new("/bin/zsh")));
+    }
+
+    #[test]
+    fn sh_is_found_beside_git_or_in_its_install_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let git = root.path().join("Git");
+        std::fs::create_dir_all(git.join("cmd")).unwrap();
+        std::fs::create_dir_all(git.join("bin")).unwrap();
+        std::fs::write(git.join(r"cmd/git.exe"), "").unwrap();
+        let sh = git.join("bin").join("sh.exe");
+        let path = std::env::join_paths([git.join("cmd")]).unwrap();
+        assert_eq!(git_sh(Some(path.clone()), None), None);
+        std::fs::write(&sh, "").unwrap();
+        assert_eq!(git_sh(Some(path), None), Some(sh.clone()));
+        #[cfg(windows)]
+        assert_eq!(git_sh(None, Some(root.path().into())), Some(sh));
+        assert_eq!(git_sh(None, None), None);
+    }
+
+    #[test]
+    fn a_folder_sh_printed_is_the_drives_on_windows() {
+        let windows = cfg!(windows);
+        assert_eq!(
+            folder("/c/Users/me"),
+            if windows {
+                "C:/Users/me"
+            } else {
+                "/c/Users/me"
+            }
+        );
+        assert_eq!(folder("/d"), if windows { "D:/" } else { "/d" });
+        for kept in ["/srv/api", "C:/Code", "/", "rel"] {
+            assert_eq!(folder(kept), kept);
+        }
     }
 
     #[test]
