@@ -4273,6 +4273,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "leon-king"
+version = "0.10.0"
+dependencies = [
+ "leon-turn",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "leon-link"
 version = "0.10.0"
 dependencies = [

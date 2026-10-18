@@ -1,0 +1,328 @@
+//! The messages of the service's control socket.
+//!
+//! The service listens on a Unix socket that only its own user may open. A
+//! client (the window, the phone's host, `leon king …`, King's tools)
+//! writes one JSON [`Envelope`] per line and reads one [`Reply`] per line,
+//! in order. A client that sent [`Request::Subscribe`] then also reads
+//! [`Notice`]s, each on a line of its own, whenever the state changes.
+//!
+//! Requests are serialised with their name in `op`:
+//!
+//! ```json
+//! {"id":1,"op":"say","text":"What is the state of leon?"}
+//! {"id":1,"ok":true,"result":null}
+//! ```
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::coordinator::{Job, Reply as Answer, Target, WorkerState};
+use crate::transcript::Entry;
+
+/// The longest line read from a client, in bytes.
+pub const MAX_LINE: usize = 1 << 20;
+
+/// A request and the number its reply carries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Envelope {
+    /// Chosen by the client; given back with the reply.
+    pub id: u64,
+    /// What is asked.
+    #[serde(flatten)]
+    pub request: Request,
+}
+
+/// What a client asks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum Request {
+    /// King and its workers, in short ([`Status`]).
+    Status,
+    /// Say something to King.
+    Say {
+        /// The words.
+        text: String,
+    },
+    /// What a conversation said after `since` ([`Entry`]s).
+    Transcript {
+        /// Whose.
+        target: Target,
+        /// The last entry the client has.
+        #[serde(default)]
+        since: Option<u64>,
+        /// At most this many, the newest.
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /// Change the agent, model or effort King runs on.
+    SetBrain {
+        /// The agent's tag.
+        agent: String,
+        /// The model.
+        #[serde(default)]
+        model: Option<String>,
+        /// How hard it thinks.
+        #[serde(default)]
+        effort: Option<String>,
+        /// The permission mode.
+        #[serde(default)]
+        mode: Option<String>,
+    },
+    /// The projects Leon knows, with their worktrees.
+    Projects,
+    /// Where each agent stands: installed, its usage, what it costs.
+    Usage,
+    /// Start a worker.
+    StartWorker(WorkerRequest),
+    /// Tell a worker more.
+    TellWorker {
+        /// The worker.
+        worker: u32,
+        /// The words.
+        text: String,
+    },
+    /// Answer a question King or a worker waits on.
+    Answer {
+        /// Whose question.
+        target: Target,
+        /// Its id.
+        question: String,
+        /// The answer.
+        #[serde(flatten)]
+        reply: Answer,
+    },
+    /// Stop a turn, keep the conversation.
+    Interrupt {
+        /// Whose.
+        target: Target,
+    },
+    /// Stop a worker.
+    StopWorker {
+        /// The worker.
+        worker: u32,
+    },
+    /// The person takes a worker over.
+    Release {
+        /// The worker.
+        worker: u32,
+    },
+    /// Send [`Notice`]s on this connection from now on.
+    Subscribe,
+}
+
+/// How a worker is asked for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerRequest {
+    /// What it is for, in a few words.
+    pub title: String,
+    /// What it is told first.
+    pub prompt: String,
+    /// The project, by name; the worker works in a new worktree of it
+    /// unless `cwd` names a folder.
+    #[serde(default)]
+    pub project: Option<String>,
+    /// The branch of the new worktree; one is made up from the title when
+    /// absent.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// A folder to work in instead: an existing worktree.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// The tier.
+    #[serde(default)]
+    pub tier: Option<String>,
+    /// The agent, instead of a tier.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// The model, with an agent.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// How hard it thinks, with an agent.
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// The permission mode.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// What kind of job.
+    #[serde(default)]
+    pub job: Job,
+}
+
+/// The answer to a request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Reply {
+    /// The request's id.
+    pub id: u64,
+    /// Whether it was done.
+    pub ok: bool,
+    /// What it gave, when it was.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub result: Value,
+    /// Why not, when it was not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl Reply {
+    /// A request that was done.
+    pub fn done(id: u64, result: Value) -> Self {
+        Self {
+            id,
+            ok: true,
+            result,
+            error: None,
+        }
+    }
+
+    /// A request that was refused.
+    pub fn refused(id: u64, error: impl Into<String>) -> Self {
+        Self {
+            id,
+            ok: false,
+            result: Value::Null,
+            error: Some(error.into()),
+        }
+    }
+}
+
+/// What a subscribed client is told without asking.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "notice", rename_all = "snake_case")]
+pub enum Notice {
+    /// The state changed; this is the new one.
+    Changed {
+        /// King and its workers.
+        status: Status,
+    },
+    /// Something for the person.
+    Notify {
+        /// One line.
+        title: String,
+        /// The rest.
+        body: String,
+    },
+}
+
+/// King and its workers, in short.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Status {
+    /// King's own conversation.
+    pub brain: ConversationStatus,
+    /// The workers that are still King's, newest last.
+    pub workers: Vec<WorkerStatus>,
+    /// What King has not been told yet.
+    pub news: usize,
+    /// What was spent today, in US dollars.
+    pub spent_today_usd: f64,
+    /// The day's budget, when there is one.
+    pub daily_budget_usd: Option<f64>,
+}
+
+/// A conversation, in short.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConversationStatus {
+    /// The agent's tag.
+    pub agent: String,
+    /// The model.
+    pub model: Option<String>,
+    /// How hard it thinks.
+    pub effort: Option<String>,
+    /// The agent's id of the conversation.
+    pub session_id: Option<String>,
+    /// In a turn.
+    pub busy: bool,
+    /// What waits for the turn to end.
+    pub queued: usize,
+    /// The questions it waits on: id and text.
+    pub questions: Vec<(String, String)>,
+    /// What it cost.
+    pub cost_usd: f64,
+    /// The number of its newest entry.
+    pub last_seq: Option<u64>,
+}
+
+/// A worker, in short.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkerStatus {
+    /// Its number.
+    pub id: u32,
+    /// What it is for.
+    pub title: String,
+    /// Its project.
+    pub project: Option<String>,
+    /// Its folder.
+    pub cwd: String,
+    /// Its kind of job.
+    pub job: Job,
+    /// The tier it came from.
+    pub tier: Option<String>,
+    /// Where it is.
+    pub state: WorkerState,
+    /// Its conversation.
+    pub conversation: ConversationStatus,
+    /// The last thing it answered, cut short.
+    pub last_answer: Option<String>,
+    /// When it last changed.
+    pub updated_ms: u64,
+}
+
+/// The entries of a transcript, as [`Request::Transcript`] answers.
+pub type Entries = Vec<Entry>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_request_is_its_name_and_its_fields_on_one_line() {
+        let line = r#"{"id":7,"op":"say","text":"hola"}"#;
+        let envelope: Envelope = serde_json::from_str(line).unwrap();
+        assert_eq!(envelope.id, 7);
+        assert_eq!(
+            envelope.request,
+            Request::Say {
+                text: "hola".into()
+            }
+        );
+        let answer: Envelope = serde_json::from_str(
+            r#"{"id":1,"op":"answer","target":{"worker":3},"question":"q1","choice":"allow"}"#,
+        )
+        .unwrap();
+        let Request::Answer {
+            target,
+            question,
+            reply,
+        } = answer.request
+        else {
+            panic!();
+        };
+        assert_eq!(target, Target::Worker(3));
+        assert_eq!(question, "q1");
+        assert_eq!(reply.choice.as_deref(), Some("allow"));
+        let brain: Envelope =
+            serde_json::from_str(r#"{"id":2,"op":"interrupt","target":"brain"}"#).unwrap();
+        assert_eq!(
+            brain.request,
+            Request::Interrupt {
+                target: Target::Brain
+            }
+        );
+        let start: Envelope = serde_json::from_str(
+            r#"{"id":3,"op":"start_worker","title":"t","prompt":"p","tier":"cheap","job":"research"}"#,
+        )
+        .unwrap();
+        let Request::StartWorker(start) = start.request else {
+            panic!();
+        };
+        assert_eq!(start.job, Job::Research);
+        assert_eq!(start.tier.as_deref(), Some("cheap"));
+    }
+
+    #[test]
+    fn a_reply_carries_a_result_or_an_error() {
+        let done = serde_json::to_string(&Reply::done(1, serde_json::json!({"a": 1}))).unwrap();
+        assert_eq!(done, r#"{"id":1,"ok":true,"result":{"a":1}}"#);
+        let refused = serde_json::to_string(&Reply::refused(2, "no")).unwrap();
+        assert_eq!(refused, r#"{"id":2,"ok":false,"error":"no"}"#);
+    }
+}
