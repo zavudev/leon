@@ -184,6 +184,9 @@ pub enum Command {
     /// Removes the merged worktrees the person ticks, after asking. The ones
     /// with changes, unpushed commits or a running session are listed only.
     RemoveMergedWorktrees,
+    /// The cleaner: every linked worktree with what it weighs and why it can
+    /// go, and the old sessions of the history, to tick and clean at once.
+    CleanUp,
     /// Renames the project, machine or live terminal the keyboard is on.
     Rename,
     /// Moves the row the keyboard is on one step up in its list: a project,
@@ -1430,6 +1433,14 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::CleanUp,
+        "Clean up worktrees and old sessions…",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
         C::RemoveMachine,
         "Remove the machine",
         S::Create,
@@ -2466,6 +2477,9 @@ pub fn keywords(command: Command) -> &'static str {
         C::RemoveMergedWorktrees => {
             "worktree worktrees merged pull request pr github branch clean up cleanup prune delete"
         }
+        C::CleanUp => {
+            "clean cleanup sweep broom prune disk space size weight worktrees old sessions settle archive delete free"
+        }
         C::OpenChanges => "git diff status modified changed files review staged unstaged",
         C::PushBranch => "git upstream remote origin publish send branch",
         C::ShipChanges => "git commit push pull request pr github gh ship publish merge review",
@@ -2767,6 +2781,7 @@ mod tests {
             C::DisableMemory,
             C::RemoveWorktree,
             C::RemoveMergedWorktrees,
+            C::CleanUp,
             C::Refresh,
             C::ProbeMachine,
             C::ToggleAppearance,
@@ -2948,6 +2963,7 @@ mod tests {
                 | C::DisableMemory
                 | C::RemoveWorktree
                 | C::RemoveMergedWorktrees
+                | C::CleanUp
                 | C::Refresh
                 | C::ProbeMachine
                 | C::ToggleAppearance

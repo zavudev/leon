@@ -335,6 +335,10 @@ pub const NOT_IN_MENUS: &[(Command, &str)] = &[
         C::RemoveMergedWorktrees,
         "palette, and the screen of a merged worktree: needs a row",
     ),
+    (
+        C::CleanUp,
+        "palette, and the broom beside the project filter",
+    ),
     (C::RemoveMachine, "palette and the tree's menu: needs a row"),
     (
         C::EditMachine,

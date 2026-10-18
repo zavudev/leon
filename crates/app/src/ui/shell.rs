@@ -142,6 +142,8 @@ pub enum Overlay {
     Trust,
     /// "Turn on agent memory for <project>?", after a project was added.
     MemoryOffer,
+    /// The cleaner: worktrees by weight and the old sessions.
+    Cleanup,
 }
 
 /// What the folder picker answered.
@@ -627,6 +629,8 @@ pub struct Shell {
     /// The Settled and Snoozed shelves, and the banner that offers Undo (see
     /// `shelving.rs`).
     pub(super) shelves: super::shelving::ShelfUi,
+    /// The cleaner's state.
+    pub(super) sweep: super::sweep_view::SweepUi,
     /// A new session that waits for the person to pick its account.
     pub(super) pending_start: Option<super::terminals::PendingStart>,
     /// Where they are remembered, when anywhere.
@@ -702,6 +706,7 @@ impl Shell {
         let find_input = find::new_input(window, cx);
         let sheet_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search the shortcuts"));
+        let sweep = super::sweep_view::SweepUi::new(window, cx);
 
         let own_window = window.window_handle();
         let weak = cx.weak_entity();
@@ -739,6 +744,15 @@ impl Shell {
                 |this, _, event: &InputEvent, _, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.sheet_changed(cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &sweep.search,
+                window,
+                |this, _, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.sweep_search_changed(cx);
                     }
                 },
             ),
@@ -935,6 +949,7 @@ impl Shell {
             slept: std::collections::HashSet::new(),
             dormant,
             shelves: super::shelving::ShelfUi::default(),
+            sweep,
             pending_start: None,
             dormant_file,
             scripts: super::scripts::ScriptsUi::new(settings::sibling(crate::trust::FILE_NAME, cx)),
@@ -1993,7 +2008,7 @@ impl Shell {
 
     /// How many live sessions run in each worktree's folder, for the cleanup:
     /// the same sessions the worktree's screen lists as running.
-    fn running_per_worktree(&self) -> std::collections::HashMap<WorktreeId, usize> {
+    pub(super) fn running_per_worktree(&self) -> std::collections::HashMap<WorktreeId, usize> {
         self.snapshot
             .projects
             .iter()
@@ -2765,6 +2780,9 @@ impl Shell {
         if self.overlay == Overlay::Usage && self.usage_key(stroke, window, cx) {
             return true;
         }
+        if self.overlay == Overlay::Cleanup && self.sweep_key(stroke, window, cx) {
+            return true;
+        }
         // The Den has the keyboard while it is the main pane's and nothing
         // is open over it: its own keys come before the tree's.
         if self.overlay == Overlay::None
@@ -2831,6 +2849,7 @@ impl Shell {
                 | Overlay::AddProject
                 | Overlay::NewWorktree
                 | Overlay::Shortcuts
+                | Overlay::Cleanup
         ) || filtering
             || finding
             || self.file_has_keyboard()
@@ -3070,6 +3089,7 @@ impl Shell {
             },
             C::Settings => self.open_settings(window, cx),
             C::ShowUsage => self.toggle_usage(window, cx),
+            C::CleanUp => self.toggle_sweep(window, cx),
             C::ShowTasks => self.toggle_tasks(window, cx),
             C::NewTask if self.tasks_open() => self.open_create(None, window, cx),
             C::NewTask => self.begin_flow(command, window, cx),
@@ -3192,6 +3212,7 @@ impl Shell {
                 | Overlay::Problems
                 | Overlay::Connect
                 | Overlay::Usage
+                | Overlay::Cleanup
                 | Overlay::Pair
                 | Overlay::Share
                 | Overlay::AddProject
@@ -3236,7 +3257,8 @@ impl Shell {
             | Overlay::History
             | Overlay::Restore
             | Overlay::Problems
-            | Overlay::Usage => {
+            | Overlay::Usage
+            | Overlay::Cleanup => {
                 self.overlay = Overlay::None;
                 self.focus.focus(window, cx);
             }
@@ -4165,6 +4187,7 @@ impl Shell {
             Overlay::Restore => self.render_restore(colours, cx).into_any_element(),
             Overlay::Trust => self.render_trust(colours, cx).into_any_element(),
             Overlay::MemoryOffer => self.render_memory_offer(colours, cx).into_any_element(),
+            Overlay::Cleanup => self.render_sweep(colours, cx).into_any_element(),
         };
         let top = match self.overlay {
             Overlay::Palette => self.palette_top(),

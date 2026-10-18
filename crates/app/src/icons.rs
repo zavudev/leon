@@ -15,6 +15,7 @@ icon_assets!(
     AppIcons,
     [
         Bot,
+        BrushCleaning,
         Check,
         ChevronDown,
         ChevronRight,

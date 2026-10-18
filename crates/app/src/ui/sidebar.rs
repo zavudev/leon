@@ -299,8 +299,8 @@ impl Shell {
             ))
     }
 
-    /// The field above the tree that filters the projects, with the +
-    /// that adds one.
+    /// The field above the tree that filters the projects, with the broom
+    /// that opens the cleaner and the + that adds one.
     fn render_filter(&self, colours: &Palette, cx: &mut Context<Self>) -> Div {
         let empty = self.filter_query.is_empty();
         div()
@@ -329,6 +329,31 @@ impl Shell {
             })
             // "Active only": the sessions that are running, and nothing else.
             .child(self.render_active_toggle(colours, cx))
+            // The cleaner: worktrees by weight and the old sessions.
+            .child(
+                div()
+                    .id("filter-clean-up")
+                    .debug_selector(|| "filter-clean-up".into())
+                    .flex_none()
+                    .size(metrics::CONTROL())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(metrics::RADIUS())
+                    .cursor_pointer()
+                    .hover({
+                        let hover = colours.surface;
+                        move |style| style.bg(hover)
+                    })
+                    .tooltip({
+                        let tip: SharedString = tooltip_text(Command::CleanUp).into();
+                        move |window, cx| Tooltip::new(tip.clone()).build(window, cx)
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.run_command(Command::CleanUp, window, cx);
+                    }))
+                    .child(icon(IconName::BrushCleaning, px(14.), colours.text_muted)),
+            )
             // The same "+" as the header's: add a project without knowing the
             // chord.
             .child(
