@@ -1199,3 +1199,53 @@ fn a_compaction_has_no_turn_in_its_answer_and_ends_like_any_turn() {
         .any(|event| matches!(event, TurnEvent::Finished { ok: true, .. })));
     assert!(session.idle());
 }
+
+#[test]
+fn the_turns_tokens_are_what_the_thread_added_since_it_began() {
+    let mut session = fresh();
+    session.first(&spec("hi"));
+    let update = |total: (u64, u64, u64, u64), last: (u64, u64, u64, u64)| {
+        let breakdown = |(input, cached, output, reasoning): (u64, u64, u64, u64)| {
+            json!({
+                "inputTokens": input, "cachedInputTokens": cached,
+                "outputTokens": output, "reasoningOutputTokens": reasoning,
+                "totalTokens": input + output,
+            })
+        };
+        json!({
+            "method": "thread/tokenUsage/updated",
+            "params": { "threadId": "t", "turnId": "u", "tokenUsage": {
+                "total": breakdown(total), "last": breakdown(last), "modelContextWindow": 400000,
+            } },
+        })
+        .to_string()
+    };
+    // A thread resumed with 1000 in and 100 out from before.
+    let first = read(
+        session.as_mut(),
+        &update((1500, 800, 150, 20), (500, 300, 50, 20)),
+    );
+    assert_eq!(
+        first.events,
+        [TurnEvent::Usage {
+            tokens: Tokens {
+                input: 500,
+                cached_input: 300,
+                output: 50,
+                reasoning: 20,
+                context_window: Some(400_000),
+            }
+        }]
+    );
+    let second = read(
+        session.as_mut(),
+        &update((2100, 1200, 210, 30), (600, 400, 60, 10)),
+    );
+    let [TurnEvent::Usage { tokens }] = &second.events[..] else {
+        panic!("{:?}", second.events);
+    };
+    assert_eq!(
+        (tokens.input, tokens.output, tokens.reasoning),
+        (1100, 110, 30)
+    );
+}

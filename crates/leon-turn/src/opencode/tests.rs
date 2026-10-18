@@ -161,6 +161,15 @@ fn it_is_greeted_and_given_a_session_in_the_folder_then_the_prompt_when_the_sess
             TurnEvent::Text {
                 text: "hola".into()
             },
+            TurnEvent::Usage {
+                tokens: Tokens {
+                    input: 14632,
+                    cached_input: 5215,
+                    output: 4,
+                    reasoning: 0,
+                    context_window: Some(1_000_000),
+                },
+            },
             TurnEvent::Finished {
                 ok: true,
                 error: None,
@@ -383,6 +392,15 @@ fn a_command_it_may_not_run_by_itself_is_a_question_with_its_own_options() {
             TurnEvent::Text {
                 text: "done".into()
             },
+            TurnEvent::Usage {
+                tokens: Tokens {
+                    input: 32893,
+                    cached_input: 29292,
+                    output: 190,
+                    reasoning: 130,
+                    context_window: Some(1_000_000),
+                },
+            },
             TurnEvent::Finished {
                 ok: true,
                 error: None,
@@ -403,7 +421,7 @@ fn a_refusal_ends_the_turn_as_opencode_ends_it() {
         ..spec("make the file")
     });
     let step = play(session.as_mut(), REJECT, None);
-    let tail = &step.events[step.events.len() - 3..];
+    let tail = &step.events[step.events.len() - 4..];
     assert_eq!(
         tail,
         [
@@ -415,6 +433,15 @@ fn a_refusal_ends_the_turn_as_opencode_ends_it() {
             },
             // Nobody answered it here: the end of the turn closes it.
             TurnEvent::QuestionResolved { id: "0".into() },
+            TurnEvent::Usage {
+                tokens: Tokens {
+                    input: 19854,
+                    cached_input: 18223,
+                    output: 113,
+                    reasoning: 58,
+                    context_window: Some(1_000_000),
+                },
+            },
             TurnEvent::Finished {
                 ok: false,
                 error: None,
@@ -528,6 +555,15 @@ fn stopping_it_cancels_the_session_and_what_it_still_asks() {
                 detail: String::new(),
             },
             TurnEvent::QuestionResolved { id: "0".into() },
+            TurnEvent::Usage {
+                tokens: Tokens {
+                    input: 20211,
+                    cached_input: 18390,
+                    output: 115,
+                    reasoning: 64,
+                    context_window: Some(1_000_000),
+                },
+            },
             TurnEvent::Finished {
                 ok: false,
                 error: None,

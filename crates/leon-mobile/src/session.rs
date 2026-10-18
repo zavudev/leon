@@ -893,8 +893,8 @@ impl Turn {
                 for bytes in write {
                     handle.write(bytes);
                 }
-                for event in events {
-                    listener.on_event(event.into());
+                for event in events.into_iter().filter_map(TurnEvent::crossing) {
+                    listener.on_event(event);
                 }
                 if last {
                     break;

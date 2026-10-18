@@ -235,10 +235,15 @@ pub enum Answer {
     },
 }
 
-impl From<leon_turn::TurnEvent> for TurnEvent {
-    fn from(event: leon_turn::TurnEvent) -> Self {
+impl TurnEvent {
+    /// The event as it crosses to the application, or nothing for one the
+    /// application does not show: the tokens of a turn
+    /// ([`leon_turn::TurnEvent::Usage`]), which the coordinator on the
+    /// computer reads.
+    pub(crate) fn crossing(event: leon_turn::TurnEvent) -> Option<Self> {
         use leon_turn::TurnEvent as T;
-        match event {
+        Some(match event {
+            T::Usage { .. } => return None,
             T::Started { session_id, model } => Self::Started { session_id, model },
             T::TextDelta { text } => Self::TextDelta { text },
             T::Text { text } => Self::Text { text },
@@ -291,7 +296,7 @@ impl From<leon_turn::TurnEvent> for TurnEvent {
             T::Gap => Self::Gap,
             T::Exited { code } => Self::Exited { code },
             T::Gone => Self::Gone,
-        }
+        })
     }
 }
 

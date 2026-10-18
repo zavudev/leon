@@ -370,7 +370,10 @@ impl Conversation {
                 self.running = false;
             }
             // A pipe on this computer neither drops nor loses output.
-            TurnEvent::Disconnected | TurnEvent::Reconnected | TurnEvent::Gap => {}
+            TurnEvent::Disconnected
+            | TurnEvent::Reconnected
+            | TurnEvent::Gap
+            | TurnEvent::Usage { .. } => {}
         }
     }
 

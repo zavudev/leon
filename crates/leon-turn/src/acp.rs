@@ -49,7 +49,8 @@ use crate::claude::AgentCommand;
 use crate::error::TurnError;
 use crate::events::{
     blocks, cap_detail, clip, edit_detail, first_line, input_detail, input_summary, text_detail,
-    text_of, written_detail, Answer, PermissionChoice, PermissionEffect, QuestionKind, TurnEvent,
+    text_of, written_detail, Answer, PermissionChoice, PermissionEffect, QuestionKind, Tokens,
+    TurnEvent,
 };
 use crate::tag::{id_tag, tag_id};
 
@@ -140,6 +141,7 @@ pub fn session(unique: u64, dialect: &'static Dialect) -> Box<dyn AgentSession> 
         mode: None,
         model: None,
         cost: None,
+        context_window: None,
         noise: VecDeque::new(),
     })
 }
@@ -243,7 +245,35 @@ struct AcpSession {
     model: Option<String>,
     /// What the conversation has cost, as last said.
     cost: Option<f64>,
+    /// How many tokens the model can hold, as last said.
+    context_window: Option<u64>,
     noise: VecDeque<String>,
+}
+
+/// The tokens of a turn, from the `usage` of the prompt's answer: what was
+/// read is the fresh input and both caches, what was written the answer and
+/// the thoughts.
+fn acp_tokens(usage: &Value, context_window: Option<u64>) -> Option<Tokens> {
+    if !usage.is_object() {
+        return None;
+    }
+    let count = |keys: &[&str]| -> u64 {
+        keys.iter()
+            .filter_map(|key| usage[*key].as_u64())
+            .next()
+            .unwrap_or(0)
+    };
+    let cached = count(&["cachedReadTokens"]);
+    let reasoning = count(&["thoughtTokens", "reasoningTokens"]);
+    Some(Tokens {
+        input: count(&["inputTokens"])
+            + cached
+            + count(&["cachedWriteTokens", "cacheCreationTokens"]),
+        cached_input: cached,
+        output: count(&["outputTokens"]) + reasoning,
+        reasoning,
+        context_window,
+    })
 }
 
 impl AcpSession {
@@ -508,6 +538,9 @@ impl AcpSession {
                     "refusal" => "The model declined to go on.".to_owned(),
                     other => format!("The turn stopped: {other}"),
                 });
+                if let Some(tokens) = acp_tokens(&value["result"]["usage"], self.context_window) {
+                    step.events.push(TurnEvent::Usage { tokens });
+                }
                 step.events.push(TurnEvent::Finished {
                     ok,
                     error,
@@ -805,6 +838,7 @@ impl AcpSession {
                 }
             }
             "usage_update" => {
+                self.context_window = update["size"].as_u64().or(self.context_window);
                 if update["cost"]["currency"] == "USD" {
                     self.cost = update["cost"]["amount"].as_f64().or(self.cost);
                 }

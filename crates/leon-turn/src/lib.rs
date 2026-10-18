@@ -62,5 +62,5 @@ pub use claude::{AgentCommand, AgentMode, AgentModel, AgentOptions};
 pub use error::TurnError;
 pub use events::{
     object_on, Answer, ChoiceAnswer, ChoiceOption, ChoiceQuestion, Lines, PermissionChoice,
-    PermissionEffect, QuestionKind, TurnEvent,
+    PermissionEffect, QuestionKind, Tokens, TurnEvent,
 };

@@ -50,7 +50,7 @@ use crate::error::TurnError;
 use crate::events::{
     blocks, cap_detail, clip, content_text, diff_lines, first_line, input_detail, input_summary,
     last_line, text_detail, text_of, written_detail, Answer, ChoiceOption, ChoiceQuestion,
-    PermissionChoice, PermissionEffect, QuestionKind, TurnEvent,
+    PermissionChoice, PermissionEffect, QuestionKind, Tokens, TurnEvent,
 };
 use crate::tag::{id_tag, tag_id};
 
@@ -95,7 +95,6 @@ const UNREAD: &[&str] = &[
     "item/reasoning/summaryPartAdded",
     "item/reasoning/textDelta",
     "item/mcpToolCall/progress",
-    "thread/tokenUsage/updated",
     "skills/changed",
     "app/list/updated",
 ];
@@ -124,6 +123,7 @@ pub fn session(unique: u64) -> Box<dyn AgentSession> {
         mode: None,
         last_error: None,
         noise: VecDeque::new(),
+        tokens_before: None,
     })
 }
 
@@ -298,6 +298,8 @@ struct CodexSession {
     mode: Option<&'static str>,
     last_error: Option<String>,
     noise: VecDeque<String>,
+    /// The thread's tokens before this turn's first model call.
+    tokens_before: Option<Tokens>,
 }
 
 impl CodexSession {
@@ -795,6 +797,31 @@ impl CodexSession {
                 let id = text_of(&params["turn"]["id"]);
                 self.turn_is(&id, step);
             }
+            "thread/tokenUsage/updated" => {
+                let usage = &params["tokenUsage"];
+                let total = codex_tokens(&usage["total"]);
+                // The thread's count goes on from its earlier turns: the
+                // turn's is what was added since its first call began.
+                let before = *self.tokens_before.get_or_insert_with(|| {
+                    let last = codex_tokens(&usage["last"]);
+                    Tokens {
+                        input: total.input.saturating_sub(last.input),
+                        cached_input: total.cached_input.saturating_sub(last.cached_input),
+                        output: total.output.saturating_sub(last.output),
+                        reasoning: total.reasoning.saturating_sub(last.reasoning),
+                        context_window: None,
+                    }
+                });
+                step.events.push(TurnEvent::Usage {
+                    tokens: Tokens {
+                        input: total.input.saturating_sub(before.input),
+                        cached_input: total.cached_input.saturating_sub(before.cached_input),
+                        output: total.output.saturating_sub(before.output),
+                        reasoning: total.reasoning.saturating_sub(before.reasoning),
+                        context_window: usage["modelContextWindow"].as_u64(),
+                    },
+                });
+            }
             "item/started" => self.item(&params["item"], false, step),
             "item/completed" => self.item(&params["item"], true, step),
             "item/agentMessage/delta" | "item/plan/delta" => {
@@ -861,6 +888,19 @@ impl CodexSession {
             }
             _ => {}
         }
+    }
+}
+
+/// A breakdown of tokens as Codex counts them: its input includes what was
+/// cached, its output the reasoning.
+fn codex_tokens(breakdown: &Value) -> Tokens {
+    let count = |key: &str| breakdown[key].as_u64().unwrap_or(0);
+    Tokens {
+        input: count("inputTokens"),
+        cached_input: count("cachedInputTokens"),
+        output: count("outputTokens"),
+        reasoning: count("reasoningOutputTokens"),
+        context_window: None,
     }
 }
 
