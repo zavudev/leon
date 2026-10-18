@@ -112,7 +112,7 @@ pub fn usage() -> String {
        leon king status              King and its workers\n  \
        leon king log [worker]        what King, or a worker, said lately\n  \
        leon king start <title> --prompt <text> [--project <name>] [--tier <tier>]\n  \
-       \x20                            [--agent <agent> --model <model>] [--research]\n  \
+       \x20                            [--agent <agent> --model <model>] [--research | --plan]\n  \
        leon king tell <worker> <words…>\n  \
        leon king stop <worker>\n  \
        leon king release <worker>    take a worker over: King lets it go\n  \
@@ -236,6 +236,7 @@ fn start_request(arguments: &[String]) -> Result<WorkerRequest, String> {
             "--effort" => request.effort = Some(value("--effort")?),
             "--mode" => request.mode = Some(value("--mode")?),
             "--research" => request.job = leon_king::coordinator::Job::Research,
+            "--plan" => request.job = leon_king::coordinator::Job::Plan,
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
             word => title.push(word.to_owned()),
         }

@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{Brain, Config};
 use crate::prompt;
 use crate::protocol::{ConversationStatus, Status, WorkerStatus};
+use crate::report::{Facts, Totals, TurnStats};
 use crate::route::Choice;
 use crate::transcript::{self, Kind, Transcript};
 
@@ -97,6 +98,9 @@ pub enum Job {
     Code,
     /// It reads and reports; it changes nothing.
     Research,
+    /// It plans: always on the best models there are (the `planning`
+    /// tier), and it changes nothing.
+    Plan,
 }
 
 /// Where a worker is.
@@ -191,6 +195,18 @@ pub struct Conversation {
     /// How its last turn ended: well, or not.
     #[serde(default)]
     pub last_ok: Option<bool>,
+    /// What its turns read and wrote, all of them.
+    #[serde(default)]
+    pub tokens: Totals,
+    /// The turn in flight: its tokens so far, and when it began.
+    #[serde(default)]
+    pub turn: TurnStats,
+    /// When the turn in flight began.
+    #[serde(default)]
+    pub turn_started_ms: u64,
+    /// The last turn that ended, measured.
+    #[serde(default)]
+    pub last_turn: Option<TurnStats>,
 }
 
 impl Conversation {
@@ -208,6 +224,10 @@ impl Conversation {
             cost_usd: 0.0,
             turns: 0,
             last_ok: None,
+            tokens: Totals::default(),
+            turn: TurnStats::default(),
+            turn_started_ms: 0,
+            last_turn: None,
         }
     }
 }
@@ -287,6 +307,12 @@ pub struct State {
     /// chosen since ([`Coordinator::set_brain`]).
     #[serde(default)]
     pub configured: Option<Brain>,
+    /// What King read and wrote that day.
+    #[serde(default)]
+    pub king_today: Totals,
+    /// What the workers read and wrote that day.
+    #[serde(default)]
+    pub workers_today: Totals,
 }
 
 /// The turn a target is to have, as the service needs it.
@@ -339,6 +365,8 @@ impl Coordinator {
                 spent_day: 0,
                 spent_usd: 0.0,
                 configured,
+                king_today: Totals::default(),
+                workers_today: Totals::default(),
             },
         }
     }
@@ -802,9 +830,21 @@ impl Coordinator {
                     }
                 }
             }
-            TurnEvent::Finished { ok, cost_usd, .. } => {
+            TurnEvent::Usage { tokens } => {
+                let (duration, cost) = (conversation.turn.duration_ms, conversation.turn.cost_usd);
+                conversation.turn = TurnStats::of(tokens, duration, cost);
+            }
+            TurnEvent::Finished {
+                ok,
+                cost_usd,
+                duration_ms,
+                ..
+            } => {
                 conversation.last_ok = Some(*ok);
                 conversation.turns += 1;
+                conversation.turn.duration_ms = duration_ms
+                    .unwrap_or_else(|| now_ms.saturating_sub(conversation.turn_started_ms));
+                conversation.turn.cost_usd = *cost_usd;
                 if let Some(cost) = cost_usd {
                     conversation.cost_usd += cost;
                     self.spend(*cost, now_ms);
@@ -828,16 +868,72 @@ impl Coordinator {
         }
     }
 
-    fn spend(&mut self, usd: f64, now_ms: u64) {
+    /// Starts a new day of spending when the day changed.
+    fn roll_day(&mut self, now_ms: u64) {
         let today = now_ms / DAY_MS;
         if self.state.spent_day != today {
             self.state.spent_day = today;
             self.state.spent_usd = 0.0;
+            self.state.king_today = Totals::default();
+            self.state.workers_today = Totals::default();
         }
+    }
+
+    fn spend(&mut self, usd: f64, now_ms: u64) {
+        self.roll_day(now_ms);
         self.state.spent_usd += usd;
     }
 
+    /// Adds the turn that just ended to the counts.
+    fn count_turn(&mut self, target: Target, now_ms: u64) {
+        let Some(conversation) = self.conversation_mut(target) else {
+            return;
+        };
+        if conversation.turn.duration_ms == 0 {
+            conversation.turn.duration_ms = now_ms.saturating_sub(conversation.turn_started_ms);
+        }
+        let turn = std::mem::take(&mut conversation.turn);
+        conversation.tokens.add(&turn);
+        conversation.last_turn = Some(turn);
+        self.roll_day(now_ms);
+        match target {
+            Target::Brain => self.state.king_today.add(&turn),
+            Target::Worker(_) => self.state.workers_today.add(&turn),
+        }
+    }
+
+    /// What the line under King's last answer is made of, but the usage
+    /// windows, which the service reads.
+    pub fn facts(&self, now_ms: u64) -> Facts<'static> {
+        let today = self.state.spent_day == now_ms / DAY_MS;
+        Facts {
+            turn: self.state.brain.last_turn,
+            workers_today: if today {
+                self.state.workers_today
+            } else {
+                Totals::default()
+            },
+            king_today: if today {
+                self.state.king_today
+            } else {
+                Totals::default()
+            },
+            spent_today_usd: self.spent_today(now_ms),
+            budget_usd: self.config.limits.daily_budget_usd,
+            usage: &[],
+        }
+    }
+
+    /// Keeps a line of Leon's in a conversation's transcript: the report
+    /// under an answer.
+    pub fn annotate(&mut self, target: Target, text: &str, now_ms: u64) {
+        if let Some(conversation) = self.conversation_mut(target) {
+            conversation.transcript.push(Kind::Report, text, now_ms);
+        }
+    }
+
     fn turn_ended(&mut self, target: Target, now_ms: u64) -> Vec<Effect> {
+        self.count_turn(target, now_ms);
         let Some(conversation) = self.conversation_mut(target) else {
             return Vec::new();
         };
@@ -969,6 +1065,8 @@ impl Coordinator {
         };
         conversation.busy = true;
         conversation.last_ok = None;
+        conversation.turn = TurnStats::default();
+        conversation.turn_started_ms = now_ms;
         conversation
             .transcript
             .push(Kind::Prompt, prompt.clone(), now_ms);

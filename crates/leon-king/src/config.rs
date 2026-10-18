@@ -21,6 +21,7 @@
 //! cheap = [{ agent = "opencode" }, { agent = "cursor" }]
 //! standard = [{ agent = "codex", effort = "medium" }]
 //! premium = [{ agent = "claude", model = "opus", effort = "high" }]
+//! planning = [{ agent = "claude", model = "opus", effort = "high" }]
 //!
 //! [modes]
 //! claude = "acceptEdits"
@@ -35,6 +36,9 @@ pub const FILE_NAME: &str = "king.toml";
 
 /// The tier a job is given when nobody names one.
 pub const DEFAULT_TIER: &str = "standard";
+
+/// The tier every plan goes to: the best models there are.
+pub const PLANNING_TIER: &str = "planning";
 
 /// Everything `king.toml` says.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -143,6 +147,21 @@ impl Default for Config {
                 vec![Candidate::agent("codex"), Candidate::agent("claude")],
             ),
             ("premium", vec![Candidate::agent("claude")]),
+            (
+                PLANNING_TIER,
+                vec![
+                    Candidate {
+                        agent: "claude".to_owned(),
+                        model: Some("opus".to_owned()),
+                        effort: Some("high".to_owned()),
+                    },
+                    Candidate {
+                        agent: "codex".to_owned(),
+                        model: None,
+                        effort: Some("high".to_owned()),
+                    },
+                ],
+            ),
         ]
         .into_iter()
         .map(|(name, candidates)| (name.to_owned(), candidates))
@@ -198,7 +217,7 @@ mod tests {
         assert_eq!(config, Config::default());
         assert_eq!(config.brain.agent, "claude");
         let tiers: Vec<&str> = config.tiers.keys().map(String::as_str).collect();
-        assert_eq!(tiers, ["cheap", "premium", "standard"]);
+        assert_eq!(tiers, ["cheap", "planning", "premium", "standard"]);
         assert_eq!(config.limits.max_workers, 6);
     }
 

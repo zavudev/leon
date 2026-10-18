@@ -72,6 +72,13 @@ pub enum Request {
     Projects,
     /// Where each agent stands: installed, its usage, what it costs.
     Usage,
+    /// The models of this computer, with what is known of each.
+    Models,
+    /// Keep what was found out about a model, in `king-models.toml`.
+    ModelNote {
+        /// The card: it replaces the one with its pattern.
+        card: crate::models::Card,
+    },
     /// Start a worker.
     StartWorker(Box<WorkerRequest>),
     /// Tell a worker more.

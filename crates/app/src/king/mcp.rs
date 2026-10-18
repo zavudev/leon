@@ -23,11 +23,13 @@ use crate::task_mcp::PROTOCOL_VERSIONS;
 pub const SERVER_NAME: &str = "leon-king";
 
 /// The names of the tools, in the order they are listed.
-pub const TOOLS: [&str; 13] = [
+pub const TOOLS: [&str; 15] = [
     "king_status",
     "projects_list",
     "project_status",
     "usage_status",
+    "models_list",
+    "model_note",
     "worker_start",
     "worker_send",
     "worker_answer",
@@ -192,6 +194,47 @@ pub fn tool_list() -> Value {
             &[],
         ),
         tool(
+            "models_list",
+            "Every model the agents of this computer offer, each with its efforts and what is \
+             known of it: its talents (1 to 5: planning, architecture, coding, review, \
+             research, speed, economy) and its benchmarks with their sources. Also the \
+             planning tier, where every plan goes.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "model_note",
+            "Keep what you found out about a model or a family of them, so the next choice is \
+             better: its talents, a benchmark (always with its source and the month you read \
+             it), notes on how it did on our work. It replaces what was kept under the same \
+             `match`. Never write a benchmark you did not read from a source.",
+            json!({
+                "match": { "type": "string", "description": "A part of the model's id, in lower case: `opus`, `gpt-5.6`, `deepseek-v4`." },
+                "name": { "type": "string" },
+                "talents": {
+                    "type": "object",
+                    "description": "Talent to score, 1 to 5.",
+                    "additionalProperties": { "type": "integer", "minimum": 1, "maximum": 5 },
+                },
+                "benchmarks": {
+                    "type": "object",
+                    "description": "Benchmark name to its result.",
+                    "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                            "score": { "type": "number" },
+                            "unit": { "type": "string" },
+                            "source": { "type": "string" },
+                            "as_of": { "type": "string" },
+                        },
+                        "required": ["score", "source", "as_of"],
+                    },
+                },
+                "notes": { "type": "string" },
+            }),
+            &["match", "name"],
+        ),
+        tool(
             "worker_start",
             "Start a worker: another agent that works on its own, in a new worktree of the \
              project (or in `cwd`, an existing worktree). Pick the cheapest tier that will do \
@@ -208,7 +251,10 @@ pub fn tool_list() -> Value {
                 "model": { "type": "string" },
                 "effort": { "type": "string" },
                 "mode": { "type": "string", "description": "The agent's permission mode." },
-                "job": { "type": "string", "enum": ["code", "research"], "default": "code" },
+                "job": {
+                    "type": "string", "enum": ["code", "research", "plan"], "default": "code",
+                    "description": "plan: a plan, on the best models (the planning tier) whatever else is asked.",
+                },
             }),
             &["title", "prompt"],
         ),
@@ -387,12 +433,22 @@ impl<B: Backend> Server<B> {
             "king_status" => self.backend.ask(Request::Status),
             "projects_list" => self.backend.ask(Request::Projects),
             "usage_status" => self.backend.ask(Request::Usage),
+            "models_list" => self.backend.ask(Request::Models),
+            "model_note" => {
+                let card: leon_king::models::Card =
+                    serde_json::from_value(Value::Object(arguments.clone()))
+                        .map_err(|error| format!("not a card: {error}"))?;
+                self.backend.ask(Request::ModelNote { card })
+            }
             "project_status" => self.project_status(&needed("project")?),
             "worker_start" => {
                 let job = match text("job").as_deref() {
                     None | Some("code") => Job::Code,
                     Some("research") => Job::Research,
-                    Some(other) => return Err(format!("a job is code or research, not {other:?}")),
+                    Some("plan") => Job::Plan,
+                    Some(other) => {
+                        return Err(format!("a job is code, research or plan, not {other:?}"))
+                    }
                 };
                 self.backend
                     .ask(Request::StartWorker(Box::new(WorkerRequest {
@@ -701,6 +757,29 @@ mod tests {
         assert!(why.contains("prompt"));
         let (why, error) = call(&mut server, "worker_send", json!({ "text": "more" }));
         assert!(error && why.contains("worker"));
+    }
+
+    #[test]
+    fn a_note_on_a_model_is_kept_as_a_card() {
+        let mut server = Server::new(Fake::default());
+        let (_, error) = call(
+            &mut server,
+            "model_note",
+            json!({
+                "match": "deepseek-v4",
+                "name": "DeepSeek V4",
+                "talents": { "coding": 4 },
+                "benchmarks": { "swe-bench-verified": { "score": 70.1, "source": "deepseek.com", "as_of": "2026-10" } },
+            }),
+        );
+        assert!(!error);
+        let Request::ModelNote { card } = &server.backend.asked[0] else {
+            panic!("{:?}", server.backend.asked);
+        };
+        assert_eq!(card.pattern, "deepseek-v4");
+        assert_eq!(card.benchmarks["swe-bench-verified"].score, 70.1);
+        let (why, error) = call(&mut server, "model_note", json!({ "match": "x" }));
+        assert!(error && why.contains("not a card"), "{why}");
     }
 
     #[test]

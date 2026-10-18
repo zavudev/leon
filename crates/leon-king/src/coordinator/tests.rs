@@ -416,3 +416,58 @@ fn king_never_asks_the_person_before_it_uses_leons_own_tools() {
     }
     assert_eq!(king.state().brain.questions.len(), 2);
 }
+
+#[test]
+fn every_turn_is_measured_and_added_to_the_days_counts() {
+    let mut king = Coordinator::new(config());
+    let day = 20_000 * DAY_MS;
+    king.say("plan the release", day);
+    let tokens = |input, output| TurnEvent::Usage {
+        tokens: leon_turn::Tokens {
+            input,
+            cached_input: input / 2,
+            output,
+            reasoning: 0,
+            context_window: None,
+        },
+    };
+    // Each count replaces the one before it in the turn.
+    king.event(Target::Brain, &tokens(1_000, 100), day + 1);
+    king.event(Target::Brain, &tokens(4_000, 600), day + 2);
+    king.event(
+        Target::Brain,
+        &TurnEvent::Finished {
+            ok: true,
+            error: None,
+            cost_usd: Some(0.05),
+            duration_ms: Some(10_000),
+            denied_tools: Vec::new(),
+            interrupted: false,
+        },
+        day + 3,
+    );
+    king.event(Target::Brain, &TurnEvent::Exited { code: 0 }, day + 4);
+    let facts = king.facts(day + 5);
+    let turn = facts.turn.unwrap();
+    assert_eq!(
+        (turn.input, turn.cached_input, turn.output),
+        (4_000, 2_000, 600)
+    );
+    assert_eq!(turn.per_second(), Some(60.0));
+    assert_eq!(facts.king_today.total(), 4_600);
+    assert_eq!(facts.spent_today_usd, 0.05);
+
+    // A worker's turn without a duration of its own is timed by the clock.
+    king.start_worker(spec("a"), day + 10).unwrap();
+    king.event(Target::Worker(1), &tokens(2_000, 200), day + 11);
+    king.event(
+        Target::Worker(1),
+        &TurnEvent::Exited { code: 0 },
+        day + 2_010,
+    );
+    let worker = &king.worker(1).unwrap().conversation;
+    assert_eq!(worker.last_turn.unwrap().duration_ms, 2_000);
+    assert_eq!(king.facts(day + 2_011).workers_today.total(), 2_200);
+    // A new day starts from nothing.
+    assert_eq!(king.facts(day + DAY_MS).king_today.total(), 0);
+}

@@ -23,6 +23,7 @@ leon king say "What is the state of every project, and what should we do next?"
 leon king status            # King and its workers
 leon king log               # what King said lately
 leon king log 3             # what worker #3 said lately
+leon king answer q1 allow           # answer a question King waits on
 leon king brain codex gpt-5.6 high   # run King on another agent or model
 ```
 
@@ -30,6 +31,66 @@ leon king brain codex gpt-5.6 high   # run King on another agent or model
 service starts by itself the first time a command needs it (`leon king serve`
 runs it in the foreground instead). What you say while King is working waits,
 and King hears all of it together when its turn ends.
+
+## What every answer tells you
+
+Under every answer of King's, Leon writes a line from what the agents and
+the usage readings say, never from what the model claims:
+
+```text
+  ── This answer: 48.2k tokens (read 45.1k, 31.0k cached · wrote 3.1k) · 62 tok/s · 50s · $0.042
+  ── Today: 150.2k tokens (King 48.2k, workers 102.0k) · $1.27 of $20.00 ($18.73 left)
+  ── Left: claude (max): 5h 66% left, resets in 2h10m, wk 88% left · codex (plus): 5h 97% left
+```
+
+The tokens are what each agent reports for the turn. Claude Code gives them
+in its result, Codex counts them as its thread goes, and opencode, Grok and
+Cursor give them in their answer to the prompt. Tokens per second are the
+tokens written over the whole turn. The usage windows are Leon's own
+readings for this computer, the same as the usage meters. King reads the same
+numbers in its instructions before every turn, and through `usage_status`,
+so it can advise you: what to run now, what can wait for a reset, which agent
+to save.
+
+## Models, talents and benchmarks
+
+Before every turn King is told every model the agents of this computer offer.
+Leon asks each agent, the same way the window's conversations do. With each
+model King gets what is known of it:
+
+* **talents**, from 1 to 5: planning, architecture, coding, review,
+  research, speed, economy;
+* **benchmarks**, each with its source and the month it was read.
+
+The catalogue built into Leon (`crates/leon-king/src/models.toml`) holds a
+starting estimate of each family's talents and **no benchmark**: a score is
+kept only with its source. King adds what it finds out with its
+`model_note` tool, and you can edit the file yourself. Both write to
+`king-models.toml` in Leon's data folder, which wins over the built-in
+catalogue:
+
+```toml
+[[model]]
+match = "deepseek-v4"          # a part of the model's id; the longest match wins
+name = "DeepSeek V4"
+talents = { coding = 4, economy = 5 }
+notes = "Good at well-specified changes; weak at planning across modules."
+
+[model.benchmarks.swe-bench-verified]
+score = 70.1
+source = "https://…"
+as_of = "2026-10"
+```
+
+## Planning goes to the best models
+
+A worker with the job `plan` (`leon king start … --plan`, or
+`job: "plan"` in `worker_start`) always runs on the `planning` tier. By
+default that is Claude Opus at high effort, then Codex at high effort.
+Asking for a cheaper tier or agent for a plan is refused. King's
+instructions say to plan with the best model and then execute step by step
+on cheaper workers, with the best model reviewing their work. King plans
+in its own conversation only when it runs on a planning-tier model itself.
 
 ## Workers
 
@@ -47,7 +108,7 @@ leon king release 1    # take the worker over: King lets it go
 A worker works in a new worktree of the project, on a branch of its own
 (`king/<title>-<n>`, under `worktree_location`'s default place). A `code` job
 changes code and commits on that branch. A `research` job only reads and
-reports. A worker is never started in a project's main checkout, and never on
+reports. A `plan` job writes a plan and changes nothing. A worker is never started in a project's main checkout, and never on
 the default branch.
 
 King is never asked to poll. When a worker finishes, fails or asks something,
@@ -107,6 +168,7 @@ wake_delay_secs = 5     # how long news is gathered before King is woken
 cheap = [{ agent = "opencode", model = "deepseek/deepseek-v4" }, { agent = "cursor" }]
 standard = [{ agent = "codex", effort = "medium" }, { agent = "claude" }]
 premium = [{ agent = "claude", model = "opus", effort = "high" }]
+planning = [{ agent = "claude", model = "opus", effort = "high" }, { agent = "codex", effort = "high" }]
 
 [modes]                 # the permission mode each agent's workers start in
 claude = "acceptEdits"
@@ -148,6 +210,5 @@ conversation; changing its model or effort keeps the same one.
   (`leon king service install`), the way `leon host service` is.
 * Workers on SSH and relay machines, and agents that only run in a terminal
   (Kimi, ZCode, Antigravity) as workers.
-* Answering King's own questions from the command line. Run King in a mode
-  that does not ask for what its tools need, or answer from the window once
-  it has the King view.
+* Showing the tokens in the window's own conversations and on the phone:
+  the event is read, and only King uses it so far.

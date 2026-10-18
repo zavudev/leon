@@ -28,8 +28,21 @@ pub struct ProjectLine {
     pub branches: Vec<String>,
 }
 
+/// What King's instructions say of the moment they are written.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Now<'a> {
+    /// The projects Leon knows.
+    pub projects: &'a [ProjectLine],
+    /// The models of this computer and what is known of each
+    /// ([`crate::models::render`]).
+    pub models: &'a str,
+    /// What was used and what is left ([`crate::report::line`]).
+    pub usage: &'a str,
+}
+
 /// King's instructions.
-pub fn king(config: &Config, projects: &[ProjectLine]) -> String {
+pub fn king(config: &Config, now: &Now<'_>) -> String {
+    let projects = now.projects;
     let mut text = String::from(
         "# King Leon\n\n\
          You are King Leon, the principal engineer of the person you talk to. You answer for \
@@ -54,6 +67,25 @@ pub fn king(config: &Config, projects: &[ProjectLine]) -> String {
            (`memory_search`) before you decide something you may have decided before.\n\
          * Tell the person with `notify_user` when something they asked for is done or \
            needs their decision, if they may not be watching.\n\n\
+         ## Choosing a model\n\n\
+         * Every model you can use is listed below, with its talents (1 to 5) and the \
+           benchmarks known of it, each with its source and date. Choose by the job: the \
+           talent it needs, then the price (economy) and what the agent has left \
+           (`usage_status`). Name the agent and model in `worker_start` when a tier would \
+           not pick the right one.\n\
+         * **Planning always goes to the best models.** Any plan that matters (a feature, \
+           a refactor, an architecture, an order of work across projects) is a `plan` job: \
+           Leon runs it on the `planning` tier and refuses cheaper models for it. Plan \
+           yourself only if you run on one of the planning tier's models; otherwise start a \
+           `plan` worker and build on its plan. Execution can then go to cheaper workers, \
+           step by step, and the best model reviews what they did.\n\
+         * When you learn something about a model (a benchmark with its source, how it did \
+           on a job of ours), keep it with `model_note`, so the next choice is better.\n\n\
+         ## Reporting\n\n\
+         * Leon writes, under every answer of yours, the tokens it took, how fast, what it \
+           cost, what was spent today and what is left of each agent's usage. Use those \
+           numbers when you advise the person (what to run now, what can wait for a reset, \
+           which agent to save), and say when a job will use a large share of what is left.\n\n\
          ## What you may do\n\n\
          * Create worktrees and start, steer and stop workers.\n\
          * Commit on a worktree's branch, push it and open a pull request (`pr_open`).\n\n\
@@ -83,6 +115,11 @@ pub fn king(config: &Config, projects: &[ProjectLine]) -> String {
             None => String::new(),
         }
     );
+    let _ = writeln!(text, "\n## Models you can use\n");
+    let _ = write!(text, "{}", now.models);
+    if !now.usage.is_empty() {
+        let _ = writeln!(text, "\n## Usage now\n\n{}", now.usage);
+    }
     let _ = writeln!(text, "\n## Projects\n");
     if projects.is_empty() {
         let _ = writeln!(text, "Leon knows no project yet.");
@@ -110,6 +147,12 @@ pub fn worker(worker: &Worker) -> String {
             "Change what the task needs in this folder only, run the project's checks, and \
              commit on the current branch with a Conventional Commit message when the work is \
              done. Do not push, do not merge, do not switch branches."
+        }
+        Job::Plan => {
+            "Plan only; change nothing, commit nothing. Read what the task touches, then \
+             write the plan: the approach and why, the steps in order with the files each \
+             one changes, the risks, and how to verify the result. Say what you are unsure \
+             of instead of guessing."
         }
         Job::Research => {
             "Read and investigate; change nothing, commit nothing. End with a clear, \
@@ -156,15 +199,23 @@ mod tests {
     fn kings_instructions_name_its_limits_tiers_and_projects() {
         let mut config = Config::default();
         config.limits.daily_budget_usd = Some(20.0);
+        let projects = [ProjectLine {
+            name: "leon".into(),
+            machine: "This computer".into(),
+            root: "/code/leon".into(),
+            branches: vec!["main".into(), "feature/x".into()],
+        }];
         let text = king(
             &config,
-            &[ProjectLine {
-                name: "leon".into(),
-                machine: "This computer".into(),
-                root: "/code/leon".into(),
-                branches: vec!["main".into(), "feature/x".into()],
-            }],
+            &Now {
+                projects: &projects,
+                models: "* **claude**\n  * `opus` (Opus)\n",
+                usage: "Left: claude: 5h 66% left",
+            },
         );
+        assert!(text.contains("Planning always goes to the best models"));
+        assert!(text.contains("## Models you can use\n\n* **claude**"));
+        assert!(text.contains("## Usage now\n\nLeft: claude: 5h 66% left"));
         assert!(text.contains("never do"));
         assert!(text.contains("Merge a pull request"));
         assert!(text.contains("* `cheap`: opencode, then cursor"));
@@ -172,6 +223,6 @@ mod tests {
         assert!(
             text.contains("**leon** on This computer: `/code/leon` (branches: main, feature/x)")
         );
-        assert!(king(&Config::default(), &[]).contains("knows no project yet"));
+        assert!(king(&Config::default(), &Now::default()).contains("knows no project yet"));
     }
 }

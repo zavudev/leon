@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Candidate, Config, DEFAULT_TIER};
+use crate::config::{Candidate, Config, DEFAULT_TIER, PLANNING_TIER};
 
 /// Where one agent stands now.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,6 +39,8 @@ pub struct Ask {
     pub model: Option<String>,
     /// How hard it thinks, with an agent.
     pub effort: Option<String>,
+    /// It is a plan: only the planning tier's models take it.
+    pub planning: bool,
 }
 
 /// The agent and model a job goes to.
@@ -68,6 +70,9 @@ pub fn route(
                  person before starting more work"
             ));
         }
+    }
+    if ask.planning {
+        return plan(config, ask, standings, spent_today_usd);
     }
     let threshold = config.limits.limit_threshold;
     let room = |agent: &str| -> Result<(), String> {
@@ -136,6 +141,48 @@ pub fn route(
         "no agent of the tier {tier:?} can take it: {}",
         reasons.join("; ")
     ))
+}
+
+/// A plan: on the planning tier (the premium one when the file names no
+/// planning tier), and on a named agent only when the tier has it.
+fn plan(
+    config: &Config,
+    ask: &Ask,
+    standings: &[Standing],
+    spent_today_usd: f64,
+) -> Result<Choice, String> {
+    let tier = if config.tiers.contains_key(PLANNING_TIER) {
+        PLANNING_TIER
+    } else {
+        "premium"
+    };
+    let candidates = config.tiers.get(tier).cloned().unwrap_or_default();
+    let mut config = config.clone();
+    if let Some(agent) = ask.agent.as_deref().filter(|agent| !agent.is_empty()) {
+        let named: Vec<Candidate> = candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.agent == agent
+                    && ask.model.as_deref().is_none_or(|model| {
+                        candidate.model.as_deref().is_none_or(|own| own == model)
+                    })
+            })
+            .cloned()
+            .collect();
+        if named.is_empty() {
+            let names: Vec<String> = candidates.iter().map(describe).collect();
+            return Err(format!(
+                "plans go to the best models only, the {tier} tier: {}",
+                names.join(", ")
+            ));
+        }
+        config.tiers.insert(tier.to_owned(), named);
+    }
+    let ask = Ask {
+        tier: Some(tier.to_owned()),
+        ..Ask::default()
+    };
+    route(&config, &ask, standings, spent_today_usd)
 }
 
 fn describe(candidate: &Candidate) -> String {
@@ -219,6 +266,46 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_goes_to_the_best_models_whatever_was_asked() {
+        let config = Config::default();
+        let cheap_plan = Ask {
+            tier: Some("cheap".into()),
+            planning: true,
+            ..Ask::default()
+        };
+        let chosen = route(&config, &cheap_plan, &everyone(), 0.0).unwrap();
+        assert_eq!(chosen.agent, "claude");
+        assert_eq!(chosen.model.as_deref(), Some("opus"));
+        assert_eq!(chosen.tier.as_deref(), Some("planning"));
+
+        // Out of room: the next best, never a cheaper one.
+        let mut standings = everyone();
+        standings[0] = standing("claude", true, Some(0.99));
+        let chosen = route(&config, &cheap_plan, &standings, 0.0).unwrap();
+        assert_eq!(chosen.agent, "codex");
+        assert_eq!(chosen.effort.as_deref(), Some("high"));
+
+        let named_cheap = Ask {
+            agent: Some("opencode".into()),
+            planning: true,
+            ..Ask::default()
+        };
+        let refused = route(&config, &named_cheap, &everyone(), 0.0).unwrap_err();
+        assert!(refused.contains("best models only"), "{refused}");
+        let named_codex = Ask {
+            agent: Some("codex".into()),
+            planning: true,
+            ..Ask::default()
+        };
+        assert_eq!(
+            route(&config, &named_codex, &everyone(), 0.0)
+                .unwrap()
+                .agent,
+            "codex"
+        );
+    }
+
+    #[test]
     fn nothing_starts_once_the_budget_is_spent_or_without_an_agent() {
         let mut config = Config::default();
         config.limits.daily_budget_usd = Some(10.0);
@@ -227,7 +314,10 @@ mod tests {
         assert!(route(&config, &tier("cheap"), &everyone(), 9.0).is_ok());
 
         let unknown = route(&config, &tier("gold"), &everyone(), 0.0).unwrap_err();
-        assert!(unknown.contains("cheap, premium, standard"), "{unknown}");
+        assert!(
+            unknown.contains("cheap, planning, premium, standard"),
+            "{unknown}"
+        );
         let none: Vec<Standing> = everyone()
             .into_iter()
             .map(|s| standing(&s.agent, false, None))

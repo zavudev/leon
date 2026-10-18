@@ -217,6 +217,7 @@ fn print_entry(entry: &leon_king::transcript::Entry) {
         Kind::Tool => println!("  · {}", entry.text),
         Kind::Question => println!("  ? {}", entry.text),
         Kind::Notice => println!("  ! {}", entry.text),
+        Kind::Report => println!("  ── {}\n", entry.text.replace('\n', "\n  ── ")),
     }
 }
 

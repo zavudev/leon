@@ -31,9 +31,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use leon_core::{Machine, MachineId, MachineKind, Store};
 use leon_king::config::Config;
-use leon_king::coordinator::{Coordinator, Effect, State, Target, WorkerSpec};
+use leon_king::coordinator::{Coordinator, Effect, Job, State, Target, WorkerSpec};
+use leon_king::models::{self, Available, Catalogue};
 use leon_king::prompt::{self, ProjectLine};
 use leon_king::protocol::{Envelope, Notice, Reply, Request, WorkerRequest, MAX_LINE};
+use leon_king::report::{self, AgentWindows, Window};
 use leon_king::route::{self, Ask, Choice, Standing};
 use leon_turn::{McpServer, TurnSpec};
 use serde_json::{json, Value};
@@ -57,7 +59,12 @@ enum Input {
         generation: u64,
         output: Output,
     },
+    /// The agents said which models they offer.
+    Models(Vec<Available>),
 }
+
+/// How often the agents are asked again which models they offer.
+const MODELS_EVERY: Duration = Duration::from_secs(30 * 60);
 
 /// A turn in flight.
 struct Running {
@@ -78,6 +85,8 @@ struct Service {
     spawner: Arc<dyn Spawner>,
     /// Which agents are installed, and when that was found out.
     installed: Option<(u64, Vec<bool>)>,
+    /// The models the agents offer, as they last said.
+    models: Vec<Available>,
 }
 
 /// How long it is believed which agents are installed.
@@ -132,7 +141,21 @@ pub fn run(paths: Paths) -> Result<(), String> {
         store,
         spawner: Arc::new(Piped),
         installed: None,
+        models: Vec::new(),
     };
+    {
+        let inputs = service.inputs.clone();
+        let spawner = service.spawner.clone();
+        std::thread::Builder::new()
+            .name("leon-king-models".to_owned())
+            .spawn(move || loop {
+                if inputs.send(Input::Models(probe_models(&*spawner))).is_err() {
+                    return;
+                }
+                std::thread::sleep(MODELS_EVERY);
+            })
+            .map_err(|error| error.to_string())?;
+    }
     tracing::info!(socket = %service.paths.socket.display(), "King's service is listening");
     service.carry_out(effects);
     loop {
@@ -271,12 +294,42 @@ impl Service {
                     self.turns.remove(&target);
                 }
                 let now = now_ms();
-                events
+                let effects: Vec<Effect> = events
                     .iter()
                     .flat_map(|event| self.coordinator.event(target, event, now))
-                    .collect()
+                    .collect();
+                // Under every answer of King's: what it took, and what is left.
+                if ended && target == Target::Brain {
+                    let line = self.report(now);
+                    self.coordinator.annotate(Target::Brain, &line, now);
+                }
+                effects
+            }
+            Input::Models(models) => {
+                if !models.is_empty() {
+                    self.models = models;
+                }
+                Vec::new()
             }
         }
+    }
+
+    /// The line under King's last answer.
+    fn report(&self, now: u64) -> String {
+        let usage = usage_windows(self.store.as_deref(), now);
+        let mut facts = self.coordinator.facts(now);
+        facts.usage = &usage;
+        report::line(&facts)
+    }
+
+    /// What is known of models' talents: the catalogue built in, and the
+    /// one in Leon's data folder over it.
+    fn catalogue(&self) -> Catalogue {
+        let own = std::fs::read_to_string(self.paths.data_dir.join(models::FILE_NAME)).ok();
+        Catalogue::with(own.as_deref()).unwrap_or_else(|error| {
+            tracing::warn!(%error, "king-models.toml could not be read");
+            Catalogue::with(None).unwrap_or_default()
+        })
     }
 
     fn request(&mut self, request: Request) -> Result<(Value, Vec<Effect>), String> {
@@ -322,6 +375,12 @@ impl Service {
                 Ok((
                     json!({
                         "agents": standings,
+                        "windows": usage_windows(self.store.as_deref(), now),
+                        "tokens_today": {
+                            "king": self.coordinator.facts(now).king_today,
+                            "workers": self.coordinator.facts(now).workers_today,
+                        },
+                        "report": self.report(now),
                         "spent_today_usd": self.coordinator.spent_today(now),
                         "daily_budget_usd": self.coordinator.config().limits.daily_budget_usd,
                         "limit_threshold": self.coordinator.config().limits.limit_threshold,
@@ -329,6 +388,43 @@ impl Service {
                     }),
                     Vec::new(),
                 ))
+            }
+            Request::Models => {
+                let catalogue = self.catalogue();
+                let models: Vec<Value> = self
+                    .models
+                    .iter()
+                    .map(|model| {
+                        json!({
+                            "agent": model.agent,
+                            "id": model.id,
+                            "label": model.label,
+                            "description": model.description,
+                            "efforts": model.efforts,
+                            "card": catalogue.card_for(&model.id, &model.label),
+                        })
+                    })
+                    .collect();
+                Ok((
+                    json!({ "models": models, "planning_tier": self.coordinator.config().tiers.get(leon_king::config::PLANNING_TIER) }),
+                    Vec::new(),
+                ))
+            }
+            Request::ModelNote { card } => {
+                let path = self.paths.data_dir.join(models::FILE_NAME);
+                let mut own = match std::fs::read_to_string(&path) {
+                    Ok(text) => Catalogue::parse(&text)
+                        .map_err(|error| format!("{}: {error}", path.display()))?,
+                    Err(_) => Catalogue::default(),
+                };
+                if card.pattern.trim().is_empty() {
+                    return Err("a card needs `match`: a part of the model's id".to_owned());
+                }
+                own.put(card);
+                let text = toml::to_string_pretty(&own).map_err(|error| error.to_string())?;
+                Catalogue::parse(&text)?;
+                std::fs::write(&path, text).map_err(|error| error.to_string())?;
+                done(Vec::new())
             }
             Request::StartWorker(asked) => {
                 let spec = self.worker_spec(*asked, now)?;
@@ -562,7 +658,16 @@ impl Service {
                 branches: project.branches,
             })
             .collect();
-        let text = prompt::king(self.coordinator.config(), &lines);
+        let models = models::render(&self.models, &self.catalogue());
+        let usage = self.report(now_ms());
+        let text = prompt::king(
+            self.coordinator.config(),
+            &prompt::Now {
+                projects: &lines,
+                models: &models,
+                usage: &usage,
+            },
+        );
         for name in ["AGENTS.md", "CLAUDE.md"] {
             let path = self.paths.folder.join(name);
             if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
@@ -620,6 +725,7 @@ impl Service {
             agent: asked.agent.clone(),
             model: asked.model.clone(),
             effort: asked.effort.clone(),
+            planning: asked.job == Job::Plan,
         };
         let standings = self.standings(now);
         let choice = route::route(
@@ -743,6 +849,92 @@ fn standings(store: Option<&Store>, now_ms: u64, installed: &[bool]) -> Vec<Stan
             }
         })
         .collect()
+}
+
+/// The agents' usage windows on this computer, as Leon last read them.
+fn usage_windows(store: Option<&Store>, now_ms: u64) -> Vec<AgentWindows> {
+    let now = (now_ms / 1000) as i64;
+    let readings: Vec<leon_usage::AgentUsage> = store
+        .and_then(|store| store.usage_readings().ok())
+        .unwrap_or_default()
+        .iter()
+        .filter(|row| row.machine == MachineId::local())
+        .filter_map(|row| serde_json::from_str(&row.payload).ok())
+        .collect();
+    let mut agents: Vec<AgentWindows> = Vec::new();
+    for usage in &readings {
+        let leon_usage::Effective::Windows(windows) = usage.effective(now) else {
+            continue;
+        };
+        let mut label = usage.agent.as_str().to_owned();
+        if let Some(plan) = &usage.plan {
+            label = format!("{label} ({plan})");
+        }
+        agents.push(AgentWindows {
+            agent: label,
+            windows: windows
+                .iter()
+                .map(|window| Window {
+                    label: window.kind.short(),
+                    used: window.used_percent / 100.0,
+                    resets_in_secs: window.resets_at.map(|at| at - now),
+                })
+                .collect(),
+        });
+    }
+    agents
+}
+
+/// Asks every installed agent which models it offers, the way the window's
+/// conversations ask (`leon_turn::Adapter::options`).
+fn probe_models(spawner: &dyn Spawner) -> Vec<Available> {
+    let mut found = Vec::new();
+    for adapter in leon_turn::ADAPTERS {
+        if !installed(adapter.program) {
+            continue;
+        }
+        let mut argv = vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            adapter.options.script.to_owned(),
+            "leon".to_owned(),
+            adapter.program.to_owned(),
+        ];
+        argv.extend((adapter.options.arguments)());
+        let start = Start {
+            machine: Machine {
+                id: MachineId::local(),
+                name: "This computer".to_owned(),
+                kind: MachineKind::Local,
+            },
+            argv,
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            env: Vec::new(),
+        };
+        let Ok((_transport, output)) = spawner.spawn(start) else {
+            continue;
+        };
+        let mut printed = String::new();
+        while let Ok(said) = output.recv_timeout(Duration::from_secs(60)) {
+            match said {
+                Output::Line(line) => {
+                    printed.push_str(&line);
+                    printed.push('\n');
+                }
+                Output::Noise(_) => {}
+                Output::Exited(_) => break,
+            }
+        }
+        let options = (adapter.options.parse)(&printed);
+        found.extend(options.models.into_iter().map(|model| Available {
+            agent: adapter.id.to_owned(),
+            id: model.id,
+            label: model.label,
+            description: model.description,
+            efforts: model.efforts,
+        }));
+    }
+    found
 }
 
 /// Whether `program` is on the login shell's path.

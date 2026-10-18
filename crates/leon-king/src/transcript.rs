@@ -36,6 +36,8 @@ pub enum Kind {
     Question,
     /// How a turn ended, or what went wrong.
     Notice,
+    /// Leon's line under an answer: its tokens, and what is left.
+    Report,
 }
 
 /// One thing a conversation said.

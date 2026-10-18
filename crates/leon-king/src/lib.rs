@@ -21,6 +21,9 @@
 //!   what each agent has left of its limits and what was spent today;
 //! * [`protocol`]: the messages of the service's control socket, which the
 //!   window, the phone's host, the command line and King's own tools speak;
+//! * [`models`]: what King knows of each model's talents and benchmarks;
+//! * [`report`]: the line under every answer of King's: its tokens, how
+//!   fast they came, and what is left of the budget and the usage windows;
 //! * [`prompt`]: the instructions King is given, and the message that wakes
 //!   it with news of its workers.
 //!
@@ -32,8 +35,10 @@
 
 pub mod config;
 pub mod coordinator;
+pub mod models;
 pub mod prompt;
 pub mod protocol;
+pub mod report;
 pub mod route;
 pub mod transcript;
 
