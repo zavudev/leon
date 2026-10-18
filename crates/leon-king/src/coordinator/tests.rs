@@ -337,3 +337,82 @@ fn a_new_agent_for_king_is_a_new_conversation_and_a_new_model_is_not() {
     assert_eq!(king.plan(Target::Brain).unwrap().resume, None);
     assert_eq!(king.config().brain.agent, "codex");
 }
+
+#[test]
+fn kings_agent_is_the_one_chosen_last_unless_the_file_was_edited_since() {
+    let mut king = Coordinator::new(config());
+    let codex = Choice {
+        agent: "codex".into(),
+        model: Some("gpt".into()),
+        effort: None,
+        tier: None,
+    };
+    king.set_brain(&codex, None);
+    let state = king.state().clone();
+    let (again, _) = Coordinator::restored(config(), state.clone(), 1);
+    assert_eq!(again.plan(Target::Brain).unwrap().agent, "codex");
+    assert_eq!(again.config().brain.agent, "codex");
+
+    let mut edited = config();
+    edited.brain.agent = "opencode".into();
+    let (again, _) = Coordinator::restored(edited, state, 1);
+    assert_eq!(again.plan(Target::Brain).unwrap().agent, "opencode");
+}
+
+#[test]
+fn king_never_asks_the_person_before_it_uses_leons_own_tools() {
+    let mut king = Coordinator::new(config());
+    king.say("go", 0);
+    let ask = |tool: &str| TurnEvent::Question {
+        id: "q".into(),
+        kind: QuestionKind::Permission {
+            tool: tool.into(),
+            summary: String::new(),
+            detail: String::new(),
+            reason: None,
+            choices: vec![
+                PermissionChoice {
+                    id: "once".into(),
+                    effect: PermissionEffect::AllowOnce,
+                    label: "Allow".into(),
+                    scope: None,
+                    takes_reason: false,
+                },
+                PermissionChoice {
+                    id: "always.0".into(),
+                    effect: PermissionEffect::AllowAlways,
+                    label: "Always".into(),
+                    scope: None,
+                    takes_reason: false,
+                },
+            ],
+        },
+    };
+    for tool in [
+        "mcp__leon-king__worker_start",
+        "leon-memory.memory_add",
+        "leon-tasks/task_list",
+    ] {
+        let effects = king.event(Target::Brain, &ask(tool), 1);
+        assert_eq!(
+            effects,
+            [Effect::Act {
+                target: Target::Brain,
+                action: Action::Answer(
+                    "q".into(),
+                    Answer::Permission {
+                        choice_id: "always.0".into(),
+                        reason: None
+                    }
+                )
+            }],
+            "{tool}"
+        );
+    }
+    assert!(king.state().brain.questions.is_empty());
+    // Anything else is the person's to answer, and so is a look-alike.
+    for tool in ["Bash", "mcp__leon-kingdom__x"] {
+        king.event(Target::Brain, &ask(tool), 2);
+    }
+    assert_eq!(king.state().brain.questions.len(), 2);
+}

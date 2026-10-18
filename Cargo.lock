@@ -4185,6 +4185,7 @@ dependencies = [
  "leon-den",
  "leon-history",
  "leon-host",
+ "leon-king",
  "leon-link",
  "leon-mark",
  "leon-memory",

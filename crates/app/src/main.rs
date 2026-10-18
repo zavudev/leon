@@ -34,6 +34,7 @@ mod history_report;
 mod host_service;
 mod icons;
 mod keys;
+mod king;
 mod launch;
 mod learn;
 mod logging;
@@ -115,6 +116,12 @@ fn main() {
     // window: what agents run from a terminal of Leon.
     if let Some((data_dir, rest)) = memory_cli::intercept(&arguments) {
         std::process::exit(memory_cli::run(data_dir, rest));
+    }
+
+    // `leon king ...` is King Leon's: its service, its tools and a command
+    // line to talk to it, all without a window.
+    if let Some((data_dir, rest)) = king::intercept(&arguments) {
+        std::process::exit(king::run(data_dir, rest));
     }
 
     // `leon task ...` is the board's command line, likewise without a window.

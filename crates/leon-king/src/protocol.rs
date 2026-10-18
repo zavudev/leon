@@ -73,7 +73,7 @@ pub enum Request {
     /// Where each agent stands: installed, its usage, what it costs.
     Usage,
     /// Start a worker.
-    StartWorker(WorkerRequest),
+    StartWorker(Box<WorkerRequest>),
     /// Tell a worker more.
     TellWorker {
         /// The worker.
@@ -105,6 +105,15 @@ pub enum Request {
     Release {
         /// The worker.
         worker: u32,
+    },
+    /// Tell the person something: on their desktop and on the clients
+    /// that listen.
+    Notify {
+        /// One line.
+        title: String,
+        /// The rest.
+        #[serde(default)]
+        body: String,
     },
     /// Send [`Notice`]s on this connection from now on.
     Subscribe,

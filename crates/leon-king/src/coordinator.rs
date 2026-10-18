@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, VecDeque};
 use leon_turn::{Action, Answer, ChoiceAnswer, PermissionEffect, QuestionKind, TurnEvent};
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
+use crate::config::{Brain, Config};
 use crate::prompt;
 use crate::protocol::{ConversationStatus, Status, WorkerStatus};
 use crate::route::Choice;
@@ -38,6 +38,11 @@ use crate::transcript::{self, Kind, Transcript};
 
 /// A day, in milliseconds.
 const DAY_MS: u64 = 86_400_000;
+
+/// The servers of tools Leon gives King. King's agent is never made to ask
+/// the person before it uses one of them: they are what King is for, and
+/// what they refuse they refuse themselves.
+pub const OWN_SERVERS: [&str; 3] = ["leon-king", "leon-memory", "leon-tasks"];
 
 /// Whose turn it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -277,6 +282,11 @@ pub struct State {
     pub spent_day: u64,
     /// What the workers and King cost that day.
     pub spent_usd: f64,
+    /// What `king.toml` said of King's agent when it was last read: a file
+    /// that says something else now was edited, and wins over what was
+    /// chosen since ([`Coordinator::set_brain`]).
+    #[serde(default)]
+    pub configured: Option<Brain>,
 }
 
 /// The turn a target is to have, as the service needs it.
@@ -317,6 +327,7 @@ impl Coordinator {
             },
             config.brain.mode.clone(),
         );
+        let configured = Some(config.brain.clone());
         Self {
             config,
             state: State {
@@ -327,6 +338,7 @@ impl Coordinator {
                 news_since_ms: None,
                 spent_day: 0,
                 spent_usd: 0.0,
+                configured,
             },
         }
     }
@@ -335,15 +347,24 @@ impl Coordinator {
     /// conversation that was in one is told so, and King hears of every
     /// worker that was working.
     pub fn restored(config: Config, mut state: State, now_ms: u64) -> (Self, Vec<Effect>) {
-        // The agent King runs on is the configuration's: one that changed
-        // while the service was down starts a new conversation.
-        if state.brain.agent != config.brain.agent {
-            state.brain.session_id = None;
-            state.brain.agent = config.brain.agent.clone();
+        // King's agent is the one last chosen, unless the file was edited
+        // since: then it is the file's. A new agent is a new conversation.
+        let mut config = config;
+        if state.configured.as_ref() == Some(&config.brain) {
+            config.brain.agent = state.brain.agent.clone();
+            config.brain.model = state.brain.model.clone();
+            config.brain.effort = state.brain.effort.clone();
+            config.brain.mode = state.brain.mode.clone();
+        } else {
+            if state.brain.agent != config.brain.agent {
+                state.brain.session_id = None;
+                state.brain.agent = config.brain.agent.clone();
+            }
+            state.brain.model = config.brain.model.clone();
+            state.brain.effort = config.brain.effort.clone();
+            state.brain.mode = config.brain.mode.clone();
+            state.configured = Some(config.brain.clone());
         }
-        state.brain.model = config.brain.model.clone();
-        state.brain.effort = config.brain.effort.clone();
-        state.brain.mode = config.brain.mode.clone();
         let mut coordinator = Self { config, state };
         let interrupted = "The turn was interrupted: Leon's service stopped.";
         if coordinator.state.brain.busy {
@@ -528,6 +549,7 @@ impl Coordinator {
         self.config.brain.agent = choice.agent.clone();
         self.config.brain.model = choice.model.clone();
         self.config.brain.effort = choice.effort.clone();
+        self.config.brain.mode = brain.mode.clone();
         vec![Effect::Changed]
     }
 
@@ -730,6 +752,14 @@ impl Coordinator {
                 effects.push(Effect::Changed);
             }
             TurnEvent::Text { .. } | TurnEvent::ToolUse { .. } => effects.push(Effect::Changed),
+            TurnEvent::Question { id, kind } if target == Target::Brain && own_tool(kind) => {
+                if let Some(answer) = allow(kind) {
+                    effects.push(Effect::Act {
+                        target,
+                        action: Action::Answer(id.clone(), answer),
+                    });
+                }
+            }
             TurnEvent::Question { id, kind } => {
                 let open = Open {
                     id: id.clone(),
@@ -944,6 +974,41 @@ impl Coordinator {
             .push(Kind::Prompt, prompt.clone(), now_ms);
         vec![Effect::Changed, Effect::Start { target, prompt }]
     }
+}
+
+/// Whether a question asks to use one of Leon's own tools ([`OWN_SERVERS`]),
+/// by the names agents give them: `mcp__leon-king__worker_start` (Claude
+/// Code), `leon-king.worker_start` or `leon-king/worker_start`.
+fn own_tool(kind: &QuestionKind) -> bool {
+    let QuestionKind::Permission { tool, .. } = kind else {
+        return false;
+    };
+    let name = tool.strip_prefix("mcp__").unwrap_or(tool);
+    OWN_SERVERS.iter().any(|server| {
+        name.strip_prefix(server).is_some_and(|rest| {
+            rest.starts_with("__") || rest.starts_with('.') || rest.starts_with('/')
+        })
+    })
+}
+
+/// The answer that allows a permission, for the session when the agent
+/// offers that.
+fn allow(kind: &QuestionKind) -> Option<Answer> {
+    let QuestionKind::Permission { choices, .. } = kind else {
+        return None;
+    };
+    let choice = choices
+        .iter()
+        .find(|choice| choice.effect == PermissionEffect::AllowAlways)
+        .or_else(|| {
+            choices
+                .iter()
+                .find(|choice| choice.effect == PermissionEffect::AllowOnce)
+        })?;
+    Some(Answer::Permission {
+        choice_id: choice.id.clone(),
+        reason: None,
+    })
 }
 
 /// How a question may be answered, from what it is.
