@@ -44,7 +44,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use serde_json::{json, Map, Value};
 
-use crate::agents::{strings, Action, AgentSession, Outgoing, Step, TurnSpec};
+use crate::agents::{strings, Action, AgentSession, McpServer, Outgoing, Step, TurnSpec};
 use crate::claude::{AgentCommand, AgentMode, AgentModel, AgentOptions};
 use crate::error::TurnError;
 use crate::events::{
@@ -1117,6 +1117,16 @@ impl AgentSession for CodexSession {
         }
         if let Some(model) = turn.model.filter(|model| !model.is_empty()) {
             params.insert("model".to_owned(), json!(model));
+        }
+        if let Some(text) = turn.instructions.filter(|text| !text.is_empty()) {
+            params.insert("developerInstructions".to_owned(), json!(text));
+        }
+        if !turn.mcp_servers.is_empty() {
+            // The same as `-c mcp_servers.<name>…` on its command line.
+            params.insert(
+                "config".to_owned(),
+                json!({ "mcp_servers": McpServer::configs(turn.mcp_servers) }),
+            );
         }
         let thread = match turn.resume.filter(|id| !id.is_empty()) {
             Some(id) => {

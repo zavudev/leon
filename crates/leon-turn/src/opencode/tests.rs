@@ -94,6 +94,31 @@ fn a_turn_is_its_server_whatever_is_asked_of_it() {
 }
 
 #[test]
+fn its_session_is_given_the_servers_of_tools() {
+    let mut session = fresh();
+    let servers = [crate::agents::McpServer {
+        name: "leon-king".into(),
+        command: "/bin/leon".into(),
+        args: vec!["king".into(), "mcp".into()],
+        env: vec![("LEON_DATA_DIR".into(), "/data".into())],
+    }];
+    let turn = TurnSpec {
+        mcp_servers: &servers,
+        ..spec("hi")
+    };
+    let new = value(&session.first(&turn)[1]);
+    assert_eq!(
+        new["params"]["mcpServers"],
+        json!([{
+            "name": "leon-king",
+            "command": "/bin/leon",
+            "args": ["king", "mcp"],
+            "env": [{ "name": "LEON_DATA_DIR", "value": "/data" }],
+        }])
+    );
+}
+
+#[test]
 fn it_is_greeted_and_given_a_session_in_the_folder_then_the_prompt_when_the_session_answered() {
     let mut session = fresh();
     let first = session.first(&spec("Reply with exactly: hola"));

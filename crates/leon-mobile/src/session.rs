@@ -638,6 +638,7 @@ exit 0"#;
             effort: effort.as_deref(),
             cwd: folder.as_deref(),
             add_dirs: &request.add_dirs,
+            ..TurnSpec::default()
         };
         let login = !overrides.direct;
         let (spec, engine) = {

@@ -44,7 +44,7 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use serde_json::{json, Value};
 
-use crate::agents::{Action, AgentSession, Outgoing, Step, TurnSpec};
+use crate::agents::{Action, AgentSession, McpServer, Outgoing, Step, TurnSpec};
 use crate::claude::AgentCommand;
 use crate::error::TurnError;
 use crate::events::{
@@ -928,6 +928,7 @@ impl AgentSession for AcpSession {
             }
         }
         let folder = turn.cwd.filter(|cwd| !cwd.is_empty()).unwrap_or("/");
+        let servers: Vec<Value> = turn.mcp_servers.iter().map(McpServer::acp).collect();
         let session = match wanted(turn.resume) {
             Some(id) => {
                 self.resumed = true;
@@ -936,13 +937,13 @@ impl AgentSession for AcpSession {
                 request(
                     ID_SESSION,
                     self.dialect.resume,
-                    json!({ "sessionId": id, "cwd": folder, "mcpServers": [] }),
+                    json!({ "sessionId": id, "cwd": folder, "mcpServers": servers }),
                 )
             }
             None => request(
                 ID_SESSION,
                 "session/new",
-                json!({ "cwd": folder, "mcpServers": [] }),
+                json!({ "cwd": folder, "mcpServers": servers }),
             ),
         };
         let hello = Outgoing {

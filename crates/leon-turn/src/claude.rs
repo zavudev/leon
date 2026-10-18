@@ -39,7 +39,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde_json::{json, Map, Value};
 
-use crate::agents::{strings, Action, AgentSession, Outgoing, Step, TurnSpec};
+use crate::agents::{strings, Action, AgentSession, McpServer, Outgoing, Step, TurnSpec};
 use crate::error::TurnError;
 use crate::events::{
     blocks, input_summary, text_of, Answer, ChoiceOption, ChoiceQuestion, PermissionChoice,
@@ -82,6 +82,14 @@ pub fn argv(turn: &TurnSpec<'_>) -> Vec<String> {
     }
     for dir in turn.add_dirs.iter().filter(|dir| !dir.is_empty()) {
         argv.extend(strings(&["--add-dir", dir]));
+    }
+    if !turn.mcp_servers.is_empty() {
+        // One JSON value in the shape of a `.mcp.json` file.
+        let config = json!({ "mcpServers": McpServer::configs(turn.mcp_servers) });
+        argv.extend(["--mcp-config".to_owned(), config.to_string()]);
+    }
+    if let Some(text) = turn.instructions.filter(|text| !text.is_empty()) {
+        argv.extend(strings(&["--append-system-prompt", text]));
     }
     argv
 }
@@ -896,6 +904,8 @@ mod tests {
             effort: Some("high"),
             add_dirs: &dirs,
             cwd: None,
+            mcp_servers: &[],
+            instructions: None,
         });
         assert_eq!(
             line,
@@ -927,6 +937,36 @@ mod tests {
             ..TurnSpec::default()
         });
         assert_eq!(plain.len(), 10);
+    }
+
+    #[test]
+    fn servers_of_tools_and_instructions_are_given_on_the_command_line() {
+        let servers = [crate::agents::McpServer {
+            name: "leon-king".into(),
+            command: "/bin/leon".into(),
+            args: vec!["king".into(), "mcp".into()],
+            env: vec![("LEON_DATA_DIR".into(), "/data".into())],
+        }];
+        let line = argv(&TurnSpec {
+            program: "claude",
+            mcp_servers: &servers,
+            instructions: Some("You coordinate."),
+            ..TurnSpec::default()
+        });
+        let at = line.iter().position(|arg| arg == "--mcp-config").unwrap();
+        let config: Value = serde_json::from_str(&line[at + 1]).unwrap();
+        assert_eq!(
+            config,
+            json!({ "mcpServers": { "leon-king": {
+                "command": "/bin/leon",
+                "args": ["king", "mcp"],
+                "env": { "LEON_DATA_DIR": "/data" },
+            } } })
+        );
+        assert_eq!(
+            line[line.len() - 2..],
+            ["--append-system-prompt", "You coordinate."]
+        );
     }
 
     #[test]
