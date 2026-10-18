@@ -1,0 +1,48 @@
+# King Leon's defaults. Your king.toml (in Leon's data folder) is read over
+# this file key by key: write only what you want different. A table you name
+# changes only the keys you write in it; a tier you name replaces that tier
+# alone, and a tier set to [] is removed. `leon king config` prints the result.
+
+# The agent King runs on. Its model and effort are the agent's own when left
+# out; `leon king brain <agent> [model] [effort]` changes them without
+# editing this file.
+[brain]
+agent = "claude"
+# model = "opus"
+# effort = "high"
+# mode = "acceptEdits"
+
+[limits]
+max_workers = 6           # workers working at the same time
+# daily_budget_usd = 20.0 # what workers and King may cost a day; no ceiling when absent
+limit_threshold = 0.85    # share of a usage window past which an agent gets no new work
+wake_delay_secs = 5       # how long news of the workers is gathered before King is woken
+
+# Tiers of workers: each an ordered list of candidates, the first one installed
+# and with room in its usage windows is taken. A model is named as its agent
+# lists it (`leon king` tools: models_list); left out, it is the agent's own.
+[tiers]
+cheap = [{ agent = "opencode" }, { agent = "cursor" }]
+standard = [{ agent = "codex" }, { agent = "claude" }]
+premium = [{ agent = "claude", model = "opus", effort = "high" }]
+planning = [
+    { agent = "claude", model = "opus", effort = "high" },
+    { agent = "codex", effort = "high" },
+]
+
+# Which tier each kind of job goes to when King names none. With
+# `strict = true` the job only ever runs on that tier's models, whatever King
+# asks for: plans always go to the best models.
+[jobs]
+code = { tier = "standard" }
+research = { tier = "cheap" }
+plan = { tier = "planning", strict = true }
+
+# Branches nothing is ever pushed to from King's tools, besides each project's
+# own default branch, which is always protected.
+[guards]
+protected_branches = ["main", "master"]
+
+# The permission mode each agent's workers start in, by agent; an agent left
+# out starts in its own default mode and asks.
+[modes]

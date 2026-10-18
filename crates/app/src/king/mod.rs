@@ -83,6 +83,17 @@ impl Paths {
     }
 }
 
+/// The configuration: `king.toml` over Leon's defaults, or the defaults
+/// alone when there is no file.
+pub fn read_config(paths: &Paths) -> Result<leon_king::config::Config, String> {
+    match std::fs::read_to_string(&paths.config) {
+        Ok(text) => leon_king::config::Config::parse(&text)
+            .map_err(|error| format!("{}: {error}", paths.config.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(error) => Err(format!("{}: {error}", paths.config.display())),
+    }
+}
+
 /// `leon [--data-dir <path>] king …`: what follows the word, and the data
 /// folder given before it.
 pub fn intercept(arguments: &[String]) -> Option<(Option<PathBuf>, Vec<String>)> {
@@ -118,6 +129,7 @@ pub fn usage() -> String {
        leon king release <worker>    take a worker over: King lets it go\n  \
        leon king answer [--worker <n>] <question> <choice> [reason…]\n  \
        leon king brain <agent> [model] [effort]\n  \
+       leon king config [--defaults] the configuration in force (king.toml over the defaults)\n  \
        leon king serve               run the service in the foreground\n  \
        leon king mcp                 King's tools, for the agent King runs on\n\n\
      The service starts by itself when a command needs it. Its settings are\n\
@@ -134,6 +146,8 @@ enum Command {
     /// A request, and whether to wait for King's answer after it.
     Ask(Request, bool),
     Log(Target),
+    /// Print the configuration; Leon's defaults alone with `true`.
+    Config(bool),
 }
 
 fn parse(arguments: &[String]) -> Result<Command, String> {
@@ -147,6 +161,11 @@ fn parse(arguments: &[String]) -> Result<Command, String> {
     };
     Ok(match first.as_str() {
         "serve" => Command::Serve,
+        "config" => match rest {
+            [] => Command::Config(false),
+            [flag] if flag == "--defaults" => Command::Config(true),
+            _ => return Err("config takes only --defaults".to_owned()),
+        },
         "mcp" => Command::Mcp,
         "help" | "--help" | "-h" => Command::Help,
         "status" => Command::Ask(Request::Status, false),
@@ -280,6 +299,14 @@ pub fn run(data_dir: Option<PathBuf>, arguments: Vec<String>) -> i32 {
             Command::Mcp => mcp::run(&paths),
             Command::Ask(request, wait) => client::ask_and_print(&paths, request, wait),
             Command::Log(target) => client::print_log(&paths, target),
+            Command::Config(true) => {
+                print!("{}", leon_king::config::DEFAULTS);
+                Ok(())
+            }
+            Command::Config(false) => read_config(&paths).map(|config| {
+                println!("# {} over Leon's defaults", paths.config.display());
+                print!("{}", config.to_toml());
+            }),
         };
         match outcome {
             Ok(()) => 0,
@@ -362,6 +389,10 @@ mod tests {
         assert!(parse(&strings(&["stop"])).is_err());
         assert!(parse(&strings(&["dance"])).is_err());
         assert_eq!(parse(&[]).unwrap(), Command::Help);
+        assert_eq!(
+            parse(&strings(&["config", "--defaults"])).unwrap(),
+            Command::Config(true)
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@
 //! [`Server::handle`] is the conversation without the pipes, so every
 //! exchange is tested with a backend that records what it was asked.
 
+use leon_king::config::Guards;
 use leon_king::coordinator::{Job, Reply as Answer, Target};
 use leon_king::protocol::{Request, WorkerRequest};
 use serde_json::{json, Map, Value};
@@ -103,10 +104,14 @@ impl Backend for Live {
 
 /// Runs the server on standard input and output until its input ends.
 pub fn run(paths: &Paths) -> Result<(), String> {
-    let mut server = Server::new(Live {
-        paths: paths.clone(),
-        client: None,
-    });
+    let config = super::read_config(paths)?;
+    let mut server = Server::with_guards(
+        Live {
+            paths: paths.clone(),
+            client: None,
+        },
+        &config.guards,
+    );
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let mut output = std::io::stdout().lock();
@@ -136,6 +141,8 @@ pub fn converse<B: Backend>(
 /// The server.
 pub struct Server<B> {
     backend: B,
+    /// Branches nothing is pushed to ([guards] protected_branches).
+    protected: Vec<String>,
 }
 
 struct Refusal {
@@ -197,8 +204,8 @@ pub fn tool_list() -> Value {
             "models_list",
             "Every model the agents of this computer offer, each with its efforts and what is \
              known of it: its talents (1 to 5: planning, architecture, coding, review, \
-             research, speed, economy) and its benchmarks with their sources. Also the \
-             planning tier, where every plan goes.",
+             research, speed, economy) and its benchmarks with their sources. Also the tiers, \
+             and which tier each kind of job goes to.",
             json!({}),
             &[],
         ),
@@ -253,7 +260,7 @@ pub fn tool_list() -> Value {
                 "mode": { "type": "string", "description": "The agent's permission mode." },
                 "job": {
                     "type": "string", "enum": ["code", "research", "plan"], "default": "code",
-                    "description": "plan: a plan, on the best models (the planning tier) whatever else is asked.",
+                    "description": "plan: a plan, on the tier king.toml gives plans (the best models), whatever else is asked.",
                 },
             }),
             &["title", "prompt"],
@@ -330,9 +337,18 @@ pub fn tool_list() -> Value {
 }
 
 impl<B: Backend> Server<B> {
-    /// A server over `backend`.
+    /// A server over `backend`, with Leon's default guards.
+    #[cfg(test)]
     pub fn new(backend: B) -> Self {
-        Self { backend }
+        Self::with_guards(backend, &leon_king::config::Config::default().guards)
+    }
+
+    /// A server over `backend` that keeps `guards`.
+    pub fn with_guards(backend: B, guards: &Guards) -> Self {
+        Self {
+            backend,
+            protected: guards.protected_branches.clone(),
+        }
     }
 
     /// One message in, at most one out.
@@ -615,9 +631,10 @@ impl<B: Backend> Server<B> {
             .map_err(|_| "the worktree is not on a branch".to_owned())?;
         let base = self.base_of(&cwd);
         let default = base.trim_start_matches("origin/");
-        if branch == default || ["main", "master"].contains(&branch.as_str()) {
+        if branch == default || self.protected.contains(&branch) {
             return Err(format!(
-                "{branch} is the default branch: nothing is pushed to it from here"
+                "{branch} is protected (the default branch, or [guards] protected_branches): \
+                 nothing is pushed to it from here"
             ));
         }
         let uncommitted = self.backend.run("git", &["status", "--porcelain"], &cwd)?;
@@ -841,7 +858,7 @@ mod tests {
             "pr_open",
             json!({ "worker": 2, "title": "x" }),
         );
-        assert!(error && why.contains("default branch"), "{why}");
+        assert!(error && why.contains("protected"), "{why}");
         assert!(!on_main
             .backend
             .ran

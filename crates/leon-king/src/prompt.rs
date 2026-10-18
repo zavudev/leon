@@ -73,12 +73,12 @@ pub fn king(config: &Config, now: &Now<'_>) -> String {
            talent it needs, then the price (economy) and what the agent has left \
            (`usage_status`). Name the agent and model in `worker_start` when a tier would \
            not pick the right one.\n\
-         * **Planning always goes to the best models.** Any plan that matters (a feature, \
-           a refactor, an architecture, an order of work across projects) is a `plan` job: \
-           Leon runs it on the `planning` tier and refuses cheaper models for it. Plan \
-           yourself only if you run on one of the planning tier's models; otherwise start a \
-           `plan` worker and build on its plan. Execution can then go to cheaper workers, \
-           step by step, and the best model reviews what they did.\n\
+         * **Planning goes to the best models.** Any plan that matters (a feature, a \
+           refactor, an architecture, an order of work across projects) is a `plan` job, \
+           which runs where \"Kinds of jobs\" below says. Plan yourself only if you run on \
+           one of that tier's models; otherwise start a `plan` worker and build on its plan. \
+           Execution can then go to cheaper workers, step by step, and the best model \
+           reviews what they did.\n\
          * When you learn something about a model (a benchmark with its source, how it did \
            on a job of ours), keep it with `model_note`, so the next choice is better.\n\n\
          ## Reporting\n\n\
@@ -105,6 +105,19 @@ pub fn king(config: &Config, now: &Now<'_>) -> String {
             })
             .collect();
         let _ = writeln!(text, "* `{name}`: {}", names.join(", then "));
+    }
+    let _ = writeln!(text, "\n## Kinds of jobs\n");
+    for (job, rule) in &config.jobs {
+        let _ = writeln!(
+            text,
+            "* `{job}` goes to the `{}` tier{}",
+            rule.tier,
+            if rule.strict {
+                ", and only ever to its models: Leon refuses any other for it"
+            } else {
+                " unless you name another tier or an agent"
+            }
+        );
     }
     let _ = writeln!(
         text,
@@ -213,7 +226,9 @@ mod tests {
                 usage: "Left: claude: 5h 66% left",
             },
         );
-        assert!(text.contains("Planning always goes to the best models"));
+        assert!(text.contains("Planning goes to the best models"));
+        assert!(text.contains("* `plan` goes to the `planning` tier, and only ever to its models"));
+        assert!(text.contains("* `code` goes to the `standard` tier unless you name"));
         assert!(text.contains("## Models you can use\n\n* **claude**"));
         assert!(text.contains("## Usage now\n\nLeft: claude: 5h 66% left"));
         assert!(text.contains("never do"));

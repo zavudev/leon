@@ -30,8 +30,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use leon_core::{Machine, MachineId, MachineKind, Store};
-use leon_king::config::Config;
-use leon_king::coordinator::{Coordinator, Effect, Job, State, Target, WorkerSpec};
+use leon_king::coordinator::{Coordinator, Effect, State, Target, WorkerSpec};
 use leon_king::models::{self, Available, Catalogue};
 use leon_king::prompt::{self, ProjectLine};
 use leon_king::protocol::{Envelope, Notice, Reply, Request, WorkerRequest, MAX_LINE};
@@ -105,13 +104,7 @@ pub fn run(paths: Paths) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let _lock = lock(&paths.lock)?;
     std::fs::create_dir_all(&paths.folder).map_err(|error| error.to_string())?;
-    let config = match std::fs::read_to_string(&paths.config) {
-        Ok(text) => {
-            Config::parse(&text).map_err(|error| format!("{}: {error}", paths.config.display()))?
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
-        Err(error) => return Err(format!("{}: {error}", paths.config.display())),
-    };
+    let config = super::read_config(&paths)?;
     let saved: Option<State> = std::fs::read_to_string(&paths.state)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok());
@@ -406,7 +399,11 @@ impl Service {
                     })
                     .collect();
                 Ok((
-                    json!({ "models": models, "planning_tier": self.coordinator.config().tiers.get(leon_king::config::PLANNING_TIER) }),
+                    json!({
+                        "models": models,
+                        "jobs": self.coordinator.config().jobs,
+                        "tiers": self.coordinator.config().tiers,
+                    }),
                     Vec::new(),
                 ))
             }
@@ -725,7 +722,7 @@ impl Service {
             agent: asked.agent.clone(),
             model: asked.model.clone(),
             effort: asked.effort.clone(),
-            planning: asked.job == Job::Plan,
+            job: asked.job.as_str().to_owned(),
         };
         let standings = self.standings(now);
         let choice = route::route(
@@ -763,7 +760,11 @@ impl Service {
                     .branch
                     .clone()
                     .unwrap_or_else(|| branch_for(&asked.title, now));
-                let path = add_worktree(&project.root, &branch)?;
+                let path = add_worktree(
+                    &project.root,
+                    &branch,
+                    &self.coordinator.config().guards.protected_branches,
+                )?;
                 (path, Some(project.name.clone()))
             }
             (None, None) => return Err("name the project, or the folder to work in".to_owned()),
@@ -978,8 +979,8 @@ fn branch_for(title: &str, now_ms: u64) -> String {
 
 /// Makes a worktree of `root` on a new branch, `branch`, from what the
 /// project's checkout has, and returns its folder. Never on the default
-/// branch.
-fn add_worktree(root: &str, branch: &str) -> Result<String, String> {
+/// branch nor on a `protected` one.
+fn add_worktree(root: &str, branch: &str, protected: &[String]) -> Result<String, String> {
     let git = |args: &[&str]| -> Result<String, String> {
         let output = leon_remote::spawn::std_child("git")
             .arg("-C")
@@ -994,9 +995,10 @@ fn add_worktree(root: &str, branch: &str) -> Result<String, String> {
         }
     };
     let default = default_branch(root);
-    if default.as_deref() == Some(branch) || ["main", "master"].contains(&branch) {
+    if default.as_deref() == Some(branch) || protected.iter().any(|name| name == branch) {
         return Err(format!(
-            "{branch} is the default branch; a worker needs one of its own"
+            "{branch} is protected (the default branch, or [guards] protected_branches); a \
+             worker needs one of its own"
         ));
     }
     let path = crate::address::worktree_location("", root, branch)?;
@@ -1111,8 +1113,10 @@ mod tests {
             "start",
         ]);
         let root = root.to_string_lossy().into_owned();
-        assert!(add_worktree(&root, "main").is_err());
-        let path = add_worktree(&root, "king/fix").unwrap();
+        let protected = ["release".to_owned()];
+        assert!(add_worktree(&root, "main", &protected).is_err());
+        assert!(add_worktree(&root, "release", &protected).is_err());
+        let path = add_worktree(&root, "king/fix", &protected).unwrap();
         assert_eq!(path, format!("{root}-worktrees/king-fix"));
         assert!(Path::new(&path).join(".git").exists());
     }

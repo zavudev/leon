@@ -85,9 +85,10 @@ as_of = "2026-10"
 ## Planning goes to the best models
 
 A worker with the job `plan` (`leon king start … --plan`, or
-`job: "plan"` in `worker_start`) always runs on the `planning` tier. By
-default that is Claude Opus at high effort, then Codex at high effort.
-Asking for a cheaper tier or agent for a plan is refused. King's
+`job: "plan"` in `worker_start`) runs where `[jobs] plan` says. By default
+that is the `planning` tier, `strict`: Claude Opus at high effort, then Codex
+at high effort. Asking for a cheaper tier or agent for a plan is refused.
+Put your best models in that tier (see the settings below). King's
 instructions say to plan with the best model and then execute step by step
 on cheaper workers, with the best model reviewing their work. King plans
 in its own conversation only when it runs on a planning-tier model itself.
@@ -149,30 +150,55 @@ through `usage_status`.
 
 ## Settings: `king.toml`
 
-The file is `king.toml` in Leon's data folder. Every key is optional.
+Nothing of King's choices is fixed in code. Leon's defaults are a file,
+[`crates/leon-king/src/defaults.toml`](../crates/leon-king/src/defaults.toml),
+with a comment on every key. Your `king.toml` in Leon's data folder is read
+over it **key by key**, so you write only what you want different:
+
+* a table you name (`[brain]`, `[limits]`…) changes only the keys you write
+  in it;
+* a tier you name replaces that tier alone; a tier set to `[]` is removed;
+* a kind of job you name in `[jobs]` changes where that kind goes.
 
 ```toml
-[brain]                 # the agent King runs on
-agent = "claude"
+[brain]                 # King itself: Opus 5.5 at high effort
 model = "opus"
 effort = "high"
-# mode = "acceptEdits"
 
 [limits]
-max_workers = 6         # working at the same time
-daily_budget_usd = 20.0 # no ceiling when absent
-limit_threshold = 0.85  # share of a usage window past which an agent gets no new work
-wake_delay_secs = 5     # how long news is gathered before King is woken
+daily_budget_usd = 20.0
 
-[tiers]                 # replaces the default tiers when present
-cheap = [{ agent = "opencode", model = "deepseek/deepseek-v4" }, { agent = "cursor" }]
-standard = [{ agent = "codex", effort = "medium" }, { agent = "claude" }]
-premium = [{ agent = "claude", model = "opus", effort = "high" }]
-planning = [{ agent = "claude", model = "opus", effort = "high" }, { agent = "codex", effort = "high" }]
+[tiers]                 # plans on Fable first, then Opus, then GPT-6
+planning = [
+    { agent = "claude", model = "fable", effort = "high" },
+    { agent = "claude", model = "opus", effort = "high" },
+    { agent = "codex", model = "gpt-6.1-sol", effort = "high" },
+]
+local = [{ agent = "opencode", model = "ollama/gemma4:26b" }]
+
+[jobs]                  # research on the local model; plans stay strict
+research = { tier = "local" }
+
+[guards]
+protected_branches = ["main", "master", "release"]
 
 [modes]                 # the permission mode each agent's workers start in
 claude = "acceptEdits"
 ```
+
+| Section | What it sets | Default |
+| --- | --- | --- |
+| `[brain]` | The agent, model, effort and mode King runs on | Claude Code, its own model |
+| `[limits]` | `max_workers`, `daily_budget_usd`, `limit_threshold`, `wake_delay_secs` | 6, none, 0.85, 5 |
+| `[tiers]` | Each tier's candidates in order: agent, model, effort | `cheap`, `standard`, `premium`, `planning` |
+| `[jobs]` | The tier each kind of job (`code`, `research`, `plan`) goes to, and whether it is `strict` (only ever that tier) | code: standard, research: cheap, plan: planning (strict) |
+| `[guards]` | Branches nothing is pushed to, besides each project's default branch | `main`, `master` |
+| `[modes]` | The permission mode of each agent's workers | none |
+
+`leon king config` prints the configuration in force (your file over the
+defaults), and `leon king config --defaults` prints Leon's defaults with
+their comments. A mistake in your file is an error that names the line, never
+a silent default.
 
 `leon king brain` changes King's agent without editing the file. If you edit
 the file's `[brain]` later, the file wins. Changing King's agent starts a new

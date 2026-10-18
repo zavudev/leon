@@ -98,9 +98,20 @@ pub enum Job {
     Code,
     /// It reads and reports; it changes nothing.
     Research,
-    /// It plans: always on the best models there are (the `planning`
-    /// tier), and it changes nothing.
+    /// It plans, and changes nothing. By default it only runs on the
+    /// `planning` tier (`[jobs] plan`, strict).
     Plan,
+}
+
+impl Job {
+    /// Its name in `king.toml`'s `[jobs]`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Job::Code => "code",
+            Job::Research => "research",
+            Job::Plan => "plan",
+        }
+    }
 }
 
 /// Where a worker is.

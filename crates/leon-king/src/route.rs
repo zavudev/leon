@@ -1,7 +1,10 @@
 //! Which agent and model take a job.
 //!
-//! King asks for a worker either by tier (`cheap`, `standard`, `premium`, or
-//! any the person named in `king.toml`) or by agent and model. Either way
+//! King asks for a worker either by tier (any `king.toml` names) or by agent
+//! and model; asking for neither is the tier the job's kind goes to
+//! (`[jobs]`). A kind of job marked `strict` (plans, by default) only ever
+//! runs on its tier's models: a cheaper tier or agent asked for it is
+//! refused. Either way
 //! the answer depends on where each agent stands now: whether it is
 //! installed, and how much of its usage window it has used (the share Leon
 //! reads for a subscription, with what is forecast to be used before the
@@ -14,7 +17,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Candidate, Config, DEFAULT_TIER, PLANNING_TIER};
+use crate::config::{Candidate, Config};
 
 /// Where one agent stands now.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,8 +42,9 @@ pub struct Ask {
     pub model: Option<String>,
     /// How hard it thinks, with an agent.
     pub effort: Option<String>,
-    /// It is a plan: only the planning tier's models take it.
-    pub planning: bool,
+    /// The kind of job (`code`, `research`, `plan`): where it goes when
+    /// no tier is named, and whether it may go anywhere else.
+    pub job: String,
 }
 
 /// The agent and model a job goes to.
@@ -71,8 +75,9 @@ pub fn route(
             ));
         }
     }
-    if ask.planning {
-        return plan(config, ask, standings, spent_today_usd);
+    let rule = config.job(&ask.job);
+    if rule.strict {
+        return strict(config, &rule.tier, ask, standings, spent_today_usd);
     }
     let threshold = config.limits.limit_threshold;
     let room = |agent: &str| -> Result<(), String> {
@@ -115,7 +120,7 @@ pub fn route(
         .tier
         .as_deref()
         .filter(|tier| !tier.is_empty())
-        .unwrap_or(DEFAULT_TIER);
+        .unwrap_or(&rule.tier);
     let Some(candidates) = config.tiers.get(tier) else {
         let known: Vec<&str> = config.tiers.keys().map(String::as_str).collect();
         return Err(format!(
@@ -143,19 +148,15 @@ pub fn route(
     ))
 }
 
-/// A plan: on the planning tier (the premium one when the file names no
-/// planning tier), and on a named agent only when the tier has it.
-fn plan(
+/// A job that only runs on `tier`'s models: on a named agent only when the
+/// tier has it.
+fn strict(
     config: &Config,
+    tier: &str,
     ask: &Ask,
     standings: &[Standing],
     spent_today_usd: f64,
 ) -> Result<Choice, String> {
-    let tier = if config.tiers.contains_key(PLANNING_TIER) {
-        PLANNING_TIER
-    } else {
-        "premium"
-    };
     let candidates = config.tiers.get(tier).cloned().unwrap_or_default();
     let mut config = config.clone();
     if let Some(agent) = ask.agent.as_deref().filter(|agent| !agent.is_empty()) {
@@ -172,12 +173,22 @@ fn plan(
         if named.is_empty() {
             let names: Vec<String> = candidates.iter().map(describe).collect();
             return Err(format!(
-                "plans go to the best models only, the {tier} tier: {}",
+                "a {} job only runs on the {tier} tier: {}",
+                ask.job,
                 names.join(", ")
             ));
         }
         config.tiers.insert(tier.to_owned(), named);
     }
+    // The tier itself, as any job of no strict kind would have it.
+    config.jobs.clear();
+    config.jobs.insert(
+        "code".to_owned(),
+        crate::config::JobRule {
+            tier: tier.to_owned(),
+            strict: false,
+        },
+    );
     let ask = Ask {
         tier: Some(tier.to_owned()),
         ..Ask::default()
@@ -270,7 +281,7 @@ mod tests {
         let config = Config::default();
         let cheap_plan = Ask {
             tier: Some("cheap".into()),
-            planning: true,
+            job: "plan".into(),
             ..Ask::default()
         };
         let chosen = route(&config, &cheap_plan, &everyone(), 0.0).unwrap();
@@ -287,14 +298,17 @@ mod tests {
 
         let named_cheap = Ask {
             agent: Some("opencode".into()),
-            planning: true,
+            job: "plan".into(),
             ..Ask::default()
         };
         let refused = route(&config, &named_cheap, &everyone(), 0.0).unwrap_err();
-        assert!(refused.contains("best models only"), "{refused}");
+        assert!(
+            refused.contains("a plan job only runs on the planning tier"),
+            "{refused}"
+        );
         let named_codex = Ask {
             agent: Some("codex".into()),
-            planning: true,
+            job: "plan".into(),
             ..Ask::default()
         };
         assert_eq!(
@@ -302,6 +316,44 @@ mod tests {
                 .unwrap()
                 .agent,
             "codex"
+        );
+    }
+
+    #[test]
+    fn where_a_kind_of_job_goes_is_the_configurations() {
+        let config = Config::parse(
+            "[tiers]\nplanning = [{ agent = \"grok\", model = \"grok-5\" }]\n\
+             [jobs]\nresearch = { tier = \"premium\" }\ncode = { tier = \"cheap\", strict = true }",
+        )
+        .unwrap();
+        let plan = Ask {
+            job: "plan".into(),
+            ..Ask::default()
+        };
+        let chosen = route(&config, &plan, &everyone(), 0.0).unwrap();
+        assert_eq!(
+            (chosen.agent.as_str(), chosen.model.as_deref()),
+            ("grok", Some("grok-5"))
+        );
+        let research = Ask {
+            job: "research".into(),
+            ..Ask::default()
+        };
+        assert_eq!(
+            route(&config, &research, &everyone(), 0.0).unwrap().agent,
+            "claude"
+        );
+        // Strict code: the cheap tier, whatever is asked.
+        let premium_code = Ask {
+            tier: Some("premium".into()),
+            ..Ask::default()
+        };
+        assert_eq!(
+            route(&config, &premium_code, &everyone(), 0.0)
+                .unwrap()
+                .tier
+                .as_deref(),
+            Some("cheap")
         );
     }
 
