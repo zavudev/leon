@@ -35,12 +35,19 @@ pub fn split_route(route: &str) -> Option<(&str, &str, &str)> {
     Some((parts.next()?, parts.next()?, parts.next()?))
 }
 
+/// A machine's connection, with the relay and the host key it was started for.
+struct Held {
+    relay_url: String,
+    host_key: [u8; 32],
+    client: Client,
+}
+
 /// The connections to every relay machine.
 pub struct RelayHub {
     identity: Arc<Identity>,
     device_name: String,
     handle: tokio::runtime::Handle,
-    clients: Mutex<HashMap<String, (String, Client)>>,
+    clients: Mutex<HashMap<String, Held>>,
 }
 
 impl std::fmt::Debug for RelayHub {
@@ -96,21 +103,44 @@ impl RelayHub {
     }
 
     /// The connection to a machine, started now if there is none (or if the
-    /// relay it should use changed).
+    /// relay it should use, or the key it answers with, changed).
     pub fn ensure(
         &self,
         host_id: &str,
         host_key_hex: &str,
         relay_url: &str,
     ) -> Result<Client, HubError> {
+        self.connection(host_id, host_key_hex, relay_url, false)
+    }
+
+    /// The connection to a machine that was just paired. One that is online
+    /// is kept; any other is started again, because it may have stopped
+    /// trying after the host refused this device before the pairing.
+    pub fn ensure_paired(
+        &self,
+        host_id: &str,
+        host_key_hex: &str,
+        relay_url: &str,
+    ) -> Result<Client, HubError> {
+        self.connection(host_id, host_key_hex, relay_url, true)
+    }
+
+    fn connection(
+        &self,
+        host_id: &str,
+        host_key_hex: &str,
+        relay_url: &str,
+        paired_now: bool,
+    ) -> Result<Client, HubError> {
         let id: HostId = host_id.parse().map_err(|_| HubError::BadIdentity)?;
         let key = parse_key(host_key_hex).ok_or(HubError::BadIdentity)?;
         let mut clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some((url, client)) = clients.get(host_id) {
-            if url == relay_url {
-                return Ok(client.clone());
+        if let Some(held) = clients.get(host_id) {
+            let stale = paired_now && held.client.state() != ConnState::Online;
+            if held.relay_url == relay_url && held.host_key == key && !stale {
+                return Ok(held.client.clone());
             }
-            client.close();
+            held.client.close();
         }
         let _enter = self.handle.enter();
         let client = Client::start(ClientConfig::new(
@@ -123,7 +153,14 @@ impl RelayHub {
             }),
             self.device_name.clone(),
         ));
-        clients.insert(host_id.to_owned(), (relay_url.to_owned(), client.clone()));
+        clients.insert(
+            host_id.to_owned(),
+            Held {
+                relay_url: relay_url.to_owned(),
+                host_key: key,
+                client: client.clone(),
+            },
+        );
         Ok(client)
     }
 
@@ -139,7 +176,7 @@ impl RelayHub {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(host_id)
-            .map(|(_, client)| client.clone())
+            .map(|held| held.client.clone())
     }
 
     /// The state of a machine's connection.
@@ -149,13 +186,13 @@ impl RelayHub {
 
     /// Closes and forgets a machine's connection (the machine was removed).
     pub fn forget(&self, host_id: &str) {
-        if let Some((_, client)) = self
+        if let Some(held) = self
             .clients
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(host_id)
         {
-            client.close();
+            held.client.close();
         }
     }
 }
