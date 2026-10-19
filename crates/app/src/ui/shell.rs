@@ -169,6 +169,21 @@ pub type OpenUrl = Rc<dyn Fn(&mut App, &str)>;
 /// Shows the folder picker and says what was chosen.
 pub type PickFolder = Rc<dyn Fn(&mut App) -> Task<Picked>>;
 
+/// The system's own picker of files, several at once: what is attached to
+/// what is said to King. Nothing chosen is an empty list.
+pub fn system_files_picker(cx: &mut App) -> Task<Vec<PathBuf>> {
+    let paths = cx.prompt_for_paths(PathPromptOptions {
+        files: true,
+        directories: false,
+        multiple: true,
+        prompt: Some("Attach".into()),
+    });
+    cx.spawn(async move |_| match paths.await {
+        Ok(Ok(Some(paths))) => paths,
+        _ => Vec::new(),
+    })
+}
+
 /// The system's own folder picker. Every way of opening a project on this
 /// computer ends here; the log line is how a run shows the call was reached.
 pub fn system_picker(cx: &mut App) -> Task<Picked> {
@@ -310,6 +325,14 @@ pub struct Options {
     /// The line to King Leon's service; absent where there is none (tests
     /// that do not need it, and Windows).
     pub king: Option<Arc<dyn crate::king::link::Link>>,
+    /// The image on the clipboard, for a paste into King's field: tests
+    /// answer with their own.
+    pub clipboard_image: Rc<dyn Fn(&App) -> Option<crate::clip_image::ClipImage>>,
+    /// Files chosen to attach to what is said to King: the system's file
+    /// picker, or the tests' answer.
+    pub pick_files: Rc<dyn Fn(&mut App) -> Task<Vec<PathBuf>>>,
+    /// Where pasted images are kept for King to read.
+    pub attachments: PathBuf,
 }
 
 /// A `~/.ssh` that is not there: the home folder is unknown.
@@ -380,6 +403,9 @@ impl Default for Options {
             remote: None,
             memory: None,
             king: None,
+            clipboard_image: Rc::new(crate::clip_image::read),
+            pick_files: Rc::new(system_files_picker),
+            attachments: std::env::temp_dir().join("leon-king-attachments"),
             updates: None,
             durable: None,
             update_timer: true,
@@ -3142,6 +3168,11 @@ impl Shell {
             C::Dictate => {
                 if let Some(id) = self.focused_chat() {
                     self.chat_dictate(id, window, cx);
+                } else if self.king_open() {
+                    // Into the open worker's field when it has the keyboard,
+                    // else King's.
+                    let target = self.king_dictation_target(window, cx);
+                    self.dictate(super::chat_voice::Field::King(target), window, cx);
                 }
             }
             C::WhyMissing => self.open_history_report(window, cx),

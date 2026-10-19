@@ -891,6 +891,114 @@ impl Shell {
         self.king_say(task_for_king(&task, &place), window, cx);
     }
 
+    /// The field of `target`: King's, or the open worker's.
+    fn king_field(&self, target: Target) -> Option<Entity<TextareaState>> {
+        match target {
+            Target::Brain => self.king_ui.input.clone(),
+            Target::Worker(_) => self.king_ui.worker_input.clone(),
+        }
+    }
+
+    /// The field of King's view that has the keyboard, as its target.
+    fn king_typing_in(&self, window: &Window, cx: &gpui_kit::App) -> Option<Target> {
+        use gpui_kit::Focusable as _;
+        let focused = |field: &Option<Entity<TextareaState>>| {
+            field
+                .as_ref()
+                .is_some_and(|field| field.focus_handle(cx).is_focused(window))
+        };
+        if focused(&self.king_ui.input) {
+            Some(Target::Brain)
+        } else if focused(&self.king_ui.worker_input) {
+            self.king_ui.open.map(Target::Worker)
+        } else {
+            None
+        }
+    }
+
+    /// The field of King's view dictation goes into: the one with the
+    /// keyboard, else King's.
+    pub(super) fn king_dictation_target(&self, window: &Window, cx: &gpui_kit::App) -> Target {
+        self.king_typing_in(window, cx).unwrap_or(Target::Brain)
+    }
+
+    /// Writes `text` where the cursor is in a field of King's view, apart
+    /// from what is around it: what was dictated, the path of a pasted image
+    /// or of an attached file.
+    pub(super) fn king_write(
+        &mut self,
+        target: Target,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(field) = self.king_field(target) else {
+            return;
+        };
+        field.update(cx, |input, cx| {
+            let (value, cursor) =
+                crate::chat::complete::dictated(&input.value(), input.cursor(), text);
+            input.set_value(value, window, cx);
+            input.set_selected_range(cursor..cursor, cx);
+            input.focus(window, cx);
+        });
+    }
+
+    /// Pastes the clipboard's image into the King field that has the
+    /// keyboard: it is kept in a file, and its path is written, which King
+    /// (and any worker it is passed to) opens. `false` when there is no
+    /// image, so the field pastes text as it does.
+    pub(super) fn king_paste_image(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(target) = self.king_typing_in(window, cx) else {
+            return false;
+        };
+        let Some(image) = (self.options.clipboard_image)(cx) else {
+            return false;
+        };
+        let stamp = (self.options.now)().format("%Y%m%d-%H%M%S%3f");
+        let path = self
+            .options
+            .attachments
+            .join(format!("pasted-{stamp}.{}", image.extension));
+        let kept = std::fs::create_dir_all(&self.options.attachments)
+            .and_then(|()| std::fs::write(&path, &image.bytes));
+        match kept {
+            Ok(()) => {
+                let text = super::paste::quote(&path.to_string_lossy());
+                self.king_write(target, &text, window, cx);
+            }
+            Err(error) => self.engine.report(
+                StatusKind::Error,
+                format!("The image could not be kept for King: {error}."),
+            ),
+        }
+        cx.notify();
+        true
+    }
+
+    /// Asks for files to attach to what is said to `target`: their paths
+    /// are written in its field.
+    pub(super) fn king_attach(
+        &mut self,
+        target: Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let picked = (self.options.pick_files)(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let paths = picked.await;
+            if paths.is_empty() {
+                return;
+            }
+            this.update_in(cx, |this, window, cx| {
+                this.king_write(target, &super::paste::quoted_paths(&paths), window, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// What the person wrote to the open worker is told to it.
     pub(super) fn king_tell_worker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(worker), Some(input)) = (self.king_ui.open, self.king_ui.worker_input.clone())
@@ -922,6 +1030,36 @@ impl Shell {
             && !stroke.modifiers.control
             && !stroke.modifiers.platform
             && !stroke.modifiers.shift;
+        // While the microphone is open for a field of King's, Enter ends the
+        // dictation and Escape drops it.
+        if matches!(
+            self.dictating_into(),
+            Some(super::chat_voice::Field::King(_))
+        ) && !stroke.modifiers.modified()
+        {
+            match stroke.key.as_str() {
+                "enter" => {
+                    self.dictation_finish(window, cx);
+                    return true;
+                }
+                "escape" => {
+                    self.dictation_cancel(cx);
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        // A paste with an image on the clipboard: the image, as a file.
+        let paste = stroke.key == "v"
+            && !stroke.modifiers.alt
+            && if crate::platform::is_mac() {
+                stroke.modifiers.platform && !stroke.modifiers.control
+            } else {
+                stroke.modifiers.control && !stroke.modifiers.platform
+            };
+        if paste && self.king_paste_image(window, cx) {
+            return true;
+        }
         // Alt with a number picks that answer of the question in view.
         if let Some(place) = only_alt
             .then(|| stroke.key.parse::<usize>().ok())

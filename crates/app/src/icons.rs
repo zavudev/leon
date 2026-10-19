@@ -40,6 +40,7 @@ icon_assets!(
         Moon,
         PanelLeft,
         PanelLeftClose,
+        Paperclip,
         Pin,
         PawPrint,
         Plus,

@@ -519,3 +519,74 @@ fn a_workers_question_is_answered_from_kings_view(cx: &mut TestAppContext) {
         }]
     );
 }
+
+fn king_field(h: &Harness, cx: &mut TestAppContext) -> String {
+    cx.update(|cx| {
+        let shell = h.shell.read(cx);
+        shell
+            .king_ui
+            .input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default()
+    })
+}
+
+#[gpui_kit::test]
+fn an_image_on_the_clipboard_is_pasted_as_a_file_king_opens(cx: &mut TestAppContext) {
+    let (h, _end) = with_conversation(cx, json!([]));
+    *h.clip_image.borrow_mut() = Some(crate::clip_image::ClipImage {
+        bytes: vec![137, 80, 78, 71],
+        extension: "png",
+    });
+    h.type_text("Look at this", cx);
+    h.press_chord("cmd-v", "ctrl-v", cx);
+    let said = king_field(&h, cx);
+    let path = said
+        .strip_prefix("Look at this ")
+        .unwrap_or_else(|| panic!("the path follows what was written: {said:?}"));
+    assert!(
+        path.starts_with(&*h.attachments.path().to_string_lossy()),
+        "{path}"
+    );
+    assert!(path.ends_with(".png"), "{path}");
+    assert_eq!(std::fs::read(path).unwrap(), [137, 80, 78, 71]);
+}
+
+#[gpui_kit::test]
+fn attached_files_are_written_as_their_paths(cx: &mut TestAppContext) {
+    let (h, _end) = with_conversation(cx, json!([]));
+    *h.picked_files.borrow_mut() = vec![
+        std::path::PathBuf::from("/home/ada/spec.pdf"),
+        std::path::PathBuf::from("/home/ada/my notes.md"),
+    ];
+    h.mouse_on("king-attach-brain".into(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(
+        king_field(&h, cx),
+        "/home/ada/spec.pdf '/home/ada/my notes.md'"
+    );
+}
+
+#[gpui_kit::test]
+fn what_is_dictated_is_written_in_kings_field(cx: &mut TestAppContext) {
+    let (h, end) = with_conversation(cx, json!([]));
+    {
+        let mut told = h.voice.0.lock().unwrap();
+        told.installed = vec!["base".into()];
+        told.says = "revisa los tests".into();
+    }
+    h.mouse_on("king-dictate-brain".into(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(h.voice.0.lock().unwrap().open, 1);
+    h.press("enter", cx);
+    assert_eq!(h.voice.0.lock().unwrap().open, 0);
+    assert_eq!(king_field(&h, cx), "revisa los tests");
+    // Written, not said: Enter again says it.
+    assert!(serve(&h, &end, cx, |_| Value::Null).is_empty());
+    h.press("enter", cx);
+    assert_eq!(
+        serve(&h, &end, cx, |_| Value::Null),
+        [Request::Say {
+            text: "revisa los tests".into()
+        }]
+    );
+}

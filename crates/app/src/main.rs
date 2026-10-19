@@ -18,6 +18,7 @@ mod avatar;
 mod brand;
 mod chat;
 mod cli;
+mod clip_image;
 mod connect;
 mod diagnose;
 mod disk;
@@ -439,6 +440,7 @@ fn main() {
                         voice: voice.clone(),
                         chat_spawner: chat_spawner.clone(),
                         king: king_link.clone(),
+                        attachments: data_dir.join("king").join("attachments"),
                         ..ui::Options::default()
                     };
                     let mut shell = ui::Shell::new(engine, options, window, cx);

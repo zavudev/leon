@@ -13,8 +13,8 @@
 //! on this computer.
 //!
 //! One microphone, so one dictation at a time for the whole window
-//! ([`Dictating`]): the conversation it was started in is the one that gets
-//! the text.
+//! ([`Dictating`]): the field it was started in ([`Field`]: a conversation's,
+//! or one of King's) is the one that gets the text.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,6 +39,15 @@ use crate::voice::Listening;
 /// loud the person is, how far a download got.
 const TICK: Duration = Duration::from_millis(120);
 
+/// The field dictation writes in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    /// A conversation's.
+    Chat(LiveId),
+    /// King's, or an open worker's in King's view.
+    King(leon_king::coordinator::Target),
+}
+
 /// What dictation is doing.
 #[derive(Default)]
 pub enum Now {
@@ -55,16 +64,16 @@ pub enum Now {
     },
     /// The microphone is open.
     Listening {
-        /// The conversation that gets the text.
-        chat: LiveId,
+        /// The field that gets the text.
+        into: Field,
         /// The microphone.
         recording: Box<dyn Listening>,
         _tick: Task<()>,
     },
     /// What was heard is being made into text.
     Writing {
-        /// The conversation that gets the text.
-        chat: LiveId,
+        /// The field that gets the text.
+        into: Field,
         _task: Task<()>,
     },
 }
@@ -131,7 +140,18 @@ impl Shell {
     /// The conversation whose microphone is open, if one is.
     pub(super) fn dictating_in(&self) -> Option<LiveId> {
         match &self.dictation.now {
-            Now::Listening { chat, .. } => Some(*chat),
+            Now::Listening {
+                into: Field::Chat(chat),
+                ..
+            } => Some(*chat),
+            _ => None,
+        }
+    }
+
+    /// The field the microphone is open for, if it is.
+    pub(super) fn dictating_into(&self) -> Option<Field> {
+        match &self.dictation.now {
+            Now::Listening { into, .. } => Some(*into),
             _ => None,
         }
     }
@@ -143,25 +163,41 @@ impl Shell {
         if !self.chats.contains_key(&id) {
             return;
         }
-        self.dictation.problem = None;
-        match &self.dictation.now {
-            Now::Listening { .. } => self.dictation_finish(window, cx),
-            Now::Writing { .. } => {}
-            Now::Downloading { .. } => self.chat_show_voices(id, window, cx),
-            Now::Idle => {
-                self.dictation.installed = self.options.voice.installed();
-                if self.dictation_model(cx).is_some() {
-                    self.dictation_listen(id, cx);
-                } else {
-                    self.chat_show_voices(id, window, cx);
-                }
-            }
-        }
+        self.dictate(Field::Chat(id), window, cx);
         // A click on the button took the keyboard from the field: what is
         // said lands there, and Enter and Escape are read there.
         let listing = self.chats.get(&id).is_some_and(|chat| chat.menu.is_some());
         if let Some(chat) = self.chats.get(&id).filter(|_| !listing) {
             chat.input.update(cx, |input, cx| input.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Opens the microphone for a field, closes the one that is open, or,
+    /// with no model to dictate with, offers to get one: the list of models
+    /// over a conversation's field, a word under King's (whose field has no
+    /// list; any conversation's `/voice` and the settings have it).
+    pub(super) fn dictate(&mut self, into: Field, window: &mut Window, cx: &mut Context<Self>) {
+        self.dictation.problem = None;
+        match (&self.dictation.now, into) {
+            (Now::Listening { .. }, _) => self.dictation_finish(window, cx),
+            (Now::Writing { .. }, _) => {}
+            (Now::Downloading { .. }, Field::Chat(id)) => self.chat_show_voices(id, window, cx),
+            (Now::Downloading { .. }, Field::King(_)) => {}
+            (Now::Idle, _) => {
+                self.dictation.installed = self.options.voice.installed();
+                match into {
+                    _ if self.dictation_model(cx).is_some() => self.dictation_listen(into, cx),
+                    Field::Chat(id) => self.chat_show_voices(id, window, cx),
+                    Field::King(_) => {
+                        self.dictation.problem = Some(
+                            "Choose a speech model first: /voice in a conversation, or \
+                             Settings, Dictation."
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
         }
         cx.notify();
     }
@@ -179,8 +215,8 @@ impl Shell {
         }
     }
 
-    /// Opens the microphone for a conversation.
-    fn dictation_listen(&mut self, id: LiveId, cx: &mut Context<Self>) {
+    /// Opens the microphone for a field.
+    fn dictation_listen(&mut self, into: Field, cx: &mut Context<Self>) {
         match self.options.voice.listen() {
             Ok(recording) => {
                 let tick = cx.spawn(async move |this, cx| loop {
@@ -194,7 +230,7 @@ impl Shell {
                     }
                 });
                 self.dictation.now = Now::Listening {
-                    chat: id,
+                    into,
                     recording,
                     _tick: tick,
                 };
@@ -207,7 +243,7 @@ impl Shell {
     /// written in the conversation it was opened for.
     pub(super) fn dictation_finish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Now::Listening {
-            chat, recording, ..
+            into, recording, ..
         } = std::mem::take(&mut self.dictation.now)
         else {
             return;
@@ -233,14 +269,17 @@ impl Shell {
                     Ok(said) if said.trim().is_empty() => {
                         this.dictation.problem = Some("Nothing was heard.".to_owned());
                     }
-                    Ok(said) => this.chat_write_said(chat, &said, window, cx),
+                    Ok(said) => match into {
+                        Field::Chat(chat) => this.chat_write_said(chat, &said, window, cx),
+                        Field::King(target) => this.king_write(target, &said, window, cx),
+                    },
                     Err(error) => this.dictation.problem = Some(sentence(&error.to_string())),
                 }
                 cx.notify();
             })
             .ok();
         });
-        self.dictation.now = Now::Writing { chat, _task: task };
+        self.dictation.now = Now::Writing { into, _task: task };
     }
 
     /// Closes the microphone and writes nothing.
@@ -338,12 +377,32 @@ impl Shell {
         colours: &Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let name = format!("chat-dictate-{}", id.0);
+        self.dictate_button(
+            Field::Chat(id),
+            (
+                format!("chat-dictate-{}", id.0),
+                format!("chat-dictate-problem-{}", id.0),
+            ),
+            colours,
+            cx,
+        )
+    }
+
+    /// The button of dictation of a field, with what went wrong last in
+    /// front of it; `names` are the selectors of the two.
+    pub(super) fn dictate_button(
+        &self,
+        field: Field,
+        names: (String, String),
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (name, problem_name) = names;
         let hover = colours.surface_2;
         let (words, light): (String, Option<gpui_kit::Hsla>) = match &self.dictation.now {
             Now::Listening {
-                chat, recording, ..
-            } if *chat == id => {
+                into, recording, ..
+            } if *into == field => {
                 // The light breathes with the voice.
                 let loud = recording.level().clamp(0.0, 1.0);
                 (
@@ -351,7 +410,7 @@ impl Shell {
                     Some(colours.signal.opacity(0.45 + 0.55 * loud)),
                 )
             }
-            Now::Writing { chat, .. } if *chat == id => ("WRITING\u{2026}".to_owned(), None),
+            Now::Writing { into, .. } if *into == field => ("WRITING\u{2026}".to_owned(), None),
             Now::Downloading { model, bytes, .. } => (
                 format!(
                     "DOWNLOADING {}%",
@@ -387,9 +446,12 @@ impl Shell {
             .hover(move |style| style.bg(hover))
             .children(light.map(led))
             .child(mono(words))
-            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                this.chat_dictate(id, window, cx);
-            }));
+            .on_click(
+                cx.listener(move |this, _: &ClickEvent, window, cx| match field {
+                    Field::Chat(id) => this.chat_dictate(id, window, cx),
+                    Field::King(_) => this.dictate(field, window, cx),
+                }),
+            );
         div()
             .flex_none()
             .flex()
@@ -397,7 +459,7 @@ impl Shell {
             .gap(px(8.))
             .children(self.dictation.problem.clone().map(|problem| {
                 div()
-                    .debug_selector(move || format!("chat-dictate-problem-{}", id.0))
+                    .debug_selector(move || problem_name.clone())
                     .max_w(px(320.))
                     .truncate()
                     .text_size(metrics::TEXT_SMALL())

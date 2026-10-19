@@ -52,6 +52,16 @@ the main pane:
   answer's number (written on its button) answer from the keyboard: the
   open worker's question first, else King's, else the first worker's. Escape stops King's turn, or
   closes the view when King is not working.
+* **Images, files and dictation.** An image pasted into King's field
+  (Ctrl+V, ⌘V on macOS) is kept as a file in `king/attachments/` of Leon's
+  data folder and its path is written in the field, for King, and any
+  worker King passes it to, to open. On Linux the image is read with
+  `wl-paste` (Wayland) or `xclip` (X11), because the toolkit does not see
+  images there. The paperclip attaches files the same way, as their paths.
+  DICTATE uses the same microphone and speech model as the conversations
+  (choose a model with `/voice` in one of them, or in the settings); Enter
+  ends the dictation, Escape drops it, and what was said is written in the
+  field, to be read before it is sent.
 * **What King runs on** is the chip under the field. A click, or the
   palette's "Change the model King runs on…", asks for the agent, then one
   of the models the agents of this computer offer, then the effort; the

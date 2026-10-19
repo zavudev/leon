@@ -21,6 +21,7 @@ use leon_king::report::{count, span, Report};
 use leon_king::transcript::{Entry, Kind};
 
 use super::activity::Activity;
+use super::chat_voice::Field;
 use super::king::{picks, Pick, Tone};
 use super::shell::Shell;
 use super::widgets::{activity_dot, key_cap, led, mark, mono, Lion};
@@ -936,6 +937,16 @@ impl Shell {
                     .items_center()
                     .gap(px(8.))
                     .child(foot)
+                    .child(self.king_attach_button(Target::Brain, c, cx))
+                    .child(self.dictate_button(
+                        Field::King(Target::Brain),
+                        (
+                            "king-dictate-brain".to_owned(),
+                            "king-dictate-problem-brain".to_owned(),
+                        ),
+                        c,
+                        cx,
+                    ))
                     .child(key_cap(if brain.busy { "ESC" } else { "ENTER" }, c))
                     .child(action),
             )
@@ -981,6 +992,35 @@ impl Shell {
                     .overflow_y_scroll()
                     .child(cards),
             )
+            .into_any_element()
+    }
+
+    /// The button that attaches files to what is said to `target`.
+    fn king_attach_button(
+        &self,
+        target: Target,
+        c: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let name = format!("king-attach-{}", key_of(target));
+        let hover = c.surface_2;
+        div()
+            .id(SharedString::from(name.clone()))
+            .debug_selector(move || name.clone())
+            .flex_none()
+            .size(px(26.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(metrics::RADIUS())
+            .border_1()
+            .border_color(c.elevated_border)
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.king_attach(target, window, cx);
+            }))
+            .child(icon(IconName::Paperclip, px(13.), c.text_muted))
             .into_any_element()
     }
 
@@ -1442,6 +1482,16 @@ impl Shell {
                                     .min_w_0()
                                     .child(Textarea::new(input).appearance(false).bordered(false))
                             }))
+                            .child(self.king_attach_button(Target::Worker(id), c, cx))
+                            .child(self.dictate_button(
+                                Field::King(Target::Worker(id)),
+                                (
+                                    format!("king-dictate-worker-{id}"),
+                                    format!("king-dictate-problem-worker-{id}"),
+                                ),
+                                c,
+                                cx,
+                            ))
                             .child(
                                 button(format!("king-tell-{id}"), "TELL", Look::Outline, c)
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
