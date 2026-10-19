@@ -26,6 +26,8 @@
 //! * [`models`]: what King knows of each model's talents and benchmarks;
 //! * [`report`]: the line under every answer of King's: its tokens, how
 //!   fast they came, and what is left of the budget and the usage windows;
+//! * [`run`]: a task of the board carried out as its steps, in the order
+//!   their needs say;
 //! * [`verify`]: the evidence a worker's work is right: its project's check,
 //!   and the CI of its pull request;
 //! * [`prompt`]: the instructions King is given, and the message that wakes
@@ -46,6 +48,7 @@ pub mod prompt;
 pub mod protocol;
 pub mod report;
 pub mod route;
+pub mod run;
 pub mod transcript;
 pub mod verify;
 

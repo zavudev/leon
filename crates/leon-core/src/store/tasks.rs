@@ -19,6 +19,11 @@
 //!   of a scope ([`MAX_TASKS`], a guard against an agent that creates in a
 //!   loop). What is refused is refused with a [`TaskError`].
 //!
+//! **A task can be a step of another.** It names its parent, and the tasks
+//! of the same parent it needs done before it can start (its *needs*): the
+//! steps of a run King carries out in that order. Neither crosses a board,
+//! a task is never its own ancestor, and needs never go round in a circle.
+//!
 //! Cards inside a column are ordered by a real-number position, so a card goes
 //! between two others by writing one row. The clock is the caller's: every
 //! write takes its time in milliseconds.
@@ -58,9 +63,9 @@ const SNIPPET_WORDS: u32 = 24;
 /// The columns of a task, in the order [`task_from_row`] reads them.
 const COLUMNS: &str = "t.id, t.scope, t.root, t.title, t.body, t.status, t.priority, \
                        t.position, t.labels, t.assignee, t.agent, t.created_at, \
-                       t.updated_at, t.closed_at, t.branch";
+                       t.updated_at, t.closed_at, t.branch, t.parent, t.needs";
 /// How many columns that is: where a query's own columns start.
-const COLUMN_COUNT: usize = 15;
+const COLUMN_COUNT: usize = 17;
 
 /// Why a task was refused.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -112,8 +117,19 @@ pub enum TaskError {
     #[error("{0:?} is not a branch: one line of at most {MAX_BRANCH_CHARS} characters")]
     BadBranch(String),
     /// A change that changes nothing.
-    #[error("nothing to change: give a title, body, status, priority, labels, assignee or branch")]
+    #[error(
+        "nothing to change: give a title, body, status, priority, labels, assignee, branch, \
+         parent or needs"
+    )]
     NothingToChange,
+    /// The parent is the task itself, one of its steps, or on another board.
+    #[error("{0:?} cannot be its parent: a task of the same board, and not one of its steps")]
+    BadParent(String),
+    /// A need is the task itself, on another board, or makes a circle.
+    #[error(
+        "{0:?} cannot be needed: a task of the same board that does not, itself, wait for this one"
+    )]
+    BadNeed(String),
 }
 
 impl From<TaskError> for StoreError {
@@ -305,6 +321,10 @@ pub struct TaskPatch {
     pub assignee: Option<Option<String>>,
     /// The branch of the worktree made for the task, or none any more.
     pub branch: Option<Option<String>>,
+    /// The task it is a step of, or none any more.
+    pub parent: Option<Option<String>>,
+    /// The tasks it waits for, replacing the old ones.
+    pub needs: Option<Vec<String>>,
 }
 
 impl TaskPatch {
@@ -325,6 +345,8 @@ pub struct TaskFilter {
     pub assignee: Option<String>,
     /// Only the tasks with this label.
     pub label: Option<String>,
+    /// Only the steps of this task, by its whole id.
+    pub parent: Option<String>,
 }
 
 /// A task as it is stored.
@@ -358,6 +380,10 @@ pub struct Task {
     pub closed_at: Option<i64>,
     /// The branch of the worktree made for it, when work was started.
     pub branch: Option<String>,
+    /// The task it is a step of, by its whole id.
+    pub parent: Option<String>,
+    /// The tasks it waits for, by their whole ids.
+    pub needs: Vec<String>,
 }
 
 impl Task {
@@ -494,6 +520,14 @@ fn checked_branch(branch: Option<&str>) -> Result<Option<String>, TaskError> {
     Ok(Some(branch.to_owned()))
 }
 
+/// Lines kept one per value, as labels and needs are.
+fn split_lines(text: &str) -> Vec<String> {
+    text.split('\n')
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 fn task_from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
     let scope: String = row.get(1)?;
     let root: String = row.get(2)?;
@@ -511,17 +545,15 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         status: TaskStatus::parse(&status).map_err(|_| super::bad_tag(5, &status))?,
         priority: TaskPriority::from_level(row.get(6)?),
         position: row.get(7)?,
-        labels: labels
-            .split('\n')
-            .filter(|label| !label.is_empty())
-            .map(str::to_owned)
-            .collect(),
+        labels: split_lines(&labels),
         assignee: row.get(9)?,
         agent: row.get(10)?,
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
         closed_at: row.get(13)?,
         branch: row.get(14)?,
+        parent: row.get(15)?,
+        needs: split_lines(&row.get::<_, String>(16)?),
     })
 }
 
@@ -692,6 +724,8 @@ impl Store {
                 updated_at: at,
                 closed_at: status.is_closed().then_some(at),
                 branch: None,
+                parent: None,
+                needs: Vec::new(),
             };
             tx.execute(
                 "INSERT INTO task (id, scope, root, title, body, status, priority, position,
@@ -754,12 +788,48 @@ impl Store {
             None => None,
         };
         let id = self.task_id(id)?;
+        let parent = match &patch.parent {
+            Some(Some(given)) => {
+                Some(Some(self.task_id(given).map_err(|_| {
+                    StoreError::from(TaskError::BadParent(given.clone()))
+                })?))
+            }
+            Some(None) => Some(None),
+            None => None,
+        };
+        let needs = match &patch.needs {
+            Some(given) => {
+                let mut ids: Vec<String> = Vec::new();
+                for need in given.iter().filter(|need| !need.trim().is_empty()) {
+                    let need = self
+                        .task_id(need)
+                        .map_err(|_| StoreError::from(TaskError::BadNeed(need.clone())))?;
+                    if !ids.contains(&need) {
+                        ids.push(need);
+                    }
+                }
+                Some(ids)
+            }
+            None => None,
+        };
         self.write(StoreChange::Tasks, |tx| {
             let mut task = row_of(tx, &id)?;
             if expected.is_some_and(|expected| task.updated_at != expected) {
                 return Ok(None);
             }
             let key = task.scope.key();
+            if let Some(parent) = parent {
+                if let Some(parent) = &parent {
+                    check_parent(tx, &task, parent)?;
+                }
+                task.parent = parent;
+            }
+            if let Some(needs) = needs {
+                for need in &needs {
+                    check_need(tx, &task, need)?;
+                }
+                task.needs = needs;
+            }
             if let Some(branch) = branch {
                 task.branch = branch;
             }
@@ -830,6 +900,15 @@ impl Store {
                 "UPDATE task_link SET task_id = NULL WHERE task_id = ?1",
                 [&id],
             )?;
+            // Its steps are steps of nothing now, and nothing waits for it.
+            tx.execute("UPDATE task SET parent = NULL WHERE parent = ?1", [&id])?;
+            tx.execute(
+                "UPDATE task SET needs = trim(replace(char(10) || needs || char(10),
+                                                      char(10) || ?1 || char(10), char(10)),
+                                              char(10))
+                 WHERE instr(char(10) || needs || char(10), char(10) || ?1 || char(10)) > 0",
+                [&id],
+            )?;
             Ok(task)
         })
     }
@@ -896,6 +975,7 @@ impl Store {
                    AND (?4 IS NULL OR lower(t.assignee) = ?4)
                    AND (?5 IS NULL OR instr(char(10) || t.labels || char(10),
                                             char(10) || ?5 || char(10)) > 0)
+                   AND (?7 IS NULL OR t.parent = ?7)
                  ORDER BY {}, t.position, t.pk
                  LIMIT ?6",
                 status_order()
@@ -908,7 +988,8 @@ impl Store {
                         filter.open_only,
                         assignee,
                         label,
-                        sql_limit(limit.min(MAX_LISTED))
+                        sql_limit(limit.min(MAX_LISTED)),
+                        filter.parent
                     ],
                     task_from_row,
                 )?
@@ -993,7 +1074,7 @@ fn write_task(tx: &Transaction<'_>, task: &Task) -> Result<()> {
     tx.execute(
         "UPDATE task SET title = ?2, body = ?3, status = ?4, priority = ?5, position = ?6,
                 labels = ?7, assignee = ?8, title_hash = ?9, updated_at = ?10, closed_at = ?11,
-                branch = ?12
+                branch = ?12, parent = ?13, needs = ?14
          WHERE id = ?1",
         params![
             task.id,
@@ -1007,9 +1088,57 @@ fn write_task(tx: &Transaction<'_>, task: &Task) -> Result<()> {
             text_hash(&task.title),
             task.updated_at,
             task.closed_at,
-            task.branch
+            task.branch,
+            task.parent,
+            task.needs.join("\n")
         ],
     )?;
+    Ok(())
+}
+
+/// Refuses a parent on another board, or one that is the task or one of
+/// its steps (however far down).
+fn check_parent(tx: &Transaction<'_>, task: &Task, parent: &str) -> Result<()> {
+    let refused = || StoreError::from(TaskError::BadParent(parent.to_owned()));
+    let mut at = Some(parent.to_owned());
+    let mut seen = 0;
+    while let Some(id) = at {
+        if id == task.id || seen > MAX_LISTED {
+            return Err(refused());
+        }
+        let found = row_of(tx, &id).map_err(|_| refused())?;
+        if found.scope != task.scope {
+            return Err(refused());
+        }
+        at = found.parent;
+        seen += 1;
+    }
+    Ok(())
+}
+
+/// Refuses a need on another board, or one that waits, however far down,
+/// for the task itself.
+fn check_need(tx: &Transaction<'_>, task: &Task, need: &str) -> Result<()> {
+    let refused = || StoreError::from(TaskError::BadNeed(need.to_owned()));
+    let mut open = vec![need.to_owned()];
+    let mut seen: Vec<String> = Vec::new();
+    while let Some(id) = open.pop() {
+        if id == task.id {
+            return Err(refused());
+        }
+        if seen.contains(&id) {
+            continue;
+        }
+        if seen.len() > MAX_LISTED {
+            return Err(refused());
+        }
+        let found = row_of(tx, &id).map_err(|_| refused())?;
+        if found.scope != task.scope {
+            return Err(refused());
+        }
+        open.extend(found.needs);
+        seen.push(id);
+    }
     Ok(())
 }
 
@@ -1062,6 +1191,74 @@ mod tests {
         assert_eq!(task.closed_at, None);
         assert_eq!(store.task(&task.id).unwrap(), task);
         assert_eq!(store.task(task.short_id()).unwrap(), task);
+    }
+
+    #[test]
+    fn a_task_has_steps_that_wait_for_each_other_and_never_in_a_circle() {
+        let store = Store::open_in_memory().unwrap();
+        let goal = add(&store, "Ship billing", 1);
+        let schema = add(&store, "Billing schema", 1);
+        let api = add(&store, "Billing API", 1);
+        let page = add(&store, "Billing page", 1);
+        let step = |needs: &[&Task]| TaskPatch {
+            parent: Some(Some(goal.short_id().to_owned())),
+            needs: Some(
+                needs
+                    .iter()
+                    .map(|need| need.short_id().to_owned())
+                    .collect(),
+            ),
+            ..TaskPatch::default()
+        };
+        store.update_task(&schema.id, &step(&[]), 2).unwrap();
+        let api = store.update_task(&api.id, &step(&[&schema]), 2).unwrap();
+        assert_eq!(api.parent.as_deref(), Some(goal.id.as_str()));
+        assert_eq!(api.needs, std::slice::from_ref(&schema.id));
+        store
+            .update_task(&page.id, &step(&[&api, &schema]), 2)
+            .unwrap();
+        let steps = TaskFilter {
+            parent: Some(goal.id.clone()),
+            ..TaskFilter::default()
+        };
+        assert_eq!(
+            titles(
+                &store
+                    .tasks(&MemoryScope::project("/srv/api"), &steps, 10)
+                    .unwrap()
+            ),
+            ["Billing schema", "Billing API", "Billing page"]
+        );
+
+        // Needs never go round, and a task is never its own ancestor.
+        let circle = TaskPatch {
+            needs: Some(vec![page.id.clone()]),
+            ..TaskPatch::default()
+        };
+        assert!(store.update_task(&schema.id, &circle, 3).is_err());
+        let own = TaskPatch {
+            parent: Some(Some(schema.id.clone())),
+            ..TaskPatch::default()
+        };
+        assert!(store.update_task(&goal.id, &own, 3).is_err());
+        let elsewhere = store
+            .add_task(&NewTask::titled(MemoryScope::Global, "Elsewhere"), 1)
+            .unwrap()
+            .into_task();
+        let across = TaskPatch {
+            needs: Some(vec![elsewhere.id.clone()]),
+            ..TaskPatch::default()
+        };
+        assert!(store.update_task(&page.id, &across, 3).is_err());
+
+        // A deleted task is a parent and a need of nothing.
+        store.delete_task(&api.id).unwrap();
+        assert_eq!(
+            store.task(&page.id).unwrap().needs,
+            std::slice::from_ref(&schema.id)
+        );
+        store.delete_task(&goal.id).unwrap();
+        assert_eq!(store.task(&schema.id).unwrap().parent, None);
     }
 
     #[test]

@@ -20,6 +20,7 @@ use leon_king::coordinator::{Open, Target, WorkerState};
 use leon_king::history::Past;
 use leon_king::protocol::{ConversationStatus, Status, WorkerStatus};
 use leon_king::report::{count, span, Report};
+use leon_king::run::RunState;
 use leon_king::transcript::{Entry, Kind};
 use leon_king::verify::{self, CheckState, Ci};
 
@@ -1611,10 +1612,16 @@ impl Shell {
         c: &Palette,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if worker.check.is_none() && worker.pull_request.is_none() {
+        let id = worker.id;
+        let step = self.king_ui.status.as_ref().and_then(|status| {
+            status.runs.iter().rev().find_map(|run| {
+                run.step_of(id)
+                    .map(|index| (run.id, run.place(index), run.state))
+            })
+        });
+        if worker.check.is_none() && worker.pull_request.is_none() && step.is_none() {
             return None;
         }
-        let id = worker.id;
         let now = (self.options.now)().timestamp_millis().max(0) as u64;
         let mut row = div()
             .debug_selector(move || format!("king-evidence-{id}"))
@@ -1623,6 +1630,18 @@ impl Shell {
             .items_center()
             .gap(px(8.))
             .min_w_0();
+        if let Some((run, place, state)) = step {
+            let colour = match state {
+                RunState::Blocked => c.error,
+                RunState::Done => c.success,
+                RunState::Running | RunState::Canceled => c.text_muted,
+            };
+            row = row.child(
+                mono(format!("RUN #{run} · {}", place.to_uppercase()))
+                    .debug_selector(move || format!("king-step-{id}"))
+                    .text_color(colour),
+            );
+        }
         if let Some(check) = &worker.check {
             let (text, colour) = match check.state {
                 CheckState::Running => (

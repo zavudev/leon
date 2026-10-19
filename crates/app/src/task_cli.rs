@@ -9,7 +9,8 @@
 //! leon task show <id> [--json]
 //! leon task edit <id> [--title T] [--body B | --body -] [--status S] [--priority P]
 //!                [--label L]... | --no-labels] [--assignee A | --no-assignee]
-//!                [--branch B | --no-branch]
+//!                [--branch B | --no-branch] [--parent P | --no-parent]
+//!                [--need N]... | --no-needs]
 //! leon task move <id> <status> [--before <id>]
 //! leon task done <id>
 //! leon task rm <id>
@@ -112,6 +113,10 @@ pub enum Action {
         assignee: Option<Option<String>>,
         /// The branch of the task's worktree, or none (`Some(None)`).
         branch: Option<Option<String>>,
+        /// The task it is a step of, or none (`Some(None)`).
+        parent: Option<Option<String>>,
+        /// The tasks it waits for, replacing the old ones.
+        needs: Option<Vec<String>>,
     },
     /// Move a task to a column.
     Move {
@@ -167,7 +172,7 @@ pub fn usage() -> String {
          {slug} task list [--global] [--status S] [--all] [--assignee A] [--label L] [--limit N] [--json]\n  \
          {slug} task board [--global]\n  \
          {slug} task show <id> [--json]\n  \
-         {slug} task edit <id> [--title T] [--body B|-] [--status S] [--priority P] [--label L]... [--no-labels] [--assignee A | --no-assignee] [--branch B | --no-branch]\n  \
+         {slug} task edit <id> [--title T] [--body B|-] [--status S] [--priority P] [--label L]... [--no-labels] [--assignee A | --no-assignee] [--branch B | --no-branch] [--parent P | --no-parent] [--need N]... [--no-needs]\n  \
          {slug} task move <id> <status> [--before <id>]\n  \
          {slug} task done <id>\n  \
          {slug} task rm <id>\n  \
@@ -231,6 +236,9 @@ pub fn parse(
     let mut anywhere = false;
     let (mut no_labels, mut no_assignee, mut no_branch) = (false, false, false);
     let mut branch: Option<String> = None;
+    let (mut no_parent, mut no_needs) = (false, false);
+    let mut parent: Option<String> = None;
+    let mut needs: Vec<String> = Vec::new();
     let mut title: Option<String> = None;
     let mut body: Option<Body> = None;
     let mut status: Option<TaskStatus> = None;
@@ -310,6 +318,22 @@ pub fn parse(
             "--branch" => {
                 branch = Some(value("a branch name")?);
                 given.push("--branch");
+            }
+            "--parent" => {
+                parent = Some(value("a task id")?);
+                given.push("--parent");
+            }
+            "--no-parent" => {
+                no_parent = true;
+                given.push("--no-parent");
+            }
+            "--need" => {
+                needs.push(value("a task id")?);
+                given.push("--need");
+            }
+            "--no-needs" => {
+                no_needs = true;
+                given.push("--no-needs");
             }
             "--title" => {
                 title = Some(value("a title")?);
@@ -393,6 +417,10 @@ pub fn parse(
             "--no-assignee",
             "--branch",
             "--no-branch",
+            "--parent",
+            "--no-parent",
+            "--need",
+            "--no-needs",
         ],
         "move" => &["--before"],
         "search" => &["--global", "--limit", "--json"],
@@ -447,6 +475,7 @@ pub fn parse(
                     open_only: !all && status.is_none(),
                     assignee,
                     label: labels.into_iter().next(),
+                    parent: None,
                 },
                 limit: limit.unwrap_or(DEFAULT_LISTED),
                 json,
@@ -466,6 +495,12 @@ pub fn parse(
             }
             if branch.is_some() && no_branch {
                 return Err("--branch and --no-branch exclude each other.".to_owned());
+            }
+            if parent.is_some() && no_parent {
+                return Err("--parent and --no-parent exclude each other.".to_owned());
+            }
+            if !needs.is_empty() && no_needs {
+                return Err("--need and --no-needs exclude each other.".to_owned());
             }
             let edit = Action::Edit {
                 id: one_id(&words)?,
@@ -489,6 +524,18 @@ pub fn parse(
                     Some(None)
                 } else {
                     branch.map(Some)
+                },
+                parent: if no_parent {
+                    Some(None)
+                } else {
+                    parent.map(Some)
+                },
+                needs: if no_needs {
+                    Some(Vec::new())
+                } else if needs.is_empty() {
+                    None
+                } else {
+                    Some(needs)
                 },
             };
             if given.is_empty() {
@@ -717,6 +764,8 @@ fn carry_out(invocation: Invocation) -> Result<(), String> {
             labels,
             assignee,
             branch,
+            parent,
+            needs,
         } => {
             service.get(&id).map_err(said)?;
             let patch = TaskPatch {
@@ -727,6 +776,8 @@ fn carry_out(invocation: Invocation) -> Result<(), String> {
                 labels,
                 assignee,
                 branch,
+                parent,
+                needs,
             };
             let task = service.update(&id, &patch).map_err(said)?;
             print(&format!("Changed {}\n", tasks::line(&task)));

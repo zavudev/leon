@@ -141,6 +141,17 @@ pub fn tool_list() -> Value {
         "minLength": 6,
         "description": "The id shown with the task (the eight characters are enough).",
     });
+    let needs = json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "The ids of the tasks of the same board this one waits for: a run \
+                        starts it once they are done. Replaces what it waited for.",
+    });
+    let parent = json!({
+        "type": "string",
+        "description": "The id of the task this one is a step of: a run of that task carries \
+                        out its steps.",
+    });
     let labels = json!({
         "type": "array",
         "items": { "type": "string", "maxLength": leon_core::store::tasks::MAX_LABEL_CHARS },
@@ -179,6 +190,8 @@ pub fn tool_list() -> Value {
                 "priority": { "type": "string", "enum": priorities.clone() },
                 "labels": labels.clone(),
                 "assignee": { "type": "string", "description": "A person or an agent." },
+                "parent": parent.clone(),
+                "needs": needs.clone(),
                 "scope": scope.clone(),
                 "project": project.clone(),
             }),
@@ -193,6 +206,10 @@ pub fn tool_list() -> Value {
                 "include_closed": { "type": "boolean", "default": false },
                 "assignee": { "type": "string" },
                 "label": { "type": "string" },
+                "parent": {
+                    "type": "string",
+                    "description": "Only the steps of this task, by its id.",
+                },
                 "scope": scope.clone(),
                 "project": project.clone(),
                 "limit": {
@@ -209,8 +226,9 @@ pub fn tool_list() -> Value {
         ),
         tool(
             "task_update",
-            "Change a task: its title, body, status, priority, labels or assignee. What is \
-             not given stays. A new status puts the task at the bottom of that column.",
+            "Change a task: its title, body, status, priority, labels, assignee, parent or \
+             needs. What is not given stays. A new status puts the task at the bottom of that \
+             column.",
             json!({
                 "id": id.clone(),
                 "title": { "type": "string", "maxLength": leon_core::store::tasks::MAX_TITLE_CHARS },
@@ -227,6 +245,12 @@ pub fn tool_list() -> Value {
                     "description": "The branch of the worktree this task is worked on in; an \
                                     empty string takes it away.",
                 },
+                "parent": {
+                    "type": "string",
+                    "description": "The task this one is a step of; an empty string makes it \
+                                    a step of nothing.",
+                },
+                "needs": needs,
             }),
             &["id"],
         ),
@@ -330,21 +354,24 @@ impl Arguments<'_> {
     }
 
     fn labels(&self) -> Result<Option<Vec<String>>, Refusal> {
-        match self.0.get("labels") {
+        self.list("labels")
+    }
+
+    fn list(&self, name: &str) -> Result<Option<Vec<String>>, Refusal> {
+        let wrong = || {
+            refuse(
+                INVALID_PARAMS,
+                format!("{name:?} must be a list of strings"),
+            )
+        };
+        match self.0.get(name) {
             None | Some(Value::Null) => Ok(None),
             Some(Value::Array(items)) => items
                 .iter()
-                .map(|item| {
-                    item.as_str().map(str::to_owned).ok_or_else(|| {
-                        refuse(INVALID_PARAMS, "\"labels\" must be a list of strings")
-                    })
-                })
+                .map(|item| item.as_str().map(str::to_owned).ok_or_else(wrong))
                 .collect::<Result<Vec<_>, _>>()
                 .map(Some),
-            Some(_) => Err(refuse(
-                INVALID_PARAMS,
-                "\"labels\" must be a list of strings",
-            )),
+            Some(_) => Err(wrong()),
         }
     }
 
@@ -505,8 +532,14 @@ impl<B: Backend> Server<B> {
         let result = match name {
             "task_create" => {
                 args.known(&[
-                    "title", "body", "status", "priority", "labels", "assignee", "scope", "project",
+                    "title", "body", "status", "priority", "labels", "assignee", "parent", "needs",
+                    "scope", "project",
                 ])?;
+                let plan = TaskPatch {
+                    parent: args.text("parent")?.map(Some),
+                    needs: args.list("needs")?,
+                    ..TaskPatch::default()
+                };
                 let draft = Draft {
                     reach: args.reach()?,
                     title: args.required("title")?,
@@ -517,7 +550,20 @@ impl<B: Backend> Server<B> {
                     assignee: args.text("assignee")?,
                     agent: self.client.clone(),
                 };
-                self.backend.add(draft).map(|saved| {
+                let saved = self.backend.add(draft).and_then(|saved| {
+                    if plan.is_empty() {
+                        return Ok(saved);
+                    }
+                    let id = saved.task().id.clone();
+                    let planned = self.backend.update(&id, plan).map_err(|error| {
+                        format!("the task was made ({id}), but not as a step: {error}")
+                    })?;
+                    Ok(match saved {
+                        SavedTask::New(_) => SavedTask::New(planned),
+                        SavedTask::Known(_) => SavedTask::Known(planned),
+                    })
+                });
+                saved.map(|saved| {
                     let created = matches!(saved, SavedTask::New(_));
                     let mut value = json_of(saved.task(), None);
                     if let Some(object) = value.as_object_mut() {
@@ -539,15 +585,24 @@ impl<B: Backend> Server<B> {
                     "include_closed",
                     "assignee",
                     "label",
+                    "parent",
                     "scope",
                     "project",
                     "limit",
                 ])?;
+                let parent = match args.text("parent")? {
+                    Some(parent) => match self.backend.get(&parent) {
+                        Ok(task) => Some(task.id),
+                        Err(message) => return Ok(tool_error(message)),
+                    },
+                    None => None,
+                };
                 let filter = TaskFilter {
                     status: args.status("status")?,
                     open_only: !args.flag("include_closed")?,
                     assignee: args.text("assignee")?,
                     label: args.text("label")?,
+                    parent,
                 };
                 self.backend
                     .list(args.reach()?, filter, args.limit(DEFAULT_LISTED)?)
@@ -564,6 +619,7 @@ impl<B: Backend> Server<B> {
             "task_update" => {
                 args.known(&[
                     "id", "title", "body", "status", "priority", "labels", "assignee", "branch",
+                    "parent", "needs",
                 ])?;
                 let patch = TaskPatch {
                     title: args.text("title")?,
@@ -577,6 +633,10 @@ impl<B: Backend> Server<B> {
                     branch: args
                         .text("branch")?
                         .map(|branch| Some(branch).filter(|b| !b.trim().is_empty())),
+                    parent: args
+                        .text("parent")?
+                        .map(|parent| Some(parent).filter(|p| !p.trim().is_empty())),
+                    needs: args.list("needs")?,
                 };
                 self.backend
                     .update(&args.required("id")?, patch)
@@ -718,6 +778,43 @@ mod tests {
             server.handle(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#),
             None
         );
+    }
+
+    #[test]
+    fn a_task_is_made_a_step_of_another_with_what_it_needs() {
+        let mut server = server();
+        let id = |value: &Value| value["id"].as_str().unwrap().to_owned();
+        let (goal, _) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Ship billing" }),
+        ));
+        let (schema, _) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Billing schema", "parent": id(&goal) }),
+        ));
+        assert_eq!(schema["parent"], goal["id"]);
+        let (api, failed) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Billing API", "parent": id(&goal), "needs": [id(&schema)] }),
+        ));
+        assert!(!failed, "{api}");
+        assert_eq!(api["needs"], json!([id(&schema)]));
+        let (steps, _) = payload(&call(
+            &mut server,
+            "task_list",
+            json!({ "parent": goal["short_id"] }),
+        ));
+        assert_eq!(steps.as_array().map(Vec::len), Some(2));
+        // Needs never go round.
+        let (refused, failed) = payload(&call(
+            &mut server,
+            "task_update",
+            json!({ "id": id(&schema), "needs": [id(&api)] }),
+        ));
+        assert!(failed, "{refused}");
     }
 
     #[test]

@@ -806,3 +806,189 @@ fn a_worker_belongs_to_the_conversation_that_started_it() {
     assert_eq!(king.worker(1).unwrap().started_in, past_of(0));
     assert_eq!(past_of(0), Some(first));
 }
+
+fn run_spec(budget_usd: Option<f64>) -> crate::run::RunSpec {
+    let step = |task: &str, needs: &[&str]| crate::run::StepSpec {
+        task: task.into(),
+        title: format!("Billing {task}"),
+        body: String::new(),
+        needs: needs.iter().map(|need| (*need).to_owned()).collect(),
+        tier: None,
+        job: Job::Code,
+    };
+    crate::run::RunSpec {
+        task: "goal".into(),
+        title: "Ship billing".into(),
+        body: String::new(),
+        project: "leon".into(),
+        steps: vec![step("api", &["schema"]), step("schema", &[])],
+        max_parallel: None,
+        budget_usd,
+    }
+}
+
+/// Gives the step at `index` of run 1 a worker, as the service does.
+fn start_step(king: &mut Coordinator, index: usize, at: u64) -> u32 {
+    let task = king.runs()[&1].steps[index].task.clone();
+    let (worker, _) = king.start_worker(spec(&task), at).unwrap();
+    king.step_started(1, index, worker, &format!("king/run-1-{task}"), at);
+    worker
+}
+
+fn boards(effects: &[Effect]) -> Vec<(String, String)> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Board { task, status } => Some((task.clone(), status.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_run_starts_each_step_once_its_needs_are_checked_and_wakes_king_when_done() {
+    let mut king = Coordinator::new(config());
+    let (id, effects) = king.start_run(run_spec(None), 0).unwrap();
+    assert_eq!(id, 1);
+    assert_eq!(boards(&effects), [("goal".to_owned(), "doing".to_owned())]);
+    assert!(
+        king.start_run(run_spec(None), 0).is_err(),
+        "one run of a task"
+    );
+
+    // The schema first: the API needs it.
+    let (ready, _) = king.steps_to_start(1);
+    assert_eq!(ready, [(1, 0)]);
+    assert_eq!(king.runs()[&1].steps[0].task, "schema");
+    let schema = start_step(&mut king, 0, 1);
+    assert!(king.steps_to_start(2).0.is_empty());
+
+    // Its worker finishes: Leon commits and checks, King hears nothing.
+    let effects = answer(&mut king, Target::Worker(schema), "Added the tables.", 10);
+    assert!(effects.contains(&Effect::Verify { worker: schema }));
+    assert!(king.state().news.is_empty());
+    king.check_started(schema, "cargo test", "abc1234", false, 11)
+        .unwrap();
+    let effects = king.check_finished(schema, true, "ok", 20);
+    assert_eq!(boards(&effects), [("schema".to_owned(), "done".to_owned())]);
+    assert!(king.state().news.is_empty());
+
+    // Then the API, which fails its check once and is told to mend it.
+    assert_eq!(king.steps_to_start(21).0, [(1, 1)]);
+    let api = start_step(&mut king, 1, 21);
+    answer(&mut king, Target::Worker(api), "Wrote the API.", 30);
+    king.check_started(api, "cargo test", "def5678", false, 31)
+        .unwrap();
+    let effects = king.check_finished(api, false, "test billing::total failed", 40);
+    let told = starts(&effects);
+    assert_eq!(told.len(), 1);
+    assert!(told[0].1.contains("billing::total failed"), "{told:?}");
+    assert!(king.state().news.is_empty(), "a mended check is not news");
+    answer(&mut king, Target::Worker(api), "Fixed the total.", 50);
+    king.check_started(api, "cargo test", "fed9876", false, 51)
+        .unwrap();
+    let effects = king.check_finished(api, true, "ok", 60);
+    assert_eq!(
+        boards(&effects),
+        [
+            ("api".to_owned(), "done".to_owned()),
+            ("goal".to_owned(), "review".to_owned())
+        ]
+    );
+    assert_eq!(king.runs()[&1].state, crate::run::RunState::Done);
+    let news = &king.state().news;
+    assert_eq!(news.len(), 1);
+    assert_eq!(news[0].run, Some(1));
+    assert!(news[0].text.contains("king/run-1-api"), "{}", news[0].text);
+    let effects = king.tick(10_000);
+    assert!(starts(&effects)[0]
+        .1
+        .contains("Run #1 of task \"Ship billing\" is done"));
+}
+
+#[test]
+fn a_failed_step_blocks_its_run_until_king_goes_on_or_calls_it_off() {
+    let mut config = config();
+    config.limits.run_fixes = 0;
+    let mut king = Coordinator::new(config);
+    king.start_run(run_spec(None), 0).unwrap();
+    let schema = start_step(&mut king, 0, 1);
+    answer(&mut king, Target::Worker(schema), "Done.", 10);
+    king.check_started(schema, "cargo test", "abc1234", false, 11)
+        .unwrap();
+    king.check_finished(schema, false, "it broke", 20);
+    let run = &king.runs()[&1];
+    assert_eq!(run.state, crate::run::RunState::Blocked);
+    assert_eq!(run.steps[0].state, crate::run::StepState::Failed);
+    assert!(king.steps_to_start(21).0.is_empty());
+    assert!(king.state().news[0].text.contains("it broke"));
+
+    // King says how to go on: the same worker is told, and the step works.
+    let effects = king
+        .run_continue(1, Some("Use the old column name."), None, 30)
+        .unwrap();
+    assert_eq!(
+        starts(&effects),
+        [(
+            Target::Worker(schema),
+            "Use the old column name.".to_owned()
+        )]
+    );
+    assert_eq!(king.runs()[&1].state, crate::run::RunState::Running);
+
+    // Called off: its worker stops and its tasks go back to the column.
+    let effects = king.run_cancel(1, 40).unwrap();
+    assert!(effects.contains(&Effect::Kill {
+        target: Target::Worker(schema)
+    }));
+    assert_eq!(
+        boards(&effects),
+        [
+            ("schema".to_owned(), "todo".to_owned()),
+            ("goal".to_owned(), "todo".to_owned())
+        ]
+    );
+    assert!(king.steps_to_start(41).0.is_empty());
+    assert!(
+        king.start_run(run_spec(None), 50).is_ok(),
+        "a new run of it"
+    );
+}
+
+#[test]
+fn a_run_whose_workers_spent_its_budget_starts_nothing_more() {
+    let mut king = Coordinator::new(config());
+    king.start_run(run_spec(Some(0.2)), 0).unwrap();
+    let schema = start_step(&mut king, 0, 1);
+    // A turn costs 0.25 here: more than the budget.
+    answer(&mut king, Target::Worker(schema), "Done.", 10);
+    king.check_started(schema, "cargo test", "abc1234", false, 11)
+        .unwrap();
+    king.check_finished(schema, true, "ok", 20);
+    let (ready, _) = king.steps_to_start(21);
+    assert!(ready.is_empty());
+    assert_eq!(king.runs()[&1].state, crate::run::RunState::Blocked);
+    assert!(king.state().news[0].text.contains("budget"));
+    king.run_continue(1, None, Some(5.0), 30).unwrap();
+    assert_eq!(king.steps_to_start(31).0, [(1, 1)]);
+}
+
+#[test]
+fn a_step_interrupted_by_a_restart_goes_on_by_itself() {
+    let mut king = Coordinator::new(config());
+    king.start_run(run_spec(None), 0).unwrap();
+    let schema = start_step(&mut king, 0, 1);
+    let saved = king.state().clone();
+    let (mut king, effects) = Coordinator::restored(config(), saved, 100);
+    let told = starts(&effects);
+    assert_eq!(told.len(), 1);
+    assert_eq!(told[0].0, Target::Worker(schema));
+    assert!(told[0].1.contains("restarted"), "{told:?}");
+    assert!(king.state().news.is_empty());
+
+    // One that was being checked is checked again.
+    answer(&mut king, Target::Worker(schema), "Done.", 110);
+    let saved = king.state().clone();
+    let (_, effects) = Coordinator::restored(config(), saved, 200);
+    assert!(effects.contains(&Effect::Verify { worker: schema }));
+}

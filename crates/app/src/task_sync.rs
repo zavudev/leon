@@ -501,6 +501,8 @@ mod tests {
             updated_at,
             closed_at: status.is_closed().then_some(updated_at),
             branch: None,
+            parent: None,
+            needs: Vec::new(),
         }
     }
 

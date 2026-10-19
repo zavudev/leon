@@ -67,6 +67,8 @@ pub enum Action {
     Sync,
     /// Give the card to King Leon, who works it.
     King,
+    /// Carry out the card as its steps: a run of King's service.
+    Run,
 }
 
 /// The action of a key pressed while the board has the keyboard, or `None`
@@ -94,6 +96,7 @@ pub fn action_of(key: &str, shift: bool, other_modifier: bool) -> Option<Action>
         ("e", false) => Action::Details,
         ("s", false) => Action::Sync,
         ("a", false) => Action::King,
+        ("r", false) => Action::Run,
         _ => return None,
     };
     Some(action)
@@ -442,6 +445,8 @@ mod tests {
             updated_at: 0,
             closed_at: None,
             branch: None,
+            parent: None,
+            needs: Vec::new(),
         }
     }
 

@@ -293,6 +293,8 @@ enum Asked {
     Past(u64),
     /// A past conversation taken up again.
     Resumed,
+    /// A run of a task's steps started.
+    Run,
     /// Anything else: only a refusal is said.
     Done,
 }
@@ -300,7 +302,7 @@ enum Asked {
 /// What the window keeps of King.
 pub struct KingUi {
     /// What was said to King before the line was open: said once it is.
-    pending: Vec<String>,
+    pending: Vec<Request>,
     /// The line to the service, once it is open.
     link: Option<flume::Sender<(u64, Request)>>,
     /// A connection is being opened.
@@ -639,8 +641,12 @@ impl Shell {
                         }
                         this.king_ask(Request::Status, Asked::Status, cx);
                         this.king_ask(Request::Models, Asked::Models, cx);
-                        for text in std::mem::take(&mut this.king_ui.pending) {
-                            this.king_ask(Request::Say { text }, Asked::Done, cx);
+                        for request in std::mem::take(&mut this.king_ui.pending) {
+                            let asked = match request {
+                                Request::RunStart { .. } => Asked::Run,
+                                _ => Asked::Done,
+                            };
+                            this.king_ask(request, asked, cx);
                         }
                         this.king_ui.watching = false;
                         this.king_watch(cx);
@@ -781,6 +787,17 @@ impl Shell {
             (Asked::Resumed, Ok(_)) => {
                 self.king_ui.viewing = None;
                 self.king_ask(Request::Conversations, Asked::Conversations, cx);
+                cx.notify();
+            }
+            (Asked::Run, Ok(value)) => {
+                let steps = value["steps"].as_array().map_or(0, Vec::len);
+                self.engine.report(
+                    StatusKind::Info,
+                    format!(
+                        "Run #{} started: {steps} steps, each once what it needs is done",
+                        value["run"]
+                    ),
+                );
                 cx.notify();
             }
             (Asked::Models, Ok(value)) => {
@@ -932,10 +949,30 @@ impl Shell {
         if self.king_ui.connected() {
             self.king_ask(Request::Say { text }, Asked::Done, cx);
         } else {
-            self.king_ui.pending.push(text);
+            self.king_ui.pending.push(Request::Say { text });
             self.king_connect(window, cx);
         }
         self.king_ui.scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    /// Carries out the card the board's cursor is on as its steps: a run,
+    /// which King's service starts without King ([`leon_king::run`]).
+    pub(super) fn tasks_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task) = self.tasks_ui.board.selected().cloned() else {
+            return;
+        };
+        let request = Request::RunStart {
+            task: task.id.clone(),
+            max_parallel: None,
+            budget_usd: None,
+        };
+        if self.king_ui.connected() {
+            self.king_ask(request, Asked::Run, cx);
+        } else {
+            self.king_ui.pending.push(request);
+            self.king_connect(window, cx);
+        }
         cx.notify();
     }
 
@@ -1476,6 +1513,7 @@ mod tests {
             spent_today_usd: 0.0,
             daily_budget_usd: None,
             running: Vec::new(),
+            runs: Vec::new(),
         }
     }
 

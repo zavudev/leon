@@ -198,6 +198,8 @@ pub fn json_of(task: &Task, snippet: Option<&str>) -> Value {
         "updated_at": task.updated_at,
         "closed_at": task.closed_at,
         "branch": task.branch,
+        "parent": task.parent,
+        "needs": task.needs,
     });
     if let (Some(snippet), Some(object)) = (snippet, value.as_object_mut()) {
         let plain: String = snippet
@@ -222,6 +224,14 @@ pub fn line(task: &Task) -> String {
     for label in &task.labels {
         line.push_str(&format!("  #{}", label.replace(' ', "-")));
     }
+    if !task.needs.is_empty() {
+        let needs: Vec<&str> = task
+            .needs
+            .iter()
+            .map(|need| leon_core::store::memory::short_id(need))
+            .collect();
+        line.push_str(&format!("  needs {}", needs.join(",")));
+    }
     line
 }
 
@@ -237,6 +247,12 @@ pub fn detail(task: &Task) -> String {
     }
     if !task.labels.is_empty() {
         field("labels", task.labels.join(", "));
+    }
+    if let Some(parent) = &task.parent {
+        field("step of", parent.clone());
+    }
+    if !task.needs.is_empty() {
+        field("needs", task.needs.join(", "));
     }
     if let Some(agent) = &task.agent {
         field("created by", agent.clone());

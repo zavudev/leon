@@ -150,6 +150,33 @@ pub enum Request {
         /// The worker.
         worker: u32,
     },
+    /// Carry out a task of the board as its steps ([`crate::run`]).
+    RunStart {
+        /// The task, by id or the end of it.
+        task: String,
+        /// How many steps work at once, when not `[limits] run_parallel`.
+        #[serde(default)]
+        max_parallel: Option<usize>,
+        /// The most its workers may cost, in dollars.
+        #[serde(default)]
+        budget_usd: Option<f64>,
+    },
+    /// Go on with a blocked run.
+    RunContinue {
+        /// The run.
+        run: u32,
+        /// What the workers of its failed steps are told.
+        #[serde(default)]
+        text: Option<String>,
+        /// A new budget, in dollars.
+        #[serde(default)]
+        budget_usd: Option<f64>,
+    },
+    /// Call a run off.
+    RunCancel {
+        /// The run.
+        run: u32,
+    },
     /// A pull request was opened for a worker's branch, or its branch was
     /// pushed to again: watch its CI.
     PullRequestOpened {
@@ -287,6 +314,9 @@ pub struct Status {
     /// server, a watcher. Filled by the service.
     #[serde(default)]
     pub running: Vec<RunningProcess>,
+    /// The runs of tasks' steps, oldest first.
+    #[serde(default)]
+    pub runs: Vec<crate::run::Run>,
 }
 
 /// A process a turn left running.
@@ -424,6 +454,17 @@ mod tests {
         for request in [
             Request::PastConversation { conversation: 4 },
             Request::ResumeConversation { conversation: 4 },
+            Request::RunStart {
+                task: "1a2b3c4d".to_owned(),
+                max_parallel: Some(2),
+                budget_usd: Some(3.5),
+            },
+            Request::RunContinue {
+                run: 4,
+                text: None,
+                budget_usd: None,
+            },
+            Request::RunCancel { run: 4 },
         ] {
             let line = serde_json::to_string(&Envelope {
                 id: 91,

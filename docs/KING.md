@@ -270,6 +270,60 @@ abc1234 · 4m14s`, `✗ CHECK FAILED`, or `CHECKING` while it runs. The pull
 request line reads `PR #62 · CI ✓`, `CI ✗ clippy`, `CI RUNNING`, `NO CI` or
 `MERGED`. Click the pull request line to open it.
 
+## Runs: a task carried out as its steps
+
+Work that takes several workers one after another (a schema, then the API
+on it, then the page) is a **run**. Its steps are tasks of the board whose
+parent is the task to carry out, each with the steps it needs done first:
+
+```text
+leon task edit <step> --parent <task> --need <other step>
+```
+
+King makes them with `task_create` (`parent`, `needs`), and the drawer of a
+task lists its steps and its run. `leon task` refuses a parent or a need on
+another board, a task that would be its own parent or step, and needs that
+go round in a circle.
+
+A run starts from the board (**Run its steps**, or `r` on the card), from
+King (`run_start`) or from the command line:
+
+```text
+leon king run <task> [--parallel 2] [--budget 5]
+leon king run continue <run> [what to tell the failed steps' workers]
+leon king run cancel <run>
+```
+
+Then Leon carries it out without King deciding each start:
+
+1. **A step starts once every step it needs is done**, at most
+   `run_parallel` of a run at once, within `max_workers`. Its worktree's
+   branch, `king/run<n>-<step>`, starts from the branch of a step it needs,
+   with the branches of the others merged in, so the work it builds on is in
+   its folder. When a merge conflicts, the worker is told which files
+   conflict and resolves them first. A step with no needs starts from the
+   project's checkout.
+2. **Its worker comes from its tier.** A step's label that names a tier
+   (`cheap`, `premium`…) picks it; a `research` label makes it a research
+   job. Otherwise it is a code job, on the tier `[jobs]` gives code.
+3. **When the worker finishes, Leon commits what it left** (the step's
+   title is the message) **and runs the project's check** on that commit.
+   The step is done when the check passes, and its task moves to *done*. A
+   failed check goes back to the same worker, with the end of what it
+   printed, up to `run_fixes` times. A project Leon cannot check has its
+   steps done unchecked, and the news says so.
+4. **King hears twice at most.** When the run is done, the news says which
+   branch holds the whole work: the last step's, ready for `worktree_diff`
+   and `pr_open`. The task moves to *review*. When the run is blocked (a step
+   failed, its worker was stopped, or its workers spent the run's budget),
+   King hears why and goes on with `run_continue` or calls it off with
+   `run_cancel`. Steps' own turns are not news; their questions are, as any
+   worker's.
+
+A worker that is a run's step shows `RUN #1 · STEP 2 OF 3` on its card. A
+restart of the service tells the steps that were working to go on, and
+checks again the ones that were being checked, with no King turn.
+
 ## What King may do
 
 | King may | King never does |
@@ -344,7 +398,7 @@ claude = "auto"
 | Section | What it sets | Default |
 | --- | --- | --- |
 | `[brain]` | The agent, model, effort and mode King runs on; `mode = ""` is the agent's own | Claude Code, its own model, mode `auto` |
-| `[limits]` | `max_workers`, `daily_budget_usd`, `limit_threshold`, `wake_delay_secs`, `compact_at_tokens`, `check_timeout_secs`, `ci_poll_secs` | 6, none, 0.85, 5, 600000, 1800, 60 |
+| `[limits]` | `max_workers`, `daily_budget_usd`, `limit_threshold`, `wake_delay_secs`, `compact_at_tokens`, `check_timeout_secs`, `ci_poll_secs`, `run_parallel`, `run_fixes` | 6, none, 0.85, 5, 600000, 1800, 60, 2, 1 |
 | `[tiers]` | Each tier's candidates in order: agent, model, effort | `cheap`, `standard`, `premium`, `planning` |
 | `[jobs]` | The tier each kind of job (`code`, `research`, `plan`) goes to, and whether it is `strict` (only ever that tier) | code: standard, research: cheap, plan: planning (strict) |
 | `[guards]` | Branches nothing is pushed to, besides each project's default branch; `verify_before_pr`: a pull request needs a passed check of its last commit | `main`, `master`; on |

@@ -101,6 +101,12 @@ pub struct Limits {
     pub check_timeout_secs: u64,
     /// How often an open pull request's CI is looked at, in seconds.
     pub ci_poll_secs: u64,
+    /// How many steps of one run work at the same time, unless the run
+    /// says otherwise ([`crate::run`]).
+    pub run_parallel: usize,
+    /// How many times a step's worker is told to mend a failed check before
+    /// the step fails and King is told.
+    pub run_fixes: u32,
 }
 
 /// One agent a tier may give work to.

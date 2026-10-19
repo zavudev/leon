@@ -25,7 +25,7 @@ use crate::task_mcp::PROTOCOL_VERSIONS;
 pub const SERVER_NAME: &str = "leon-king";
 
 /// The names of the tools, in the order they are listed.
-pub const TOOLS: [&str; 16] = [
+pub const TOOLS: [&str; 19] = [
     "king_status",
     "projects_list",
     "project_status",
@@ -40,6 +40,9 @@ pub const TOOLS: [&str; 16] = [
     "worker_transcript",
     "worktree_diff",
     "worktree_check",
+    "run_start",
+    "run_continue",
+    "run_cancel",
     "pr_open",
     "notify_user",
 ];
@@ -331,6 +334,46 @@ pub fn tool_list() -> Value {
             &["worker"],
         ),
         tool(
+            "run_start",
+            "Carry out a task of the board as its steps, without you starting each: its steps \
+             are the tasks whose parent it is (task_create with parent and needs), and each \
+             starts once the steps it needs are done. Leon gives each step a worktree that \
+             starts from the branches of what it needs, a worker from its tier (a step's \
+             label that names a tier; `research` for a research job), commits what the worker \
+             leaves and runs the project's check; a failed check goes back to the worker. You \
+             hear when the run is done, or blocked.",
+            json!({
+                "task": { "type": "string", "description": "The task's id, or the end of it." },
+                "max_parallel": {
+                    "type": "integer", "minimum": 1,
+                    "description": "How many steps work at once ([limits] run_parallel).",
+                },
+                "budget_usd": {
+                    "type": "number", "exclusiveMinimum": 0,
+                    "description": "The most its workers may cost, in dollars.",
+                },
+            }),
+            &["task"],
+        ),
+        tool(
+            "run_continue",
+            "Go on with a blocked run: the workers of its failed steps are told `text` (or to \
+             go on), a step that could not start is tried again, and `budget_usd` gives it a \
+             new budget.",
+            json!({
+                "run": { "type": "integer", "minimum": 1 },
+                "text": { "type": "string" },
+                "budget_usd": { "type": "number", "exclusiveMinimum": 0 },
+            }),
+            &["run"],
+        ),
+        tool(
+            "run_cancel",
+            "Call a run off: its steps that wait never start, and its workers that work stop.",
+            json!({ "run": { "type": "integer", "minimum": 1 } }),
+            &["run"],
+        ),
+        tool(
             "pr_open",
             "Push a worker's branch and open a pull request for it, or push again to the one \
              it has. Its last commit must have passed worktree_check; the description then \
@@ -469,6 +512,13 @@ impl<B: Backend> Server<B> {
                 .and_then(|id| u32::try_from(id).ok())
                 .ok_or_else(|| "\"worker\" is required: the worker's number".to_owned())
         };
+        let run = || -> Result<u32, String> {
+            arguments
+                .get("run")
+                .and_then(Value::as_u64)
+                .and_then(|id| u32::try_from(id).ok())
+                .ok_or_else(|| "\"run\" is required: the run's number".to_owned())
+        };
         match name {
             "king_status" => self.backend.ask(Request::Status),
             "projects_list" => self.backend.ask(Request::Projects),
@@ -541,6 +591,20 @@ impl<B: Backend> Server<B> {
                 arguments.get("draft").and_then(Value::as_bool) == Some(true),
                 text("unverified").filter(|why| !why.trim().is_empty()),
             ),
+            "run_start" => self.backend.ask(Request::RunStart {
+                task: needed("task")?,
+                max_parallel: arguments
+                    .get("max_parallel")
+                    .and_then(Value::as_u64)
+                    .and_then(|most| usize::try_from(most).ok()),
+                budget_usd: arguments.get("budget_usd").and_then(Value::as_f64),
+            }),
+            "run_continue" => self.backend.ask(Request::RunContinue {
+                run: run()?,
+                text: text("text"),
+                budget_usd: arguments.get("budget_usd").and_then(Value::as_f64),
+            }),
+            "run_cancel" => self.backend.ask(Request::RunCancel { run: run()? }),
             "notify_user" => self.backend.ask(Request::Notify {
                 title: needed("title")?,
                 body: text("body").unwrap_or_default(),

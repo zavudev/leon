@@ -39,6 +39,8 @@ use leon_king::route::{self, Ask, Choice, Standing};
 use leon_turn::{McpServer, TurnSpec};
 use serde_json::{json, Value};
 
+mod runs;
+
 use super::Paths;
 use crate::chat::turn::{Output, Piped, Spawner, Start, Turn};
 
@@ -234,6 +236,7 @@ pub fn run(paths: Paths) -> Result<(), String> {
             Err(flume::RecvTimeoutError::Disconnected) => return Ok(()),
         };
         service.carry_out(effects);
+        service.advance_runs();
         service.look_at_pull_requests();
     }
 }
@@ -788,55 +791,21 @@ impl Service {
                 self.refresh_running();
                 done(vec![Effect::Changed])
             }
-            Request::Check { worker } => {
-                let found = self
-                    .coordinator
-                    .worker(worker)
-                    .ok_or_else(|| format!("there is no worker #{worker}"))?;
-                let cwd = found.cwd.clone();
-                let command = super::checks::command_for(
-                    &self.coordinator.config().checks,
-                    found.project.as_deref(),
-                    &cwd,
-                )?;
-                let (commit, dirty) = super::checks::head_of(&cwd)?;
-                let effects = self
-                    .coordinator
-                    .check_started(worker, &command, &commit, dirty, now)?;
-                let log = self
-                    .paths
-                    .folder
-                    .join("checks")
-                    .join(format!("{worker}.log"));
-                let timeout =
-                    Duration::from_secs(self.coordinator.config().limits.check_timeout_secs.max(1));
-                let inputs = self.inputs.clone();
-                {
-                    let (command, log) = (command.clone(), log.clone());
-                    std::thread::Builder::new()
-                        .name(format!("leon-king-check-{worker}"))
-                        .spawn(move || {
-                            let (passed, output) =
-                                super::checks::run(&command, &cwd, &log, timeout);
-                            let _ = inputs.send(Input::Checked {
-                                worker,
-                                passed,
-                                output,
-                            });
-                        })
-                        .map_err(|error| error.to_string())?;
-                }
-                Ok((
-                    json!({
-                        "started": command,
-                        "commit": leon_king::verify::short(&commit),
-                        "uncommitted_changes": dirty,
-                        "log": log,
-                        "note": "You are told how it ended as news; do not wait for it.",
-                    }),
-                    effects,
-                ))
-            }
+            Request::Check { worker } => self.start_check(worker, now),
+            Request::RunStart {
+                task,
+                max_parallel,
+                budget_usd,
+            } => self.start_run(&task, max_parallel, budget_usd, now),
+            Request::RunContinue {
+                run,
+                text,
+                budget_usd,
+            } => done(
+                self.coordinator
+                    .run_continue(run, text.as_deref(), budget_usd, now)?,
+            ),
+            Request::RunCancel { run } => done(self.coordinator.run_cancel(run, now)?),
             Request::PullRequestOpened {
                 worker,
                 url,
@@ -853,6 +822,57 @@ impl Service {
                 echo: false,
             }]),
         }
+    }
+
+    /// Runs the project's check in a worker's worktree, on a thread of its
+    /// own: how it ended comes back as [`Input::Checked`].
+    fn start_check(&mut self, worker: u32, now: u64) -> Result<(Value, Vec<Effect>), String> {
+        let found = self
+            .coordinator
+            .worker(worker)
+            .ok_or_else(|| format!("there is no worker #{worker}"))?;
+        let cwd = found.cwd.clone();
+        let command = super::checks::command_for(
+            &self.coordinator.config().checks,
+            found.project.as_deref(),
+            &cwd,
+        )?;
+        let (commit, dirty) = super::checks::head_of(&cwd)?;
+        let effects = self
+            .coordinator
+            .check_started(worker, &command, &commit, dirty, now)?;
+        let log = self
+            .paths
+            .folder
+            .join("checks")
+            .join(format!("{worker}.log"));
+        let timeout =
+            Duration::from_secs(self.coordinator.config().limits.check_timeout_secs.max(1));
+        let inputs = self.inputs.clone();
+        {
+            let (command, log) = (command.clone(), log.clone());
+            std::thread::Builder::new()
+                .name(format!("leon-king-check-{worker}"))
+                .spawn(move || {
+                    let (passed, output) = super::checks::run(&command, &cwd, &log, timeout);
+                    let _ = inputs.send(Input::Checked {
+                        worker,
+                        passed,
+                        output,
+                    });
+                })
+                .map_err(|error| error.to_string())?;
+        }
+        Ok((
+            json!({
+                "started": command,
+                "commit": leon_king::verify::short(&commit),
+                "uncommitted_changes": dirty,
+                "log": log,
+                "note": "You are told how it ended as news; do not wait for it.",
+            }),
+            effects,
+        ))
     }
 
     /// Carries out effects, and the effects they lead to, then saves and
@@ -884,6 +904,8 @@ impl Service {
                     }
                 }
                 Effect::Notify { title, body, echo } => self.notify(title, body, echo),
+                Effect::Verify { worker } => waiting.extend(self.verify_step(worker)),
+                Effect::Board { task, status } => self.move_task(&task, &status),
             }
         }
         if changed {
@@ -1368,6 +1390,11 @@ fn installed(program: &str) -> bool {
 
 /// A branch for a worker: `king/` and its title in a few words.
 fn branch_for(title: &str, now_ms: u64) -> String {
+    format!("king/{}-{}", slug(title), (now_ms / 1000) % 100_000)
+}
+
+/// A title in a few words, as a branch takes it.
+fn slug(title: &str) -> String {
     let words: String = title
         .to_lowercase()
         .chars()
@@ -1378,18 +1405,28 @@ fn branch_for(title: &str, now_ms: u64) -> String {
         .filter(|word| !word.is_empty())
         .take(5)
         .collect();
-    let slug = if slug.is_empty() {
+    if slug.is_empty() {
         "work".to_owned()
     } else {
         slug.join("-")
-    };
-    format!("king/{slug}-{}", (now_ms / 1000) % 100_000)
+    }
 }
 
 /// Makes a worktree of `root` on a new branch, `branch`, from what the
 /// project's checkout has, and returns its folder. Never on the default
 /// branch nor on a `protected` one.
 fn add_worktree(root: &str, branch: &str, protected: &[String]) -> Result<String, String> {
+    add_worktree_from(root, branch, protected, None)
+}
+
+/// [`add_worktree`] whose new branch starts at `from` (a branch), when
+/// given.
+fn add_worktree_from(
+    root: &str,
+    branch: &str,
+    protected: &[String],
+    from: Option<&str>,
+) -> Result<String, String> {
     let git = |args: &[&str]| -> Result<String, String> {
         let output = leon_remote::spawn::std_child("git")
             .arg("-C")
@@ -1421,7 +1458,9 @@ fn add_worktree(root: &str, branch: &str, protected: &[String]) -> Result<String
     if exists {
         git(&["worktree", "add", &path, branch])?;
     } else {
-        git(&["worktree", "add", "-b", branch, &path])?;
+        let mut args = vec!["worktree", "add", "-b", branch, path.as_str()];
+        args.extend(from);
+        git(&args)?;
     }
     Ok(path)
 }

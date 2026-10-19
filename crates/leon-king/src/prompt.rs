@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 
 use crate::config::Config;
 use crate::coordinator::{Job, News, Worker};
+use crate::run::Run;
 
 /// A project as King's instructions list it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,7 +87,16 @@ pub fn king(config: &Config, now: &Now<'_>) -> String {
            it as any request: move it to `doing` (`task_move`), give it to a worker, set its \
            `branch` (`task_update`) once a worktree has one, move it to `review` when its pull \
            request is open, and say on the task (its body) what was done. Never move a task \
-           to `done`: the person does, after the merge.\n\n\
+           to `done`: the person does, after the merge.\n\
+         * **Work of several steps is a run.** When a request needs more than one worker \
+           one after another (a schema, then the API on it, then the page), put its steps \
+           on the board as tasks whose `parent` is the request's task, each with the steps \
+           it `needs`, a tier as a label when it is not the job's (`cheap`, `premium`…) and \
+           what it is to do in its body. Then `run_start` it: Leon starts each step once \
+           what it needs is done and checked, in a worktree that already holds that work, \
+           and you hear only when the run is done (open the pull request of its last \
+           step) or blocked (`run_continue` or `run_cancel`). The person can start a run \
+           from the board too.\n\n\
          ## Choosing a model\n\n\
          * Every model you can use is listed below, with its talents (1 to 5) and the \
            benchmarks known of it, each with its source and date. Choose by the job: the \
@@ -209,9 +219,17 @@ pub fn worker(worker: &Worker) -> String {
 }
 
 /// The message that gives King the news of its workers.
-pub fn wake(news: &[News], workers: &BTreeMap<u32, Worker>) -> String {
+pub fn wake(news: &[News], workers: &BTreeMap<u32, Worker>, runs: &BTreeMap<u32, Run>) -> String {
     let mut text = String::from("[Leon] News of your workers:\n");
     for item in news {
+        if let Some(run) = item.run.and_then(|id| runs.get(&id)) {
+            let _ = writeln!(
+                text,
+                "\n- Run #{} of task \"{}\" {}",
+                run.id, run.title, item.text
+            );
+            continue;
+        }
         let who = match workers.get(&item.worker) {
             Some(worker) => format!(
                 "#{} \"{}\" ({}{})",

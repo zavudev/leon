@@ -585,6 +585,7 @@ impl Shell {
             Action::New => self.open_create(None, window, cx),
             Action::Start => self.tasks_start(window, cx),
             Action::King => self.tasks_send_to_king(window, cx),
+            Action::Run => self.tasks_run(window, cx),
             Action::Scope => {
                 let which = if self.tasks_ui.want_global {
                     self.tasks_pick_project()
@@ -1265,6 +1266,7 @@ impl Shell {
             .child(hint("s", "sync with GitHub"))
             .child(hint("w", "create worktree"))
             .child(hint("a", "give it to the King"))
+            .child(hint("r", "run its steps"))
             .child(hint("n", "new"))
             .child(hint("d", "done"))
             .child(hint("p", "priority"))

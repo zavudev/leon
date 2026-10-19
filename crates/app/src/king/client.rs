@@ -304,4 +304,28 @@ fn print_status(status: &Status) {
             worker.cwd
         );
     }
+    for run in &status.runs {
+        println!(
+            "Run #{} {:<9} {} — {} of {} steps done{}",
+            run.id,
+            format!("{:?}", run.state).to_lowercase(),
+            run.title,
+            run.done(),
+            run.steps.len(),
+            run.note
+                .as_deref()
+                .map(|note| format!(": {note}"))
+                .unwrap_or_default()
+        );
+        for step in &run.steps {
+            println!(
+                "    {:<9} {}{}",
+                format!("{:?}", step.state).to_lowercase(),
+                step.title,
+                step.worker
+                    .map(|worker| format!(" (#{worker})"))
+                    .unwrap_or_default()
+            );
+        }
+    }
 }

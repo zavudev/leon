@@ -45,6 +45,18 @@ pub fn head_of(cwd: &str) -> Result<(String, bool), String> {
     Ok((commit.trim().to_owned(), !status.trim().is_empty()))
 }
 
+/// Commits everything not committed in `cwd`, with `message`: what a run
+/// step's worker left. Whether there was anything to commit.
+pub fn commit_all(cwd: &str, message: &str) -> Result<bool, String> {
+    let (_, dirty) = head_of(cwd)?;
+    if !dirty {
+        return Ok(false);
+    }
+    git(cwd, &["add", "--all"])?;
+    git(cwd, &["commit", "--quiet", "--message", message])?;
+    Ok(true)
+}
+
 fn git(cwd: &str, args: &[&str]) -> Result<String, String> {
     let output = leon_remote::spawn::std_child("git")
         .args(args)
@@ -164,6 +176,28 @@ mod tests {
         let (passed, printed) = run("sleep 30", cwd, &log, Duration::from_millis(300));
         assert!(!passed);
         assert!(printed.contains("was ended"), "{printed}");
+    }
+
+    #[test]
+    fn what_a_worker_left_is_committed_once() {
+        let folder = tempfile::tempdir().unwrap();
+        let cwd = folder.path().to_str().unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.name", "t"],
+            &["config", "user.email", "t@t"],
+            &["commit", "-q", "--allow-empty", "-m", "base"],
+        ] {
+            git(cwd, args).unwrap();
+        }
+        assert!(!commit_all(cwd, "Nothing").unwrap());
+        std::fs::write(folder.path().join("new.txt"), "x").unwrap();
+        assert!(commit_all(cwd, "Billing schema").unwrap());
+        assert!(!head_of(cwd).unwrap().1);
+        assert_eq!(
+            git(cwd, &["log", "-1", "--format=%s"]).unwrap().trim(),
+            "Billing schema"
+        );
     }
 
     #[test]

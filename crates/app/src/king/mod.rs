@@ -141,6 +141,10 @@ pub fn usage() -> String {
        leon king stop <worker>\n  \
        leon king release <worker>    take a worker over: King lets it go\n  \
        leon king answer [--worker <n>] <question> <choice> [reason…]\n  \
+       leon king run <task> [--parallel <n>] [--budget <usd>]\n  \
+       \x20                            carry out a task of the board as its steps\n  \
+       leon king run continue <run> [words…]\n  \
+       leon king run cancel <run>\n  \
        leon king brain <agent> [model] [effort]\n  \
        leon king config [--defaults] the configuration in force (king.toml over the defaults)\n  \
        leon king serve               run the service in the foreground\n  \
@@ -237,6 +241,7 @@ fn parse(arguments: &[String]) -> Result<Command, String> {
             false,
         ),
         "start" => Command::Ask(Request::StartWorker(Box::new(start_request(rest)?)), false),
+        "run" => Command::Ask(run_request(rest)?, false),
         "answer" => {
             let (target, rest) = match rest {
                 [flag, worker, tail @ ..] if flag == "--worker" => {
@@ -266,6 +271,48 @@ fn parse(arguments: &[String]) -> Result<Command, String> {
         }
         other => return Err(format!("unknown command {other:?}\n\n{}", usage())),
     })
+}
+
+fn run_request(arguments: &[String]) -> Result<Request, String> {
+    let run = |text: Option<&String>| -> Result<u32, String> {
+        text.and_then(|text| text.trim_start_matches('#').parse().ok())
+            .ok_or_else(|| "name the run by its number".to_owned())
+    };
+    match arguments {
+        [word, rest @ ..] if word == "continue" => Ok(Request::RunContinue {
+            run: run(rest.first())?,
+            text: rest
+                .get(1..)
+                .filter(|words| !words.is_empty())
+                .map(|words| words.join(" ")),
+            budget_usd: None,
+        }),
+        [word, rest @ ..] if word == "cancel" => Ok(Request::RunCancel {
+            run: run(rest.first())?,
+        }),
+        [task, rest @ ..] if !task.starts_with("--") => {
+            let (mut max_parallel, mut budget_usd) = (None, None);
+            let mut rest = rest.iter();
+            while let Some(flag) = rest.next() {
+                let value = rest.next().ok_or_else(|| format!("{flag} needs a value"))?;
+                match flag.as_str() {
+                    "--parallel" => {
+                        max_parallel = Some(value.parse().map_err(|_| "--parallel takes a number")?)
+                    }
+                    "--budget" => {
+                        budget_usd = Some(value.parse().map_err(|_| "--budget takes dollars")?)
+                    }
+                    other => return Err(format!("unknown option {other}")),
+                }
+            }
+            Ok(Request::RunStart {
+                task: task.clone(),
+                max_parallel,
+                budget_usd,
+            })
+        }
+        _ => Err("run takes a task's id, or continue or cancel and a run's number".to_owned()),
+    }
 }
 
 fn start_request(arguments: &[String]) -> Result<WorkerRequest, String> {
@@ -421,6 +468,40 @@ mod tests {
         assert_eq!(reply.text.as_deref(), Some("not now"));
         assert!(parse(&strings(&["start", "x"])).is_err());
         assert!(parse(&strings(&["stop"])).is_err());
+        assert_eq!(
+            parse(&strings(&[
+                "run",
+                "1a2b3c4d",
+                "--parallel",
+                "3",
+                "--budget",
+                "4.5"
+            ]))
+            .unwrap(),
+            Command::Ask(
+                Request::RunStart {
+                    task: "1a2b3c4d".to_owned(),
+                    max_parallel: Some(3),
+                    budget_usd: Some(4.5),
+                },
+                false
+            )
+        );
+        assert_eq!(
+            parse(&strings(&[
+                "run", "continue", "#2", "use", "the", "old", "name"
+            ]))
+            .unwrap(),
+            Command::Ask(
+                Request::RunContinue {
+                    run: 2,
+                    text: Some("use the old name".to_owned()),
+                    budget_usd: None,
+                },
+                false
+            )
+        );
+        assert!(parse(&strings(&["run", "cancel"])).is_err());
         assert!(parse(&strings(&["dance"])).is_err());
         assert_eq!(parse(&[]).unwrap(), Command::Help);
         assert_eq!(

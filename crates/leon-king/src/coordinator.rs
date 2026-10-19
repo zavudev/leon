@@ -20,6 +20,11 @@
 //! ([`crate::prompt::wake`]), or with the person's next message if they
 //! speak first. King's tools see the same through the control socket.
 //!
+//! **Runs.** A task carried out as its steps ([`crate::run`]) is held here
+//! too: the service asks which steps may start ([`Coordinator::steps_to_start`]),
+//! and a step's worker finishing, or its check ending, moves its run on
+//! without waking King, who hears only that the run is done or cannot go on.
+//!
 //! **Restarts.** The state is saved after every change ([`Effect::Changed`])
 //! and read back by [`Coordinator::restored`]. A turn does not survive the
 //! service: one that was running is said to have been interrupted, and a
@@ -36,6 +41,7 @@ use crate::prompt;
 use crate::protocol::{ConversationStatus, Status, WorkerStatus};
 use crate::report::{Facts, Report, Totals, TurnStats};
 use crate::route::Choice;
+use crate::run::Run;
 use crate::transcript::{self, Entry, Kind, Transcript};
 use crate::verify::{self, Check, CheckState, Ci, PullRequest, Seen};
 
@@ -82,6 +88,20 @@ pub enum Effect {
     },
     /// The state changed: save it and tell the clients.
     Changed,
+    /// Commit what a run step's worker left in its worktree, then run the
+    /// project's check there ([`Coordinator::check_started`]); without a
+    /// check, [`Coordinator::step_unchecked`].
+    Verify {
+        /// The step's worker.
+        worker: u32,
+    },
+    /// Move a task of the board to a column.
+    Board {
+        /// The task's id.
+        task: String,
+        /// The column: `doing`, `review`, `done`, `todo`.
+        status: String,
+    },
     /// Tell the person.
     Notify {
         /// One line.
@@ -294,8 +314,11 @@ pub struct Worker {
 /// What King is to be told of a worker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct News {
-    /// The worker.
+    /// The worker; 0 for news of a run that is no worker's.
     pub worker: u32,
+    /// The run it is news of, when it is one's.
+    #[serde(default)]
+    pub run: Option<u32>,
     /// What happened, in a sentence or a paragraph.
     pub text: String,
 }
@@ -357,6 +380,9 @@ pub struct State {
     /// with the next thing it hears.
     #[serde(default)]
     pub carry: Option<String>,
+    /// The runs of tasks' steps, by number.
+    #[serde(default)]
+    pub runs: BTreeMap<u32, Run>,
 }
 
 /// The turn a target is to have, as the service needs it.
@@ -414,6 +440,7 @@ impl Coordinator {
                 conversation: 0,
                 past: Vec::new(),
                 carry: None,
+                runs: BTreeMap::new(),
             },
         }
     }
@@ -465,8 +492,25 @@ impl Coordinator {
                 .push(Kind::Notice, interrupted, now_ms);
         }
         let mut news = Vec::new();
+        let steps: Vec<u32> = coordinator
+            .state
+            .workers
+            .keys()
+            .copied()
+            .filter(|id| coordinator.step_of_worker(*id).is_some())
+            .collect();
+        let mut going_on = Vec::new();
         for worker in coordinator.state.workers.values_mut() {
-            if worker.conversation.busy {
+            if worker.conversation.busy && steps.contains(&worker.id) {
+                // A step's worker goes on by itself: King need not hear.
+                worker.conversation.busy = false;
+                worker.conversation.questions.clear();
+                worker
+                    .conversation
+                    .transcript
+                    .push(Kind::Notice, interrupted, now_ms);
+                going_on.push(worker.id);
+            } else if worker.conversation.busy {
                 worker.conversation.busy = false;
                 worker.conversation.questions.clear();
                 worker
@@ -476,6 +520,7 @@ impl Coordinator {
                 worker.state = WorkerState::Failed;
                 worker.updated_ms = now_ms;
                 news.push(News {
+                    run: None,
                     worker: worker.id,
                     text: "was interrupted when Leon's service stopped; tell it to go on \
                            with worker_send, or stop it"
@@ -491,7 +536,11 @@ impl Coordinator {
             {
                 check.state = CheckState::Failed;
                 check.tail = "Leon's service stopped while it ran.".to_owned();
+                if steps.contains(&worker.id) {
+                    continue;
+                }
                 news.push(News {
+                    run: None,
                     worker: worker.id,
                     text: format!(
                         "had its check (`{}`) cut short when Leon's service stopped; run \
@@ -505,6 +554,7 @@ impl Coordinator {
             coordinator.add_news(item, now_ms);
         }
         let mut effects = vec![Effect::Changed];
+        effects.extend(coordinator.steps_restored(&going_on, now_ms));
         effects.extend(coordinator.tick(now_ms));
         (coordinator, effects)
     }
@@ -740,6 +790,7 @@ impl Coordinator {
             spent_today_usd: self.spent_today(now_ms),
             daily_budget_usd: self.config.limits.daily_budget_usd,
             running: Vec::new(),
+            runs: self.state.runs.values().cloned().collect(),
         }
     }
 
@@ -851,6 +902,7 @@ impl Coordinator {
             worker.state = WorkerState::Done;
         }
         worker.updated_ms = now_ms;
+        self.step_told(id, now_ms);
         let mut effects = vec![Effect::Changed];
         effects.extend(self.next_turn(Target::Worker(id), now_ms));
         Ok(effects)
@@ -909,6 +961,7 @@ impl Coordinator {
             });
         }
         self.state.news.retain(|news| news.worker != id);
+        effects.extend(self.step_left(id, "its worker was stopped", now_ms));
         Ok(effects)
     }
 
@@ -927,12 +980,15 @@ impl Coordinator {
         self.state.news.retain(|news| news.worker != id);
         self.add_news(
             News {
+                run: None,
                 worker: id,
                 text: "was taken over by the person; it is no longer yours".to_owned(),
             },
             now_ms,
         );
-        Ok((released, vec![Effect::Changed]))
+        let mut effects = vec![Effect::Changed];
+        effects.extend(self.step_left(id, "its worker was taken over by the person", now_ms));
+        Ok((released, effects))
     }
 
     /// A worker that is King's to command.
@@ -971,6 +1027,7 @@ impl Coordinator {
                 }
                 self.add_news(
                     News {
+                        run: None,
                         worker: id,
                         text: format!("could not start: {error}"),
                     },
@@ -1044,6 +1101,7 @@ impl Coordinator {
                         self.set_state(worker, WorkerState::Asking, now_ms);
                         self.add_news(
                             News {
+                                run: None,
                                 worker,
                                 text: format!(
                                     "asks, and waits (answer with worker_answer, question \
@@ -1242,8 +1300,19 @@ impl Coordinator {
                         "failed without a word; read its transcript".to_owned()
                     }
                 };
+                if let Some(more) = self.step_turn_ended(id, ok, &text, now_ms) {
+                    effects.extend(more);
+                    return effects;
+                }
                 self.state.news.retain(|news| news.worker != id);
-                self.add_news(News { worker: id, text }, now_ms);
+                self.add_news(
+                    News {
+                        run: None,
+                        worker: id,
+                        text,
+                    },
+                    now_ms,
+                );
                 effects.extend(self.tick(now_ms));
             }
         }
@@ -1309,6 +1378,20 @@ impl Coordinator {
         };
         check.duration_ms = Some(took);
         check.tail = verify::tail(output, verify::TAIL_CHARS);
+        let tail = check.tail.clone();
+        if let Some(more) = self.step_check_finished(id, passed, &tail, now_ms) {
+            let mut effects = vec![Effect::Changed];
+            effects.extend(more);
+            return effects;
+        }
+        let Some(check) = self
+            .state
+            .workers
+            .get(&id)
+            .and_then(|worker| worker.check.as_ref())
+        else {
+            return Vec::new();
+        };
         let on = format!(
             "`{}` on {}{}",
             check.command,
@@ -1333,7 +1416,14 @@ impl Coordinator {
                 transcript::cut(&check.tail, 1_500)
             )
         };
-        self.add_news(News { worker: id, text }, now_ms);
+        self.add_news(
+            News {
+                run: None,
+                worker: id,
+                text,
+            },
+            now_ms,
+        );
         let mut effects = vec![Effect::Changed];
         effects.extend(self.tick(now_ms));
         effects
@@ -1427,7 +1517,14 @@ impl Coordinator {
         };
         worker.updated_ms = now_ms;
         if let Some(text) = text {
-            self.add_news(News { worker: id, text }, now_ms);
+            self.add_news(
+                News {
+                    run: None,
+                    worker: id,
+                    text,
+                },
+                now_ms,
+            );
             effects.extend(self.tick(now_ms));
         }
         effects
@@ -1485,7 +1582,10 @@ impl Coordinator {
             parts.push((Kind::News, carry));
         }
         if !news.is_empty() {
-            parts.push((Kind::News, prompt::wake(&news, &self.state.workers)));
+            parts.push((
+                Kind::News,
+                prompt::wake(&news, &self.state.workers, &self.state.runs),
+            ));
         }
         parts.extend(said.into_iter().map(|text| (Kind::Prompt, text)));
         self.begin_with(Target::Brain, parts, now_ms)
@@ -1640,6 +1740,8 @@ fn answer_of(open: &Open, reply: &Reply) -> Result<Answer, String> {
         }),
     }
 }
+
+mod runs;
 
 #[cfg(test)]
 mod tests;
