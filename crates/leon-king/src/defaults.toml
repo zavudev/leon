@@ -20,6 +20,10 @@ max_workers = 6           # workers working at the same time
 # daily_budget_usd = 20.0 # what workers and King may cost a day; no ceiling when absent
 limit_threshold = 0.85    # share of a usage window past which an agent gets no new work
 wake_delay_secs = 5       # how long news of the workers is gathered before King is woken
+# A turn of King's that read this many tokens or more puts the conversation
+# away (to HISTORY) and King goes on in a new one, told where it left off:
+# every turn reads the whole conversation again. 0 never does.
+compact_at_tokens = 600000
 
 # Tiers of workers: each an ordered list of candidates, the first one installed
 # and with room in its usage windows is taken. A model is named as its agent
@@ -40,6 +44,28 @@ planning = [
 code = { tier = "standard" }
 research = { tier = "cheap" }
 plan = { tier = "planning", strict = true }
+
+# The questions of the workers Leon answers itself, without waking King: an
+# edit of a file in the worker's own worktree, a command that only reads, and
+# the programs below run in the worktree. Anything else (a push, a write out
+# of the worktree, a command Leon cannot read for sure) still goes to King.
+# Every question King answers costs one of its turns.
+[permissions]
+routine = true
+# Programs that only read: allowed on any path. `sed` without -i, `find`
+# without -delete or -exec, and git's reading forms count as reading too.
+read_only = [
+    "ls", "cat", "head", "tail", "wc", "rg", "grep", "find", "stat", "file", "diff",
+    "jq", "echo", "printf", "pwd", "which", "sort", "uniq", "cut", "tr", "sed", "tree",
+    "du", "realpath", "basename", "dirname", "date", "true", "test", "sleep",
+]
+# Programs allowed when run in the worktree: tests, builds, servers, and a
+# browser to look at what was built.
+in_worktree = [
+    "python", "python3", "pytest", "node", "npm", "npx", "pnpm", "yarn", "bun", "deno",
+    "make", "cargo", "go", "uv", "ruff", "mypy", "tsc", "eslint", "prettier", "just",
+    "chrome-devtools-axi",
+]
 
 # Branches nothing is ever pushed to from King's tools, besides each project's
 # own default branch, which is always protected.

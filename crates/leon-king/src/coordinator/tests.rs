@@ -563,3 +563,73 @@ fn a_worker_whose_turn_was_stopped_waits_rather_than_failing() {
         "{news:?}"
     );
 }
+
+#[test]
+fn a_workers_routine_question_is_answered_by_leon_and_king_hears_nothing() {
+    let mut king = Coordinator::new(config());
+    let (id, _) = king.start_worker(spec("style"), 0).unwrap();
+    let target = Target::Worker(id);
+    let question = |summary: &str| TurnEvent::Question {
+        id: "q".into(),
+        kind: QuestionKind::Permission {
+            tool: "edit".into(),
+            summary: summary.into(),
+            detail: String::new(),
+            reason: None,
+            choices: vec![PermissionChoice {
+                id: "d.0".into(),
+                effect: PermissionEffect::AllowOnce,
+                label: String::new(),
+                scope: None,
+                takes_reason: false,
+            }],
+        },
+    };
+    // An edit in its own worktree (`/work/style`): answered, no news.
+    let effects = king.event(target, &question("/work/style/app.css"), 1);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Act { target: t, action: Action::Answer(q, _) } if *t == target && q == "q"
+    )));
+    assert!(king.state().news.is_empty());
+    assert_ne!(king.worker(id).unwrap().state, WorkerState::Asking);
+    // An edit of the main checkout: King hears of it.
+    king.event(target, &question("/work/other/app.css"), 2);
+    assert_eq!(king.worker(id).unwrap().state, WorkerState::Asking);
+    assert_eq!(king.state().news.len(), 1);
+}
+
+#[test]
+fn a_conversation_whose_turn_read_too_much_goes_on_in_a_new_one() {
+    let mut config = config();
+    config.limits.compact_at_tokens = 1_000;
+    let mut king = Coordinator::new(config);
+    king.say("Restyle the radar", 0);
+    let usage = TurnEvent::Usage {
+        tokens: leon_turn::Tokens {
+            input: 5_000,
+            ..Default::default()
+        },
+    };
+    king.event(Target::Brain, &usage, 1);
+    answer(&mut king, Target::Brain, "Worker #1 does it.", 2);
+    let before = king.status(2).conversation;
+    let archived = king.compact_if_long(3).expect("put away");
+    assert_eq!(archived.past.title, "Restyle the radar");
+    assert_ne!(king.status(3).conversation, before);
+    assert_eq!(king.status(3).brain.session_id, None);
+    // The next turn is told where it left off, before what is said.
+    let effects = king.say("And now?", 4);
+    let started = starts(&effects);
+    assert_eq!(started.len(), 1);
+    assert!(
+        started[0].1.starts_with("[Leon] This conversation goes on"),
+        "{}",
+        started[0].1
+    );
+    assert!(started[0].1.contains("Worker #1 does it."));
+    assert!(started[0].1.ends_with("And now?"));
+    // A short turn is left alone.
+    answer(&mut king, Target::Brain, "Fine.", 5);
+    assert!(king.compact_if_long(6).is_none());
+}

@@ -26,7 +26,7 @@ use super::activity::Activity;
 use super::chat_voice::Field;
 use super::king::{picks, Pick, Tone};
 use super::shell::Shell;
-use super::widgets::{activity_dot, key_cap, led, mark, mono, Lion};
+use super::widgets::{activity_dot, led, mark, mono, Lion};
 use crate::icons::{agent_icon, icon, IconName};
 use crate::theme::{fonts, metrics, px, Palette};
 
@@ -840,13 +840,13 @@ impl Shell {
     fn king_composer(&self, status: &Status, c: &Palette, cx: &mut Context<Self>) -> AnyElement {
         let brain = &status.brain;
         let action = if brain.busy {
-            button("king-stop".into(), "STOP", Look::Outline, c).on_click(cx.listener(
+            button("king-stop".into(), "STOP  ESC", Look::Outline, c).on_click(cx.listener(
                 |this, _: &ClickEvent, _, cx| {
                     this.king_interrupt(Target::Brain, cx);
                 },
             ))
         } else {
-            button("king-send".into(), "SEND", Look::Primary, c).on_click(cx.listener(
+            button("king-send".into(), "SEND  \u{23ce}", Look::Primary, c).on_click(cx.listener(
                 |this, _: &ClickEvent, window, cx| {
                     this.king_send(window, cx);
                 },
@@ -988,7 +988,6 @@ impl Shell {
                         c,
                         cx,
                     ))
-                    .child(key_cap(if brain.busy { "ESC" } else { "ENTER" }, c))
                     .child(action),
             )
             .into_any_element()

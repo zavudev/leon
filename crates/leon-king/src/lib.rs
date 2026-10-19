@@ -18,6 +18,7 @@
 //!   [`coordinator::Effect`]s the service carries out;
 //! * [`transcript`]: what a conversation said, kept short enough to send;
 //! * [`history`]: King's past conversations, to read and to resume;
+//! * [`policy`]: the questions of the workers Leon answers itself;
 //! * [`route`]: which agent and model take a job, from the tier asked for,
 //!   what each agent has left of its limits and what was spent today;
 //! * [`protocol`]: the messages of the service's control socket, which the
@@ -38,6 +39,7 @@ pub mod config;
 pub mod coordinator;
 pub mod history;
 pub mod models;
+pub mod policy;
 pub mod prompt;
 pub mod protocol;
 pub mod report;

@@ -375,9 +375,11 @@ impl Service {
                     .flat_map(|event| self.coordinator.event(target, event, now))
                     .collect();
                 // Under every answer of King's: what it took, and what is left.
+                let mut effects = effects;
                 if ended && target == Target::Brain {
                     let report = self.report(now);
                     self.coordinator.annotate(Target::Brain, report, now);
+                    effects.extend(self.compact(now));
                 }
                 effects
             }
@@ -407,6 +409,7 @@ impl Service {
                 if target == Target::Brain {
                     let report = self.report(now);
                     self.coordinator.annotate(Target::Brain, report, now);
+                    effects.extend(self.compact(now));
                 }
                 effects.push(Effect::Changed);
                 effects
@@ -475,6 +478,18 @@ impl Service {
             old.turn.kill();
         }
         self.running = running;
+    }
+
+    /// Puts King's conversation away when its last turn read too much,
+    /// keeping it in the history.
+    fn compact(&mut self, now: u64) -> Vec<Effect> {
+        match self.coordinator.compact_if_long(now) {
+            Some(archived) => {
+                self.keep_archived(Some(archived));
+                vec![Effect::Changed]
+            }
+            None => Vec::new(),
+        }
     }
 
     /// Where a past conversation's entries are kept.

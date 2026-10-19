@@ -46,6 +46,8 @@ pub struct Config {
     pub jobs: BTreeMap<String, JobRule>,
     /// What King's tools never do.
     pub guards: Guards,
+    /// Which questions of the workers Leon answers itself.
+    pub permissions: crate::policy::Permissions,
     /// The permission mode a worker of each agent starts in, by agent tag.
     /// An agent named nowhere starts in its own default mode, and asks.
     #[serde(default)]
@@ -86,6 +88,10 @@ pub struct Limits {
     /// How long news of the workers is gathered before King is woken with
     /// it, in seconds.
     pub wake_delay_secs: u64,
+    /// A turn of King's that read this many tokens or more puts its
+    /// conversation away, and King goes on in a new one told where it left
+    /// off: every turn reads the whole conversation again. 0 never does.
+    pub compact_at_tokens: u64,
 }
 
 /// One agent a tier may give work to.

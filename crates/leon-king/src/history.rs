@@ -68,6 +68,40 @@ pub fn title_of(entries: &[Entry]) -> String {
         .unwrap_or_else(|| "(no question)".to_owned())
 }
 
+/// How many characters of King's last answer are carried into the next
+/// conversation.
+const CARRIED_CHARS: usize = 2000;
+
+/// What King is told when a conversation put away for its length goes on
+/// in a new one: what it was about, what the person asked last, and what
+/// King answered last.
+pub fn carried(past: &Past, entries: &[Entry]) -> String {
+    let mut text = format!(
+        "[Leon] This conversation goes on from a longer one that Leon put away to save \
+         tokens (past conversation {}, \"{}\"; `leon king history {}` reads it). Where it \
+         left off:",
+        past.id, past.title, past.id
+    );
+    let asked: Vec<&Entry> = entries
+        .iter()
+        .filter(|entry| entry.kind == Kind::Prompt)
+        .collect();
+    for entry in asked.iter().rev().take(3).rev() {
+        text.push_str(&format!(
+            "\n- The person asked: {}",
+            cut(entry.text.trim(), 400)
+        ));
+    }
+    if let Some(answer) = entries.iter().rev().find(|entry| entry.kind == Kind::Agent) {
+        text.push_str(&format!(
+            "\n- You answered last:\n{}",
+            cut(answer.text.trim(), CARRIED_CHARS)
+        ));
+    }
+    text.push_str("\nYour workers, tasks and memory are as they were: read them with your tools.");
+    text
+}
+
 /// Adds `past` to the list, newest last, and says which fell off the end.
 pub fn keep(list: &mut Vec<Past>, past: Past) -> Vec<u64> {
     list.push(past);

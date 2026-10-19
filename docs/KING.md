@@ -181,6 +181,26 @@ instructions say to plan with the best model and then execute step by step
 on cheaper workers, with the best model reviewing their work. King plans
 in its own conversation only when it runs on a planning-tier model itself.
 
+## Spending less
+
+Every turn of King's reads its whole conversation again, so what costs is
+how often King is woken and how long its conversation is. Two things keep
+both down:
+
+* **Leon answers the workers' routine questions itself.** An edit of a file
+  in the worker's own worktree, a command that only reads (`ls`, `rg`,
+  `git log`, `cat`…), and tests, builds and servers run in the worktree are
+  allowed without waking King; the worker's transcript says "Leon allowed
+  it". A push, a write out of the worktree, a `git reset --hard`, or a
+  command Leon cannot read for sure (`$VAR`, `$(…)`, an unknown program)
+  still goes to King. The programs are lists in `[permissions]`, and
+  `routine = false` sends every question to King.
+* **A conversation that grew too long goes on in a new one.** When a turn
+  of King's reads `[limits] compact_at_tokens` or more (600k by default),
+  Leon puts the conversation in HISTORY and King goes on in a new one,
+  told what was asked last and what it answered, so the next turn reads a
+  fraction. NEW does the same by hand.
+
 ## Workers
 
 King starts workers with its `worker_start` tool. You can also start one
@@ -277,10 +297,11 @@ claude = "auto"
 | Section | What it sets | Default |
 | --- | --- | --- |
 | `[brain]` | The agent, model, effort and mode King runs on; `mode = ""` is the agent's own | Claude Code, its own model, mode `auto` |
-| `[limits]` | `max_workers`, `daily_budget_usd`, `limit_threshold`, `wake_delay_secs` | 6, none, 0.85, 5 |
+| `[limits]` | `max_workers`, `daily_budget_usd`, `limit_threshold`, `wake_delay_secs`, `compact_at_tokens` | 6, none, 0.85, 5, 600000 |
 | `[tiers]` | Each tier's candidates in order: agent, model, effort | `cheap`, `standard`, `premium`, `planning` |
 | `[jobs]` | The tier each kind of job (`code`, `research`, `plan`) goes to, and whether it is `strict` (only ever that tier) | code: standard, research: cheap, plan: planning (strict) |
 | `[guards]` | Branches nothing is pushed to, besides each project's default branch | `main`, `master` |
+| `[permissions]` | Which worker questions Leon answers itself: `routine`, the `read_only` programs and the `in_worktree` ones | on, with lists of common tools |
 | `[modes]` | The permission mode of each agent's workers; `""` is the agent's own | codex `auto`, claude `acceptEdits`: a worker edits in its own worktree without asking |
 
 `leon king config` prints the configuration in force (your file over the

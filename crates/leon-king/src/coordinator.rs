@@ -341,6 +341,10 @@ pub struct State {
     /// King's past conversations, newest last ([`crate::history`]).
     #[serde(default)]
     pub past: Vec<Past>,
+    /// Where a conversation put away for its length left off: told to King
+    /// with the next thing it hears.
+    #[serde(default)]
+    pub carry: Option<String>,
 }
 
 /// The turn a target is to have, as the service needs it.
@@ -397,6 +401,7 @@ impl Coordinator {
                 workers_today: Totals::default(),
                 conversation: 0,
                 past: Vec::new(),
+                carry: None,
             },
         }
     }
@@ -564,6 +569,34 @@ impl Coordinator {
         brain.questions.clear();
         self.state.conversation = past.id;
         Ok((archived, vec![Effect::Changed]))
+    }
+
+    /// After King's turn, with its report written: a turn that read
+    /// [`crate::config::Limits::compact_at_tokens`] or more puts the
+    /// conversation away, and the next one starts told where it left off.
+    /// The archive is the service's to write.
+    pub fn compact_if_long(&mut self, now_ms: u64) -> Option<Archived> {
+        let most = self.config.limits.compact_at_tokens;
+        let brain = &self.state.brain;
+        let read = brain.last_turn.map_or(0, |turn| turn.input);
+        if most == 0 || read < most || brain.busy || !brain.queue.is_empty() {
+            return None;
+        }
+        let archived = self.archive(now_ms)?;
+        self.state.carry = Some(history::carried(&archived.past, &archived.entries));
+        self.state.conversation = self.next_conversation();
+        self.state.brain.transcript.push(
+            Kind::Notice,
+            format!(
+                "Leon put the conversation away: its last turn read {} tokens, and every turn \
+                 reads all of it again. It is in HISTORY (\"{}\"); King goes on here, told \
+                 where it left off.",
+                crate::report::count(read),
+                archived.past.title
+            ),
+            now_ms,
+        );
+        Some(archived)
     }
 
     /// The past conversations, newest last.
@@ -894,6 +927,10 @@ impl Coordinator {
 
     /// What an agent printed, as an event of the protocol.
     pub fn event(&mut self, target: Target, event: &TurnEvent, now_ms: u64) -> Vec<Effect> {
+        let routine = match event {
+            TurnEvent::Question { kind, .. } => self.routine_answer(target, kind),
+            _ => None,
+        };
         let Some(conversation) = self.conversation_mut(target) else {
             return Vec::new();
         };
@@ -914,6 +951,23 @@ impl Coordinator {
                         target,
                         action: Action::Answer(id.clone(), answer),
                     });
+                }
+            }
+            // A worker's routine question: Leon answers, King hears nothing.
+            TurnEvent::Question { id, kind } if routine.is_some() => {
+                if let Some((answer, why)) = routine {
+                    let line = format!(
+                        "Leon allowed it ({why}): {}",
+                        transcript::question_text(kind)
+                    );
+                    conversation
+                        .transcript
+                        .push(Kind::Tool, transcript::cut(&line, 200), now_ms);
+                    effects.push(Effect::Act {
+                        target,
+                        action: Action::Answer(id.clone(), answer),
+                    });
+                    effects.push(Effect::Changed);
                 }
             }
             TurnEvent::Question { id, kind } => {
@@ -988,6 +1042,16 @@ impl Coordinator {
             _ => {}
         }
         effects
+    }
+
+    /// Leon's own answer to a worker's question, when the question is
+    /// routine for where the worker works ([`crate::policy`]).
+    fn routine_answer(&self, target: Target, kind: &QuestionKind) -> Option<(Answer, String)> {
+        let Target::Worker(id) = target else {
+            return None;
+        };
+        let worker = self.state.workers.get(&id)?;
+        crate::policy::routine(kind, &worker.cwd, &self.config.permissions)
     }
 
     fn set_state(&mut self, id: u32, state: WorkerState, now_ms: u64) {
@@ -1178,6 +1242,9 @@ impl Coordinator {
         let news: Vec<News> = std::mem::take(&mut self.state.news);
         self.state.news_since_ms = None;
         let mut parts = Vec::new();
+        if let Some(carry) = self.state.carry.take() {
+            parts.push((Kind::News, carry));
+        }
         if !news.is_empty() {
             parts.push((Kind::News, prompt::wake(&news, &self.state.workers)));
         }
