@@ -160,6 +160,9 @@ pub enum Reason {
     NoSubscription,
     /// The service rejected the stored key.
     KeyRejected,
+    /// The account pays as it goes from prepaid credits (opencode Zen): there
+    /// is no limit to read, and the balance is only on the vendor's console.
+    PayAsYouGo,
     /// This version of the agent answers its usage command with a model turn,
     /// which would spend quota at every read: Leon stopped asking.
     SpendsATurn,
@@ -192,6 +195,9 @@ impl Reason {
             Reason::ApiKeyBilling => "Usage limits do not apply to API-key billing.",
             Reason::NoSubscription => "No subscription for this key: there is no limit to read.",
             Reason::KeyRejected => "The service rejected the stored key.",
+            Reason::PayAsYouGo => {
+                "Paid from credits as it is used (opencode Zen): there is no limit to read. The balance is on the opencode console."
+            }
             Reason::SpendsATurn => {
                 "This version of Antigravity cannot report usage without spending a turn."
             }
@@ -269,6 +275,7 @@ impl Reason {
             Reason::ApiKeyBilling => "API key",
             Reason::NoSubscription => "no subscription",
             Reason::KeyRejected => "key rejected",
+            Reason::PayAsYouGo => "credits",
             Reason::SpendsATurn => "unsupported",
         }
     }

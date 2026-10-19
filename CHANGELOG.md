@@ -4,6 +4,12 @@
 
 ### Fixed
 
+* opencode's limits are read with the OpenCode Console sign-in too. OpenCode 2
+  connects the account with `/connect` and stores no Go key, so the usage
+  view said nothing for a Go subscription; it now shows the five-hour, weekly
+  and monthly Go windows, and a workspace that pays from Zen credits says so
+  (they have no limit to read; the balance is on the opencode console). An
+  expired sign-in is left for opencode to renew.
 * A conversation in Leon's own interface names what its agent runs with. The
   chips under the field said "Default" for the model and the effort until
   you chose one; they now say the model and the effort the agent is set up
