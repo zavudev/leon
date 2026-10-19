@@ -633,3 +633,125 @@ fn a_conversation_whose_turn_read_too_much_goes_on_in_a_new_one() {
     answer(&mut king, Target::Brain, "Fine.", 5);
     assert!(king.compact_if_long(6).is_none());
 }
+
+#[test]
+fn a_workers_check_is_kept_as_evidence_and_king_hears_how_it_ended() {
+    let mut king = Coordinator::new(config());
+    king.start_worker(spec("a"), 0).unwrap();
+    answer(&mut king, Target::Worker(1), "Done and committed.", 10);
+    king.tick(10_000);
+    answer(&mut king, Target::Brain, "Checking it.", 10_000);
+
+    king.check_started(1, "cargo test", "0123456789", false, 20_000)
+        .unwrap();
+    // One at a time.
+    assert!(king
+        .check_started(1, "cargo test", "0123456789", false, 20_001)
+        .is_err());
+    assert!(king.check_started(9, "cargo test", "x", false, 0).is_err());
+
+    let output = "running 3 tests\ntest a ... FAILED\nerror: 1 test failed\n";
+    king.check_finished(1, false, output, 80_000);
+    let check = king.worker(1).unwrap().check.clone().unwrap();
+    assert_eq!(check.state, CheckState::Failed);
+    assert_eq!(check.duration_ms, Some(60_000));
+    assert!(!check.proves("0123456789"));
+    let woken = starts(&king.tick(85_000));
+    assert_eq!(woken.len(), 1);
+    assert!(woken[0]
+        .1
+        .contains("failed its check: `cargo test` on 0123456"));
+    assert!(woken[0].1.contains("error: 1 test failed"));
+    answer(&mut king, Target::Brain, "Mending.", 85_000);
+
+    // An end heard twice, or of no check, changes nothing.
+    assert!(king.check_finished(1, true, "", 90_000).is_empty());
+
+    king.check_started(1, "cargo test", "abcdef1234", false, 100_000)
+        .unwrap();
+    king.check_finished(1, true, "ok\n", 130_000);
+    assert!(king
+        .worker(1)
+        .unwrap()
+        .check
+        .as_ref()
+        .unwrap()
+        .proves("abcdef1"));
+    let woken = starts(&king.tick(135_000));
+    assert!(woken[0]
+        .1
+        .contains("passed its check: `cargo test` on abcdef1, in 30s"));
+}
+
+#[test]
+fn a_pull_requests_ci_is_watched_until_it_settles() {
+    let mut king = Coordinator::new(config());
+    king.start_worker(spec("a"), 0).unwrap();
+    answer(&mut king, Target::Worker(1), "Done.", 10);
+    king.tick(10_000);
+    answer(&mut king, Target::Brain, "Opening it.", 10_000);
+
+    let url = "https://github.com/zavudev/leon/pull/62";
+    king.pr_opened(1, url, "king/a", 20_000).unwrap();
+    assert_eq!(
+        king.watched_prs(),
+        [(1, url.to_owned(), "/work/a".to_owned())]
+    );
+    let seen = |ci, failing: &[&str]| Seen {
+        ci,
+        failing: failing.iter().map(|name| (*name).to_owned()).collect(),
+        closed: None,
+    };
+    // Still running: nothing to say.
+    assert!(king.ci_seen(1, seen(Ci::Pending, &[]), 80_000).is_empty());
+
+    let effects = king.ci_seen(1, seen(Ci::Failed, &["clippy"]), 140_000);
+    assert!(effects.contains(&Effect::Changed));
+    assert!(king.watched_prs().is_empty());
+    let woken = starts(&king.tick(145_000));
+    assert!(woken[0]
+        .1
+        .contains("CI failing on its pull request #62: clippy"));
+    answer(&mut king, Target::Brain, "Mending.", 145_000);
+
+    // Pushed again, and it passes: the person is told it is theirs.
+    king.pr_opened(1, url, "king/a", 200_000).unwrap();
+    let effects = king.ci_seen(1, seen(Ci::Passed, &[]), 260_000);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Notify { title, .. } if title == "#62 is ready for your review"
+    )));
+    let woken = starts(&king.tick(265_000));
+    assert!(woken[0].1.contains("every CI check passed"));
+    answer(&mut king, Target::Brain, "Told them.", 265_000);
+
+    // A pull request that never shows a check: its project runs no CI.
+    king.pr_opened(1, url, "king/a", 300_000).unwrap();
+    assert!(king.ci_seen(1, seen(Ci::Pending, &[]), 360_000).is_empty());
+    king.ci_seen(
+        1,
+        seen(Ci::Pending, &[]),
+        300_000 + verify::NO_CI_AFTER_MS + 1,
+    );
+    let pr = king.worker(1).unwrap().pull_request.clone().unwrap();
+    assert_eq!(pr.ci, Ci::None);
+    assert!(!pr.watched());
+}
+
+#[test]
+fn a_check_cut_short_by_a_restart_is_news() {
+    let mut king = Coordinator::new(config());
+    king.start_worker(spec("a"), 0).unwrap();
+    answer(&mut king, Target::Worker(1), "Done.", 10);
+    king.check_started(1, "make check", "abc", false, 20)
+        .unwrap();
+    let state: State = serde_json::from_str(&serde_json::to_string(king.state()).unwrap()).unwrap();
+    let (king, effects) = Coordinator::restored(config(), state, 100_000);
+    let check = king.worker(1).unwrap().check.clone().unwrap();
+    assert_eq!(check.state, CheckState::Failed);
+    // King is woken at once: its news waited long already.
+    let woken = starts(&effects);
+    assert!(woken[0]
+        .1
+        .contains("had its check (`make check`) cut short"));
+}

@@ -10,6 +10,8 @@
 //!   and the command line are its clients;
 //! * [`mcp`]: `leon king mcp`, King's tools, an MCP server that the agent
 //!   King runs on starts, and that speaks to the service;
+//! * [`checks`]: a project's check in a worker's worktree, and a look at
+//!   a pull request's CI;
 //! * [`client`]: one connection to the service, and starting the service
 //!   when nothing answers;
 //! * [`link`]: the window's line to the service;
@@ -17,6 +19,8 @@
 //!
 //! See `docs/KING.md`.
 
+#[cfg(unix)]
+pub mod checks;
 #[cfg(unix)]
 pub mod client;
 #[cfg(unix)]
@@ -56,7 +60,9 @@ pub struct Paths {
 impl Paths {
     /// Where King's things are for the data folder `data_dir`, with the
     /// socket under `runtime` (the keeper's rule: `XDG_RUNTIME_DIR` when the
-    /// path fits, else a folder of the user's under `/tmp`).
+    /// path fits, else a folder of the user's under `/tmp`). King's service
+    /// runs only where there are Unix sockets.
+    #[cfg(unix)]
     pub fn new(data_dir: &Path, runtime: &Path) -> Self {
         let key = leon_host::keeper::data_dir_key(data_dir);
         let folder = data_dir.join("king");
@@ -423,6 +429,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_socket_is_named_after_the_data_folder() {
         let paths = Paths::new(

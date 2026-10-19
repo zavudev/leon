@@ -26,6 +26,8 @@
 //! * [`models`]: what King knows of each model's talents and benchmarks;
 //! * [`report`]: the line under every answer of King's: its tokens, how
 //!   fast they came, and what is left of the budget and the usage windows;
+//! * [`verify`]: the evidence a worker's work is right: its project's check,
+//!   and the CI of its pull request;
 //! * [`prompt`]: the instructions King is given, and the message that wakes
 //!   it with news of its workers.
 //!
@@ -45,6 +47,7 @@ pub mod protocol;
 pub mod report;
 pub mod route;
 pub mod transcript;
+pub mod verify;
 
 /// The environment variable that holds the path of the service's control
 /// socket, given to King's tools.

@@ -259,11 +259,16 @@ fn a_worker_taken_over_opens_as_a_session_of_the_window(cx: &mut TestAppContext)
         |_| json!({"worker": 3, "agent": "claude", "session_id": "ses-7", "cwd": cwd}),
     );
     assert_eq!(asked, [Request::Release { worker: 3 }]);
-    assert!(
-        h.main_kind(cx).starts_with("live:"),
-        "the worker is a session of the window now: {}",
-        h.main_kind(cx)
-    );
+    let kind = h.main_kind(cx);
+    let id: u64 = kind
+        .strip_prefix("live:")
+        .and_then(|id| id.parse().ok())
+        .unwrap_or_else(|| panic!("the worker is a session of the window now: {kind}"));
+    // Its agent's line is typed into the shell from a thread of its own:
+    // the test waits for it rather than end while that thread still writes.
+    super::live::wait_until(&h, cx, "the worker's conversation resumed", |h, cx| {
+        super::live::screen(h, cx, id).contains("--resume ses-7")
+    });
 }
 
 #[gpui_kit::test]
@@ -628,4 +633,29 @@ fn what_a_turn_left_running_is_listed_and_stopped(cx: &mut TestAppContext) {
         serve(&h, &end, cx, |_| Value::Null),
         [Request::StopProcess { pid: 4242 }]
     );
+}
+
+#[gpui_kit::test]
+fn a_workers_check_and_its_pull_requests_ci_show_on_its_card(cx: &mut TestAppContext) {
+    let mut checked = worker(1, "done", None);
+    checked["check"] = json!({
+        "command": "scripts/check.sh", "commit": "abc1234def", "dirty": false,
+        "state": "passed", "started_ms": 0, "duration_ms": 254_000, "tail": "",
+    });
+    checked["pull_request"] = json!({
+        "url": "https://github.com/zavudev/api/pull/62", "number": 62, "branch": "king/fix",
+        "pushed_ms": 0, "ci": "failed", "failing": ["clippy"],
+    });
+    let (h, _end) = with_conversation(cx, json!([checked, worker(2, "working", None)]));
+    assert!(h.shows_dynamic("king-check-1".into(), cx));
+    assert!(h.shows_dynamic("king-pr-1".into(), cx));
+    // A worker with neither shows no line for them.
+    assert!(!h.shows_dynamic("king-evidence-2".into(), cx));
+    h.mouse_on("king-pr-1".into(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(
+        *h.urls.borrow(),
+        ["https://github.com/zavudev/api/pull/62".to_owned()]
+    );
+    // The click opened the pull request, not the worker.
+    assert_eq!(h.main_kind(cx), "king");
 }

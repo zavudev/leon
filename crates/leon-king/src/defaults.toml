@@ -24,6 +24,8 @@ wake_delay_secs = 5       # how long news of the workers is gathered before King
 # away (to HISTORY) and King goes on in a new one, told where it left off:
 # every turn reads the whole conversation again. 0 never does.
 compact_at_tokens = 600000
+check_timeout_secs = 1800 # how long a project's check may run in a worktree
+ci_poll_secs = 60         # how often an open pull request's CI is looked at
 
 # Tiers of workers: each an ordered list of candidates, the first one installed
 # and with room in its usage windows is taken. A model is named as its agent
@@ -71,6 +73,17 @@ in_worktree = [
 # own default branch, which is always protected.
 [guards]
 protected_branches = ["main", "master"]
+# A pull request is opened only for a branch whose last commit passed its
+# project's check (worktree_check), unless King says why it cannot be checked.
+# The pull request's description says what was run, on which commit.
+verify_before_pr = true
+
+# The command that checks each project, by its name in Leon, run in a worker's
+# worktree. A project left out is checked as its files say: scripts/check.sh,
+# `make check`, `cargo test`, the package's `check` or `test` script,
+# `go test ./...` or `pytest`.
+[checks]
+# leon = "scripts/check.sh"
 
 # The permission mode each agent's workers start in, by agent; an agent left
 # out starts in its own default mode and asks. A worker works in a worktree of

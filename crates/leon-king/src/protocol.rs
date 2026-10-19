@@ -18,6 +18,7 @@ use serde_json::Value;
 
 use crate::coordinator::{Job, Open, Reply as Answer, Target, WorkerState};
 use crate::transcript::Entry;
+use crate::verify::{Check, PullRequest};
 
 /// The longest line read from a client, in bytes.
 pub const MAX_LINE: usize = 1 << 20;
@@ -142,6 +143,22 @@ pub enum Request {
     StopProcess {
         /// Its id.
         pid: u32,
+    },
+    /// Run the project's check in a worker's worktree. It answers once the
+    /// check started; King hears how it ended as news.
+    Check {
+        /// The worker.
+        worker: u32,
+    },
+    /// A pull request was opened for a worker's branch, or its branch was
+    /// pushed to again: watch its CI.
+    PullRequestOpened {
+        /// The worker.
+        worker: u32,
+        /// The pull request's address.
+        url: String,
+        /// The branch.
+        branch: String,
     },
     /// Whether the person is looking at King on this connection's client:
     /// while anybody is, what King's conversation shows already is not also
@@ -337,6 +354,12 @@ pub struct WorkerStatus {
     pub last_answer: Option<String>,
     /// When it last changed.
     pub updated_ms: u64,
+    /// The last run of its project's check.
+    #[serde(default)]
+    pub check: Option<Check>,
+    /// The pull request opened for its branch.
+    #[serde(default)]
+    pub pull_request: Option<PullRequest>,
 }
 
 /// The entries of a transcript, as [`Request::Transcript`] answers.

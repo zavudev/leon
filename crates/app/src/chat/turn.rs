@@ -152,12 +152,12 @@ impl Turn {
         Ok(events)
     }
 
-    /// Ends the process now, whatever it is doing.
     /// The agent's process id on this computer, when it runs here.
     pub fn pid(&self) -> Option<u32> {
         self.transport.pid()
     }
 
+    /// Ends the process now, whatever it is doing.
     pub fn kill(&mut self) {
         self.transport.kill();
     }

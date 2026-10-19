@@ -37,6 +37,7 @@ use crate::protocol::{ConversationStatus, Status, WorkerStatus};
 use crate::report::{Facts, Report, Totals, TurnStats};
 use crate::route::Choice;
 use crate::transcript::{self, Entry, Kind, Transcript};
+use crate::verify::{self, Check, CheckState, Ci, PullRequest, Seen};
 
 /// A day, in milliseconds.
 const DAY_MS: u64 = 86_400_000;
@@ -277,6 +278,12 @@ pub struct Worker {
     pub started_ms: u64,
     /// When it last changed.
     pub updated_ms: u64,
+    /// The last run of its project's check in its worktree.
+    #[serde(default)]
+    pub check: Option<Check>,
+    /// The pull request opened for its branch.
+    #[serde(default)]
+    pub pull_request: Option<PullRequest>,
 }
 
 /// What King is to be told of a worker.
@@ -455,6 +462,24 @@ impl Coordinator {
                     text: "was interrupted when Leon's service stopped; tell it to go on \
                            with worker_send, or stop it"
                         .to_owned(),
+                });
+            }
+        }
+        for worker in coordinator.state.workers.values_mut() {
+            if let Some(check) = worker
+                .check
+                .as_mut()
+                .filter(|check| check.state == CheckState::Running)
+            {
+                check.state = CheckState::Failed;
+                check.tail = "Leon's service stopped while it ran.".to_owned();
+                news.push(News {
+                    worker: worker.id,
+                    text: format!(
+                        "had its check (`{}`) cut short when Leon's service stopped; run \
+                         worktree_check again",
+                        check.command
+                    ),
                 });
             }
         }
@@ -681,6 +706,8 @@ impl Coordinator {
                         .last_answer()
                         .map(|text| transcript::cut(text, 300)),
                     updated_ms: worker.updated_ms,
+                    check: worker.check.clone(),
+                    pull_request: worker.pull_request.clone(),
                 })
                 .collect(),
             news: self.state.news.len(),
@@ -776,6 +803,8 @@ impl Coordinator {
             conversation,
             started_ms: now_ms,
             updated_ms: now_ms,
+            check: None,
+            pull_request: None,
         };
         self.state.workers.insert(id, worker);
         let mut effects = vec![Effect::Changed];
@@ -1190,6 +1219,189 @@ impl Coordinator {
                 self.add_news(News { worker: id, text }, now_ms);
                 effects.extend(self.tick(now_ms));
             }
+        }
+        effects
+    }
+
+    /// The project's check started in a worker's worktree.
+    pub fn check_started(
+        &mut self,
+        id: u32,
+        command: &str,
+        commit: &str,
+        dirty: bool,
+        now_ms: u64,
+    ) -> Result<Vec<Effect>, String> {
+        let worker = self
+            .state
+            .workers
+            .get_mut(&id)
+            .ok_or_else(|| format!("there is no worker #{id}"))?;
+        if worker
+            .check
+            .as_ref()
+            .is_some_and(|check| check.state == CheckState::Running)
+        {
+            return Err(format!("worker #{id}'s check runs already"));
+        }
+        worker.check = Some(Check {
+            command: command.to_owned(),
+            commit: commit.to_owned(),
+            dirty,
+            state: CheckState::Running,
+            started_ms: now_ms,
+            duration_ms: None,
+            tail: String::new(),
+        });
+        worker.updated_ms = now_ms;
+        Ok(vec![Effect::Changed])
+    }
+
+    /// A worker's check ended: King hears how.
+    pub fn check_finished(
+        &mut self,
+        id: u32,
+        passed: bool,
+        output: &str,
+        now_ms: u64,
+    ) -> Vec<Effect> {
+        let Some(check) = self
+            .state
+            .workers
+            .get_mut(&id)
+            .and_then(|worker| worker.check.as_mut())
+            .filter(|check| check.state == CheckState::Running)
+        else {
+            return Vec::new();
+        };
+        let took = now_ms.saturating_sub(check.started_ms);
+        check.state = if passed {
+            CheckState::Passed
+        } else {
+            CheckState::Failed
+        };
+        check.duration_ms = Some(took);
+        check.tail = verify::tail(output, verify::TAIL_CHARS);
+        let on = format!(
+            "`{}` on {}{}",
+            check.command,
+            verify::short(&check.commit),
+            if check.dirty {
+                " (with changes not committed)"
+            } else {
+                ""
+            }
+        );
+        let text = if passed {
+            format!(
+                "passed its check: {on}, in {}. Its branch can go out as a pull request \
+                 (pr_open)",
+                verify::duration(took)
+            )
+        } else {
+            format!(
+                "failed its check: {on}, after {}. The end of what it printed:\n{}\n\
+                 Tell the worker what to mend (worker_send), then check again",
+                verify::duration(took),
+                transcript::cut(&check.tail, 1_500)
+            )
+        };
+        self.add_news(News { worker: id, text }, now_ms);
+        let mut effects = vec![Effect::Changed];
+        effects.extend(self.tick(now_ms));
+        effects
+    }
+
+    /// A pull request was opened for a worker's branch, or its branch was
+    /// pushed to again: its CI is watched from now.
+    pub fn pr_opened(
+        &mut self,
+        id: u32,
+        url: &str,
+        branch: &str,
+        now_ms: u64,
+    ) -> Result<Vec<Effect>, String> {
+        let worker = self
+            .state
+            .workers
+            .get_mut(&id)
+            .ok_or_else(|| format!("there is no worker #{id}"))?;
+        worker.pull_request = Some(PullRequest::new(url, branch, now_ms));
+        worker.updated_ms = now_ms;
+        Ok(vec![Effect::Changed])
+    }
+
+    /// The workers whose pull request's CI is still to be read, with its
+    /// address and the folder `gh` runs in.
+    pub fn watched_prs(&self) -> Vec<(u32, String, String)> {
+        self.state
+            .workers
+            .values()
+            .filter_map(|worker| {
+                let pr = worker.pull_request.as_ref().filter(|pr| pr.watched())?;
+                Some((worker.id, pr.url.clone(), worker.cwd.clone()))
+            })
+            .collect()
+    }
+
+    /// What a look at a worker's pull request found. When its CI settles,
+    /// King hears it, and the person too when it passed: it is theirs to
+    /// review and merge.
+    pub fn ci_seen(&mut self, id: u32, seen: Seen, now_ms: u64) -> Vec<Effect> {
+        let Some(worker) = self.state.workers.get_mut(&id) else {
+            return Vec::new();
+        };
+        let title = worker.title.clone();
+        let Some(pr) = worker.pull_request.as_mut().filter(|pr| pr.watched()) else {
+            return Vec::new();
+        };
+        let mut ci = seen.ci;
+        if ci == Ci::Pending
+            && seen.failing.is_empty()
+            && now_ms.saturating_sub(pr.pushed_ms) > verify::NO_CI_AFTER_MS
+            && seen.closed.is_none()
+        {
+            // Nothing reported at all for long: the project runs no CI.
+            ci = Ci::None;
+        }
+        let changed = pr.ci != ci || pr.closed != seen.closed || pr.failing != seen.failing;
+        pr.ci = ci;
+        pr.failing = seen.failing;
+        pr.closed = seen.closed.clone();
+        if !changed {
+            return Vec::new();
+        }
+        let name = pr.name();
+        let url = pr.url.clone();
+        let mut effects = vec![Effect::Changed];
+        let text = match (seen.closed.as_deref(), ci) {
+            (Some(how), _) => Some(format!("has its pull request {name} {how} by the person")),
+            (None, Ci::Passed) => {
+                effects.push(Effect::Notify {
+                    title: format!("{name} is ready for your review"),
+                    body: format!("{title}: its CI passed. {url}"),
+                    echo: false,
+                });
+                Some(format!(
+                    "has its pull request {name} with every CI check passed: it is the \
+                     person's to review and merge ({url})"
+                ))
+            }
+            (None, Ci::Failed) => Some(format!(
+                "has CI failing on its pull request {name}: {}. Read why (`gh pr checks {url}`, \
+                 `gh run view --log-failed`) or have the worker do it, mend it on the same \
+                 branch, check it, and pr_open again to push",
+                pr.failing.join(", ")
+            )),
+            (None, Ci::None) => Some(format!(
+                "has its pull request {name} open, and its project runs no CI on it"
+            )),
+            (None, Ci::Pending) => None,
+        };
+        worker.updated_ms = now_ms;
+        if let Some(text) = text {
+            self.add_news(News { worker: id, text }, now_ms);
+            effects.extend(self.tick(now_ms));
         }
         effects
     }

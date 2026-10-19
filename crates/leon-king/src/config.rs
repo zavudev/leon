@@ -52,6 +52,11 @@ pub struct Config {
     /// An agent named nowhere starts in its own default mode, and asks.
     #[serde(default)]
     pub modes: BTreeMap<String, String>,
+    /// The command that checks each project, by the project's name, run
+    /// with `sh -c` in a worker's worktree. A project named nowhere is
+    /// checked the way its files say ([`crate::verify::detect_check`]).
+    #[serde(default)]
+    pub checks: BTreeMap<String, String>,
 }
 
 /// The agent King runs on.
@@ -92,6 +97,10 @@ pub struct Limits {
     /// conversation away, and King goes on in a new one told where it left
     /// off: every turn reads the whole conversation again. 0 never does.
     pub compact_at_tokens: u64,
+    /// How long a project's check may run in a worktree, in seconds.
+    pub check_timeout_secs: u64,
+    /// How often an open pull request's CI is looked at, in seconds.
+    pub ci_poll_secs: u64,
 }
 
 /// One agent a tier may give work to.
@@ -126,6 +135,9 @@ pub struct Guards {
     /// Branches nothing is pushed to, besides each project's own default
     /// branch, which always is protected.
     pub protected_branches: Vec<String>,
+    /// A pull request is opened only for a branch whose last commit passed
+    /// its project's check, unless King says why it cannot be checked.
+    pub verify_before_pr: bool,
 }
 
 impl Default for Config {

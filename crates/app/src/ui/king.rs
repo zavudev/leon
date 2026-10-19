@@ -830,7 +830,13 @@ impl Shell {
     /// view is drawn again every frame, and the loop ends with the turns.
     fn king_spin(&mut self, cx: &mut Context<Self>) {
         let busy = |status: &Status| {
-            status.brain.busy || status.workers.iter().any(|worker| worker.conversation.busy)
+            status.brain.busy
+                || status.workers.iter().any(|worker| {
+                    worker.conversation.busy
+                        || worker.check.as_ref().is_some_and(|check| {
+                            check.state == leon_king::verify::CheckState::Running
+                        })
+                })
         };
         if !self.king_ui.status.as_ref().is_some_and(busy) {
             self.king_ui.spinning = None;
@@ -1453,6 +1459,8 @@ mod tests {
                     conversation: conversation(*last),
                     last_answer: None,
                     updated_ms: 0,
+                    check: None,
+                    pull_request: None,
                 })
                 .collect(),
             news: 0,

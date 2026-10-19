@@ -21,6 +21,7 @@ use leon_king::history::Past;
 use leon_king::protocol::{ConversationStatus, Status, WorkerStatus};
 use leon_king::report::{count, span, Report};
 use leon_king::transcript::{Entry, Kind};
+use leon_king::verify::{self, CheckState, Ci};
 
 use super::activity::Activity;
 use super::chat_voice::Field;
@@ -1546,6 +1547,7 @@ impl Shell {
                     .truncate()
                     .text_color(c.text_faint),
             )
+            .children(self.king_evidence(worker, c, cx))
             .children(worker.last_answer.as_ref().map(|answer| {
                 div()
                     .max_h(px(36.))
@@ -1555,6 +1557,81 @@ impl Shell {
                     .child(answer.clone())
             }))
             .into_any_element()
+    }
+
+    /// What shows a worker's work is right: its last check, and its pull
+    /// request's CI, which opens on a click.
+    fn king_evidence(
+        &self,
+        worker: &WorkerStatus,
+        c: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if worker.check.is_none() && worker.pull_request.is_none() {
+            return None;
+        }
+        let id = worker.id;
+        let now = (self.options.now)().timestamp_millis().max(0) as u64;
+        let mut row = div()
+            .debug_selector(move || format!("king-evidence-{id}"))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.))
+            .min_w_0();
+        if let Some(check) = &worker.check {
+            let (text, colour) = match check.state {
+                CheckState::Running => (
+                    format!(
+                        "{} CHECKING {}",
+                        spinner_frame(),
+                        verify::duration(now.saturating_sub(check.started_ms))
+                    ),
+                    c.text_muted,
+                ),
+                CheckState::Passed => (
+                    format!(
+                        "✓ CHECKED {} · {}",
+                        verify::short(&check.commit),
+                        verify::duration(check.duration_ms.unwrap_or_default())
+                    ),
+                    c.success,
+                ),
+                CheckState::Failed => (
+                    format!("✗ CHECK FAILED {}", verify::short(&check.commit)),
+                    c.error,
+                ),
+            };
+            row = row.child(
+                mono(text)
+                    .debug_selector(move || format!("king-check-{id}"))
+                    .text_color(colour),
+            );
+        }
+        if let Some(pr) = &worker.pull_request {
+            let (ci, colour) = match (pr.closed.as_deref(), pr.ci) {
+                (Some(how), _) => (how.to_uppercase(), c.text_muted),
+                (None, Ci::Pending) => ("CI RUNNING".to_owned(), c.text_muted),
+                (None, Ci::Passed) => ("CI ✓".to_owned(), c.success),
+                (None, Ci::Failed) => (format!("CI ✗ {}", pr.failing.join(", ")), c.error),
+                (None, Ci::None) => ("NO CI".to_owned(), c.text_faint),
+            };
+            let url = pr.url.clone();
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("king-pr-{id}")))
+                    .debug_selector(move || format!("king-pr-{id}"))
+                    .min_w_0()
+                    .truncate()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        (this.options.open_url)(cx, &url);
+                    }))
+                    .child(mono(format!("PR {} · {ci}", pr.name())).text_color(colour)),
+            );
+        }
+        Some(row.into_any_element())
     }
 
     /// An open card: the worker's conversation, live, and what can be done

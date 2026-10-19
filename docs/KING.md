@@ -227,6 +227,40 @@ questions (`worker_answer`), tells it more (`worker_send`), reads what it did
 (`worker_transcript`, `worktree_diff`), and opens a pull request when the work
 is right (`pr_open`).
 
+## Evidence, then a pull request, then CI
+
+A worker saying it is done is not evidence, so King checks the work before it
+reports it done:
+
+1. **The project's check.** `worktree_check` runs the project's own check in
+   the worker's worktree, on its last commit. Leon picks the check from the
+   project's files: `scripts/check.sh`, a `check:` target in the `Makefile`,
+   `cargo test`, the package's `check` or `test` script, `go test ./...` or
+   `pytest`. You can name a different one under `[checks]`. The tool answers
+   at once. King hears how the check ended as news, with the end of what it
+   printed. The whole output is in `<data dir>/king/checks/<worker>.log`. A
+   check that runs past `check_timeout_secs` is ended, along with everything
+   it started.
+2. **The pull request.** `pr_open` opens a pull request only for a branch
+   whose last commit passed the check. The description ends with what was
+   run, on which commit and how long it took ("Verified by Leon:
+   `scripts/check.sh` passed on abc1234 in 4m14s."). When a project cannot be
+   checked on this computer, King must say why (`unverified`), and that
+   reason goes in the description instead. Calling `pr_open` again on a
+   branch whose pull request is already open pushes to it.
+3. **CI.** From then on Leon watches the pull request's checks with `gh`,
+   every `ci_poll_secs`, with no King turns spent. When the checks settle,
+   King hears either that they all passed or which ones failed. If they
+   failed, King has the worker fix them on the same branch, checks again and
+   pushes. If they passed, you get a desktop notification that the pull
+   request is ready for your review. A pull request with no checks after ten
+   minutes is taken as one its project runs no CI on.
+
+Each worker's card shows the evidence. The check line reads `✓ CHECKED
+abc1234 · 4m14s`, `✗ CHECK FAILED`, or `CHECKING` while it runs. The pull
+request line reads `PR #62 · CI ✓`, `CI ✗ clippy`, `CI RUNNING`, `NO CI` or
+`MERGED`. Click the pull request line to open it.
+
 ## What King may do
 
 | King may | King never does |
@@ -237,8 +271,9 @@ is right (`pr_open`).
 | Tell you on your desktop that something is done | Work in a project's main checkout |
 
 These rules are written into King's instructions, and the tools enforce them
-too: `pr_open` refuses the default branch and a worktree with changes that
-are not committed, nothing is pushed with `--force`, and no tool merges.
+too. `pr_open` refuses the default branch, a worktree with changes that are
+not committed, and a last commit with no passed check (`verify_before_pr`).
+Nothing is pushed with `--force`, and no tool merges.
 
 ## Choosing agents to save
 
@@ -290,6 +325,9 @@ research = { tier = "local" }
 [guards]
 protected_branches = ["main", "master", "release"]
 
+[checks]                # how a project is checked, when its files do not say
+api = "make lint test"
+
 [modes]                 # the permission mode each agent's workers start in
 claude = "auto"
 ```
@@ -297,10 +335,11 @@ claude = "auto"
 | Section | What it sets | Default |
 | --- | --- | --- |
 | `[brain]` | The agent, model, effort and mode King runs on; `mode = ""` is the agent's own | Claude Code, its own model, mode `auto` |
-| `[limits]` | `max_workers`, `daily_budget_usd`, `limit_threshold`, `wake_delay_secs`, `compact_at_tokens` | 6, none, 0.85, 5, 600000 |
+| `[limits]` | `max_workers`, `daily_budget_usd`, `limit_threshold`, `wake_delay_secs`, `compact_at_tokens`, `check_timeout_secs`, `ci_poll_secs` | 6, none, 0.85, 5, 600000, 1800, 60 |
 | `[tiers]` | Each tier's candidates in order: agent, model, effort | `cheap`, `standard`, `premium`, `planning` |
 | `[jobs]` | The tier each kind of job (`code`, `research`, `plan`) goes to, and whether it is `strict` (only ever that tier) | code: standard, research: cheap, plan: planning (strict) |
-| `[guards]` | Branches nothing is pushed to, besides each project's default branch | `main`, `master` |
+| `[guards]` | Branches nothing is pushed to, besides each project's default branch; `verify_before_pr`: a pull request needs a passed check of its last commit | `main`, `master`; on |
+| `[checks]` | The command that checks each project, by name, run with `sh -c` in a worktree | read from each project's files |
 | `[permissions]` | Which worker questions Leon answers itself: `routine`, the `read_only` programs and the `in_worktree` ones | on, with lists of common tools |
 | `[modes]` | The permission mode of each agent's workers; `""` is the agent's own | codex `auto`, claude `acceptEdits`: a worker edits in its own worktree without asking |
 

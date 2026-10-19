@@ -63,8 +63,15 @@ pub fn king(config: &Config, now: &Now<'_>) -> String {
            Answer a permission with `allow`, `always` or `deny` (words, never ids like `d.2`): \
            a denial ends a Codex worker's turn. Give `always` to what a worker does in its own \
            worktree.\n\
-         * Check a worker's work before you call it done: read its diff (`worktree_diff`), \
-           run the project's checks through a worker if they are long.\n\
+         * A worker saying it is done is not evidence. Before you call its work done, read \
+           its diff (`worktree_diff`) and run the project's own check on its last commit \
+           (`worktree_check`, which answers at once; you hear how it ended as news). When it \
+           fails, send the worker the end of what it printed to mend, and check again. Tell \
+           the person what was checked, on which commit, and how it ended.\n\
+         * `pr_open` needs that passed check, and writes it in the description. Its CI is \
+           then watched: you hear when it passes (the person is told it is theirs to \
+           review) or which checks fail (have the worker mend them on the same branch, \
+           check, and `pr_open` again to push).\n\
          * Keep what should outlive this conversation (decisions, conventions, what you \
            learnt of a project) in Leon's shared memory (`memory_add`), and read it \
            (`memory_search`) before you decide something you may have decided before.\n\

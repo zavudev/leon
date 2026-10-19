@@ -14,6 +14,7 @@
 use leon_king::config::Guards;
 use leon_king::coordinator::{Job, Reply as Answer, Target};
 use leon_king::protocol::{Request, WorkerRequest};
+use leon_king::verify::{same_commit, short, Check, CheckState};
 use serde_json::{json, Map, Value};
 
 use super::client::Client;
@@ -24,7 +25,7 @@ use crate::task_mcp::PROTOCOL_VERSIONS;
 pub const SERVER_NAME: &str = "leon-king";
 
 /// The names of the tools, in the order they are listed.
-pub const TOOLS: [&str; 15] = [
+pub const TOOLS: [&str; 16] = [
     "king_status",
     "projects_list",
     "project_status",
@@ -38,6 +39,7 @@ pub const TOOLS: [&str; 15] = [
     "worker_stop",
     "worker_transcript",
     "worktree_diff",
+    "worktree_check",
     "pr_open",
     "notify_user",
 ];
@@ -143,6 +145,9 @@ pub struct Server<B> {
     backend: B,
     /// Branches nothing is pushed to ([guards] protected_branches).
     protected: Vec<String>,
+    /// A pull request needs its last commit checked ([guards]
+    /// verify_before_pr).
+    verify_before_pr: bool,
 }
 
 struct Refusal {
@@ -317,14 +322,30 @@ pub fn tool_list() -> Value {
             &["worker"],
         ),
         tool(
+            "worktree_check",
+            "Run the project's own check (its tests, lints, build: scripts/check.sh, cargo \
+             test, npm test… or what king.toml names) in a worker's worktree, on its last \
+             commit. It answers at once; how it ended comes to you as news, with the end of \
+             what it printed. A pull request needs a passed check of its last commit.",
+            json!({ "worker": worker.clone() }),
+            &["worker"],
+        ),
+        tool(
             "pr_open",
-            "Push a worker's branch and open a pull request for it. Never the default branch, \
-             never forced; merging is the person's.",
+            "Push a worker's branch and open a pull request for it, or push again to the one \
+             it has. Its last commit must have passed worktree_check; the description then \
+             says so. Never the default branch, never forced; merging is the person's. Its \
+             CI is watched from then on, and you hear when it passes or fails.",
             json!({
                 "worker": worker.clone(),
                 "title": { "type": "string" },
                 "body": { "type": "string" },
                 "draft": { "type": "boolean", "default": false },
+                "unverified": {
+                    "type": "string",
+                    "description": "Only when the project cannot be checked here: why. It \
+                                    is written in the description instead of the evidence.",
+                },
             }),
             &["worker", "title"],
         ),
@@ -350,6 +371,7 @@ impl<B: Backend> Server<B> {
         Self {
             backend,
             protected: guards.protected_branches.clone(),
+            verify_before_pr: guards.verify_before_pr,
         }
     }
 
@@ -511,11 +533,13 @@ impl<B: Backend> Server<B> {
                 ),
             }),
             "worktree_diff" => self.worktree_diff(worker()?),
+            "worktree_check" => self.backend.ask(Request::Check { worker: worker()? }),
             "pr_open" => self.pr_open(
                 worker()?,
                 &needed("title")?,
                 &text("body").unwrap_or_default(),
                 arguments.get("draft").and_then(Value::as_bool) == Some(true),
+                text("unverified").filter(|why| !why.trim().is_empty()),
             ),
             "notify_user" => self.backend.ask(Request::Notify {
                 title: needed("title")?,
@@ -525,8 +549,8 @@ impl<B: Backend> Server<B> {
         }
     }
 
-    /// The folder of a worker that is still King's.
-    fn worker_folder(&mut self, worker: u32) -> Result<String, String> {
+    /// A worker that is still King's, as the service's status has it.
+    fn worker_status(&mut self, worker: u32) -> Result<Value, String> {
         let status = self.backend.ask(Request::Status)?;
         status["workers"]
             .as_array()
@@ -535,9 +559,17 @@ impl<B: Backend> Server<B> {
                     .iter()
                     .find(|w| w["id"].as_u64() == Some(u64::from(worker)))
             })
-            .and_then(|w| w["cwd"].as_str())
-            .map(str::to_owned)
+            .filter(|w| w["cwd"].is_string())
+            .cloned()
             .ok_or_else(|| format!("there is no worker #{worker} of yours"))
+    }
+
+    /// The folder of a worker that is still King's.
+    fn worker_folder(&mut self, worker: u32) -> Result<String, String> {
+        Ok(self.worker_status(worker)?["cwd"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned())
     }
 
     fn project_status(&mut self, name: &str) -> Result<Value, String> {
@@ -625,12 +657,15 @@ impl<B: Backend> Server<B> {
         title: &str,
         body: &str,
         draft: bool,
+        unverified: Option<String>,
     ) -> Result<Value, String> {
-        let cwd = self.worker_folder(worker)?;
+        let status = self.worker_status(worker)?;
+        let cwd = status["cwd"].as_str().unwrap_or_default().to_owned();
         let branch = self
             .backend
             .run("git", &["symbolic-ref", "--short", "HEAD"], &cwd)
             .map_err(|_| "the worktree is not on a branch".to_owned())?;
+        let branch = branch.trim().to_owned();
         let base = self.base_of(&cwd);
         let default = base.trim_start_matches("origin/");
         if branch == default || self.protected.contains(&branch) {
@@ -645,16 +680,95 @@ impl<B: Backend> Server<B> {
                 "the worktree has changes not committed; have the worker commit them first:\n{uncommitted}"
             ));
         }
+        let head = self.backend.run("git", &["rev-parse", "HEAD"], &cwd)?;
+        let check: Option<Check> = serde_json::from_value(status["check"].clone()).ok();
+        let evidence = match (&check, &unverified) {
+            (Some(check), _) if check.proves(&head) => Some(check.evidence()),
+            (_, Some(why)) => Some(format!("Not verified by Leon: {why}")),
+            _ if !self.verify_before_pr => None,
+            (Some(check), None) if check.state == CheckState::Running => {
+                return Err(format!(
+                    "its check (`{}`) still runs; you hear how it ended as news, then open it",
+                    check.command
+                ))
+            }
+            (Some(check), None) if same_commit(&check.commit, &head) && !check.dirty => {
+                return Err(format!(
+                    "its last commit failed its check (`{}`); have the worker mend it, then \
+                     worktree_check again",
+                    check.command
+                ))
+            }
+            _ => {
+                return Err(format!(
+                    "its last commit ({}) passed no check: run worktree_check first. Only if \
+                     the project cannot be checked here, say why in `unverified`",
+                    short(head.trim())
+                ))
+            }
+        };
+        let body = match &evidence {
+            Some(evidence) if body.trim().is_empty() => evidence.clone(),
+            Some(evidence) => format!("{}\n\n---\n{evidence}", body.trim_end()),
+            None => body.to_owned(),
+        };
         self.backend
             .run("git", &["push", "--set-upstream", "origin", &branch], &cwd)?;
-        let mut args = vec![
-            "pr", "create", "--head", &branch, "--base", default, "--title", title, "--body", body,
-        ];
-        if draft {
-            args.push("--draft");
-        }
-        let url = self.backend.run("gh", &args, &cwd)?;
-        Ok(json!({ "branch": branch, "base": default, "pull_request": url }))
+        // A branch that has its pull request already: pushing it was all.
+        let existing = self
+            .backend
+            .run(
+                "gh",
+                &[
+                    "pr",
+                    "view",
+                    &branch,
+                    "--json",
+                    "url,state",
+                    "--jq",
+                    "select(.state == \"OPEN\") | .url",
+                ],
+                &cwd,
+            )
+            .ok()
+            .map(|url| url.trim().to_owned())
+            .filter(|url| !url.is_empty());
+        let (url, updated) = match existing {
+            Some(url) => (url, true),
+            None => {
+                let mut args = vec![
+                    "pr", "create", "--head", &branch, "--base", default, "--title", title,
+                    "--body", &body,
+                ];
+                if draft {
+                    args.push("--draft");
+                }
+                (
+                    self.backend.run("gh", &args, &cwd)?.trim().to_owned(),
+                    false,
+                )
+            }
+        };
+        let watched = self
+            .backend
+            .ask(Request::PullRequestOpened {
+                worker,
+                url: url.clone(),
+                branch: branch.clone(),
+            })
+            .is_ok();
+        Ok(json!({
+            "branch": branch,
+            "base": default,
+            "pull_request": url,
+            "pushed_to_an_open_one": updated,
+            "verified": evidence.is_some() && unverified.is_none(),
+            "ci": if watched {
+                "watched: you hear when it passes or fails"
+            } else {
+                "not watched: King's service did not answer"
+            },
+        }))
     }
 }
 
@@ -684,13 +798,27 @@ mod tests {
         ran: Vec<(String, Vec<String>, String)>,
         branch: String,
         dirty: bool,
+        /// The worker's last check, as the service's status has it.
+        check: Value,
+        /// The address of the branch's open pull request.
+        open_pr: Option<String>,
+    }
+
+    /// A check of the worker's last commit (`abc1234def`, as `Fake` has it).
+    fn passed() -> Value {
+        json!({
+            "command": "scripts/check.sh", "commit": "abc1234def", "dirty": false,
+            "state": "passed", "started_ms": 0, "duration_ms": 254_000, "tail": "",
+        })
     }
 
     impl Backend for Fake {
         fn ask(&mut self, request: Request) -> Result<Value, String> {
             self.asked.push(request.clone());
             Ok(match request {
-                Request::Status => json!({ "workers": [{ "id": 2, "cwd": "/w/fix" }] }),
+                Request::Status => {
+                    json!({ "workers": [{ "id": 2, "cwd": "/w/fix", "check": self.check }] })
+                }
                 Request::Projects => {
                     json!([{ "name": "leon", "root": "/code/leon", "local": true }])
                 }
@@ -708,6 +836,8 @@ mod tests {
                 ["symbolic-ref", "--short", "HEAD"] => self.branch.clone(),
                 ["symbolic-ref", ..] => "origin/main".to_owned(),
                 ["status", "--porcelain"] if self.dirty => " M src/lib.rs".to_owned(),
+                ["rev-parse", "HEAD"] => "abc1234def\n".to_owned(),
+                ["pr", "view", ..] => self.open_pr.clone().unwrap_or_default(),
                 ["pr", "create", ..] => "https://github.com/z/leon/pull/9".to_owned(),
                 _ => String::new(),
             })
@@ -827,15 +957,33 @@ mod tests {
     fn a_pull_request_is_pushed_and_opened_from_the_workers_branch_only() {
         let mut server = Server::new(Fake {
             branch: "king/fix-login".into(),
+            check: passed(),
             ..Fake::default()
         });
         let (text, error) = call(
             &mut server,
             "pr_open",
-            json!({ "worker": 2, "title": "fix: login" }),
+            json!({ "worker": 2, "title": "fix: login", "body": "Fixes the login." }),
         );
         assert!(!error, "{text}");
         assert!(text.contains("pull/9"));
+        let created = server
+            .backend
+            .ran
+            .iter()
+            .find(|(_, args, _)| args.get(1).map(String::as_str) == Some("create"))
+            .unwrap();
+        let body = &created.1[created.1.iter().position(|arg| arg == "--body").unwrap() + 1];
+        assert_eq!(
+            body,
+            "Fixes the login.\n\n---\nVerified by Leon: `scripts/check.sh` passed on abc1234 in 4m14s."
+        );
+        // Its CI is watched from now.
+        assert!(server.backend.asked.contains(&Request::PullRequestOpened {
+            worker: 2,
+            url: "https://github.com/z/leon/pull/9".into(),
+            branch: "king/fix-login".into(),
+        }));
         let pushed = server
             .backend
             .ran
@@ -870,6 +1018,7 @@ mod tests {
         let mut dirty = Server::new(Fake {
             branch: "king/x".into(),
             dirty: true,
+            check: passed(),
             ..Fake::default()
         });
         let (why, error) = call(&mut dirty, "pr_open", json!({ "worker": 2, "title": "x" }));
@@ -877,6 +1026,91 @@ mod tests {
 
         let (why, error) = call(&mut server, "pr_open", json!({ "worker": 7, "title": "x" }));
         assert!(error && why.contains("no worker #7"), "{why}");
+    }
+
+    #[test]
+    fn a_pull_request_needs_its_last_commit_checked_or_a_reason() {
+        let fake = |check: Value| {
+            Server::new(Fake {
+                branch: "king/x".into(),
+                check,
+                ..Fake::default()
+            })
+        };
+        let pushed = |server: &Server<Fake>| {
+            server
+                .backend
+                .ran
+                .iter()
+                .any(|(_, args, _)| args[0] == "push")
+        };
+        let mut unchecked = fake(Value::Null);
+        let (why, error) = call(
+            &mut unchecked,
+            "pr_open",
+            json!({ "worker": 2, "title": "x" }),
+        );
+        assert!(error && why.contains("run worktree_check first"), "{why}");
+        assert!(!pushed(&unchecked));
+
+        let mut old = passed();
+        old["commit"] = json!("0000000");
+        let mut stale = fake(old);
+        let (why, error) = call(&mut stale, "pr_open", json!({ "worker": 2, "title": "x" }));
+        assert!(error && why.contains("abc1234"), "{why}");
+
+        let mut failed = passed();
+        failed["state"] = json!("failed");
+        let (why, error) = call(
+            &mut fake(failed),
+            "pr_open",
+            json!({ "worker": 2, "title": "x" }),
+        );
+        assert!(error && why.contains("failed its check"), "{why}");
+
+        let mut running = passed();
+        running["state"] = json!("running");
+        let (why, error) = call(
+            &mut fake(running),
+            "pr_open",
+            json!({ "worker": 2, "title": "x" }),
+        );
+        assert!(error && why.contains("still runs"), "{why}");
+
+        // A reason instead: written where the evidence would be.
+        let mut reasoned = fake(Value::Null);
+        let (text, error) = call(
+            &mut reasoned,
+            "pr_open",
+            json!({ "worker": 2, "title": "x", "unverified": "it needs a phone" }),
+        );
+        assert!(!error, "{text}");
+        assert!(reasoned.backend.ran.iter().any(|(_, args, _)| args
+            .iter()
+            .any(|arg| arg == "Not verified by Leon: it needs a phone")));
+
+        // A branch with its pull request open is pushed to, not opened twice.
+        let mut again = Server::new(Fake {
+            branch: "king/x".into(),
+            check: passed(),
+            open_pr: Some("https://github.com/z/leon/pull/5\n".into()),
+            ..Fake::default()
+        });
+        let (text, error) = call(&mut again, "pr_open", json!({ "worker": 2, "title": "x" }));
+        assert!(!error && text.contains("pull/5"), "{text}");
+        assert!(pushed(&again));
+        assert!(!again
+            .backend
+            .ran
+            .iter()
+            .any(|(_, args, _)| args.get(1).map(String::as_str) == Some("create")));
+
+        let (text, error) = call(&mut again, "worktree_check", json!({ "worker": 2 }));
+        assert!(!error, "{text}");
+        assert_eq!(
+            again.backend.asked.last(),
+            Some(&Request::Check { worker: 2 })
+        );
     }
 
     #[test]

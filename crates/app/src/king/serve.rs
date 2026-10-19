@@ -63,6 +63,17 @@ enum Input {
     /// A while after a turn said its result: if its process still runs, the
     /// turn is over anyway ([`super::linger`]).
     Linger { target: Target, generation: u64 },
+    /// A worker's check ended ([`super::checks::run`]).
+    Checked {
+        worker: u32,
+        passed: bool,
+        output: String,
+    },
+    /// What a look at a worker's pull request found.
+    PullRequest {
+        worker: u32,
+        seen: Result<leon_king::verify::Seen, String>,
+    },
 }
 
 /// How long a process may go on after its turn said its result before the
@@ -112,6 +123,9 @@ struct Service {
     lingering: Vec<Lingering>,
     /// What those left running, as last looked at.
     running: Vec<leon_king::protocol::RunningProcess>,
+    /// When each watched pull request is to be looked at next, by worker,
+    /// and whether a look is under way.
+    pr_looks: HashMap<u32, (u64, bool)>,
 }
 
 /// The connections whose client shows King to the person right now, by the
@@ -189,6 +203,7 @@ pub fn run(paths: Paths) -> Result<(), String> {
         modes: Vec::new(),
         lingering: Vec::new(),
         running: Vec::new(),
+        pr_looks: HashMap::new(),
     };
     {
         let inputs = service.inputs.clone();
@@ -219,6 +234,7 @@ pub fn run(paths: Paths) -> Result<(), String> {
             Err(flume::RecvTimeoutError::Disconnected) => return Ok(()),
         };
         service.carry_out(effects);
+        service.look_at_pull_requests();
     }
 }
 
@@ -414,6 +430,31 @@ impl Service {
                 effects.push(Effect::Changed);
                 effects
             }
+            Input::Checked {
+                worker,
+                passed,
+                output,
+            } => self
+                .coordinator
+                .check_finished(worker, passed, &output, now_ms()),
+            Input::PullRequest { worker, seen } => {
+                let now = now_ms();
+                let every = self.coordinator.config().limits.ci_poll_secs.max(10) * 1000;
+                self.pr_looks.insert(worker, (now + every, false));
+                match seen {
+                    Ok(seen) => self.coordinator.ci_seen(worker, seen, now),
+                    Err(error) => {
+                        tracing::debug!(worker, %error, "a pull request could not be looked at");
+                        // Nothing read is nothing reported; past a while, no CI.
+                        let nothing = leon_king::verify::Seen {
+                            ci: leon_king::verify::Ci::Pending,
+                            failing: Vec::new(),
+                            closed: None,
+                        };
+                        self.coordinator.ci_seen(worker, nothing, now)
+                    }
+                }
+            }
             Input::Models(models, modes) => {
                 if !models.is_empty() {
                     self.models = models;
@@ -422,6 +463,32 @@ impl Service {
                     self.modes = modes;
                 }
                 Vec::new()
+            }
+        }
+    }
+
+    /// Starts a look at each watched pull request whose time came.
+    fn look_at_pull_requests(&mut self) {
+        let now = now_ms();
+        let watched = self.coordinator.watched_prs();
+        self.pr_looks
+            .retain(|worker, _| watched.iter().any(|(id, _, _)| id == worker));
+        for (worker, url, cwd) in watched {
+            let (due, busy) = *self.pr_looks.entry(worker).or_insert((now, false));
+            if busy || now < due {
+                continue;
+            }
+            self.pr_looks.insert(worker, (due, true));
+            let inputs = self.inputs.clone();
+            let spawned = std::thread::Builder::new()
+                .name(format!("leon-king-ci-{worker}"))
+                .spawn(move || {
+                    let seen = super::checks::look_at(&url, &cwd)
+                        .and_then(|json| leon_king::verify::read_ci(&json));
+                    let _ = inputs.send(Input::PullRequest { worker, seen });
+                });
+            if spawned.is_err() {
+                self.pr_looks.insert(worker, (due, false));
             }
         }
     }
@@ -718,6 +785,65 @@ impl Service {
                 std::thread::sleep(Duration::from_millis(300));
                 self.refresh_running();
                 done(vec![Effect::Changed])
+            }
+            Request::Check { worker } => {
+                let found = self
+                    .coordinator
+                    .worker(worker)
+                    .ok_or_else(|| format!("there is no worker #{worker}"))?;
+                let cwd = found.cwd.clone();
+                let command = super::checks::command_for(
+                    &self.coordinator.config().checks,
+                    found.project.as_deref(),
+                    &cwd,
+                )?;
+                let (commit, dirty) = super::checks::head_of(&cwd)?;
+                let effects = self
+                    .coordinator
+                    .check_started(worker, &command, &commit, dirty, now)?;
+                let log = self
+                    .paths
+                    .folder
+                    .join("checks")
+                    .join(format!("{worker}.log"));
+                let timeout =
+                    Duration::from_secs(self.coordinator.config().limits.check_timeout_secs.max(1));
+                let inputs = self.inputs.clone();
+                {
+                    let (command, log) = (command.clone(), log.clone());
+                    std::thread::Builder::new()
+                        .name(format!("leon-king-check-{worker}"))
+                        .spawn(move || {
+                            let (passed, output) =
+                                super::checks::run(&command, &cwd, &log, timeout);
+                            let _ = inputs.send(Input::Checked {
+                                worker,
+                                passed,
+                                output,
+                            });
+                        })
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok((
+                    json!({
+                        "started": command,
+                        "commit": leon_king::verify::short(&commit),
+                        "uncommitted_changes": dirty,
+                        "log": log,
+                        "note": "You are told how it ended as news; do not wait for it.",
+                    }),
+                    effects,
+                ))
+            }
+            Request::PullRequestOpened {
+                worker,
+                url,
+                branch,
+            } => {
+                let effects = self.coordinator.pr_opened(worker, &url, &branch, now)?;
+                // The first look a little later: CI takes a moment to start.
+                self.pr_looks.insert(worker, (now + 20_000, false));
+                Ok((Value::Null, effects))
             }
             Request::Notify { title, body } => done(vec![Effect::Notify {
                 title,
