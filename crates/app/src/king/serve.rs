@@ -60,6 +60,21 @@ enum Input {
     },
     /// The agents said which models and permission modes they offer.
     Models(Vec<Available>, Vec<AvailableMode>),
+    /// A while after a turn said its result: if its process still runs, the
+    /// turn is over anyway ([`super::linger`]).
+    Linger { target: Target, generation: u64 },
+}
+
+/// How long a process may go on after its turn said its result before the
+/// turn is taken as over and the process as one that runs something.
+const LINGER_AFTER: Duration = Duration::from_secs(4);
+
+/// A turn whose process outlived it: what it started still runs.
+struct Lingering {
+    target: Target,
+    generation: u64,
+    turn: Turn,
+    since_ms: u64,
 }
 
 /// How often the agents are asked again which models they offer.
@@ -69,6 +84,9 @@ const MODELS_EVERY: Duration = Duration::from_secs(30 * 60);
 struct Running {
     generation: u64,
     turn: Turn,
+    /// The agent said its result: the turn is over once the process ends,
+    /// or [`LINGER_AFTER`] from now.
+    finished: bool,
 }
 
 /// The owner: the coordinator and what carries out its effects.
@@ -90,6 +108,10 @@ struct Service {
     models: Vec<Available>,
     /// The permission modes the agents offer, as they last said.
     modes: Vec<AvailableMode>,
+    /// Turns whose process outlived them.
+    lingering: Vec<Lingering>,
+    /// What those left running, as last looked at.
+    running: Vec<leon_king::protocol::RunningProcess>,
 }
 
 /// The connections whose client shows King to the person right now, by the
@@ -165,6 +187,8 @@ pub fn run(paths: Paths) -> Result<(), String> {
         installed: None,
         models: Vec::new(),
         modes: Vec::new(),
+        lingering: Vec::new(),
+        running: Vec::new(),
     };
     {
         let inputs = service.inputs.clone();
@@ -309,16 +333,41 @@ impl Service {
                 generation,
                 output,
             } => {
+                let ended = matches!(output, Output::Exited(_));
+                // The process of a turn that is over already: when it ends,
+                // what it left running ends with it.
+                if let Some(at) = self
+                    .lingering
+                    .iter()
+                    .position(|old| old.target == target && old.generation == generation)
+                {
+                    if ended {
+                        self.lingering.remove(at);
+                        self.refresh_running();
+                        return vec![Effect::Changed];
+                    }
+                    return Vec::new();
+                }
                 let Some(running) = self.turns.get_mut(&target) else {
                     return Vec::new();
                 };
                 if running.generation != generation {
                     return Vec::new();
                 }
-                let ended = matches!(output, Output::Exited(_));
                 let events = running.turn.output(output);
                 if ended {
                     self.turns.remove(&target);
+                } else if !running.finished
+                    && events
+                        .iter()
+                        .any(|event| matches!(event, leon_turn::TurnEvent::Finished { .. }))
+                {
+                    running.finished = true;
+                    let inputs = self.inputs.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(LINGER_AFTER);
+                        let _ = inputs.send(Input::Linger { target, generation });
+                    });
                 }
                 let now = now_ms();
                 let effects: Vec<Effect> = events
@@ -330,6 +379,36 @@ impl Service {
                     let report = self.report(now);
                     self.coordinator.annotate(Target::Brain, report, now);
                 }
+                effects
+            }
+            Input::Linger { target, generation } => {
+                let lingers = self
+                    .turns
+                    .get(&target)
+                    .is_some_and(|running| running.generation == generation && running.finished);
+                if !lingers {
+                    return Vec::new();
+                }
+                let Some(running) = self.turns.remove(&target) else {
+                    return Vec::new();
+                };
+                let now = now_ms();
+                self.lingering.push(Lingering {
+                    target,
+                    generation,
+                    turn: running.turn,
+                    since_ms: now,
+                });
+                self.refresh_running();
+                // The turn is over: what waits for it goes on.
+                let mut effects =
+                    self.coordinator
+                        .event(target, &leon_turn::TurnEvent::Exited { code: 0 }, now);
+                if target == Target::Brain {
+                    let report = self.report(now);
+                    self.coordinator.annotate(Target::Brain, report, now);
+                }
+                effects.push(Effect::Changed);
                 effects
             }
             Input::Models(models, modes) => {
@@ -355,6 +434,47 @@ impl Service {
             budget_usd: facts.budget_usd,
             usage: usage_windows(self.store.as_deref(), now),
         }
+    }
+
+    /// The status, with what turns left running.
+    fn status(&self, now: u64) -> leon_king::protocol::Status {
+        let mut status = self.coordinator.status(now);
+        status.running = self.running.clone();
+        status
+    }
+
+    /// Looks again at what the turns that outlived themselves left running.
+    /// One that runs nothing any more (only its tools) is ended.
+    fn refresh_running(&mut self) {
+        if self.lingering.is_empty() {
+            self.running.clear();
+            return;
+        }
+        let table = super::linger::process_table().unwrap_or_default();
+        let mut running = Vec::new();
+        let mut idle = Vec::new();
+        for (at, old) in self.lingering.iter().enumerate() {
+            let Some(pid) = old.turn.pid() else {
+                continue;
+            };
+            let left = super::linger::left_running(&table, pid);
+            if left.is_empty() && !table.is_empty() {
+                idle.push(at);
+            }
+            running.extend(left.into_iter().map(|(pid, command)| {
+                leon_king::protocol::RunningProcess {
+                    pid,
+                    command,
+                    of: old.target,
+                    since_ms: old.since_ms,
+                }
+            }));
+        }
+        for at in idle.into_iter().rev() {
+            let mut old = self.lingering.remove(at);
+            old.turn.kill();
+        }
+        self.running = running;
     }
 
     /// Where a past conversation's entries are kept.
@@ -413,7 +533,8 @@ impl Service {
             // Kept per connection, in `input`.
             Request::Watch { .. } => done(Vec::new()),
             Request::Status | Request::Subscribe => {
-                Ok((json!(self.coordinator.status(now)), Vec::new()))
+                self.refresh_running();
+                Ok((json!(self.status(now)), Vec::new()))
             }
             Request::Say { text } => done(self.coordinator.say(&text, now)),
             Request::Transcript {
@@ -571,6 +692,18 @@ impl Service {
                 let _ = std::fs::remove_file(self.archived_path(id));
                 Ok((Value::Null, effects))
             }
+            Request::StopProcess { pid } => {
+                self.refresh_running();
+                if !self.running.iter().any(|process| process.pid == pid) {
+                    return Err(format!(
+                        "process {pid} is not one a turn of King's or of a worker left running"
+                    ));
+                }
+                super::linger::terminate(pid);
+                std::thread::sleep(Duration::from_millis(300));
+                self.refresh_running();
+                done(vec![Effect::Changed])
+            }
             Request::Notify { title, body } => done(vec![Effect::Notify {
                 title,
                 body,
@@ -613,7 +746,7 @@ impl Service {
         if changed {
             self.save();
             let notice = Notice::Changed {
-                status: self.coordinator.status(now_ms()),
+                status: Box::new(self.status(now_ms())),
             };
             self.broadcast(&notice);
         }
@@ -727,7 +860,14 @@ impl Service {
                         }
                     }
                 });
-                self.turns.insert(target, Running { generation, turn });
+                self.turns.insert(
+                    target,
+                    Running {
+                        generation,
+                        turn,
+                        finished: false,
+                    },
+                );
                 events
                     .iter()
                     .flat_map(|event| self.coordinator.event(target, event, now))

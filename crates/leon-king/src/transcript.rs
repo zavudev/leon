@@ -208,15 +208,27 @@ pub fn question_text(kind: &QuestionKind) -> String {
             choices,
             ..
         } => {
-            let ids: Vec<&str> = choices.iter().map(|choice| choice.id.as_str()).collect();
+            // Each choice with what it does: an agent's ids (Codex's `d.2`)
+            // say nothing, and a guess may deny what was meant to be allowed.
+            let named: Vec<String> = choices
+                .iter()
+                .map(|choice| {
+                    let effect = match choice.effect {
+                        leon_turn::PermissionEffect::AllowOnce => "allow",
+                        leon_turn::PermissionEffect::AllowAlways => "always",
+                        leon_turn::PermissionEffect::Deny => "deny",
+                    };
+                    format!("{} = {effect}", choice.id)
+                })
+                .collect();
             let why = reason
                 .as_deref()
                 .map(|reason| format!(" ({reason})"))
                 .unwrap_or_default();
             format!(
-                "May it use {tool}: {}{why}? Choices: {}.",
+                "May it use {tool}: {}{why}? Choices: {}. Answer with allow, always or deny.",
                 cut(summary, TOOL_CHARS),
-                ids.join(", ")
+                named.join(", ")
             )
         }
         QuestionKind::Choices { questions } => questions
@@ -326,5 +338,35 @@ mod tests {
     fn a_long_line_is_cut_on_a_character() {
         assert_eq!(cut("ñandú", 3), "ña…");
         assert_eq!(cut("abc", 3), "abc");
+    }
+
+    #[test]
+    fn a_permission_says_what_each_choice_does() {
+        let kind = QuestionKind::Permission {
+            tool: "shell".into(),
+            summary: "open chrome".into(),
+            detail: String::new(),
+            reason: None,
+            choices: ["d.0", "d.1", "d.2"]
+                .iter()
+                .zip([
+                    leon_turn::PermissionEffect::AllowOnce,
+                    leon_turn::PermissionEffect::AllowAlways,
+                    leon_turn::PermissionEffect::Deny,
+                ])
+                .map(|(id, effect)| leon_turn::PermissionChoice {
+                    id: (*id).into(),
+                    effect,
+                    label: String::new(),
+                    scope: None,
+                    takes_reason: false,
+                })
+                .collect(),
+        };
+        let text = question_text(&kind);
+        assert!(
+            text.contains("d.0 = allow, d.1 = always, d.2 = deny"),
+            "{text}"
+        );
     }
 }

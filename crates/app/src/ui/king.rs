@@ -228,6 +228,24 @@ fn modes_of(value: &Value) -> Vec<KingMode> {
         .unwrap_or_default()
 }
 
+/// What is said with files attached: the words, then the files' paths, one
+/// a line, for the agent to open. `None` when there is nothing to say.
+pub fn with_attached(typed: &str, files: &[std::path::PathBuf]) -> Option<String> {
+    if files.is_empty() {
+        return (!typed.is_empty()).then(|| typed.to_owned());
+    }
+    let mut text = if typed.is_empty() {
+        "Look at the attached files.".to_owned()
+    } else {
+        typed.to_owned()
+    };
+    text.push_str("\n\nAttached (open each path):");
+    for file in files {
+        text.push_str(&format!("\n- {}", file.display()));
+    }
+    Some(text)
+}
+
 /// What King is told of a task given to it from the board.
 pub fn task_for_king(task: &leon_core::Task, place: &str) -> String {
     let mut text = format!(
@@ -315,6 +333,9 @@ pub struct KingUi {
     /// King's past conversations, newest first, while the column of the
     /// workers shows them instead.
     pub history: Option<Vec<Past>>,
+    /// The files attached to what is said next to King or to a worker
+    /// (pasted images among them), shown over the field and sent with it.
+    pub attached: HashMap<Target, Vec<std::path::PathBuf>>,
     /// A past conversation on screen instead of the one now, read only.
     pub viewing: Option<(Past, Vec<Entry>)>,
     /// What the service was last told: the person is looking at King here.
@@ -326,6 +347,8 @@ pub struct KingUi {
     asked: HashMap<u64, Asked>,
     next_tag: u64,
     reader: Option<Task<()>>,
+    /// Draws the view again while a turn goes on, for its spinner.
+    spinning: Option<Task<()>>,
     subscriptions: Vec<Subscription>,
 }
 
@@ -349,12 +372,14 @@ impl Default for KingUi {
             modes: Vec::new(),
             history: None,
             viewing: None,
+            attached: HashMap::new(),
             watching: false,
             note: None,
             back: None,
             asked: HashMap::new(),
             next_tag: 1,
             reader: None,
+            spinning: None,
             subscriptions: Vec::new(),
         }
     }
@@ -406,6 +431,7 @@ impl Shell {
         };
         self.main = Main::King;
         self.king_ui.back = Some(back);
+        self.king_spin(cx);
         self.home.nav = Some(Nav::King);
         self.pane = Pane::Main;
         self.king_fields(window, cx);
@@ -678,7 +704,7 @@ impl Shell {
     fn king_heard(&mut self, said: Heard, window: &mut Window, cx: &mut Context<Self>) {
         match said {
             Heard::Lost(why) => self.king_lost(format!("King's service went away: {why}"), cx),
-            Heard::Notice(Notice::Changed { status }) => self.king_status(status, cx),
+            Heard::Notice(Notice::Changed { status }) => self.king_status(*status, cx),
             // What the conversation shows already is not said twice.
             Heard::Notice(Notice::Notify { echo: true, .. }) => {}
             Heard::Notice(Notice::Notify { title, body, .. }) => {
@@ -796,7 +822,38 @@ impl Shell {
         }
         self.king_fetch(&status, cx);
         self.king_ui.status = Some(status);
+        self.king_spin(cx);
         cx.notify();
+    }
+
+    /// Keeps the spinner turning while King or a worker is in a turn: the
+    /// view is drawn again every frame, and the loop ends with the turns.
+    fn king_spin(&mut self, cx: &mut Context<Self>) {
+        let busy = |status: &Status| {
+            status.brain.busy || status.workers.iter().any(|worker| worker.conversation.busy)
+        };
+        if !self.king_ui.status.as_ref().is_some_and(busy) {
+            self.king_ui.spinning = None;
+            return;
+        }
+        if self.king_ui.spinning.is_some() {
+            return;
+        }
+        self.king_ui.spinning = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(super::king_view::SPIN).await;
+            let going = this.update(cx, |this, cx| {
+                let going = this.king_open() && this.king_ui.status.as_ref().is_some_and(busy);
+                if going {
+                    cx.notify();
+                } else {
+                    this.king_ui.spinning = None;
+                }
+                going
+            });
+            if !going.unwrap_or(false) {
+                return;
+            }
+        }));
     }
 
     /// Asks for the entries the window does not have.
@@ -832,10 +889,16 @@ impl Shell {
         let Some(input) = self.king_ui.input.clone() else {
             return;
         };
-        let text = input.read(cx).value().trim().to_owned();
-        if text.is_empty() {
+        let typed = input.read(cx).value().trim().to_owned();
+        let files = self
+            .king_ui
+            .attached
+            .get(&Target::Brain)
+            .cloned()
+            .unwrap_or_default();
+        let Some(text) = with_attached(&typed, &files) else {
             return;
-        }
+        };
         if !self.king_ui.connected() {
             self.king_connect(window, cx);
             self.engine.report(
@@ -846,6 +909,7 @@ impl Shell {
             return;
         }
         input.update(cx, |input, cx| input.set_value("", window, cx));
+        self.king_ui.attached.remove(&Target::Brain);
         self.king_ask(Request::Say { text }, Asked::Done, cx);
         self.king_ui.note = None;
         self.king_ui.scroll.scroll_to_bottom();
@@ -899,6 +963,18 @@ impl Shell {
         }
     }
 
+    /// Gives the keyboard back to the field of `target`.
+    pub(super) fn king_focus_field(
+        &mut self,
+        target: Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(field) = self.king_field(target) {
+            field.update(cx, |field, cx| field.focus(window, cx));
+        }
+    }
+
     /// The field of King's view that has the keyboard, as its target.
     fn king_typing_in(&self, window: &Window, cx: &gpui_kit::App) -> Option<Target> {
         use gpui_kit::Focusable as _;
@@ -945,8 +1021,9 @@ impl Shell {
     }
 
     /// Pastes the clipboard's image into the King field that has the
-    /// keyboard: it is kept in a file, and its path is written, which King
-    /// (and any worker it is passed to) opens. `false` when there is no
+    /// keyboard: it is kept in a file and attached to what is said next,
+    /// which names its path for King (and any worker it is passed to) to
+    /// open. `false` when there is no
     /// image, so the field pastes text as it does.
     pub(super) fn king_paste_image(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(target) = self.king_typing_in(window, cx) else {
@@ -963,10 +1040,7 @@ impl Shell {
         let kept = std::fs::create_dir_all(&self.options.attachments)
             .and_then(|()| std::fs::write(&path, &image.bytes));
         match kept {
-            Ok(()) => {
-                let text = super::paste::quote(&path.to_string_lossy());
-                self.king_write(target, &text, window, cx);
-            }
+            Ok(()) => self.king_ui.attached.entry(target).or_default().push(path),
             Err(error) => self.engine.report(
                 StatusKind::Error,
                 format!("The image could not be kept for King: {error}."),
@@ -976,8 +1050,8 @@ impl Shell {
         true
     }
 
-    /// Asks for files to attach to what is said to `target`: their paths
-    /// are written in its field.
+    /// Asks for files to attach to what is said to `target`: they are shown
+    /// over its field and sent with what is written.
     pub(super) fn king_attach(
         &mut self,
         target: Target,
@@ -991,7 +1065,13 @@ impl Shell {
                 return;
             }
             this.update_in(cx, |this, window, cx| {
-                this.king_write(target, &super::paste::quoted_paths(&paths), window, cx);
+                let attached = this.king_ui.attached.entry(target).or_default();
+                for path in paths {
+                    if !attached.contains(&path) {
+                        attached.push(path);
+                    }
+                }
+                this.king_focus_field(target, window, cx);
                 cx.notify();
             })
             .ok();
@@ -1005,11 +1085,22 @@ impl Shell {
         else {
             return;
         };
-        let text = input.read(cx).value().trim().to_owned();
-        if text.is_empty() || !self.king_ui.connected() {
+        let typed = input.read(cx).value().trim().to_owned();
+        let target = Target::Worker(worker);
+        let files = self
+            .king_ui
+            .attached
+            .get(&target)
+            .cloned()
+            .unwrap_or_default();
+        let Some(text) = with_attached(&typed, &files) else {
+            return;
+        };
+        if !self.king_ui.connected() {
             return;
         }
         input.update(cx, |input, cx| input.set_value("", window, cx));
+        self.king_ui.attached.remove(&target);
         self.king_ask(Request::TellWorker { worker, text }, Asked::Done, cx);
         self.king_ui.worker_scroll.scroll_to_bottom();
         cx.notify();
@@ -1201,6 +1292,11 @@ impl Shell {
         self.king_ask(Request::Interrupt { target }, Asked::Done, cx);
     }
 
+    /// Ends a process a turn left running.
+    pub(super) fn king_stop_process(&mut self, pid: u32, cx: &mut Context<Self>) {
+        self.king_ask(Request::StopProcess { pid }, Asked::Done, cx);
+    }
+
     /// Stops a worker.
     pub(super) fn king_stop_worker(&mut self, worker: u32, cx: &mut Context<Self>) {
         self.king_ask(Request::StopWorker { worker }, Asked::Done, cx);
@@ -1332,6 +1428,7 @@ mod tests {
             mode: None,
             session_id: None,
             busy: false,
+            busy_since_ms: None,
             queued: 0,
             questions: Vec::new(),
             cost_usd: 0.0,
@@ -1361,6 +1458,7 @@ mod tests {
             news: 0,
             spent_today_usd: 0.0,
             daily_budget_usd: None,
+            running: Vec::new(),
         }
     }
 

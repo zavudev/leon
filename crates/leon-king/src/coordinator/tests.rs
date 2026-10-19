@@ -526,3 +526,40 @@ fn a_new_conversation_puts_the_old_one_away_and_a_past_one_can_go_on() {
     assert_eq!(ids.len(), 1, "the one taken up is not in the list any more");
     assert!(king.resume_conversation(999, Vec::new(), 50).is_err());
 }
+
+#[test]
+fn a_worker_whose_turn_was_stopped_waits_rather_than_failing() {
+    let mut king = Coordinator::new(config());
+    let (id, _) = king.start_worker(spec("restyle"), 0).unwrap();
+    let target = Target::Worker(id);
+    king.event(
+        target,
+        &TurnEvent::Started {
+            session_id: "s".into(),
+            model: None,
+        },
+        1,
+    );
+    // Codex ends its turn when a permission is denied.
+    king.event(
+        target,
+        &TurnEvent::Finished {
+            ok: false,
+            error: None,
+            cost_usd: None,
+            duration_ms: None,
+            denied_tools: Vec::new(),
+            interrupted: true,
+        },
+        2,
+    );
+    king.event(target, &TurnEvent::Exited { code: 0 }, 2);
+    let worker = king.worker(id).unwrap();
+    assert_eq!(worker.state, WorkerState::Paused);
+    let news = &king.state().news;
+    assert!(
+        news.iter()
+            .any(|news| news.text.contains("tell it how to go on")),
+        "{news:?}"
+    );
+}

@@ -129,6 +129,10 @@ pub enum WorkerState {
     Done,
     /// Its last turn failed, or could not start.
     Failed,
+    /// Its last turn was stopped before its end: by a refusal (Codex ends
+    /// its turn when a permission is denied) or by an interrupt. It waits to
+    /// be told how to go on.
+    Paused,
     /// It was stopped.
     Stopped,
     /// The person took it over: it is no longer King's.
@@ -209,6 +213,9 @@ pub struct Conversation {
     /// How its last turn ended: well, or not.
     #[serde(default)]
     pub last_ok: Option<bool>,
+    /// Its last turn was stopped before its end, rather than failing.
+    #[serde(default)]
+    pub last_stopped: bool,
     /// What its turns read and wrote, all of them.
     #[serde(default)]
     pub tokens: Totals,
@@ -238,6 +245,7 @@ impl Conversation {
             cost_usd: 0.0,
             turns: 0,
             last_ok: None,
+            last_stopped: false,
             tokens: Totals::default(),
             turn: TurnStats::default(),
             turn_started_ms: 0,
@@ -611,6 +619,7 @@ impl Coordinator {
             mode: conversation.mode.clone(),
             session_id: conversation.session_id.clone(),
             busy: conversation.busy,
+            busy_since_ms: conversation.busy.then_some(conversation.turn_started_ms),
             queued: conversation.queue.len(),
             questions: conversation.questions.clone(),
             cost_usd: conversation.cost_usd,
@@ -644,6 +653,7 @@ impl Coordinator {
             news: self.state.news.len(),
             spent_today_usd: self.spent_today(now_ms),
             daily_budget_usd: self.config.limits.daily_budget_usd,
+            running: Vec::new(),
         }
     }
 
@@ -957,9 +967,11 @@ impl Coordinator {
                 ok,
                 cost_usd,
                 duration_ms,
+                interrupted,
                 ..
             } => {
                 conversation.last_ok = Some(*ok);
+                conversation.last_stopped = *interrupted;
                 conversation.turns += 1;
                 conversation.turn.duration_ms = duration_ms
                     .unwrap_or_else(|| now_ms.saturating_sub(conversation.turn_started_ms));
@@ -1090,16 +1102,25 @@ impl Coordinator {
                     effects.extend(self.next_turn(target, now_ms));
                     return effects;
                 }
-                worker.state = if ok {
-                    WorkerState::Done
-                } else {
-                    WorkerState::Failed
+                let stopped = !ok && worker.conversation.last_stopped;
+                worker.state = match (ok, stopped) {
+                    (true, _) => WorkerState::Done,
+                    (false, true) => WorkerState::Paused,
+                    (false, false) => WorkerState::Failed,
                 };
-                let text = match (ok, answer) {
-                    (true, Some(answer)) => format!("finished its turn and answered:\n{answer}"),
-                    (true, None) => "finished its turn without a word".to_owned(),
-                    (false, Some(answer)) => format!("failed; its last words:\n{answer}"),
-                    (false, None) => "failed without a word; read its transcript".to_owned(),
+                let text = match (ok, stopped, answer) {
+                    (true, _, Some(answer)) => {
+                        format!("finished its turn and answered:\n{answer}")
+                    }
+                    (true, _, None) => "finished its turn without a word".to_owned(),
+                    (false, true, _) => "had its turn stopped before the end (a permission was \
+                         denied, which ends a Codex turn, or the turn was interrupted). Its work so \
+                         far is in its worktree; tell it how to go on with worker_send"
+                        .to_owned(),
+                    (false, false, Some(answer)) => format!("failed; its last words:\n{answer}"),
+                    (false, false, None) => {
+                        "failed without a word; read its transcript".to_owned()
+                    }
                 };
                 self.state.news.retain(|news| news.worker != id);
                 self.add_news(News { worker: id, text }, now_ms);

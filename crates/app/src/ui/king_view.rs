@@ -12,7 +12,9 @@
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::prelude::*;
-use gpui_kit::{div, AnyElement, ClickEvent, Context, Div, FontWeight, SharedString, Stateful};
+use gpui_kit::{
+    div, img, AnyElement, ClickEvent, Context, Div, FontWeight, ObjectFit, SharedString, Stateful,
+};
 use leon_core::AgentId;
 use leon_king::coordinator::{Open, Target, WorkerState};
 use leon_king::history::Past;
@@ -86,6 +88,7 @@ pub(super) fn worker_activity(state: WorkerState) -> Activity {
         WorkerState::Asking => Activity::NeedsYou,
         WorkerState::Done => Activity::TurnOver,
         WorkerState::Failed => Activity::Failed,
+        WorkerState::Paused => Activity::Waiting,
         WorkerState::Stopped | WorkerState::Released => Activity::Off,
     }
 }
@@ -97,6 +100,7 @@ fn state_word(state: WorkerState) -> &'static str {
         WorkerState::Asking => "ASKS",
         WorkerState::Done => "DONE",
         WorkerState::Failed => "FAILED",
+        WorkerState::Paused => "STOPPED, WAITS",
         WorkerState::Stopped => "STOPPED",
         WorkerState::Released => "TAKEN OVER",
     }
@@ -137,6 +141,21 @@ fn column() -> Div {
         .min_w_0()
         .flex()
         .flex_col()
+}
+
+/// The frames of the spinner of a turn in flight.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// How long one frame of the spinner shows.
+pub(super) const SPIN: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The spinner's frame now: the clock picks it, so every spinner on screen
+/// turns together, and the view only has to be drawn again.
+fn spinner_frame() -> &'static str {
+    let ticks = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() / SPIN.as_millis());
+    SPINNER[(ticks % SPINNER.len() as u128) as usize]
 }
 
 /// How a button looks.
@@ -336,6 +355,7 @@ impl Shell {
                     .bg(c.surface)
                     .flex()
                     .flex_col()
+                    .children(self.king_running(status, c, cx))
                     .child(
                         match ui
                             .open
@@ -418,6 +438,20 @@ impl Shell {
     ) -> AnyElement {
         let key = key_of(target);
         let worker = matches!(target, Target::Worker(_));
+        let since = match target {
+            Target::Brain => self
+                .king_ui
+                .status
+                .as_ref()
+                .and_then(|status| status.brain.busy_since_ms),
+            Target::Worker(id) => self.king_ui.status.as_ref().and_then(|status| {
+                status
+                    .workers
+                    .iter()
+                    .find(|worker| worker.id == id)
+                    .and_then(|worker| worker.conversation.busy_since_ms)
+            }),
+        };
         let (scroll, busy, agent) = match target {
             Target::Brain => (
                 &self.king_ui.scroll,
@@ -471,11 +505,17 @@ impl Shell {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(activity_dot(Activity::Working, c))
+                    // It turns while the turn goes on, and says for how long.
+                    .child(mono(spinner_frame()).text_color(c.signal))
                     .child(
                         mono(if worker { "WORKING" } else { "KING IS WORKING" })
                             .text_color(c.text_muted),
-                    ),
+                    )
+                    .children(since.map(|since| {
+                        let now = (self.options.now)().timestamp_millis().max(0) as u64;
+                        mono(span((now.saturating_sub(since) / 1000) as i64))
+                            .text_color(c.text_faint)
+                    })),
             );
         }
         div()
@@ -924,6 +964,7 @@ impl Shell {
             .border_1()
             .border_color(c.elevated_border)
             .bg(c.surface)
+            .children(self.king_attached(Target::Brain, c, cx))
             .children(self.king_ui.input.as_ref().map(|input| {
                 div()
                     .debug_selector(|| "king-input".into())
@@ -993,6 +1034,199 @@ impl Shell {
                     .child(cards),
             )
             .into_any_element()
+    }
+
+    /// What turns left running (a server, a watcher), over the right
+    /// column, each with whose it is, since when, and the way to stop it.
+    fn king_running(
+        &self,
+        status: &Status,
+        c: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if status.running.is_empty() {
+            return None;
+        }
+        let now = (self.options.now)().timestamp_millis().max(0) as u64;
+        let mut rows = div()
+            .debug_selector(|| "king-running".into())
+            .flex_none()
+            .px(px(12.))
+            .py(px(8.))
+            .border_b_1()
+            .border_color(c.border)
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(led(c.success))
+                    .child(
+                        mono(format!("RUNNING {}", status.running.len())).text_color(c.text_muted),
+                    ),
+            );
+        for process in &status.running {
+            let pid = process.pid;
+            let whose = match process.of {
+                Target::Brain => "KING".to_owned(),
+                Target::Worker(id) => format!("#{id}"),
+            };
+            rows = rows.child(
+                div()
+                    .debug_selector(move || format!("king-running-{pid}"))
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_family(fonts::mono())
+                                    .text_size(metrics::TEXT_SMALL())
+                                    .text_color(c.text)
+                                    .child(process.command.clone()),
+                            )
+                            .child(
+                                mono(format!(
+                                    "{whose} · PID {pid} · {}",
+                                    span((now.saturating_sub(process.since_ms) / 1000) as i64)
+                                ))
+                                .text_color(c.text_faint),
+                            ),
+                    )
+                    .child(
+                        button(format!("king-running-stop-{pid}"), "STOP", Look::Danger, c)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.king_stop_process(pid, cx);
+                            })),
+                    ),
+            );
+        }
+        Some(rows.into_any_element())
+    }
+
+    /// The files attached to what is said next to `target`, over its field:
+    /// an image as a thumbnail, any other file as its name, each with the
+    /// button that takes it off.
+    fn king_attached(
+        &self,
+        target: Target,
+        c: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let files = self
+            .king_ui
+            .attached
+            .get(&target)
+            .filter(|files| !files.is_empty())?;
+        let key = key_of(target);
+        let hover = c.surface_2;
+        let mut row = div()
+            .debug_selector({
+                let key = key.clone();
+                move || format!("king-attached-{key}")
+            })
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_wrap()
+            .gap(px(6.));
+        for (place, path) in files.iter().enumerate() {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            let image = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
+                        .contains(&ext.to_ascii_lowercase().as_str())
+                });
+            let gone = path.clone();
+            row = row.child(
+                div()
+                    .debug_selector({
+                        let key = key.clone();
+                        move || format!("king-attached-{key}-{place}")
+                    })
+                    .flex_none()
+                    .max_w(px(220.))
+                    .h(px(40.))
+                    .pl(px(4.))
+                    .pr(px(2.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .rounded(metrics::RADIUS())
+                    .border_1()
+                    .border_color(c.border)
+                    .bg(c.background)
+                    .child(if image {
+                        img(path.clone())
+                            .flex_none()
+                            .size(px(32.))
+                            .rounded(px(2.))
+                            .object_fit(ObjectFit::Cover)
+                            .into_any_element()
+                    } else {
+                        div()
+                            .flex_none()
+                            .size(px(32.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon(IconName::File, px(14.), c.text_muted))
+                            .into_any_element()
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(metrics::TEXT_SMALL())
+                            .text_color(c.text_muted)
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "king-attached-remove-{key}-{place}"
+                            )))
+                            .debug_selector({
+                                let key = key.clone();
+                                move || format!("king-attached-remove-{key}-{place}")
+                            })
+                            .flex_none()
+                            .size(px(20.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(metrics::RADIUS())
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(hover))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                if let Some(files) = this.king_ui.attached.get_mut(&target) {
+                                    files.retain(|file| *file != gone);
+                                }
+                                this.king_focus_field(target, window, cx);
+                                cx.notify();
+                            }))
+                            .child(icon(IconName::X, px(11.), c.text_faint)),
+                    ),
+            );
+        }
+        Some(row.into_any_element())
     }
 
     /// The button that attaches files to what is said to `target`.
@@ -1462,6 +1696,7 @@ impl Shell {
                     .flex_col()
                     .gap(px(8.))
                     .children(self.king_questions(target, &worker.conversation.questions, c, cx))
+                    .children(self.king_attached(target, c, cx))
                     .child(
                         div()
                             .debug_selector(move || format!("king-worker-composer-{id}"))
@@ -1881,6 +2116,7 @@ mod tests {
             mode: None,
             session_id: None,
             busy: false,
+            busy_since_ms: None,
             queued: 0,
             questions: Vec::new(),
             cost_usd: 0.0,

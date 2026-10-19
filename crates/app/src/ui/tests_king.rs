@@ -533,37 +533,54 @@ fn king_field(h: &Harness, cx: &mut TestAppContext) -> String {
 }
 
 #[gpui_kit::test]
-fn an_image_on_the_clipboard_is_pasted_as_a_file_king_opens(cx: &mut TestAppContext) {
-    let (h, _end) = with_conversation(cx, json!([]));
+fn an_image_on_the_clipboard_is_attached_and_sent_as_a_file_king_opens(cx: &mut TestAppContext) {
+    let (h, end) = with_conversation(cx, json!([]));
     *h.clip_image.borrow_mut() = Some(crate::clip_image::ClipImage {
         bytes: vec![137, 80, 78, 71],
         extension: "png",
     });
     h.type_text("Look at this", cx);
     h.press_chord("cmd-v", "ctrl-v", cx);
-    let said = king_field(&h, cx);
-    let path = said
-        .strip_prefix("Look at this ")
-        .unwrap_or_else(|| panic!("the path follows what was written: {said:?}"));
-    assert!(
-        path.starts_with(&*h.attachments.path().to_string_lossy()),
-        "{path}"
-    );
-    assert!(path.ends_with(".png"), "{path}");
-    assert_eq!(std::fs::read(path).unwrap(), [137, 80, 78, 71]);
+    // The field keeps the words; the image is shown over it.
+    assert_eq!(king_field(&h, cx), "Look at this");
+    assert!(h.shows_dynamic("king-attached-brain-0".into(), cx));
+    let path = h.shell(cx, |s| s.king_ui.attached[&Target::Brain][0].clone());
+    assert!(path.starts_with(h.attachments.path()), "{path:?}");
+    assert_eq!(std::fs::read(&path).unwrap(), [137, 80, 78, 71]);
+    // Sent with the words, as a path to open; then gone from over the field.
+    h.press("enter", cx);
+    let asked = serve(&h, &end, cx, |_| Value::Null);
+    let [Request::Say { text }] = asked.as_slice() else {
+        panic!("{asked:?}");
+    };
+    assert!(text.starts_with("Look at this\n\nAttached"), "{text}");
+    assert!(text.contains(&*path.to_string_lossy()), "{text}");
+    assert!(!h.shows_dynamic("king-attached-brain-0".into(), cx));
 }
 
 #[gpui_kit::test]
-fn attached_files_are_written_as_their_paths(cx: &mut TestAppContext) {
-    let (h, _end) = with_conversation(cx, json!([]));
+fn attached_files_are_shown_can_be_taken_off_and_are_sent(cx: &mut TestAppContext) {
+    let (h, end) = with_conversation(cx, json!([]));
     *h.picked_files.borrow_mut() = vec![
         std::path::PathBuf::from("/home/ada/spec.pdf"),
-        std::path::PathBuf::from("/home/ada/my notes.md"),
+        std::path::PathBuf::from("/home/ada/notes.md"),
     ];
     h.mouse_on("king-attach-brain".into(), gpui_kit::MouseButton::Left, cx);
+    assert!(h.shows_dynamic("king-attached-brain-1".into(), cx));
+    h.mouse_on(
+        "king-attached-remove-brain-0".into(),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
+    // Nothing written: the files alone are sent.
+    h.press("enter", cx);
+    let asked = serve(&h, &end, cx, |_| Value::Null);
     assert_eq!(
-        king_field(&h, cx),
-        "/home/ada/spec.pdf '/home/ada/my notes.md'"
+        asked,
+        [Request::Say {
+            text: "Look at the attached files.\n\nAttached (open each path):\n- /home/ada/notes.md"
+                .into()
+        }]
     );
 }
 
@@ -588,5 +605,27 @@ fn what_is_dictated_is_written_in_kings_field(cx: &mut TestAppContext) {
         [Request::Say {
             text: "revisa los tests".into()
         }]
+    );
+}
+
+#[gpui_kit::test]
+fn what_a_turn_left_running_is_listed_and_stopped(cx: &mut TestAppContext) {
+    let (h, end) = with_conversation(cx, json!([]));
+    let mut now = status(Some(2), json!([]));
+    now["running"] = json!([{
+        "pid": 4242, "command": "python3 app/server.py --port 8790",
+        "of": "brain", "since_ms": 0,
+    }]);
+    tell_status(&end, now);
+    h.settle(cx);
+    assert!(h.shows_dynamic("king-running-4242".into(), cx));
+    h.mouse_on(
+        "king-running-stop-4242".into(),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
+    assert_eq!(
+        serve(&h, &end, cx, |_| Value::Null),
+        [Request::StopProcess { pid: 4242 }]
     );
 }

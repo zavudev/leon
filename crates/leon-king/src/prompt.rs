@@ -59,7 +59,10 @@ pub fn king(config: &Config, now: &Now<'_>) -> String {
            left. Then summarise for the person what the worker found or did.\n\
          * You are woken with news of your workers when they finish, fail or ask something: \
            do not wait or poll for them. Answer their questions with `worker_answer`, tell \
-           them more with `worker_send`, read what they did with `worker_transcript`.\n\
+           them more with `worker_send`, read what they did with `worker_transcript`. \
+           Answer a permission with `allow`, `always` or `deny` (words, never ids like `d.2`): \
+           a denial ends a Codex worker's turn. Give `always` to what a worker does in its own \
+           worktree.\n\
          * Check a worker's work before you call it done: read its diff (`worktree_diff`), \
            run the project's checks through a worker if they are long.\n\
          * Keep what should outlive this conversation (decisions, conventions, what you \

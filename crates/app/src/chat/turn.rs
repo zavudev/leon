@@ -55,6 +55,10 @@ pub trait Transport: Send {
     fn close_input(&mut self);
     /// Ends it now.
     fn kill(&mut self);
+    /// Its process id on this computer, when it runs here.
+    fn pid(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Starts processes.
@@ -149,6 +153,11 @@ impl Turn {
     }
 
     /// Ends the process now, whatever it is doing.
+    /// The agent's process id on this computer, when it runs here.
+    pub fn pid(&self) -> Option<u32> {
+        self.transport.pid()
+    }
+
     pub fn kill(&mut self) {
         self.transport.kill();
     }
@@ -197,6 +206,10 @@ struct PipedTransport {
 }
 
 impl Transport for PipedTransport {
+    fn pid(&self) -> Option<u32> {
+        self.child.lock().ok().map(|child| child.id())
+    }
+
     fn write(&mut self, line: &str) -> io::Result<()> {
         let input = self
             .input

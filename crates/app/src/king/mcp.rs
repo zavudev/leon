@@ -273,9 +273,11 @@ pub fn tool_list() -> Value {
         ),
         tool(
             "worker_answer",
-            "Answer a question a worker waits on. A permission takes `choice` (allow, always, \
-             deny, or a choice's id) and may take `text` as the reason; options take `choice` \
-             (a label) or `text`; a plan takes `approve` and may take `text`.",
+            "Answer a question a worker waits on. A permission takes `choice`: `allow` (this \
+             once), `always` or `deny`, as words, never an agent's id such as `d.2` (the question \
+             says which id does what; a wrong one denies, and a Codex worker denied ends its \
+             turn). `text` is a reason, read only with a denial. Options take `choice` (a label) \
+             or `text`; a plan takes `approve` and may take `text`.",
             json!({
                 "worker": worker.clone(),
                 "question": { "type": "string" },

@@ -54,10 +54,12 @@ the main pane:
   closes the view when King is not working.
 * **Images, files and dictation.** An image pasted into King's field
   (Ctrl+V, ⌘V on macOS) is kept as a file in `king/attachments/` of Leon's
-  data folder and its path is written in the field, for King, and any
-  worker King passes it to, to open. On Linux the image is read with
+  data folder and shown over the field as a thumbnail (× takes it off); it
+  is sent with the words as a path, for King, and any worker King passes
+  it to, to open. On Linux the image is read with
   `wl-paste` (Wayland) or `xclip` (X11), because the toolkit does not see
-  images there. The paperclip attaches files the same way, as their paths.
+  images there. The paperclip attaches files the same way: shown
+  by name over the field, sent as their paths.
   DICTATE uses the same microphone and speech model as the conversations
   (choose a model with `/voice` in one of them, or in the settings); Enter
   ends the dictation, Escape drops it, and what was said is written in the
@@ -97,6 +99,13 @@ place, and TAKE IT UP AGAIN continues it: the agent's own session goes on,
 and the conversation it replaces is put away in turn (`leon king history`,
 `leon king resume <n>`). Each keeps its last 400 entries, in
 `king/history/` in Leon's data folder.
+
+**What a turn leaves running.** An agent may start a program that outlives
+its answer (a development server, a watcher). Its turn is over once it has
+said its result, even while its process goes on; RUNNING, over the right
+column, lists what such turns left running (the command, whose turn, since
+when) with STOP. A turn in flight shows a spinner and for how long it has
+gone on.
 
 The sidebar's row shows how King stands when it is not on screen: a dot
 while King or a worker works, the waiting dot when one of them asks you

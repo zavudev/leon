@@ -66,10 +66,18 @@ pub fn read(cx: &App) -> Option<ClipImage> {
     None
 }
 
+/// A tool that reads the clipboard: its program, the arguments that list
+/// the types, and the arguments that print one type.
+type Tool = (
+    &'static str,
+    &'static [&'static str],
+    fn(&str) -> Vec<String>,
+);
+
 /// Asks `wl-paste` (Wayland) or `xclip` (X11) for the clipboard's image.
 fn read_with_tool() -> Option<ClipImage> {
     let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let (program, list, take): (&str, &[&str], fn(&str) -> Vec<String>) = if wayland {
+    let (program, list, take): Tool = if wayland {
         ("wl-paste", &["--list-types"], |mime| {
             vec!["--no-newline".into(), "--type".into(), mime.into()]
         })

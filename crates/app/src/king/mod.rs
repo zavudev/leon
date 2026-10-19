@@ -19,6 +19,8 @@
 
 #[cfg(unix)]
 pub mod client;
+#[cfg(unix)]
+pub mod linger;
 pub mod link;
 #[cfg(unix)]
 pub mod mcp;

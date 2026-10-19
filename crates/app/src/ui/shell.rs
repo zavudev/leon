@@ -169,6 +169,13 @@ pub type OpenUrl = Rc<dyn Fn(&mut App, &str)>;
 /// Shows the folder picker and says what was chosen.
 pub type PickFolder = Rc<dyn Fn(&mut App) -> Task<Picked>>;
 
+/// Reads the image on the clipboard: injected so that tests never touch the
+/// real one.
+pub type ReadClipImage = Rc<dyn Fn(&App) -> Option<crate::clip_image::ClipImage>>;
+
+/// Asks the person for files, several at once; none is an empty list.
+pub type PickFiles = Rc<dyn Fn(&mut App) -> Task<Vec<PathBuf>>>;
+
 /// The system's own picker of files, several at once: what is attached to
 /// what is said to King. Nothing chosen is an empty list.
 pub fn system_files_picker(cx: &mut App) -> Task<Vec<PathBuf>> {
@@ -327,10 +334,10 @@ pub struct Options {
     pub king: Option<Arc<dyn crate::king::link::Link>>,
     /// The image on the clipboard, for a paste into King's field: tests
     /// answer with their own.
-    pub clipboard_image: Rc<dyn Fn(&App) -> Option<crate::clip_image::ClipImage>>,
+    pub clipboard_image: ReadClipImage,
     /// Files chosen to attach to what is said to King: the system's file
     /// picker, or the tests' answer.
-    pub pick_files: Rc<dyn Fn(&mut App) -> Task<Vec<PathBuf>>>,
+    pub pick_files: PickFiles,
     /// Where pasted images are kept for King to read.
     pub attachments: PathBuf,
 }

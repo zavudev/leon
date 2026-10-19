@@ -138,6 +138,11 @@ pub enum Request {
         /// Its number.
         id: u64,
     },
+    /// End a process a turn left running ([`RunningProcess`]).
+    StopProcess {
+        /// Its id.
+        pid: u32,
+    },
     /// Whether the person is looking at King on this connection's client:
     /// while anybody is, what King's conversation shows already is not also
     /// sent to the desktop.
@@ -229,7 +234,7 @@ pub enum Notice {
     /// The state changed; this is the new one.
     Changed {
         /// King and its workers.
-        status: Status,
+        status: Box<Status>,
     },
     /// Something for the person.
     Notify {
@@ -261,6 +266,23 @@ pub struct Status {
     pub spent_today_usd: f64,
     /// The day's budget, when there is one.
     pub daily_budget_usd: Option<f64>,
+    /// What a turn of King's or of a worker left running when it ended: a
+    /// server, a watcher. Filled by the service.
+    #[serde(default)]
+    pub running: Vec<RunningProcess>,
+}
+
+/// A process a turn left running.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunningProcess {
+    /// Its id on the service's computer.
+    pub pid: u32,
+    /// Its command line.
+    pub command: String,
+    /// Whose turn started it.
+    pub of: Target,
+    /// Since when it is known to run, in milliseconds since the epoch.
+    pub since_ms: u64,
 }
 
 /// A conversation, in short.
@@ -279,6 +301,9 @@ pub struct ConversationStatus {
     pub session_id: Option<String>,
     /// In a turn.
     pub busy: bool,
+    /// When the turn in flight started, in milliseconds since the epoch.
+    #[serde(default)]
+    pub busy_since_ms: Option<u64>,
     /// What waits for the turn to end.
     pub queued: usize,
     /// The questions it waits on, with how each may be answered.
