@@ -766,8 +766,10 @@ impl Service {
                 past.reverse();
                 Ok((json!(past), Vec::new()))
             }
-            Request::PastConversation { id } => Ok((json!(self.read_archived(id)?), Vec::new())),
-            Request::ResumeConversation { id } => {
+            Request::PastConversation { conversation: id } => {
+                Ok((json!(self.read_archived(id)?), Vec::new()))
+            }
+            Request::ResumeConversation { conversation: id } => {
                 let entries = self.read_archived(id)?;
                 let (archived, effects) = self.coordinator.resume_conversation(id, entries, now)?;
                 self.keep_archived(archived);

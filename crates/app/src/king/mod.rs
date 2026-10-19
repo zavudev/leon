@@ -187,7 +187,7 @@ fn parse(arguments: &[String]) -> Result<Command, String> {
             None => Command::Ask(Request::Conversations, false),
             Some(id) => Command::Ask(
                 Request::PastConversation {
-                    id: id
+                    conversation: id
                         .parse()
                         .map_err(|_| "name the conversation by its number")?,
                 },
@@ -196,7 +196,7 @@ fn parse(arguments: &[String]) -> Result<Command, String> {
         },
         "resume" => Command::Ask(
             Request::ResumeConversation {
-                id: rest
+                conversation: rest
                     .first()
                     .and_then(|id| id.parse().ok())
                     .ok_or("name the conversation by its number")?,

@@ -132,12 +132,12 @@ pub enum Request {
     /// What a past conversation said ([`Entry`]s).
     PastConversation {
         /// Its number.
-        id: u64,
+        conversation: u64,
     },
     /// Take a past conversation up again.
     ResumeConversation {
         /// Its number.
-        id: u64,
+        conversation: u64,
     },
     /// End a process a turn left running ([`RunningProcess`]).
     StopProcess {
@@ -354,6 +354,9 @@ pub struct WorkerStatus {
     pub last_answer: Option<String>,
     /// When it last changed.
     pub updated_ms: u64,
+    /// The conversation of King's that started it.
+    #[serde(default)]
+    pub started_in: Option<u64>,
     /// The last run of its project's check.
     #[serde(default)]
     pub check: Option<Check>,
@@ -412,6 +415,24 @@ mod tests {
         };
         assert_eq!(start.job, Job::Research);
         assert_eq!(start.tier.as_deref(), Some("cheap"));
+    }
+
+    #[test]
+    fn no_request_has_a_field_named_like_the_envelopes_own() {
+        // The request is flattened into the envelope: a field `id` of its
+        // own would be read as the envelope's number.
+        for request in [
+            Request::PastConversation { conversation: 4 },
+            Request::ResumeConversation { conversation: 4 },
+        ] {
+            let line = serde_json::to_string(&Envelope {
+                id: 91,
+                request: request.clone(),
+            })
+            .unwrap();
+            let read: Envelope = serde_json::from_str(&line).unwrap();
+            assert_eq!((read.id, read.request), (91, request));
+        }
     }
 
     #[test]

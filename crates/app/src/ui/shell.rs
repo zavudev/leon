@@ -3148,7 +3148,6 @@ impl Shell {
             C::ShowUsage => self.toggle_usage(window, cx),
             C::ShowKing => self.toggle_king(window, cx),
             C::CleanUp => self.toggle_sweep(window, cx),
-            C::KingBrain => self.begin_flow(command, window, cx),
             C::KingBrain | C::KingMode => self.begin_flow(command, window, cx),
             C::ShowTasks => self.toggle_tasks(window, cx),
             C::NewTask if self.tasks_open() => self.open_create(None, window, cx),

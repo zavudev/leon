@@ -68,6 +68,19 @@ in_worktree = [
     "make", "cargo", "go", "uv", "ruff", "mypy", "tsc", "eslint", "prettier", "just",
     "chrome-devtools-axi",
 ]
+# The tools of MCP servers (Ahrefs, a database, a browser…) are allowed when
+# their names only read: a tool whose name has one of these words (split at
+# `-` and `_`) still goes to King.
+mcp_reading = true
+mcp_writes = [
+    "create", "update", "delete", "remove", "edit", "write", "set", "add", "put", "post",
+    "patch", "insert", "upsert", "drop", "truncate", "send", "reply", "forward", "invite",
+    "share", "publish", "deploy", "merge", "push", "commit", "close", "cancel", "archive",
+    "trash", "move", "rename", "upload", "import", "pay", "payment", "charge", "refund",
+    "transfer", "buy", "purchase", "subscribe", "generate", "execute", "exec", "run", "eval",
+    "call", "click", "fill", "type", "submit", "approve", "revoke", "grant", "reset",
+    "restore", "kill", "stop", "start", "trigger", "schedule",
+]
 
 # Branches nothing is ever pushed to from King's tools, besides each project's
 # own default branch, which is always protected.

@@ -19,6 +19,12 @@
 //! * anything the rules cannot see through (`$VAR`, `$(…)`, backquotes, an
 //!   unknown program, `git push`) is not routine.
 //!
+//! A tool of an MCP server (`mcp__ahrefs__site-explorer-metrics`) is routine
+//! when its name says nothing of changing, sending or spending: none of its
+//! words is one of [`Permissions::mcp_writes`] (`create`, `delete`, `send`,
+//! `pay`, `generate`…). The servers are the person's own; a tool that reads
+//! from one is what a worker was given it for.
+//!
 //! Pure: a question and a folder in, an answer or nothing out.
 
 use leon_turn::{Answer, PermissionEffect, QuestionKind};
@@ -35,6 +41,11 @@ pub struct Permissions {
     /// Programs allowed when run in the worktree: tests, builds, servers,
     /// a browser to look at what was built.
     pub in_worktree: Vec<String>,
+    /// Leon allows the tools of MCP servers whose names only read.
+    pub mcp_reading: bool,
+    /// The words of a tool's name that make it more than reading: a tool of
+    /// an MCP server with one of them goes to King.
+    pub mcp_writes: Vec<String>,
 }
 
 /// The tools of the agents that edit a file, by their lower-case names.
@@ -106,6 +117,8 @@ pub fn routine(kind: &QuestionKind, cwd: &str, rules: &Permissions) -> Option<(A
             summary
         };
         command_is_routine(command, cwd, rules)?
+    } else if rules.mcp_reading && mcp_tool_reads(&tool, &rules.mcp_writes) {
+        "a tool of an MCP server that only reads"
     } else {
         return None;
     };
@@ -125,6 +138,28 @@ pub fn routine(kind: &QuestionKind, cwd: &str, rules: &Permissions) -> Option<(A
         },
         why.to_owned(),
     ))
+}
+
+/// Whether `tool` (lower case) is an MCP server's, by the names agents give
+/// them (`mcp__server__tool`, `server.tool`, `server/tool`), and its name has
+/// none of `writes` among its words.
+fn mcp_tool_reads(tool: &str, writes: &[String]) -> bool {
+    let name = if let Some(rest) = tool.strip_prefix("mcp__") {
+        match rest.split_once("__") {
+            Some((_, name)) => name,
+            None => return false,
+        }
+    } else if let Some((server, name)) = tool.split_once(['.', '/']) {
+        if server.is_empty() || name.is_empty() {
+            return false;
+        }
+        name
+    } else {
+        return false;
+    };
+    name.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .all(|word| !writes.iter().any(|write| write == word))
 }
 
 /// The files an edit names: its summary's paths, else the `file_path`s of
@@ -462,6 +497,28 @@ mod tests {
             ..rules()
         };
         assert!(routine(&ask("edit", &format!("{CWD}/a.js")), CWD, &off).is_none());
+    }
+
+    #[test]
+    fn a_tool_of_an_mcp_server_that_only_reads_is_allowed() {
+        assert!(allowed(
+            "mcp__ahrefs__site-explorer-metrics",
+            r#"{"target":"nely.ai"}"#
+        ));
+        assert!(allowed("mcp__ahrefs__site-explorer-referring-domains", ""));
+        assert!(allowed("ahrefs.keywords-explorer-overview", ""));
+        // Changing, sending or spending goes to King.
+        assert!(!allowed("mcp__stripe__create_payment_link", ""));
+        assert!(!allowed("mcp__gmail__send_email", ""));
+        assert!(!allowed("mcp__elevenlabs__creative_generate_image", ""));
+        assert!(!allowed("mcp__github__merge_pull_request", ""));
+        assert!(!allowed("mcp__db__execute_sql", ""));
+        // A tool of no server is not one of these.
+        assert!(!allowed("webfetch", "https://x"));
+        assert!(!allowed("mcp__nothing", ""));
+        let mut off = rules();
+        off.mcp_reading = false;
+        assert!(routine(&ask("mcp__ahrefs__top-pages", ""), CWD, &off).is_none());
     }
 
     #[test]

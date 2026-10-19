@@ -278,6 +278,11 @@ pub struct Worker {
     pub started_ms: u64,
     /// When it last changed.
     pub updated_ms: u64,
+    /// The conversation of King's that started it, by number; a
+    /// conversation that went on in a new one ([`Coordinator::compact_if_long`])
+    /// takes its workers along.
+    #[serde(default)]
+    pub started_in: Option<u64>,
     /// The last run of its project's check in its worktree.
     #[serde(default)]
     pub check: Option<Check>,
@@ -434,6 +439,19 @@ impl Coordinator {
             state.brain.effort = config.brain.effort.clone();
             state.brain.mode = config.brain.mode.clone();
             state.configured = Some(config.brain.clone());
+        }
+        // Workers saved before they knew their conversation: the one that
+        // ran when they started.
+        for worker in state.workers.values_mut() {
+            if worker.started_in.is_none() {
+                worker.started_in = Some(
+                    state
+                        .past
+                        .iter()
+                        .find(|past| (past.started_ms..=past.ended_ms).contains(&worker.started_ms))
+                        .map_or(state.conversation, |past| past.id),
+                );
+            }
         }
         let mut coordinator = Self { config, state };
         let interrupted = "The turn was interrupted: Leon's service stopped.";
@@ -609,7 +627,14 @@ impl Coordinator {
         }
         let archived = self.archive(now_ms)?;
         self.state.carry = Some(history::carried(&archived.past, &archived.entries));
+        let before = self.state.conversation;
         self.state.conversation = self.next_conversation();
+        // King goes on with the same work: its workers come along.
+        for worker in self.state.workers.values_mut() {
+            if worker.started_in == Some(before) {
+                worker.started_in = Some(self.state.conversation);
+            }
+        }
         self.state.brain.transcript.push(
             Kind::Notice,
             format!(
@@ -706,6 +731,7 @@ impl Coordinator {
                         .last_answer()
                         .map(|text| transcript::cut(text, 300)),
                     updated_ms: worker.updated_ms,
+                    started_in: worker.started_in,
                     check: worker.check.clone(),
                     pull_request: worker.pull_request.clone(),
                 })
@@ -803,6 +829,7 @@ impl Coordinator {
             conversation,
             started_ms: now_ms,
             updated_ms: now_ms,
+            started_in: Some(self.state.conversation),
             check: None,
             pull_request: None,
         };

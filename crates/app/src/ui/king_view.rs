@@ -995,7 +995,32 @@ impl Shell {
     }
 
     /// The workers, as cards, newest first.
+    /// The workers of the conversation on screen (the one now, or the past
+    /// one being read), and, beside the one now, those of earlier
+    /// conversations that still work or ask.
+    fn king_shown_workers<'a>(
+        &self,
+        status: &'a Status,
+    ) -> (Vec<&'a WorkerStatus>, Vec<&'a WorkerStatus>) {
+        let viewed = self.king_ui.viewing.as_ref().map(|(past, _)| past.id);
+        let on_screen = viewed.unwrap_or(status.conversation);
+        let (mine, others): (Vec<&WorkerStatus>, Vec<&WorkerStatus>) = status
+            .workers
+            .iter()
+            .partition(|worker| worker.started_in.is_none_or(|id| id == on_screen));
+        let still = if viewed.is_some() {
+            Vec::new()
+        } else {
+            others
+                .into_iter()
+                .filter(|worker| matches!(worker.state, WorkerState::Working | WorkerState::Asking))
+                .collect()
+        };
+        (mine, still)
+    }
+
     fn king_cards(&self, status: &Status, c: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        let (mine, earlier) = self.king_shown_workers(status);
         let mut cards = div()
             .w_full()
             .min_w_0()
@@ -1003,7 +1028,15 @@ impl Shell {
             .flex()
             .flex_col()
             .gap(px(8.));
-        if status.workers.is_empty() {
+        if mine.is_empty() && self.king_ui.viewing.is_some() {
+            cards = cards.child(
+                div()
+                    .debug_selector(|| "king-no-workers".into())
+                    .text_size(metrics::TEXT_SMALL())
+                    .text_color(c.text_faint)
+                    .child("This conversation started no workers."),
+            );
+        } else if mine.is_empty() {
             cards = cards.child(
                 div()
                     .debug_selector(|| "king-no-workers".into())
@@ -1015,8 +1048,19 @@ impl Shell {
                     ),
             );
         }
-        for worker in status.workers.iter().rev() {
+        for worker in mine.into_iter().rev() {
             cards = cards.child(self.king_card(worker, c, cx));
+        }
+        if !earlier.is_empty() {
+            cards = cards.child(
+                mono("STILL WORKING, FROM EARLIER CONVERSATIONS")
+                    .debug_selector(|| "king-earlier-workers".into())
+                    .pt(px(8.))
+                    .text_color(c.text_faint),
+            );
+            for worker in earlier.into_iter().rev() {
+                cards = cards.child(self.king_card(worker, c, cx));
+            }
         }
         div()
             .flex_1()
@@ -1295,7 +1339,7 @@ impl Shell {
             .child(
                 tab(
                     "king-tab-workers",
-                    format!("WORKERS {}", status.workers.len()),
+                    format!("WORKERS {}", self.king_shown_workers(status).0.len()),
                     !history,
                 )
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {

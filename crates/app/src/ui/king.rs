@@ -1238,15 +1238,19 @@ impl Shell {
             self.king_ui.history.get_or_insert_with(Vec::new);
             self.king_ask(Request::Conversations, Asked::Conversations, cx);
         } else {
+            // A past conversation stays on screen: its workers are shown.
             self.king_ui.history = None;
-            self.king_ui.viewing = None;
         }
         cx.notify();
     }
 
     /// Shows what a past conversation said, in place of the one now.
     pub(super) fn king_view_past(&mut self, id: u64, cx: &mut Context<Self>) {
-        self.king_ask(Request::PastConversation { id }, Asked::Past(id), cx);
+        self.king_ask(
+            Request::PastConversation { conversation: id },
+            Asked::Past(id),
+            cx,
+        );
     }
 
     /// Back to the conversation now.
@@ -1262,7 +1266,11 @@ impl Shell {
             return;
         };
         let id = past.id;
-        self.king_ask(Request::ResumeConversation { id }, Asked::Resumed, cx);
+        self.king_ask(
+            Request::ResumeConversation { conversation: id },
+            Asked::Resumed,
+            cx,
+        );
     }
 
     /// Opens a worker's card: its conversation, live.
@@ -1459,6 +1467,7 @@ mod tests {
                     conversation: conversation(*last),
                     last_answer: None,
                     updated_ms: 0,
+                    started_in: None,
                     check: None,
                     pull_request: None,
                 })

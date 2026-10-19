@@ -755,3 +755,54 @@ fn a_check_cut_short_by_a_restart_is_news() {
         .1
         .contains("had its check (`make check`) cut short"));
 }
+
+#[test]
+fn a_worker_belongs_to_the_conversation_that_started_it() {
+    let mut config = config();
+    config.limits.compact_at_tokens = 1_000;
+    let mut king = Coordinator::new(config);
+    let first = king.status(0).conversation;
+    king.say("Restyle the radar", 0);
+    king.start_worker(spec("a"), 0).unwrap();
+    assert_eq!(king.worker(1).unwrap().started_in, Some(first));
+    answer(&mut king, Target::Brain, "Worker #1 does it.", 1);
+
+    king.new_conversation(10).unwrap();
+    let second = king.status(10).conversation;
+    king.start_worker(spec("b"), 10).unwrap();
+    assert_eq!(king.worker(2).unwrap().started_in, Some(second));
+    assert_eq!(king.worker(1).unwrap().started_in, Some(first));
+
+    // A conversation that goes on in a new one takes its workers along.
+    king.say("go on", 20);
+    king.event(
+        Target::Brain,
+        &TurnEvent::Usage {
+            tokens: leon_turn::Tokens {
+                input: 5_000,
+                ..Default::default()
+            },
+        },
+        21,
+    );
+    answer(&mut king, Target::Brain, "Fine.", 22);
+    king.compact_if_long(23).expect("put away");
+    let third = king.status(23).conversation;
+    assert_eq!(king.worker(2).unwrap().started_in, Some(third));
+    assert_eq!(king.worker(1).unwrap().started_in, Some(first));
+
+    // Saved before workers knew theirs: the one that ran when they started.
+    let mut state = king.state().clone();
+    for worker in state.workers.values_mut() {
+        worker.started_in = None;
+    }
+    let (king, _) = Coordinator::restored(Config::default(), state, 30);
+    let past_of = |at: u64| {
+        king.past()
+            .iter()
+            .find(|past| (past.started_ms..=past.ended_ms).contains(&at))
+            .map(|past| past.id)
+    };
+    assert_eq!(king.worker(1).unwrap().started_in, past_of(0));
+    assert_eq!(past_of(0), Some(first));
+}

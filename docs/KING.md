@@ -100,6 +100,12 @@ and the conversation it replaces is put away in turn (`leon king history`,
 `leon king resume <n>`). Each keeps its last 400 entries, in
 `king/history/` in Leon's data folder.
 
+Workers belong to the conversation that started them. WORKERS shows the
+ones of the conversation on screen: the current one, or a past one you are
+reading. Below them it lists the workers of earlier conversations that are
+still working or asking. A conversation that goes on in a new one because it
+grew too long takes its workers along.
+
 **What a turn leaves running.** An agent may start a program that outlives
 its answer (a development server, a watcher). Its turn is over once it has
 said its result, even while its process goes on; RUNNING, over the right
@@ -193,7 +199,10 @@ both down:
   allowed without waking King; the worker's transcript says "Leon allowed
   it". A push, a write out of the worktree, a `git reset --hard`, or a
   command Leon cannot read for sure (`$VAR`, `$(…)`, an unknown program)
-  still goes to King. The programs are lists in `[permissions]`, and
+  still goes to King. A tool of an MCP server (Ahrefs, a database, a
+  browser) is allowed when its name only reads. A name with a word of
+  `mcp_writes` in it (`create`, `delete`, `send`, `pay`, `generate`…) still
+  goes to King. The programs and the words are lists in `[permissions]`;
   `routine = false` sends every question to King.
 * **A conversation that grew too long goes on in a new one.** When a turn
   of King's reads `[limits] compact_at_tokens` or more (600k by default),
@@ -340,7 +349,7 @@ claude = "auto"
 | `[jobs]` | The tier each kind of job (`code`, `research`, `plan`) goes to, and whether it is `strict` (only ever that tier) | code: standard, research: cheap, plan: planning (strict) |
 | `[guards]` | Branches nothing is pushed to, besides each project's default branch; `verify_before_pr`: a pull request needs a passed check of its last commit | `main`, `master`; on |
 | `[checks]` | The command that checks each project, by name, run with `sh -c` in a worktree | read from each project's files |
-| `[permissions]` | Which worker questions Leon answers itself: `routine`, the `read_only` programs and the `in_worktree` ones | on, with lists of common tools |
+| `[permissions]` | Which worker questions Leon answers itself: `routine`, the `read_only` programs and the `in_worktree` ones, and MCP tools that only read (`mcp_reading`, `mcp_writes`) | on, with lists of common tools and words |
 | `[modes]` | The permission mode of each agent's workers; `""` is the agent's own | codex `auto`, claude `acceptEdits`: a worker edits in its own worktree without asking |
 
 `leon king config` prints the configuration in force (your file over the

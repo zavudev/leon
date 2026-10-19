@@ -483,7 +483,7 @@ fn past_conversations_are_listed_read_and_taken_up_again(cx: &mut TestAppContext
             "prompt",
             "What is the state of api?"
         )])),
-        [Request::PastConversation { id: 0 }]
+        [Request::PastConversation { conversation: 0 }]
     );
     assert!(h.shows("king-past-bar", cx));
     assert!(h.shows_dynamic("king-prompt-brain-0".into(), cx));
@@ -492,7 +492,7 @@ fn past_conversations_are_listed_read_and_taken_up_again(cx: &mut TestAppContext
         Request::Conversations => json!([]),
         _ => Value::Null,
     });
-    assert_eq!(asked[0], Request::ResumeConversation { id: 0 });
+    assert_eq!(asked[0], Request::ResumeConversation { conversation: 0 });
     assert!(
         !h.shows("king-past-bar", cx),
         "the one taken up is the one now"
@@ -658,4 +658,42 @@ fn a_workers_check_and_its_pull_requests_ci_show_on_its_card(cx: &mut TestAppCon
     );
     // The click opened the pull request, not the worker.
     assert_eq!(h.main_kind(cx), "king");
+}
+
+#[gpui_kit::test]
+fn the_workers_shown_are_the_conversations_on_screen(cx: &mut TestAppContext) {
+    let mut earlier = worker(1, "done", None);
+    earlier["started_in"] = json!(0);
+    let mut busy = worker(2, "working", None);
+    busy["started_in"] = json!(0);
+    let mut now = worker(3, "done", None);
+    now["started_in"] = json!(1);
+    let workers = json!([earlier, busy, now]);
+    let (h, end) = with_conversation(cx, workers.clone());
+    let mut fresh = status(Some(2), workers);
+    fresh["conversation"] = json!(1);
+    tell_status(&end, fresh);
+    h.settle(cx);
+    serve(&h, &end, cx, |_| json!([]));
+    // The one now's, and an earlier one's that still works, apart.
+    assert!(h.shows_dynamic("king-card-3".into(), cx));
+    assert!(!h.shows_dynamic("king-card-1".into(), cx));
+    assert!(h.shows_dynamic("king-card-2".into(), cx));
+    assert!(h.shows("king-earlier-workers", cx));
+
+    // Reading the past conversation: its workers, and the tab stays on it.
+    let past = json!([{
+        "id": 0, "title": "Restyle", "started_ms": 0, "ended_ms": 0,
+        "agent": "claude", "model": "opus", "session_id": "s", "entries": 1,
+    }]);
+    h.mouse_on("king-tab-history".into(), gpui_kit::MouseButton::Left, cx);
+    serve(&h, &end, cx, |_| past.clone());
+    h.mouse_on("king-past-0".into(), gpui_kit::MouseButton::Left, cx);
+    serve(&h, &end, cx, |_| entries(&[(0, "prompt", "Restyle")]));
+    h.mouse_on("king-tab-workers".into(), gpui_kit::MouseButton::Left, cx);
+    h.settle(cx);
+    assert!(h.shows("king-past-bar", cx));
+    assert!(h.shows_dynamic("king-card-1".into(), cx));
+    assert!(h.shows_dynamic("king-card-2".into(), cx));
+    assert!(!h.shows_dynamic("king-card-3".into(), cx));
 }
