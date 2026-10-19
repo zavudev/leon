@@ -1678,7 +1678,9 @@ there is no credential at all; an expired sign-in says what to do (run the
 agent once so it refreshes its own sign-in: Leon never does); a 403 that names a
 missing scope says the sign-in lacks permission to read usage; an account on an
 API key says that usage limits do not apply to API-key billing; an opencode key
-with no Go subscription says so, and a rejected key says that.
+with no Go subscription says so, an opencode Console workspace without Go says
+it pays from Zen credits (no limit to read; the balance is on the console), and
+a rejected key says that.
 
 `⇧⌘U` (`Ctrl+Shift+Alt+U`), a click on the bar and the palette's **Show usage**
 open the usage view: one row per agent and machine with `Resets in …`, a labelled
@@ -1704,7 +1706,7 @@ SSH machine's limits are the ones of that machine's account).
 | --- | --- | --- | --- |
 | Codex | its own session log | the `rate_limits` of the `token_count` events in `~/.codex/sessions` (five-hour and weekly windows, plan) | none |
 | Claude Code | Anthropic's usage endpoint | the sign-in token Claude Code already holds, sent to `api.anthropic.com` over HTTPS | on this computer only, **on by default**; turn it off in Settings ▸ Usage |
-| opencode | the Go usage endpoint | the Go API key opencode stored (the inline `OPENCODE_AUTH_CONTENT`, `auth.json`, OpenCode 2's credential database opened read only, or `OPENCODE_API_KEY`, in Orca's order), sent to `opencode.ai` over HTTPS | on this computer only, **on by default**; turn it off in Settings ▸ Usage |
+| opencode | the Go usage endpoint | the Go API key opencode stored (the inline `OPENCODE_AUTH_CONTENT`, `auth.json`, OpenCode 2's credential database opened read only, or `OPENCODE_API_KEY`, in Orca's order) or, without one, the OpenCode Console sign-in `/connect` made (the same places, entry `opencode`; an expired one is left for opencode to renew), sent to `opencode.ai` over HTTPS. A Zen workspace, paid from credits, has no limit to read and says so | on this computer only, **on by default**; turn it off in Settings ▸ Usage |
 | Codex, fresher | OpenAI's backend usage endpoint | used only when the session log is more than ten minutes old: the ChatGPT sign-in Codex holds (`~/.codex/auth.json`, read only), sent to `chatgpt.com` over HTTPS; it starts no session and writes nothing | on this computer only, **on by default**; **implemented from Orca's reference, unverified against the live service** |
 | Grok | the billing endpoint of its CLI | the sign-in in `~/.grok/auth.json`, sent to `cli-chat-proxy.grok.com`; weekly credits, or the monthly budget | on this computer only, **on by default**; **unverified against the live service** |
 | Cursor | the dashboard's usage summary | the session `cursor-agent` holds (macOS keychain, or its `auth.json`) or, failing a live one, the Cursor IDE's own session (`state.vscdb`, opened read only), sent to `cursor.com` as the dashboard's session cookie; monthly plan, two model pools, on-demand | on this computer only, **on by default**; **unverified against the live service** |

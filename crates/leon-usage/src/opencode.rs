@@ -1,10 +1,14 @@
 //! opencode: the limits of the opencode Go subscription.
 //!
 //! opencode itself keeps no limits on disk, and the providers it fronts have
-//! none to read. Only the opencode Go subscription has a usage endpoint, called
-//! with the API key opencode stored when its owner connected the account
-//! (`auth.json`, entry `opencode-go`). That reads a credential, so it is an
-//! opt-in source; this module holds the pure parts.
+//! none to read. Its own service has two plans: Zen, paid from prepaid credits
+//! and with no limit to read, and the Go subscription, whose usage endpoint
+//! answers to either of two credentials opencode stores. One is the Go API key
+//! (`auth.json` or the credential table, entry `opencode-go`); the other is the
+//! sign-in to the OpenCode Console (entry `opencode`), which OpenCode 2 makes
+//! with `/connect` and which covers both plans of the workspace. Reading either
+//! reads a credential, so it is an opt-in source; this module holds the pure
+//! parts.
 
 use leon_core::AgentId;
 use serde_json::Value;
@@ -51,20 +55,76 @@ pub fn auth_reason(status: u16, body: &str) -> Reason {
 /// first and the newest next, each `value` a JSON text `{"type":"key","key":..}`.
 /// `data_dir` is opencode's data folder; `db_override` its `OPENCODE_DB`.
 pub fn database_key(data_dir: &std::path::Path, db_override: Option<&str>) -> Option<Secret> {
-    let mut paths = Vec::new();
+    database_paths(data_dir, db_override)
+        .iter()
+        .find_map(|path| from_database(path, "opencode-go", go_row))
+}
+
+/// The console sign-in from the same table, rows of the `opencode`
+/// integration: a token, or why the stored one cannot be used.
+pub fn database_console(
+    data_dir: &std::path::Path,
+    db_override: Option<&str>,
+    now: i64,
+) -> Option<Result<Secret, Reason>> {
+    database_paths(data_dir, db_override)
+        .iter()
+        .find_map(|path| from_database(path, "opencode", |value| console_token(value, now)))
+}
+
+/// The console sign-in from `auth.json` (`{"opencode":{..}}`).
+pub fn parse_console(json: &str, now: i64) -> Option<Result<Secret, Reason>> {
+    let value: Value = serde_json::from_str(json).ok()?;
+    console_token(value.get("opencode")?, now)
+}
+
+/// What one stored console credential holds. An OAuth sign-in past its
+/// `expires` (milliseconds) is one only opencode can renew: its refresh token
+/// is single use, and spending it here would sign opencode out. A key (a
+/// service account's, or a Zen key) never expires.
+pub fn console_token(value: &Value, now: i64) -> Option<Result<Secret, Reason>> {
+    let (field, expires) = match value.get("type")?.as_str()? {
+        "oauth" => ("access", value.get("expires").and_then(Value::as_i64)),
+        "key" | "api" => ("key", None),
+        _ => return None,
+    };
+    let token = value.get(field)?.as_str()?.trim();
+    if token.is_empty() {
+        return None;
+    }
+    Some(match expires {
+        Some(ms) if ms <= now.saturating_mul(1000) => Err(Reason::SessionExpired),
+        _ => Ok(Secret::new(token)),
+    })
+}
+
+fn go_row(value: &Value) -> Option<Secret> {
+    if value.get("type").and_then(Value::as_str) != Some("key") {
+        return None;
+    }
+    let key = value.get("key")?.as_str()?.trim();
+    (!key.is_empty()).then(|| Secret::new(key))
+}
+
+fn database_paths(
+    data_dir: &std::path::Path,
+    db_override: Option<&str>,
+) -> Vec<std::path::PathBuf> {
     match db_override.map(str::trim).filter(|path| !path.is_empty()) {
-        Some(":memory:") => return None,
+        Some(":memory:") => Vec::new(),
         Some(path) => {
             let path = std::path::Path::new(path);
-            paths.push(if path.is_absolute() {
+            vec![if path.is_absolute() {
                 path.to_path_buf()
             } else {
                 data_dir.join(path)
-            });
+            }]
         }
         None => {
-            let mut found: Vec<_> = std::fs::read_dir(data_dir)
-                .ok()?
+            let Ok(entries) = std::fs::read_dir(data_dir) else {
+                return Vec::new();
+            };
+            let mut found: Vec<_> = entries
                 .flatten()
                 .filter(|entry| {
                     let name = entry.file_name().to_string_lossy().into_owned();
@@ -78,13 +138,16 @@ pub fn database_key(data_dir: &std::path::Path, db_override: Option<&str>) -> Op
                 .map(|entry| entry.path())
                 .collect();
             found.sort();
-            paths = found;
+            found
         }
     }
-    paths.iter().find_map(|path| key_from_database(path))
 }
 
-fn key_from_database(path: &std::path::Path) -> Option<Secret> {
+fn from_database<T>(
+    path: &std::path::Path,
+    integration: &str,
+    parse: impl Fn(&Value) -> Option<T>,
+) -> Option<T> {
     use rusqlite::OpenFlags;
     let connection = rusqlite::Connection::open_with_flags(
         path,
@@ -98,17 +161,15 @@ fn key_from_database(path: &std::path::Path) -> Option<Secret> {
         )
         .ok()?;
     let rows = statement
-        .query_map(["opencode-go"], |row| row.get::<_, String>(0))
+        .query_map([integration], |row| row.get::<_, String>(0))
         .ok()?;
-    let key = rows.flatten().find_map(|value| {
+    // Bound so the rows end before the statement they borrow.
+    #[allow(clippy::let_and_return)]
+    let found = rows.flatten().find_map(|value| {
         let value: Value = serde_json::from_str(&value).ok()?;
-        if value.get("type").and_then(Value::as_str) != Some("key") {
-            return None;
-        }
-        let key = value.get("key")?.as_str()?.trim();
-        (!key.is_empty()).then(|| Secret::new(key))
+        parse(&value)
     });
-    key
+    found
 }
 
 fn meter(kind: WindowKind, raw: Option<&Value>, length: i64) -> Option<UsageWindow> {
@@ -274,6 +335,62 @@ mod tests {
         assert!(database_key(&rows, None).is_none());
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&rows).ok();
+    }
+
+    #[test]
+    fn the_console_sign_in_is_its_token_until_it_expires() {
+        let now = 1_790_000_000;
+        let oauth = |expires: i64| serde_json::json!({"type":"oauth","access":" tok ","refresh":"r","expires":expires});
+        let ahead = console_token(&oauth(now * 1000 + 60_000), now).unwrap();
+        assert_eq!(ahead.unwrap().expose(), "tok");
+        assert_eq!(
+            console_token(&oauth(now * 1000), now).unwrap().err(),
+            Some(Reason::SessionExpired)
+        );
+        // A key, a service account's or a Zen one, has no expiry.
+        for value in [
+            serde_json::json!({"type":"key","key":"oc_sk_1"}),
+            serde_json::json!({"type":"api","key":"oc_sk_1"}),
+        ] {
+            assert_eq!(
+                console_token(&value, now).unwrap().unwrap().expose(),
+                "oc_sk_1"
+            );
+        }
+        for value in [
+            serde_json::json!({"type":"oauth","access":""}),
+            serde_json::json!({"type":"wellknown","key":"x"}),
+            serde_json::json!({}),
+        ] {
+            assert!(console_token(&value, now).is_none(), "{value}");
+        }
+        let file =
+            r#"{"opencode-go":{"type":"api","key":"go"},"opencode":{"type":"api","key":"zen"}}"#;
+        assert_eq!(parse_console(file, now).unwrap().unwrap().expose(), "zen");
+        assert!(parse_console(r#"{"opencode-go":{"type":"api","key":"go"}}"#, now).is_none());
+    }
+
+    #[test]
+    fn the_console_sign_in_is_read_from_the_credential_table() {
+        let dir = scratch("console");
+        database(
+            &dir,
+            "opencode.db",
+            &[
+                (
+                    "opencode",
+                    r#"{"type":"oauth","access":"access-1","refresh":"r","expires":4000000000000}"#,
+                    1,
+                    10,
+                ),
+                ("mcp_1", r#"{"type":"oauth","access":"mcp"}"#, 1, 20),
+            ],
+        );
+        let found = database_console(&dir, None, 1_790_000_000).unwrap();
+        assert_eq!(found.unwrap().expose(), "access-1");
+        // The console row is not a Go key.
+        assert!(database_key(&dir, None).is_none());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

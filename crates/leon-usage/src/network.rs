@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use leon_core::AgentId;
 
-use crate::model::{AgentUsage, Reason};
+use crate::model::{AgentUsage, Reason, State};
 use crate::secret::Secret;
 use crate::{claude, codex, cursor, grok, kimi, opencode, zcode};
 
@@ -421,6 +421,10 @@ pub trait Credentials: Send + Sync {
     fn claude(&self) -> Read<claude::Credential>;
     /// The opencode Go API key.
     fn opencode_go(&self) -> Read<Secret>;
+    /// The opencode Console sign-in (Zen and Go), at the time `now`.
+    fn opencode_console(&self, _now: i64) -> Read<Secret> {
+        Read::Missing
+    }
     /// Codex's ChatGPT sign-in.
     fn codex(&self) -> Read<codex::Credential> {
         Read::Missing
@@ -693,6 +697,30 @@ impl Credentials for SystemCredentials {
         }
     }
 
+    fn opencode_console(&self, now: i64) -> Read<Secret> {
+        let data =
+            env_dir("XDG_DATA_HOME").unwrap_or_else(|| self.home.join(".local").join("share"));
+        let dir = data.join("opencode");
+        // The same order as the Go key: the inline content, `auth.json`, then
+        // the OpenCode 2 credential database.
+        let found = std::env::var("OPENCODE_AUTH_CONTENT")
+            .ok()
+            .and_then(|text| opencode::parse_console(&text, now))
+            .or_else(|| {
+                std::fs::read_to_string(dir.join("auth.json"))
+                    .ok()
+                    .and_then(|text| opencode::parse_console(&text, now))
+            })
+            .or_else(|| {
+                opencode::database_console(&dir, std::env::var("OPENCODE_DB").ok().as_deref(), now)
+            });
+        match found {
+            Some(Ok(token)) => Read::Found(token),
+            Some(Err(reason)) => Read::Not(reason),
+            None => Read::Missing,
+        }
+    }
+
     fn codex(&self) -> Read<codex::Credential> {
         codex_credential(env_dir("CODEX_HOME").unwrap_or_else(|| self.home.join(".codex")))
     }
@@ -951,7 +979,9 @@ pub async fn claude_usage(
     }
 }
 
-/// The opencode Go subscription's usage, if its source is on.
+/// The opencode Go subscription's usage, if its source is on: with the Go key
+/// when there is one, else with the console sign-in. A console workspace with
+/// no Go subscription pays from Zen credits, which have no limit to read.
 pub async fn opencode_usage(
     policy: &NetworkPolicy,
     credentials: &dyn Credentials,
@@ -963,12 +993,11 @@ pub async fn opencode_usage(
     if !policy.allows(agent) {
         return AgentUsage::unknown(agent, machine, Reason::SourceDisabled);
     }
-    let key = match credential(
-        credentials.opencode_go(),
-        Reason::NotSupported,
-        agent,
-        machine,
-    ) {
+    let (read, console) = match credentials.opencode_go() {
+        Read::Missing => (credentials.opencode_console(now), true),
+        read => (read, false),
+    };
+    let key = match credential(read, Reason::NotSupported, agent, machine) {
         Ok(key) => key,
         Err(usage) => return usage,
     };
@@ -977,13 +1006,31 @@ pub async fn opencode_usage(
         auth: Auth::Bearer(&key),
         headers: vec![("Accept", "application/json".to_owned())],
     };
-    match call(http, &request, agent, machine).await {
+    let usage = match call(http, &request, agent, machine).await {
         // A key bounced to the console's sign-in page arrives as a 200 page.
         Ok(body) if body.trim_start().starts_with('<') => {
             AgentUsage::unknown(agent, machine, Reason::KeyRejected)
         }
         Ok(body) => opencode::parse_usage(&body, machine, now),
         Err(usage) => usage,
+    };
+    if !console {
+        return usage;
+    }
+    // The console sign-in is opencode's to renew, and a workspace without Go
+    // is a Zen one.
+    match usage.state {
+        State::Unknown {
+            reason: Reason::KeyRejected,
+        } => AgentUsage::unknown(agent, machine, Reason::SessionExpired),
+        State::Unknown {
+            reason: Reason::NoSubscription,
+        } => AgentUsage {
+            account_label: Some("Zen".into()),
+            plan: Some("Zen".into()),
+            ..AgentUsage::unknown(agent, machine, Reason::PayAsYouGo)
+        },
+        _ => usage,
     }
 }
 
@@ -1274,6 +1321,7 @@ mod tests {
     struct FakeCredentials {
         claude_json: Option<&'static str>,
         key: Option<&'static str>,
+        console: Option<Result<&'static str, Reason>>,
         claude_reason: Option<Reason>,
         reads: AtomicUsize,
     }
@@ -1292,6 +1340,13 @@ mod tests {
             self.reads.fetch_add(1, Ordering::SeqCst);
             self.key
                 .map_or(Read::Missing, |k| Read::Found(Secret::new(k)))
+        }
+        fn opencode_console(&self, _now: i64) -> Read<Secret> {
+            match self.console {
+                Some(Ok(token)) => Read::Found(Secret::new(token)),
+                Some(Err(reason)) => Read::Not(reason),
+                None => Read::Missing,
+            }
         }
     }
 
@@ -1653,6 +1708,101 @@ mod tests {
             let usage = opencode_usage(&policy, &credentials, &http, "local", 1).await;
             assert_eq!(usage.state, State::Unknown { reason }, "{status} {body}");
         }
+    }
+
+    const GO_METERS: &str = r#"{"usage":{"rolling":{"percent":0,"resetsAt":"2026-10-19T07:45:20Z"},"weekly":{"percent":0,"resetsAt":"2026-10-26T00:00:00Z"},"monthly":{"percent":19,"resetsAt":"2026-11-07T02:14:46Z"}}}"#;
+
+    #[tokio::test]
+    async fn without_a_go_key_the_console_sign_in_reads_the_go_meters() {
+        let credentials = FakeCredentials {
+            console: Some(Ok("console-token")),
+            ..Default::default()
+        };
+        let http = ScriptedHttp::new().reply(200, GO_METERS);
+        let policy = NetworkPolicy::none().with(AgentId::OPENCODE);
+        let usage = opencode_usage(&policy, &credentials, &http, "local", 1).await;
+        assert_eq!(http.calls(), [opencode::URL]);
+        assert_eq!(usage.plan.as_deref(), Some("Go"));
+        let State::Known { windows } = usage.state else {
+            panic!("expected windows");
+        };
+        assert_eq!(windows.len(), 3);
+        assert_eq!(windows[2].used_percent, 19.0);
+    }
+
+    #[tokio::test]
+    async fn a_console_workspace_without_go_pays_from_zen_credits() {
+        for (status, body) in [
+            (403, "{}"),
+            (402, r#"{"error":{"type":"EntitlementError"}}"#),
+        ] {
+            let credentials = FakeCredentials {
+                console: Some(Ok("console-token")),
+                ..Default::default()
+            };
+            let http = ScriptedHttp::new().reply(status, body);
+            let policy = NetworkPolicy::none().with(AgentId::OPENCODE);
+            let usage = opencode_usage(&policy, &credentials, &http, "local", 1).await;
+            assert_eq!(
+                usage.state,
+                State::Unknown {
+                    reason: Reason::PayAsYouGo
+                },
+                "{status} {body}"
+            );
+            assert_eq!(usage.plan.as_deref(), Some("Zen"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stale_console_sign_in_is_left_for_opencode_to_renew() {
+        let policy = NetworkPolicy::none().with(AgentId::OPENCODE);
+        // Expired on disk: no call at all.
+        let expired = FakeCredentials {
+            console: Some(Err(Reason::SessionExpired)),
+            ..Default::default()
+        };
+        let http = ScriptedHttp::new();
+        let usage = opencode_usage(&policy, &expired, &http, "local", 1).await;
+        assert_eq!(
+            usage.state,
+            State::Unknown {
+                reason: Reason::SessionExpired
+            }
+        );
+        assert_eq!(http.calls().len(), 0);
+        // Refused by the console.
+        let refused = FakeCredentials {
+            console: Some(Ok("console-token")),
+            ..Default::default()
+        };
+        let http = ScriptedHttp::new().reply(401, r#"{"error":{"type":"AuthError"}}"#);
+        let usage = opencode_usage(&policy, &refused, &http, "local", 1).await;
+        assert_eq!(
+            usage.state,
+            State::Unknown {
+                reason: Reason::SessionExpired
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn the_go_key_comes_before_the_console_sign_in() {
+        let credentials = FakeCredentials {
+            key: Some("go-key"),
+            console: Some(Ok("console-token")),
+            ..Default::default()
+        };
+        // A Go key without a subscription stays that, not Zen.
+        let http = ScriptedHttp::new().reply(403, "{}");
+        let policy = NetworkPolicy::none().with(AgentId::OPENCODE);
+        let usage = opencode_usage(&policy, &credentials, &http, "local", 1).await;
+        assert_eq!(
+            usage.state,
+            State::Unknown {
+                reason: Reason::NoSubscription
+            }
+        );
     }
 
     #[test]

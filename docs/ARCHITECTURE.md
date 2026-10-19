@@ -209,7 +209,7 @@ above: the engine writes the store and the UI reads it.
   pure parsers (`grok`, `cursor`, `kimi`, `zcode`, `antigravity`, `codex`,
   `claude`, `opencode`) plus one function in `network.rs`; every vendor host is
   in `ALLOWED_HOSTS` and a test pins that an unlisted host is refused. An
-  expired stored sign-in (a 401, a 403 that is not a missing scope, or a credential with only a refresh token) is `Reason::SessionExpired` and is never refreshed; `Reason::keeps_numbers` says which failures leave the earlier numbers on show (`agent_usage::merge`), marked with their age; `NotSignedIn` is only for no credential at all, with `MissingScope`, `ApiKeyBilling`, `NoSubscription`, `KeyRejected` and `SpendsATurn` (Antigravity's latch, per machine, for the session) as their own reasons. Those run on this computer only and through the `Http` trait
+  expired stored sign-in (a 401, a 403 that is not a missing scope, or a credential with only a refresh token) is `Reason::SessionExpired` and is never refreshed; `Reason::keeps_numbers` says which failures leave the earlier numbers on show (`agent_usage::merge`), marked with their age; `NotSignedIn` is only for no credential at all, with `MissingScope`, `ApiKeyBilling`, `NoSubscription`, `PayAsYouGo` (opencode Zen credits), `KeyRejected` and `SpendsATurn` (Antigravity's latch, per machine, for the session) as their own reasons. Those run on this computer only and through the `Http` trait
   (`CurlHttp`: the system `curl`, the header on standard input so the token is
   never in a process list, HTTPS to one allowed host, no redirects, a time limit);
   a disabled source reads no credential and makes no call (tested with a
