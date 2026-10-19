@@ -508,6 +508,17 @@ impl Shell {
             .questions
             .first()
             .map(|open| (Target::Brain, open))
+            .or_else(|| {
+                // Else the first question a worker waits on: they are
+                // drawn under King's, oldest worker first.
+                status.workers.iter().find_map(|worker| {
+                    worker
+                        .conversation
+                        .questions
+                        .first()
+                        .map(|open| (Target::Worker(worker.id), open))
+                })
+            })
     }
 
     /// The fields the person writes in, made the first time the view opens.

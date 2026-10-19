@@ -301,6 +301,24 @@ impl Shell {
                                 c,
                                 cx,
                             ))
+                            // What the workers ask is here too, so it is
+                            // seen without opening them (the open one asks
+                            // in its own column).
+                            .children(
+                                status
+                                    .workers
+                                    .iter()
+                                    .filter(|worker| ui.open != Some(worker.id))
+                                    .flat_map(|worker| {
+                                        self.king_questions(
+                                            Target::Worker(worker.id),
+                                            &worker.conversation.questions,
+                                            c,
+                                            cx,
+                                        )
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
                             .child(self.king_composer(status, c, cx))
                             .into_any_element(),
                     }),
@@ -752,7 +770,24 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .child(mono("ASKS YOU").text_color(c.signal))
+                    .child(
+                        mono(match target {
+                            Target::Brain => "ASKS YOU".to_owned(),
+                            Target::Worker(id) => {
+                                match self.king_ui.status.as_ref().and_then(|status| {
+                                    status.workers.iter().find(|worker| worker.id == id)
+                                }) {
+                                    Some(worker) => format!("WORKER #{id} ASKS · {}", worker.title)
+                                        .to_uppercase(),
+                                    None => format!("WORKER #{id} ASKS"),
+                                }
+                            }
+                        })
+                        .w_full()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(c.signal),
+                    )
                     .child(div().min_w_0().text_color(c.text).child(open.text.clone()))
                     .child(answers)
                     .into_any_element()

@@ -89,6 +89,11 @@ pub fn king(config: &Config, now: &Now<'_>) -> String {
            one of that tier's models; otherwise start a `plan` worker and build on its plan. \
            Execution can then go to cheaper workers, step by step, and the best model \
            reviews what they did.\n\
+         * When you tell the person which worker does a job, always name the agent **and \
+           the model** (and the effort when one was set): \"codex, gpt-5.6-sol, high\", never \
+           \"codex\" alone; an agent has many models. When `worker_start` says the worker runs \
+           on its agent's default, read the model it started with in `king_status` before \
+           you name it.\n\
          * When you learn something about a model (a benchmark with its source, how it did \
            on a job of ours), keep it with `model_note`, so the next choice is better.\n\n\
          ## Reporting\n\n\

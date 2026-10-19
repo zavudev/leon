@@ -493,3 +493,29 @@ fn past_conversations_are_listed_read_and_taken_up_again(cx: &mut TestAppContext
         "the one taken up is the one now"
     );
 }
+
+#[gpui_kit::test]
+fn a_workers_question_is_answered_from_kings_view(cx: &mut TestAppContext) {
+    let mut asking = worker(2, "asking", Some(0));
+    asking["conversation"]["questions"] = json!([{
+        "id": "d.0", "text": "May it use edit: app.js?",
+        "form": {"type": "permission", "choices": [["d.0", "allow"], ["d.1", "always"], ["d.2", "deny"]]},
+    }]);
+    let (h, end) = with_conversation(cx, json!([asking]));
+    // Seen without opening the worker.
+    assert!(h.shows_dynamic("king-question-worker-2-d.0".into(), cx));
+    // King asks nothing: the keys answer the worker.
+    h.press("alt-2", cx);
+    let asked = serve(&h, &end, cx, |_| Value::Null);
+    assert_eq!(
+        asked,
+        [Request::Answer {
+            target: Target::Worker(2),
+            question: "d.0".into(),
+            reply: leon_king::coordinator::Reply {
+                choice: Some("d.1".into()),
+                ..Default::default()
+            },
+        }]
+    );
+}

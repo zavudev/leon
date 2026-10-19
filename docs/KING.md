@@ -45,9 +45,12 @@ the main pane:
   time and cost, the day's spending, and a bar for each agent's usage window
   with what is left and when it resets. A question King waits on is a
   framed card with its answers (allow, always, deny; start or not yet for a plan), and any
-  question can be answered with what is written in the field. Alt and the
+  question can be answered with what is written in the field. What a
+  worker asks is framed over the field too, with the worker's number and
+  title, so it is seen and answered without opening the worker (King is
+  told, and may answer it as well: the first answer counts). Alt and the
   answer's number (written on its button) answer from the keyboard: the
-  open worker's question first, else King's. Escape stops King's turn, or
+  open worker's question first, else King's, else the first worker's. Escape stops King's turn, or
   closes the view when King is not working.
 * **What King runs on** is the chip under the field. A click, or the
   palette's "Change the model King runs on…", asks for the agent, then one
@@ -249,17 +252,17 @@ research = { tier = "local" }
 protected_branches = ["main", "master", "release"]
 
 [modes]                 # the permission mode each agent's workers start in
-claude = "acceptEdits"
+claude = "auto"
 ```
 
 | Section | What it sets | Default |
 | --- | --- | --- |
-| `[brain]` | The agent, model, effort and mode King runs on | Claude Code, its own model |
+| `[brain]` | The agent, model, effort and mode King runs on; `mode = ""` is the agent's own | Claude Code, its own model, mode `auto` |
 | `[limits]` | `max_workers`, `daily_budget_usd`, `limit_threshold`, `wake_delay_secs` | 6, none, 0.85, 5 |
 | `[tiers]` | Each tier's candidates in order: agent, model, effort | `cheap`, `standard`, `premium`, `planning` |
 | `[jobs]` | The tier each kind of job (`code`, `research`, `plan`) goes to, and whether it is `strict` (only ever that tier) | code: standard, research: cheap, plan: planning (strict) |
 | `[guards]` | Branches nothing is pushed to, besides each project's default branch | `main`, `master` |
-| `[modes]` | The permission mode of each agent's workers | none |
+| `[modes]` | The permission mode of each agent's workers; `""` is the agent's own | codex `auto`, claude `acceptEdits`: a worker edits in its own worktree without asking |
 
 `leon king config` prints the configuration in force (your file over the
 defaults), and `leon king config --defaults` prints Leon's defaults with

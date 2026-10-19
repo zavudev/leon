@@ -511,16 +511,24 @@ impl Service {
                 let spec = self.worker_spec(*asked, now)?;
                 let (id, effects) = self.coordinator.start_worker(spec, now)?;
                 let worker = self.coordinator.worker(id).ok_or("the worker went")?;
-                Ok((
-                    json!({
-                        "worker": id,
-                        "agent": worker.conversation.agent,
-                        "model": worker.conversation.model,
-                        "tier": worker.tier,
-                        "cwd": worker.cwd,
-                    }),
-                    effects,
-                ))
+                let mut answer = json!({
+                    "worker": id,
+                    "agent": worker.conversation.agent,
+                    "model": worker.conversation.model,
+                    "effort": worker.conversation.effort,
+                    "tier": worker.tier,
+                    "cwd": worker.cwd,
+                });
+                // An agent says its own default model only once its turn
+                // starts: King is told where to read it then.
+                if worker.conversation.model.is_none() {
+                    answer["model_note"] = json!(
+                        "No model was named, so the worker runs on its agent's default. Its \
+                         first turn says which: king_status shows it within seconds, and the \
+                         news of the worker names it."
+                    );
+                }
+                Ok((answer, effects))
             }
             Request::TellWorker { worker, text } => {
                 done(self.coordinator.tell_worker(worker, &text, now)?)

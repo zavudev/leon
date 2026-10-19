@@ -141,7 +141,11 @@ impl Config {
         if let Some(tiers) = merged.get_mut("tiers").and_then(toml::Value::as_table_mut) {
             tiers.retain(|_, tier| tier.as_array().is_none_or(|list| !list.is_empty()));
         }
-        let config: Self = merged.try_into().map_err(|error| error.to_string())?;
+        let mut config: Self = merged.try_into().map_err(|error| error.to_string())?;
+        // "" is the agent's own mode, as no mode at all.
+        if config.brain.mode.as_deref() == Some("") {
+            config.brain.mode = None;
+        }
         config.check()?;
         Ok(config)
     }
@@ -179,9 +183,13 @@ impl Config {
         Ok(())
     }
 
-    /// The permission mode a worker of `agent` starts in.
+    /// The permission mode a worker of `agent` starts in; an agent set to
+    /// `""` starts in its own.
     pub fn mode_of(&self, agent: &str) -> Option<&str> {
-        self.modes.get(agent).map(String::as_str)
+        self.modes
+            .get(agent)
+            .map(String::as_str)
+            .filter(|mode| !mode.is_empty())
     }
 
     /// Where a kind of job goes; a job the file does not name goes where
@@ -222,6 +230,7 @@ mod tests {
         let config = Config::parse("").unwrap();
         assert_eq!(config, Config::default());
         assert_eq!(config.brain.agent, "claude");
+        assert_eq!(config.brain.mode.as_deref(), Some("auto"));
         let tiers: Vec<&str> = config.tiers.keys().map(String::as_str).collect();
         assert_eq!(tiers, ["cheap", "planning", "premium", "standard"]);
         assert_eq!(config.job("plan").tier, "planning");
@@ -229,6 +238,10 @@ mod tests {
         assert_eq!(config.job("research").tier, "cheap");
         assert_eq!(config.job("anything else").tier, "standard");
         assert_eq!(config.guards.protected_branches, ["main", "master"]);
+        // Workers edit in their own worktree without asking.
+        assert_eq!(config.mode_of("codex"), Some("auto"));
+        assert_eq!(config.mode_of("claude"), Some("acceptEdits"));
+        assert_eq!(config.mode_of("opencode"), None);
         // Written out and read back, it is the same.
         assert_eq!(Config::parse(&config.to_toml()).unwrap(), config);
     }
@@ -251,7 +264,8 @@ mod tests {
             research = { tier = "local" }
 
             [modes]
-            claude = "acceptEdits"
+            claude = "default"
+            codex = ""
         "#;
         let config = Config::parse(text).unwrap();
         // A key left out of a table keeps its default.
@@ -267,8 +281,10 @@ mod tests {
         assert_eq!(config.job("research").tier, "local");
         // A rule left alone keeps all of it.
         assert!(config.job("plan").strict);
-        assert_eq!(config.mode_of("claude"), Some("acceptEdits"));
-        assert_eq!(config.mode_of("codex"), None);
+        assert_eq!(config.mode_of("claude"), Some("default"));
+        let own = Config::parse("[brain]\nmode = \"\"").unwrap();
+        assert_eq!(own.brain.mode, None, "\"\" is the agent's own");
+        assert_eq!(config.mode_of("codex"), None, "\"\" is the agent's own");
     }
 
     #[test]

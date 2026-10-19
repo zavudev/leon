@@ -10,7 +10,10 @@
 agent = "claude"
 # model = "opus"
 # effort = "high"
-# mode = "acceptEdits"
+# How much King asks before it acts. "auto": Claude Code decides what is safe
+# without asking (reading, git, the projects' checks); "" is the agent's own
+# mode, which asks before every command.
+mode = "auto"
 
 [limits]
 max_workers = 6           # workers working at the same time
@@ -44,5 +47,14 @@ plan = { tier = "planning", strict = true }
 protected_branches = ["main", "master"]
 
 # The permission mode each agent's workers start in, by agent; an agent left
-# out starts in its own default mode and asks.
+# out starts in its own default mode and asks. A worker works in a worktree of
+# its own, so by default it edits there without asking: every question it
+# asks costs one of King's turns to answer.
+#   codex  "auto": edits and runs commands in its folder, asks to go beyond it
+#          ("read-only", "untrusted" and "full-access" are the others)
+#   claude "acceptEdits": edits without asking, asks before commands
+#          ("default", "auto", "plan", "bypassPermissions"…)
+# Set an agent to "" to have its workers start in its own default mode.
 [modes]
+codex = "auto"
+claude = "acceptEdits"
