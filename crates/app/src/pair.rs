@@ -17,6 +17,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use leon_link::client::{ConnState, Failure as LinkFailure};
 use leon_link::relay_client::{dial, DialError, Target};
 use leon_link::{pair_as_client, CodeShape, Identity, PairError, PairedHost, PairingCode};
 use leon_remote::relay::{describe, key_hex};
@@ -224,33 +225,54 @@ pub async fn pair(
     report(Step::Channel, StepState::Running);
     let channel = async {
         let client = hub
-            .ensure(
+            .ensure_paired(
                 &paired.host_id.to_string(),
                 &key_hex(&paired.host_key),
                 relay_url,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| (e.to_string(), CHANNEL_RETRIES))?;
         client
             .wait_online(Duration::from_secs(20))
             .await
             .map_err(|_| {
-                describe(&client.state(), relay_url).unwrap_or_else(|| "not online".into())
+                let state = client.state();
+                let why = describe(&state, relay_url).unwrap_or_else(|| "not online".into());
+                (why, channel_advice(&state))
             })?;
-        Ok::<_, String>(())
+        Ok::<_, (String, &str)>(())
     };
     match channel.await {
         Ok(()) => {
             report(Step::Channel, StepState::Passed);
             Ok(paired)
         }
-        Err(why) => {
+        Err((why, advice)) => {
             report(Step::Channel, StepState::Failed);
             Err(Failure {
                 step: Step::Channel,
                 headline: format!("The secure channel did not open: {why}"),
-                advice: "The pairing worked, so the machine is saved; it will connect when the other computer is reachable.".into(),
+                advice: advice.into(),
             })
         }
+    }
+}
+
+const CHANNEL_RETRIES: &str = "The pairing worked, so the machine is saved; it will connect when the other computer is reachable.";
+
+/// What to do when the channel did not open after a pairing that worked.
+/// Only a connection that keeps trying will connect by itself: one the host
+/// refused, or that speaks no common version, has stopped.
+fn channel_advice(state: &ConnState) -> &'static str {
+    match state {
+        ConnState::Offline {
+            failure: LinkFailure::Revoked,
+            ..
+        } => "The pairing worked, but the other computer then refused this device, and this computer has stopped trying. On the other computer, in Share this machine, check that this computer is listed and not revoked; then choose New code there and pair again.",
+        ConnState::Offline {
+            failure: LinkFailure::VersionMismatch,
+            ..
+        } => "The pairing worked, so the machine is saved, but this computer has stopped trying. Update Leon on one of the two computers, then restart Leon here.",
+        _ => CHANNEL_RETRIES,
     }
 }
 
@@ -274,6 +296,28 @@ mod tests {
     fn the_explanation_is_two_sentences_about_the_relay_and_privacy() {
         assert!(WHAT_IT_IS.contains("relay") && WHAT_IT_IS.contains("short code"));
         assert!(HOW_IT_IS_SAFE.contains("end-to-end encrypted"));
+    }
+
+    #[test]
+    fn only_a_connection_that_keeps_trying_is_said_to_connect_by_itself() {
+        let offline = |failure| ConnState::Offline {
+            failure,
+            reason: String::new(),
+            attempt: 1,
+        };
+        let revoked = channel_advice(&offline(LinkFailure::Revoked));
+        assert!(revoked.contains("stopped trying") && revoked.contains("New code"));
+        assert!(!revoked.contains("will connect"));
+        let version = channel_advice(&offline(LinkFailure::VersionMismatch));
+        assert!(version.contains("Update Leon") && !version.contains("will connect"));
+        for state in [
+            offline(LinkFailure::HostOffline),
+            offline(LinkFailure::RelayUnreachable),
+            offline(LinkFailure::Other),
+            ConnState::Connecting,
+        ] {
+            assert!(channel_advice(&state).contains("will connect"));
+        }
     }
 
     fn hub() -> Arc<RelayHub> {
@@ -395,5 +439,39 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(failure.step, Step::Find | Step::Verify));
+    }
+
+    #[tokio::test]
+    async fn pairing_again_after_being_revoked_opens_the_channel() {
+        let relay = TestRelay::start().await;
+        let host = host_at(&relay.url()).await;
+        let hub = hub();
+        let info = host.new_pairing_code().await;
+        let (_, report) = log();
+        let code = PairingCode::parse(&info.code).unwrap();
+        let paired = pair(&relay.url(), &hub, &code, "me", report).await.unwrap();
+        let host_id = paired.host_id.to_string();
+        host.revoke(&hub.identity().device_id().to_string())
+            .unwrap();
+        // The connection learns it was revoked and stops trying.
+        let client = hub.client(&host_id).unwrap();
+        let mut state = client.watch();
+        while !matches!(
+            &*state.borrow_and_update(),
+            leon_link::client::ConnState::Offline {
+                failure: leon_link::client::Failure::Revoked,
+                ..
+            }
+        ) {
+            state.changed().await.unwrap();
+        }
+        let info = host.new_pairing_code().await;
+        let (seen, report) = log();
+        let code = PairingCode::parse(&info.code).unwrap();
+        pair(&relay.url(), &hub, &code, "me", report).await.unwrap();
+        assert_eq!(
+            seen.lock().unwrap().last(),
+            Some(&(Step::Channel, StepState::Passed))
+        );
     }
 }
