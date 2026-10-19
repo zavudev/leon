@@ -12,12 +12,14 @@
 //!   King runs on starts, and that speaks to the service;
 //! * [`client`]: one connection to the service, and starting the service
 //!   when nothing answers;
+//! * [`link`]: the window's line to the service;
 //! * this file: where everything lives, and `leon king …` itself.
 //!
 //! See `docs/KING.md`.
 
 #[cfg(unix)]
 pub mod client;
+pub mod link;
 #[cfg(unix)]
 pub mod mcp;
 #[cfg(unix)]

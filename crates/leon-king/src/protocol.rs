@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::coordinator::{Job, Reply as Answer, Target, WorkerState};
+use crate::coordinator::{Job, Open, Reply as Answer, Target, WorkerState};
 use crate::transcript::Entry;
 
 /// The longest line read from a client, in bytes.
@@ -216,6 +216,10 @@ pub enum Notice {
         title: String,
         /// The rest.
         body: String,
+        /// What it says is in King's conversation already: a client that
+        /// shows the conversation need not say it again.
+        #[serde(default)]
+        echo: bool,
     },
 }
 
@@ -249,8 +253,8 @@ pub struct ConversationStatus {
     pub busy: bool,
     /// What waits for the turn to end.
     pub queued: usize,
-    /// The questions it waits on: id and text.
-    pub questions: Vec<(String, String)>,
+    /// The questions it waits on, with how each may be answered.
+    pub questions: Vec<Open>,
     /// What it cost.
     pub cost_usd: f64,
     /// The number of its newest entry.

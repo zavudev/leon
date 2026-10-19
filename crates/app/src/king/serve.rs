@@ -460,7 +460,11 @@ impl Service {
                     effects,
                 ))
             }
-            Request::Notify { title, body } => done(vec![Effect::Notify { title, body }]),
+            Request::Notify { title, body } => done(vec![Effect::Notify {
+                title,
+                body,
+                echo: false,
+            }]),
         }
     }
 
@@ -492,7 +496,7 @@ impl Service {
                         running.turn.kill();
                     }
                 }
-                Effect::Notify { title, body } => self.notify(title, body),
+                Effect::Notify { title, body, echo } => self.notify(title, body, echo),
             }
         }
         if changed {
@@ -510,9 +514,9 @@ impl Service {
             .retain(|subscriber| subscriber.send(line.clone()).is_ok());
     }
 
-    fn notify(&mut self, title: String, body: String) {
+    fn notify(&mut self, title: String, body: String, echo: bool) {
         crate::king::serve::desktop_notification(&title, &body);
-        self.broadcast(&Notice::Notify { title, body });
+        self.broadcast(&Notice::Notify { title, body, echo });
     }
 
     fn save(&self) {

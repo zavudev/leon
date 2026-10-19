@@ -200,6 +200,10 @@ impl Shell {
                 return;
             }
         }
+        // King's view keeps it in its fields.
+        if self.overlay == Overlay::None && self.king_focus(window, cx) {
+            return;
+        }
         // The field of the conversation on screen keeps the keyboard.
         if self.overlay == Overlay::None && self.pane == Pane::Main {
             if let Some(chat) = self.focused_chat().and_then(|id| self.chats.get(&id)) {

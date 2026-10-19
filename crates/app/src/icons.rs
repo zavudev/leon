@@ -23,6 +23,7 @@ icon_assets!(
         CircleAlert,
         CircleDot,
         Command,
+        Crown,
         ExternalLink,
         File,
         Folder,

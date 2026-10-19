@@ -86,6 +86,8 @@ pub enum Effect {
         title: String,
         /// The rest.
         body: String,
+        /// What it says is in King's conversation already.
+        echo: bool,
     },
 }
 
@@ -503,11 +505,7 @@ impl Coordinator {
             session_id: conversation.session_id.clone(),
             busy: conversation.busy,
             queued: conversation.queue.len(),
-            questions: conversation
-                .questions
-                .iter()
-                .map(|open| (open.id.clone(), open.text.clone()))
-                .collect(),
+            questions: conversation.questions.clone(),
             cost_usd: conversation.cost_usd,
             last_seq: conversation.transcript.last_seq(),
         };
@@ -757,6 +755,7 @@ impl Coordinator {
             Target::Brain => effects.push(Effect::Notify {
                 title: "King could not start".to_owned(),
                 body: text,
+                echo: true,
             }),
             Target::Worker(id) => {
                 if let Some(worker) = self.state.workers.get_mut(&id) {
@@ -811,6 +810,7 @@ impl Coordinator {
                     Target::Brain => effects.push(Effect::Notify {
                         title: "King asks".to_owned(),
                         body: open.text,
+                        echo: true,
                     }),
                     Target::Worker(worker) => {
                         self.set_state(worker, WorkerState::Asking, now_ms);
@@ -965,6 +965,7 @@ impl Coordinator {
                     effects.push(Effect::Notify {
                         title: "King answered".to_owned(),
                         body: answer.unwrap_or_default(),
+                        echo: true,
                     });
                 }
                 effects.extend(self.next_brain_turn(now_ms));
@@ -1049,10 +1050,10 @@ impl Coordinator {
         self.state.news_since_ms = None;
         let mut parts = Vec::new();
         if !news.is_empty() {
-            parts.push(prompt::wake(&news, &self.state.workers));
+            parts.push((Kind::News, prompt::wake(&news, &self.state.workers)));
         }
-        parts.extend(said);
-        self.begin(Target::Brain, parts.join("\n\n"), now_ms)
+        parts.extend(said.into_iter().map(|text| (Kind::Prompt, text)));
+        self.begin_with(Target::Brain, parts, now_ms)
     }
 
     /// Starts the next turn of a worker, with all that waits for it.
@@ -1071,6 +1072,17 @@ impl Coordinator {
     }
 
     fn begin(&mut self, target: Target, prompt: String, now_ms: u64) -> Vec<Effect> {
+        self.begin_with(target, vec![(Kind::Prompt, prompt)], now_ms)
+    }
+
+    /// Starts a turn told all of `parts` as one prompt, each kept in the
+    /// transcript as what it is: the person's words, or Leon's news.
+    fn begin_with(
+        &mut self,
+        target: Target,
+        parts: Vec<(Kind, String)>,
+        now_ms: u64,
+    ) -> Vec<Effect> {
         let Some(conversation) = self.conversation_mut(target) else {
             return Vec::new();
         };
@@ -1078,9 +1090,14 @@ impl Coordinator {
         conversation.last_ok = None;
         conversation.turn = TurnStats::default();
         conversation.turn_started_ms = now_ms;
-        conversation
-            .transcript
-            .push(Kind::Prompt, prompt.clone(), now_ms);
+        let prompt = parts
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        for (kind, text) in parts {
+            conversation.transcript.push(kind, text, now_ms);
+        }
         vec![Effect::Changed, Effect::Start { target, prompt }]
     }
 }

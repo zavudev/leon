@@ -94,7 +94,7 @@ fn what_the_person_says_starts_kings_turn_or_waits_for_it_to_end() {
     assert!(starts(&effects).is_empty());
     assert!(effects.iter().any(|effect| matches!(
         effect,
-        Effect::Notify { title, body } if title == "King answered" && body == "zavu too."
+        Effect::Notify { title, body, .. } if title == "King answered" && body == "zavu too."
     )));
     assert!((king.spent_today(4) - 0.5).abs() < 1e-9);
 }

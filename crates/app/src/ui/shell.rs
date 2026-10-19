@@ -307,6 +307,9 @@ pub struct Options {
     /// `None` tells terminals nothing: tests, which must not name this
     /// computer's folders.
     pub memory: Option<crate::memory::Terminals>,
+    /// The line to King Leon's service; absent where there is none (tests
+    /// that do not need it, and Windows).
+    pub king: Option<Arc<dyn crate::king::link::Link>>,
 }
 
 /// A `~/.ssh` that is not there: the home folder is unknown.
@@ -376,6 +379,7 @@ impl Default for Options {
             },
             remote: None,
             memory: None,
+            king: None,
             updates: None,
             durable: None,
             update_timer: true,
@@ -474,6 +478,8 @@ pub enum Main {
     Den,
     /// The board of tasks.
     Tasks,
+    /// King Leon: its conversation and its workers.
+    King,
 }
 
 /// The application window's view.
@@ -522,6 +528,8 @@ pub struct Shell {
     /// The usage bar and view.
     pub(super) usage: super::usage_view::UsageUi,
     pub(super) tasks_ui: super::tasks_view::TasksUi,
+    /// King Leon, as the window has it from King's service.
+    pub(super) king_ui: super::king::KingUi,
     pub(super) den: super::den_view::DenUi,
     /// Following the agents' transcripts for the sessions' lights.
     pub(super) status: super::transcript_watch::StatusUi,
@@ -896,6 +904,7 @@ impl Shell {
             connect_ui,
             usage: super::usage_view::UsageUi::default(),
             tasks_ui: super::tasks_view::TasksUi::default(),
+            king_ui: super::king::KingUi::default(),
             den: super::den_view::DenUi::default(),
             status: super::transcript_watch::StatusUi::default(),
             home: super::home::HomeUi::default(),
@@ -1129,7 +1138,7 @@ impl Shell {
                     && !self.changes.contains_key(id)
                     && !self.chats.contains_key(id)
             }
-            Main::Empty | Main::Session(_) | Main::Den | Main::Tasks => false,
+            Main::Empty | Main::Session(_) | Main::Den | Main::Tasks | Main::King => false,
         };
         if gone {
             self.main = Main::Empty;
@@ -2095,7 +2104,7 @@ impl Shell {
                 .or_else(|| self.files.get(id).map(|doc| doc.machine.clone()))
                 .or_else(|| self.changes.get(id).map(|view| view.target.machine.clone()))
                 .or_else(|| self.chats.get(id).map(|chat| chat.machine.clone())),
-            Main::Empty | Main::Den | Main::Tasks => None,
+            Main::Empty | Main::Den | Main::Tasks | Main::King => None,
         };
         let found = if self.pane == Pane::Sidebar {
             from_row().or_else(from_main)
@@ -2186,7 +2195,7 @@ impl Shell {
                         entry.project.root.clone(),
                     ))
                 }
-                Main::Empty | Main::Den => None,
+                Main::Empty | Main::Den | Main::King => None,
             }
         };
         let (machine, project, cwd) = if self.pane == Pane::Sidebar {
@@ -2804,6 +2813,14 @@ impl Shell {
         {
             return true;
         }
+        // So is King's view.
+        if self.overlay == Overlay::None
+            && self.pane == Pane::Main
+            && self.king_open()
+            && self.king_key(stroke, window, cx)
+        {
+            return true;
+        }
         // The changes tab has its own keys while it has the keyboard and no
         // field of it does.
         if self.overlay == Overlay::None
@@ -2859,6 +2876,7 @@ impl Shell {
             || self.file_has_keyboard()
             || self.changes_typing(window, cx)
             || self.chat_typing(window, cx)
+            || self.king_typing(window, cx)
             || self.tasks_typing(window, cx);
         if self.overlay == Overlay::Palette && self.palette_key(stroke, window, cx) {
             return true;
@@ -3093,6 +3111,7 @@ impl Shell {
             },
             C::Settings => self.open_settings(window, cx),
             C::ShowUsage => self.toggle_usage(window, cx),
+            C::ShowKing => self.toggle_king(window, cx),
             C::CleanUp => self.toggle_sweep(window, cx),
             C::ShowTasks => self.toggle_tasks(window, cx),
             C::NewTask if self.tasks_open() => self.open_create(None, window, cx),

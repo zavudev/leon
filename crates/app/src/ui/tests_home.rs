@@ -33,24 +33,27 @@ fn the_navigation_is_over_the_filter_whatever_is_filtered_or_scrolled(cx: &mut T
     assert!(
         h.shows("sidebar-nav", cx)
             && h.shows("sidebar-home", cx)
+            && h.shows("sidebar-king", cx)
             && h.shows("sidebar-tasks", cx)
             && h.shows("sidebar-den", cx)
     );
-    // Header, navigation (Home, Tasks, The Den), filter, tree.
+    // Header, navigation (Home, King Leon, Tasks, The Den), filter, tree.
     let bounds = |selector: &str, cx: &mut TestAppContext| {
         h.bounds_of(selector.to_owned(), cx)
             .unwrap_or_else(|| panic!("{selector} is drawn"))
     };
-    let (header, home, tasks, den, filter, first) = (
+    let (header, home, king, tasks, den, filter, first) = (
         bounds("sidebar-header", cx),
         bounds("sidebar-home", cx),
+        bounds("sidebar-king", cx),
         bounds("sidebar-tasks", cx),
         bounds("sidebar-den", cx),
         bounds("sidebar-filter", cx),
         bounds("tree-row-0", cx),
     );
     assert!(header.bottom() <= home.top());
-    assert_eq!(home.bottom(), tasks.top());
+    assert_eq!(home.bottom(), king.top());
+    assert_eq!(king.bottom(), tasks.top());
     assert_eq!(tasks.bottom(), den.top());
     assert!(den.bottom() <= filter.top() && filter.bottom() <= first.top());
     // Its rows are rows of the tree: the same height, the same edges.
@@ -58,6 +61,7 @@ fn the_navigation_is_over_the_filter_whatever_is_filtered_or_scrolled(cx: &mut T
     assert_eq!((home.left(), home.right()), (first.left(), first.right()));
     assert_eq!(home.size, den.size);
     assert_eq!(home.size, tasks.size);
+    assert_eq!(home.size, king.size);
 
     // A filter that matches nothing leaves it there.
     h.press("/", cx);
@@ -221,8 +225,8 @@ fn the_navigation_is_the_first_stop_of_the_sidebar(cx: &mut TestAppContext) {
     });
     let nav = |cx: &mut TestAppContext| h.shell(cx, |shell| shell.home.nav);
     assert!(!h.shows("sidebar-nav-cursor", cx));
-    // Up from the first row of the tree is The Den, then Tasks, then Home;
-    // there it stays.
+    // Up from the first row of the tree is The Den, then Tasks, then King
+    // Leon, then Home; there it stays.
     h.press("up", cx);
     assert_eq!(nav(cx), Some(Nav::Den));
     assert!(h.shows("sidebar-nav-cursor", cx));
@@ -233,6 +237,8 @@ fn the_navigation_is_the_first_stop_of_the_sidebar(cx: &mut TestAppContext) {
     h.press("up", cx);
     assert_eq!(nav(cx), Some(Nav::Tasks));
     h.press("up", cx);
+    assert_eq!(nav(cx), Some(Nav::King));
+    h.press("up", cx);
     assert_eq!(nav(cx), Some(Nav::Home));
     h.press("up", cx);
     assert_eq!(nav(cx), Some(Nav::Home));
@@ -241,7 +247,10 @@ fn the_navigation_is_the_first_stop_of_the_sidebar(cx: &mut TestAppContext) {
         "project:api",
         "moving the cursor opens nothing"
     );
-    // Down goes through Tasks and The Den back into the tree, at its first row.
+    // Down goes through King Leon, Tasks and The Den back into the tree, at
+    // its first row.
+    h.press("down", cx);
+    assert_eq!(nav(cx), Some(Nav::King));
     h.press("down", cx);
     assert_eq!(nav(cx), Some(Nav::Tasks));
     h.press("down", cx);
@@ -257,6 +266,8 @@ fn the_navigation_is_the_first_stop_of_the_sidebar(cx: &mut TestAppContext) {
     cx.update(|cx| h.shell.update(cx, |shell, _| shell.pane = Pane::Sidebar));
     h.press("up", cx);
     assert_eq!(nav(cx), Some(Nav::Tasks));
+    h.press("up", cx);
+    assert_eq!(nav(cx), Some(Nav::King));
     h.press("up", cx);
     h.press("enter", cx);
     assert_eq!(h.main_kind(cx), "empty");

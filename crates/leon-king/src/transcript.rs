@@ -26,8 +26,10 @@ const TOOL_CHARS: usize = 200;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
-    /// What was asked: by the person, by King, or by Leon waking King.
+    /// What was asked: by the person, or by King of a worker.
     Prompt,
+    /// What Leon told King of its workers, waking it.
+    News,
     /// What the agent answered.
     Agent,
     /// A tool the agent used, and how it went.

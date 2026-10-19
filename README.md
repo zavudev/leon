@@ -602,6 +602,7 @@ platform (see below).
 | Settings | `⌘,` | `Ctrl+,` |
 | Show usage | `⇧⌘U` | `Ctrl+Shift+Alt+U` |
 | Refresh usage now | palette only | palette only |
+| Talk to King Leon | `⌥⇧⌘K` | `Ctrl+Shift+Alt+K` |
 | Show the task board | `⇧⌘I` | `Ctrl+Shift+Alt+I` |
 | New task… | palette only | palette only |
 | Create worktree for the task… | palette only | palette only |

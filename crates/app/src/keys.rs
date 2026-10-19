@@ -353,6 +353,8 @@ pub enum Command {
     /// Opens the microphone for the conversation on screen, or closes it and
     /// writes what was said in its field.
     Dictate,
+    /// King Leon: the coordinator's conversation and the workers it runs.
+    ShowKing,
     /// The board of tasks of the project: columns, shared with the agents.
     ShowTasks,
     /// Asks for the title of a new task and puts it on the board.
@@ -2143,6 +2145,14 @@ pub const BINDINGS: &[Binding] = &[
         true,
     ),
     bind(
+        C::ShowKing,
+        "Talk to King Leon",
+        S::View,
+        W::Anywhere,
+        &[with_alt(secondary_shift("k"))],
+        true,
+    ),
+    bind(
         C::ShowTasks,
         "Show the task board",
         S::View,
@@ -2498,6 +2508,7 @@ pub fn keywords(command: Command) -> &'static str {
         C::Settings => "preferences options configuration config",
         C::RestoreSessions => "reopen open terminals tabs panes crash power quit previous session workspace",
         C::WhyMissing => "history sessions lost gone disappeared import diagnose opencode claude codex report",
+        C::ShowKing => "king coordinator principal engineer orchestrate delegate workers agents plan research cheap models budget pull request",
         C::ShowDen => "lions pride office agents live sessions watch activity pixel narrator who is working",
         C::GoHome => "home start dashboard quickstart overview nothing open back sessions summary",
         C::EditDen => "den furniture move place rotate desk decorate customise customize arrange room layout build",
@@ -2794,6 +2805,7 @@ mod tests {
             C::ShowUsage,
             C::RefreshUsage,
             C::Dictate,
+            C::ShowKing,
             C::ShowTasks,
             C::NewTask,
             C::StartTask,
@@ -2976,6 +2988,7 @@ mod tests {
                 | C::ShowUsage
                 | C::RefreshUsage
                 | C::Dictate
+                | C::ShowKing
                 | C::ShowTasks
                 | C::NewTask
                 | C::StartTask

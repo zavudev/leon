@@ -321,6 +321,14 @@ fn main() {
         runtime.handle().clone(),
     ));
     let backend = Rc::new(remote::RoutingBackend::new(hub, runtime.handle().clone()));
+    // King Leon's service: the window is one of its clients, and starts it
+    // the first time King's view opens.
+    #[cfg(unix)]
+    let king_link: Option<Arc<dyn king::link::Link>> = Some(Arc::new(king::link::Socket {
+        paths: king::Paths::here(&data_dir),
+    }));
+    #[cfg(not(unix))]
+    let king_link: Option<Arc<dyn king::link::Link>> = None;
     // The keeper of durable local sessions, started the first time a session
     // is opened with the setting on. Where there are no POSIX terminals there
     // is none.
@@ -430,6 +438,7 @@ fn main() {
                         memory: memory_terminals.clone(),
                         voice: voice.clone(),
                         chat_spawner: chat_spawner.clone(),
+                        king: king_link.clone(),
                         ..ui::Options::default()
                     };
                     let mut shell = ui::Shell::new(engine, options, window, cx);

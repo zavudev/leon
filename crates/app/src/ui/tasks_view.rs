@@ -308,7 +308,7 @@ impl Shell {
                 self.open_live(id, window, cx);
                 self.pane = pane;
             }
-            Main::Live(_) | Main::Den | Main::Tasks => {
+            Main::Live(_) | Main::Den | Main::Tasks | Main::King => {
                 self.main = Main::Empty;
                 self.pane = Pane::Sidebar;
             }

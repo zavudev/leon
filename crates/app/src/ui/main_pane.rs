@@ -49,6 +49,7 @@ impl Shell {
             Main::Live(id) => self.render_live(*id, colours, cx),
             Main::Den => self.render_den(colours, cx),
             Main::Tasks => self.render_tasks(colours, cx),
+            Main::King => self.render_king(colours, cx),
         };
         let agent = self.main_agent();
         div()
@@ -181,7 +182,7 @@ impl Shell {
                     .or_else(|| self.chats.get(id).map(|chat| chat.cwd.clone())),
             },
             Main::Session(transcript) => Some(transcript.session.cwd.clone()),
-            Main::Empty | Main::Den | Main::Tasks => None,
+            Main::Empty | Main::Den | Main::Tasks | Main::King => None,
         };
         match path.filter(|path| !path.is_empty()).and_then(|path| {
             meta.split_once(&path)
@@ -230,6 +231,7 @@ impl Shell {
         match &self.main {
             Main::Empty => ("Home", "Home".to_owned(), self.home_headline()),
             Main::Den => self.den_heading(),
+            Main::King => self.king_heading(),
             Main::Tasks => {
                 let (kind, title, meta) = self.tasks_heading();
                 (kind, title, meta)

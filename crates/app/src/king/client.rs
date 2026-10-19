@@ -23,9 +23,19 @@ const START_WITHIN: Duration = Duration::from_secs(10);
 
 /// A connection to the service.
 pub struct Client {
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
+    reader: Reader,
+    writer: Writer,
+}
+
+/// The half of a connection that writes requests.
+pub struct Writer {
+    stream: UnixStream,
     next: u64,
+}
+
+/// The half of a connection that reads what the service sends.
+pub struct Reader {
+    stream: BufReader<UnixStream>,
 }
 
 /// What the service sent that is not a reply.
@@ -48,9 +58,13 @@ impl Client {
         }
         let writer = stream.try_clone().map_err(|error| error.to_string())?;
         Ok(Self {
-            reader: BufReader::new(stream),
-            writer,
-            next: 1,
+            reader: Reader {
+                stream: BufReader::new(stream),
+            },
+            writer: Writer {
+                stream: writer,
+                next: 1,
+            },
         })
     }
 
@@ -74,32 +88,17 @@ impl Client {
 
     /// Sends a request and returns its id.
     pub fn send(&mut self, request: Request) -> Result<u64, String> {
-        let id = self.next;
-        self.next += 1;
-        let line = serde_json::to_string(&Envelope { id, request }).map_err(|e| e.to_string())?;
-        self.writer
-            .write_all(format!("{line}\n").as_bytes())
-            .map_err(|error| error.to_string())?;
-        Ok(id)
+        self.writer.send(request)
     }
 
     /// The next thing the service sends.
     pub fn read(&mut self) -> Result<Incoming, String> {
-        let mut line = String::new();
-        let read = self
-            .reader
-            .read_line(&mut line)
-            .map_err(|error| error.to_string())?;
-        if read == 0 {
-            return Err("King's service closed the connection".to_owned());
-        }
-        let value: Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
-        if value.get("notice").is_some() {
-            let notice = serde_json::from_value(value).map_err(|error| error.to_string())?;
-            return Ok(Incoming::Notice(notice));
-        }
-        let reply = serde_json::from_value(value).map_err(|error| error.to_string())?;
-        Ok(Incoming::Reply(reply))
+        self.reader.read()
+    }
+
+    /// The two halves, for a reader on a thread of its own.
+    pub fn split(self) -> (Writer, Reader) {
+        (self.writer, self.reader)
     }
 
     /// Asks and waits for the answer, skipping notices.
@@ -116,6 +115,45 @@ impl Client {
                 };
             }
         }
+    }
+}
+
+impl Writer {
+    /// Sends a request and returns its id.
+    pub fn send(&mut self, request: Request) -> Result<u64, String> {
+        let id = self.next;
+        self.next += 1;
+        self.send_as(id, request)?;
+        Ok(id)
+    }
+
+    /// Sends a request under an id the caller chose.
+    pub fn send_as(&mut self, id: u64, request: Request) -> Result<(), String> {
+        let line = serde_json::to_string(&Envelope { id, request }).map_err(|e| e.to_string())?;
+        self.stream
+            .write_all(format!("{line}\n").as_bytes())
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl Reader {
+    /// The next thing the service sends.
+    pub fn read(&mut self) -> Result<Incoming, String> {
+        let mut line = String::new();
+        let read = self
+            .stream
+            .read_line(&mut line)
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            return Err("King's service closed the connection".to_owned());
+        }
+        let value: Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
+        if value.get("notice").is_some() {
+            let notice = serde_json::from_value(value).map_err(|error| error.to_string())?;
+            return Ok(Incoming::Notice(notice));
+        }
+        let reply = serde_json::from_value(value).map_err(|error| error.to_string())?;
+        Ok(Incoming::Reply(reply))
     }
 }
 
@@ -182,10 +220,11 @@ pub fn ask_and_print(paths: &Paths, request: Request, wait: bool) -> Result<(), 
                 seen = Some(last.seq);
             }
         }
-        if let Some((id, _)) = status.brain.questions.first() {
+        if let Some(open) = status.brain.questions.first() {
             println!(
-                "\nKing waits on question {id}. Answer it from the window, or tell it what to do \
-                 with `leon king say`."
+                "\nKing waits on question {}. Answer it from the window, or tell it what to do \
+                 with `leon king say`.",
+                open.id
             );
             return Ok(());
         }
@@ -213,6 +252,7 @@ pub fn print_log(paths: &Paths, target: Target) -> Result<(), String> {
 fn print_entry(entry: &leon_king::transcript::Entry) {
     match entry.kind {
         Kind::Prompt => println!("\n> {}\n", entry.text.replace('\n', "\n> ")),
+        Kind::News => println!("  ! {}", entry.text.replace('\n', "\n  ! ")),
         Kind::Agent => println!("{}\n", entry.text),
         Kind::Tool => println!("  · {}", entry.text),
         Kind::Question => println!("  ? {}", entry.text),

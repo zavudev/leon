@@ -12,9 +12,9 @@ King is a conversation with a coding agent you choose: Claude Code, Codex,
 opencode, Grok or Cursor's agent. Leon gives that agent King's tools and
 keeps the conversation in a service that runs without the window.
 
-> Status: the first stage. The service, the command line and King's tools
-> work on macOS and Linux. The window's King view, workers on other machines
-> and the phone's screen come next (see "Not built yet").
+> Status: the service, the command line, King's tools and the window's King
+> view work on macOS and Linux. Workers on other machines and the phone's
+> screen come next (see "Not built yet").
 
 ## Talking to King
 
@@ -31,6 +31,41 @@ leon king brain codex gpt-5.6 high   # run King on another agent or model
 service starts by itself the first time a command needs it (`leon king serve`
 runs it in the foreground instead). What you say while King is working waits,
 and King hears all of it together when its turn ends.
+
+## In the window
+
+**King Leon** is a row of the sidebar's navigation, under Home
+(Ctrl+Shift+Alt+K, the palette's "Talk to King Leon"). It opens King's view
+in the main pane:
+
+* **King's conversation** on the left, with the field you speak to King in.
+  The tools King used between two answers are one folded line, what Leon
+  told King of its workers is a folded "news" line, and Leon's report sits
+  under each answer. A question King waits on is a framed card with its
+  answers (allow, always, deny; start or not yet for a plan), and any
+  question can be answered with what is written in the field. Escape stops
+  King's turn, or closes the view when King is not working.
+* **The workers** on the right, as cards, newest first: what each is for,
+  what it runs on, its job and tier, what it cost and the last thing it
+  said. Workers are not in the sidebar while they are King's.
+* **A card opened** (a click, or Alt+Down and Alt+Up) shows the worker's
+  conversation live, with what you can do to it: write to it (King is told
+  you stepped in), stop its turn (Escape), stop the worker, or **take it
+  over**.
+* **Taking a worker over** takes it from King and opens it as a session of
+  the window in its worktree, continuing the agent's conversation where the
+  worker left it. From then on it is yours, in the sidebar like any other.
+
+The sidebar's row shows how King stands when it is not on screen: a dot
+while King or a worker works, the waiting dot when one of them asks you
+something, and how many workers King runs.
+
+The window is one more client of King's service, as the phone and
+`leon king …` are: it starts the service when it is not running, and
+closing the window stops nothing King does. King's own answers, questions
+and failures also reach the desktop as notifications, for when the window
+is not looking; inside the view only what King sends you with `notify_user`
+shows up over the field.
 
 ## What every answer tells you
 
@@ -228,9 +263,8 @@ conversation; changing its model or effort keeps the same one.
 
 ## Not built yet
 
-* The window's King view: King's conversation as the main view, and workers
-  as cards you can watch, step into and pull out to the sidebar. Workers stay
-  out of the sidebar while they are King's.
+* Changing King's agent, model and effort from the window (today:
+  `leon king brain`, or `king.toml`).
 * King on the phone, through the paired host.
 * Installing the service as a background service of your session
   (`leon king service install`), the way `leon host service` is.

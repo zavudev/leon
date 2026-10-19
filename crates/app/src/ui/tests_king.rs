@@ -1,0 +1,287 @@
+//! King Leon in the window: the view opens on the service's line, shows
+//! King's conversation and its workers as it is told, says what is written
+//! to King and to a worker, and opens a worker the person takes over as a
+//! session of its own. The service is played by the test
+//! (`crate::king::link::testing`).
+
+use super::*;
+use crate::king::link::testing::End;
+use crate::king::link::Heard;
+use leon_king::coordinator::Target;
+use leon_king::protocol::{Notice, Request};
+use serde_json::{json, Value};
+
+fn open_king(h: &Harness, cx: &mut TestAppContext) -> End {
+    h.press_chord("cmd-shift-alt-k", "ctrl-shift-alt-k", cx);
+    assert_eq!(h.main_kind(cx), "king");
+    let mut ends = h.king.take();
+    assert_eq!(ends.len(), 1, "one line to the service");
+    ends.remove(0)
+}
+
+fn conversation(busy: bool, last_seq: Option<u64>) -> Value {
+    json!({
+        "agent": "claude", "model": "opus", "effort": "high", "session_id": "s-king",
+        "busy": busy, "queued": 0, "questions": [], "cost_usd": 0.12,
+        "last_seq": last_seq,
+    })
+}
+
+fn status(brain_seq: Option<u64>, workers: Value) -> Value {
+    json!({
+        "brain": conversation(false, brain_seq),
+        "workers": workers,
+        "news": 0,
+        "spent_today_usd": 0.42,
+        "daily_budget_usd": 20.0,
+    })
+}
+
+fn worker(id: u32, state: &str, last_seq: Option<u64>) -> Value {
+    json!({
+        "id": id, "title": "Fix the calculator", "project": "api",
+        "cwd": "/home/user/api-king-fix-1", "job": "code", "tier": "cheap", "state": state,
+        "conversation": {
+            "agent": "opencode", "model": "free", "effort": null, "session_id": "ses-7",
+            "busy": state == "working", "queued": 0, "questions": [], "cost_usd": 0.0,
+            "last_seq": last_seq,
+        },
+        "last_answer": "Found it: the sum is off by one.", "updated_ms": 0,
+    })
+}
+
+fn entries(texts: &[(u64, &str, &str)]) -> Value {
+    Value::Array(
+        texts
+            .iter()
+            .map(|(seq, kind, text)| json!({"seq": seq, "at_ms": 0, "kind": kind, "text": text}))
+            .collect(),
+    )
+}
+
+/// Answers the window's requests: `answer` gives the result of each, by
+/// what was asked. Returns what was asked.
+fn serve(
+    h: &Harness,
+    end: &End,
+    cx: &mut TestAppContext,
+    mut answer: impl FnMut(&Request) -> Value,
+) -> Vec<Request> {
+    h.settle(cx);
+    let asked = end.drain();
+    for (tag, request) in &asked {
+        end.tell
+            .send(Heard::Reply {
+                tag: *tag,
+                result: Ok(answer(request)),
+            })
+            .unwrap();
+    }
+    h.settle(cx);
+    asked.into_iter().map(|(_, request)| request).collect()
+}
+
+/// The view opened, the service told the status and King's conversation.
+fn with_conversation(cx: &mut TestAppContext, workers: Value) -> (Harness, End) {
+    let h = open(cx, ScriptedRunner::new());
+    let end = open_king(&h, cx);
+    let asked = serve(&h, &end, cx, |request| match request {
+        Request::Status => status(Some(2), workers.clone()),
+        _ => Value::Null,
+    });
+    assert_eq!(asked, [Request::Status]);
+    let asked = serve(&h, &end, cx, |request| match request {
+        Request::Transcript { .. } => entries(&[
+            (0, "prompt", "What is the state of api?"),
+            (1, "tool", "projects_list: all"),
+            (2, "agent", "Everything is green."),
+        ]),
+        _ => Value::Null,
+    });
+    assert_eq!(
+        asked,
+        [Request::Transcript {
+            target: Target::Brain,
+            since: None,
+            limit: Some(leon_king::transcript::KEPT),
+        }]
+    );
+    (h, end)
+}
+
+#[gpui_kit::test]
+fn the_view_shows_kings_conversation_as_the_service_tells_it(cx: &mut TestAppContext) {
+    let (h, end) = with_conversation(cx, json!([]));
+    assert!(h.shows("king", cx));
+    assert!(h.shows_dynamic("king-prompt-brain-0".into(), cx));
+    assert!(h.shows_dynamic("king-tools-brain-1".into(), cx));
+    assert!(h.shows_dynamic("king-agent-brain-2".into(), cx));
+    assert!(h.shows("king-no-workers", cx));
+    let (_, title, meta) = h.shell(cx, |s| s.king_heading());
+    assert_eq!(title, "King Leon");
+    assert!(meta.contains("CLAUDE CODE OPUS HIGH"), "{meta}");
+    assert!(meta.contains("$0.42 of $20.00 today"), "{meta}");
+
+    // A notice with more: only what comes after is asked for.
+    end.tell
+        .send(Heard::Notice(
+            serde_json::from_value::<Notice>(json!({
+                "notice": "changed", "status": status(Some(4), json!([])),
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let asked = serve(&h, &end, cx, |_| {
+        entries(&[
+            (3, "agent", "And the tests pass."),
+            (4, "report", "This answer: 1k tokens"),
+        ])
+    });
+    assert_eq!(
+        asked,
+        [Request::Transcript {
+            target: Target::Brain,
+            since: Some(2),
+            limit: Some(leon_king::transcript::KEPT),
+        }]
+    );
+    assert!(h.shows_dynamic("king-agent-brain-3".into(), cx));
+    assert!(h.shows_dynamic("king-report-brain-4".into(), cx));
+}
+
+#[gpui_kit::test]
+fn what_is_written_is_said_to_king_and_escape_closes_the_view(cx: &mut TestAppContext) {
+    let (h, end) = with_conversation(cx, json!([]));
+    h.type_text("Review the open pull requests", cx);
+    h.press("enter", cx);
+    let asked = serve(&h, &end, cx, |_| Value::Null);
+    assert_eq!(
+        asked,
+        [Request::Say {
+            text: "Review the open pull requests".into()
+        }]
+    );
+    let left = cx.update(|cx| {
+        let shell = h.shell.read(cx);
+        shell
+            .king_ui
+            .input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+    });
+    assert_eq!(left.as_deref(), Some(""), "the field is empty again");
+    h.press("escape", cx);
+    assert_eq!(h.main_kind(cx), "empty");
+    // The line stays: opening again does not open another.
+    h.press_chord("cmd-shift-alt-k", "ctrl-shift-alt-k", cx);
+    assert_eq!(h.main_kind(cx), "king");
+    assert!(h.king.take().is_empty());
+}
+
+#[gpui_kit::test]
+fn a_workers_card_opens_its_conversation_and_takes_what_is_told(cx: &mut TestAppContext) {
+    let (h, end) = with_conversation(cx, json!([worker(1, "working", Some(0))]));
+    assert!(h.shows_dynamic("king-card-1".into(), cx));
+    // King's workers are never rows of the sidebar.
+    assert!(!h
+        .outline(cx)
+        .iter()
+        .any(|row| row.contains("Fix the calculator")));
+    h.mouse_on("king-card-1".into(), gpui_kit::MouseButton::Left, cx);
+    let asked = serve(&h, &end, cx, |_| {
+        entries(&[(0, "prompt", "Find the bug in calc.py")])
+    });
+    assert_eq!(
+        asked,
+        [Request::Transcript {
+            target: Target::Worker(1),
+            since: None,
+            limit: Some(leon_king::transcript::KEPT),
+        }]
+    );
+    assert!(h.shows_dynamic("king-worker-1".into(), cx));
+    assert!(h.shows_dynamic("king-prompt-worker-1-0".into(), cx));
+    // The person steps in.
+    h.type_text("Look at the tests too", cx);
+    h.press("enter", cx);
+    let asked = serve(&h, &end, cx, |_| Value::Null);
+    assert_eq!(
+        asked,
+        [Request::TellWorker {
+            worker: 1,
+            text: "Look at the tests too".into()
+        }]
+    );
+    // Its turn is stopped with Escape; the card stays open.
+    h.press("escape", cx);
+    let asked = serve(&h, &end, cx, |_| Value::Null);
+    assert_eq!(
+        asked,
+        [Request::Interrupt {
+            target: Target::Worker(1)
+        }]
+    );
+    assert!(h.shows_dynamic("king-worker-1".into(), cx));
+}
+
+#[gpui_kit::test]
+fn a_worker_taken_over_opens_as_a_session_of_the_window(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let mut done = worker(3, "done", Some(0));
+    done["cwd"] = json!(cwd);
+    let (h, end) = with_conversation(cx, json!([done]));
+    h.mouse_on("king-card-3".into(), gpui_kit::MouseButton::Left, cx);
+    serve(&h, &end, cx, |_| entries(&[(0, "agent", "Done.")]));
+    h.mouse_on("king-take-over-3".into(), gpui_kit::MouseButton::Left, cx);
+    let asked = serve(
+        &h,
+        &end,
+        cx,
+        |_| json!({"worker": 3, "agent": "claude", "session_id": "ses-7", "cwd": cwd}),
+    );
+    assert_eq!(asked, [Request::Release { worker: 3 }]);
+    assert!(
+        h.main_kind(cx).starts_with("live:"),
+        "the worker is a session of the window now: {}",
+        h.main_kind(cx)
+    );
+}
+
+#[gpui_kit::test]
+fn a_line_that_cannot_be_opened_says_why_and_can_be_tried_again(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    h.king.refuse("King's service did not start: no such file");
+    h.press_chord("cmd-shift-alt-k", "ctrl-shift-alt-k", cx);
+    assert!(h.shows("king-unreached", cx));
+    let (_, _, meta) = h.shell(cx, |s| s.king_heading());
+    assert!(meta.contains("did not start"), "{meta}");
+    h.mouse_on("king-connect".into(), gpui_kit::MouseButton::Left, cx);
+    let end = h.king.take().pop().expect("a second try");
+    serve(&h, &end, cx, |_| status(None, json!([])));
+    assert!(h.shows("king-empty", cx));
+    // The service goes away: the view says so.
+    end.tell.send(Heard::Lost("closed".into())).unwrap();
+    h.settle(cx);
+    assert!(h.shell(cx, |s| !s.king_ui.connected()));
+}
+
+#[gpui_kit::test]
+fn the_sidebar_row_opens_king_and_shows_how_it_stands(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    assert!(h.shows("sidebar-king", cx));
+    h.mouse_on("sidebar-king".into(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(h.main_kind(cx), "king");
+    let end = h.king.take().pop().unwrap();
+    serve(&h, &end, cx, |_| {
+        status(
+            None,
+            json!([worker(1, "working", None), worker(2, "asking", None)]),
+        )
+    });
+    assert!(h.shows("sidebar-king-glance", cx));
+    assert_eq!(
+        h.shell(cx, |s| s.king_glance()),
+        Some((crate::ui::activity::Activity::NeedsYou, 2))
+    );
+}

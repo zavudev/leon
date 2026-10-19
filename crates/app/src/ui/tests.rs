@@ -366,6 +366,8 @@ struct Harness {
     urls: Rc<std::cell::RefCell<Vec<String>>>,
     /// How many times the application was asked to end.
     quits: Rc<std::cell::Cell<usize>>,
+    /// King's service, played by the test.
+    king: crate::king::link::testing::Fake,
 }
 
 /// Opens the window over an in-memory store, with nothing waiting on the
@@ -472,6 +474,7 @@ fn open_core(
     let updates = updates(runtime.handle());
     let chat = crate::chat::turn::testing::Scripted::default();
     let voice = crate::voice::testing::Scripted::default();
+    let king = crate::king::link::testing::Fake::default();
     let options = Options {
         backend: computer.clone(),
         chat_spawner: Arc::new(chat.clone()),
@@ -519,6 +522,7 @@ fn open_core(
         ssh_dir: ssh.clone(),
         remote: None,
         memory: None,
+        king: Some(Arc::new(king.clone())),
         updates,
         durable: DURABLE.with(|slot| slot.borrow_mut().take()),
         update_timer: false,
@@ -560,6 +564,7 @@ fn open_core(
         key_answer,
         urls,
         quits,
+        king,
     }
 }
 
@@ -842,6 +847,7 @@ impl Harness {
             Main::Session(transcript) => format!("session:{}", transcript.session.title),
             Main::Live(id) => format!("live:{id}"),
             Main::Den => "den".to_owned(),
+            Main::King => "king".to_owned(),
         })
     }
 }
@@ -7970,6 +7976,10 @@ mod tests_usage;
 
 #[path = "tests_tasks.rs"]
 mod tests_tasks;
+
+#[cfg(leon_posix_tests)]
+#[path = "tests_king.rs"]
+mod tests_king;
 
 #[cfg(leon_posix_tests)]
 #[path = "tests_task_work.rs"]
