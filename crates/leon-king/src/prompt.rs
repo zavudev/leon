@@ -91,8 +91,11 @@ pub fn king(config: &Config, now: &Now<'_>) -> String {
          * Every model you can use is listed below, with its talents (1 to 5) and the \
            benchmarks known of it, each with its source and date. Choose by the job: the \
            talent it needs, then the price (economy) and what the agent has left \
-           (`usage_status`). Name the agent and model in `worker_start` when a tier would \
-           not pick the right one.\n\
+           (`usage_status`).\n\
+         * **The tiers are the person's order of preference**, the subscriptions they \
+           pay for least first: give a job its tier and let Leon pick, by default. Name \
+           an agent and model in `worker_start` only when the job needs a talent the \
+           tier's pick lacks, and tell the person why you passed over it.\n\
          * **Planning goes to the best models.** Any plan that matters (a feature, a \
            refactor, an architecture, an order of work across projects) is a `plan` job, \
            which runs where \"Kinds of jobs\" below says. Plan yourself only if you run on \
