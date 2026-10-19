@@ -123,9 +123,14 @@ impl Chat {
             MenuKind::Models => self.options.as_ref().map_or_else(Vec::new, |options| {
                 complete::model_rows(&filter(), options, self.model.as_deref())
             }),
-            MenuKind::Efforts => {
-                complete::effort_rows(&filter(), self.efforts(), self.effort.as_deref())
-            }
+            MenuKind::Efforts => complete::effort_rows(
+                &filter(),
+                self.efforts(),
+                self.effort.as_deref(),
+                self.options
+                    .as_ref()
+                    .and_then(|options| options.default_effort.as_deref()),
+            ),
             MenuKind::Voices => complete::voice_rows(&filter(), voices),
         }
     }

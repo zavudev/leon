@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Fixed
+
+* A conversation in Leon's own interface names what its agent runs with. The
+  chips under the field said "Default" for the model and the effort until
+  you chose one; they now say the model and the effort the agent is set up
+  with (Claude Code is asked for its settings as it weighs them, Codex for
+  its configuration, Grok for the model it marks), and the lists say what
+  "Default" is. What a turn says it answers with (`claude-opus-5-5`) is
+  shown by the name you know it by (Opus 5.5).
+* Coming back to a conversation by its row no longer asks to resume it. Once
+  the agent had written its session, the row was the history's, and a click
+  on it only looked for a terminal: it offered to start the agent again in
+  one. The row is the conversation's, as it is a terminal's, also for the
+  context menu, the keys that act on the session under the cursor and the
+  Den.
+
 ## [0.10.0] - 2026-10-13
 
 ### Added

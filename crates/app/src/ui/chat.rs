@@ -995,6 +995,16 @@ impl Shell {
         }
     }
 
+    /// What runs here for this history session: the terminal that has it, or
+    /// the conversation. A history row with either is that session's row, and
+    /// is brought forward, never started a second time.
+    pub(super) fn running_of_history(&self, history: &SessionId) -> Option<LiveId> {
+        self.live
+            .of_history(history)
+            .map(|live| live.id)
+            .or_else(|| self.chat_of_history(history))
+    }
+
     /// The conversation started from this history session, if one is open.
     pub(super) fn chat_of_history(&self, history: &SessionId) -> Option<LiveId> {
         self.chats

@@ -456,7 +456,7 @@ impl Shell {
         // by default: the transcript comes first, and resuming is "Resume
         // here anyway".
         if let (Some(_), Kind::Session(session)) = (held, &row.kind) {
-            if self.live.of_history(&session.id).is_none() {
+            if self.running_of_history(&session.id).is_none() {
                 items.retain(|item| item.command != Command::ResumeSession);
             }
         }
@@ -464,7 +464,7 @@ impl Shell {
         // with what that state does: running, asleep, or history only (which
         // `items_for_held` already is).
         if let Kind::Session(session) = &row.kind {
-            if self.live.of_history(&session.id).is_some() {
+            if self.running_of_history(&session.id).is_some() {
                 // The terminal's row: it is closed from here as a live row
                 // is, and removing it from the history would only bring the
                 // terminal back as a live row, so that is not offered.
@@ -503,7 +503,7 @@ impl Shell {
                         item.command = Command::BringBackSession;
                     }
                 }
-            } else if self.live.of_history(&session.id).is_some() {
+            } else if self.running_of_history(&session.id).is_some() {
                 items.retain(|item| item.command != Command::SettleSession);
             }
         }

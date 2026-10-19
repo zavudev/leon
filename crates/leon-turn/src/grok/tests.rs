@@ -304,6 +304,8 @@ fn its_models_are_read_from_its_own_list() {
         ["grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"]
     );
     assert!(options.models[0].efforts.contains(&"xhigh".to_owned()));
+    // The one it marks is the one it answers with unasked.
+    assert_eq!(options.default_model.as_deref(), Some("grok-4.7"));
     let modes: Vec<&str> = options.modes.iter().map(|mode| mode.id.as_str()).collect();
     assert_eq!(modes, [MODE_ASK, acp::MODE_AUTO]);
     assert_eq!(options.default_mode.as_deref(), Some(MODE_ASK));
