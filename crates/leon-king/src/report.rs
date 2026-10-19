@@ -113,6 +113,38 @@ pub struct Facts<'a> {
     pub usage: &'a [AgentWindows],
 }
 
+/// The facts under one answer, kept with it: what a client draws its own
+/// way, and what [`line`] writes as text.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Report {
+    /// The turn that just ended.
+    pub turn: Option<TurnStats>,
+    /// The workers' tokens today.
+    pub workers_today: Totals,
+    /// King's own tokens today.
+    pub king_today: Totals,
+    /// What was spent today, in US dollars.
+    pub spent_today_usd: f64,
+    /// The day's budget, when there is one.
+    pub budget_usd: Option<f64>,
+    /// What is left of each agent's usage windows.
+    pub usage: Vec<AgentWindows>,
+}
+
+impl Report {
+    /// The facts, as [`line`] reads them.
+    pub fn facts(&self) -> Facts<'_> {
+        Facts {
+            turn: self.turn,
+            workers_today: self.workers_today,
+            king_today: self.king_today,
+            spent_today_usd: self.spent_today_usd,
+            budget_usd: self.budget_usd,
+            usage: &self.usage,
+        }
+    }
+}
+
 /// A count of tokens, short: `950`, `12.3k`, `1.2M`.
 pub fn count(tokens: u64) -> String {
     match tokens {

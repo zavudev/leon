@@ -65,6 +65,8 @@ pub enum Action {
     Details,
     /// Sync with GitHub now, or ask to turn it on.
     Sync,
+    /// Give the card to King Leon, who works it.
+    King,
 }
 
 /// The action of a key pressed while the board has the keyboard, or `None`
@@ -91,6 +93,7 @@ pub fn action_of(key: &str, shift: bool, other_modifier: bool) -> Option<Action>
         ("w" | "enter", false) => Action::Start,
         ("e", false) => Action::Details,
         ("s", false) => Action::Sync,
+        ("a", false) => Action::King,
         _ => return None,
     };
     Some(action)

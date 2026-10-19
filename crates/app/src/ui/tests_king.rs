@@ -64,6 +64,11 @@ fn models() -> Value {
         {"agent": "claude", "id": "opus", "label": "Opus", "efforts": ["low", "high"]},
         {"agent": "claude", "id": "haiku", "label": "Haiku", "efforts": []},
         {"agent": "codex", "id": "gpt-5.5", "label": "GPT-5.5", "efforts": ["medium", "high"]},
+    ], "modes": [
+        {"agent": "claude", "id": "acceptEdits", "label": "Accept edits",
+         "description": "edits files without asking", "dangerous": false},
+        {"agent": "claude", "id": "bypassPermissions", "label": "Bypass permissions",
+         "description": "never asks", "dangerous": true},
     ]})
 }
 
@@ -131,7 +136,7 @@ fn the_view_shows_kings_conversation_as_the_service_tells_it(cx: &mut TestAppCon
     assert!(h.shows_dynamic("king-agent-brain-2".into(), cx));
     assert!(h.shows("king-no-workers", cx));
     let (_, title, meta) = h.shell(cx, |s| s.king_heading());
-    assert_eq!(title, "King Leon");
+    assert_eq!(title, "The King");
     assert!(meta.contains("CLAUDE CODE OPUS HIGH"), "{meta}");
     assert!(meta.contains("$0.42 of $20.00 today"), "{meta}");
 
@@ -381,6 +386,20 @@ fn kings_model_is_changed_from_the_window(cx: &mut TestAppContext) {
             mode: None,
         }]
     );
+    // How much it asks: a mode of its agent, the rest kept.
+    h.mouse_on("king-mode-chip".into(), gpui_kit::MouseButton::Left, cx);
+    h.set_palette_text("accept", cx);
+    h.press("enter", cx);
+    let asked = serve(&h, &end, cx, |_| Value::Null);
+    assert_eq!(
+        asked,
+        [Request::SetBrain {
+            agent: "claude".into(),
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+            mode: Some("acceptEdits".into()),
+        }]
+    );
 }
 
 #[gpui_kit::test]
@@ -421,4 +440,56 @@ fn the_service_is_told_while_the_person_looks_at_king(cx: &mut TestAppContext) {
     // The view closed: not looking.
     h.press("escape", cx);
     assert_eq!(watch(&h, cx), [false]);
+}
+
+#[gpui_kit::test]
+fn past_conversations_are_listed_read_and_taken_up_again(cx: &mut TestAppContext) {
+    let (h, end) = with_conversation(cx, json!([]));
+    // A new conversation is asked for from the field's foot.
+    h.mouse_on("king-new".into(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(
+        serve(&h, &end, cx, |_| json!({"archived": 0})),
+        [Request::NewConversation]
+    );
+    // The service says so: another conversation, nothing said in it yet.
+    let mut fresh = status(None, json!([]));
+    fresh["conversation"] = json!(1);
+    tell_status(&end, fresh);
+    h.settle(cx);
+    assert!(
+        h.shows("king-empty", cx),
+        "what was said before is not shown"
+    );
+
+    let past = json!([{
+        "id": 0, "title": "What is the state of api?", "started_ms": 0, "ended_ms": 0,
+        "agent": "claude", "model": "opus", "session_id": "s-king", "entries": 3,
+    }]);
+    h.mouse_on("king-tab-history".into(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(
+        serve(&h, &end, cx, |_| past.clone()),
+        [Request::Conversations]
+    );
+    assert!(h.shows_dynamic("king-past-0".into(), cx));
+    h.mouse_on("king-past-0".into(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(
+        serve(&h, &end, cx, |_| entries(&[(
+            0,
+            "prompt",
+            "What is the state of api?"
+        )])),
+        [Request::PastConversation { id: 0 }]
+    );
+    assert!(h.shows("king-past-bar", cx));
+    assert!(h.shows_dynamic("king-prompt-brain-0".into(), cx));
+    h.mouse_on("king-resume".into(), gpui_kit::MouseButton::Left, cx);
+    let asked = serve(&h, &end, cx, |request| match request {
+        Request::Conversations => json!([]),
+        _ => Value::Null,
+    });
+    assert_eq!(asked[0], Request::ResumeConversation { id: 0 });
+    assert!(
+        !h.shows("king-past-bar", cx),
+        "the one taken up is the one now"
+    );
 }

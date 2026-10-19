@@ -75,23 +75,23 @@ pub struct HomeUi {
 pub enum Nav {
     /// The home.
     Home,
-    /// King Leon.
-    King,
     /// The board of tasks.
     Tasks,
+    /// King Leon.
+    King,
     /// The Den.
     Den,
 }
 
 impl Nav {
     /// The rows, top to bottom.
-    pub const ALL: [Nav; 4] = [Nav::Home, Nav::King, Nav::Tasks, Nav::Den];
+    pub const ALL: [Nav; 4] = [Nav::Home, Nav::Tasks, Nav::King, Nav::Den];
 
     /// Its name.
     pub fn label(self) -> &'static str {
         match self {
             Nav::Home => "Home",
-            Nav::King => "King Leon",
+            Nav::King => "The King",
             Nav::Tasks => "Tasks",
             Nav::Den => "The Den",
         }
@@ -112,12 +112,12 @@ impl Nav {
     pub fn step(self, up: bool) -> Option<Nav> {
         match (self, up) {
             (Nav::Home, true) => Some(Nav::Home),
-            (Nav::Home, false) => Some(Nav::King),
-            (Nav::King, true) => Some(Nav::Home),
-            (Nav::King, false) => Some(Nav::Tasks),
-            (Nav::Tasks, true) => Some(Nav::King),
-            (Nav::Tasks, false) => Some(Nav::Den),
-            (Nav::Den, true) => Some(Nav::Tasks),
+            (Nav::Home, false) => Some(Nav::Tasks),
+            (Nav::Tasks, true) => Some(Nav::Home),
+            (Nav::Tasks, false) => Some(Nav::King),
+            (Nav::King, true) => Some(Nav::Tasks),
+            (Nav::King, false) => Some(Nav::Den),
+            (Nav::Den, true) => Some(Nav::King),
             (Nav::Den, false) => None,
         }
     }

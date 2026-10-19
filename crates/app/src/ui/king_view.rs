@@ -10,12 +10,14 @@
 //! the worker over it.
 
 use gpui_kit::component::input::Textarea;
-use gpui_kit::component::text::TextView;
+use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::prelude::*;
 use gpui_kit::{div, AnyElement, ClickEvent, Context, Div, FontWeight, SharedString, Stateful};
 use leon_core::AgentId;
 use leon_king::coordinator::{Open, Target, WorkerState};
+use leon_king::history::Past;
 use leon_king::protocol::{ConversationStatus, Status, WorkerStatus};
+use leon_king::report::{count, span, Report};
 use leon_king::transcript::{Entry, Kind};
 
 use super::activity::Activity;
@@ -30,6 +32,23 @@ const COLUMN: f32 = 760.;
 
 /// How wide the column of the workers is.
 const WORKERS: f32 = 380.;
+
+/// The line height of an answer, in lines of its text: answers are long,
+/// and read rather than glanced at.
+const ANSWER_LINE: f32 = 1.65;
+
+/// How an answer's Markdown is laid out: more room between paragraphs and
+/// lists than a chat's, and headings that mark a section without shouting.
+fn answer_style() -> TextViewStyle {
+    TextViewStyle::default()
+        .paragraph_gap(gpui_kit::rems(1.2))
+        .heading_font_size(|level, base| match level {
+            1 => base * 1.45,
+            2 => base * 1.3,
+            3 => base * 1.15,
+            _ => base * 1.05,
+        })
+}
 
 /// How many tools of a folded run are named under it when it is open.
 const TOOLS_SHOWN: usize = 40;
@@ -208,7 +227,7 @@ impl Shell {
                 .clone()
                 .unwrap_or_else(|| "Not connected".to_owned()),
         };
-        ("King", "King Leon".to_owned(), meta)
+        ("King", "The King".to_owned(), meta)
     }
 
     /// How King stands, for the sidebar's row: its dot and how many workers
@@ -255,9 +274,18 @@ impl Shell {
                     .min_h_0()
                     .flex()
                     .flex_col()
-                    .child(self.king_timeline(Target::Brain, &ui.brain.entries, c, cx))
-                    .child(
-                        column()
+                    .child(match &ui.viewing {
+                        Some((_, entries)) => self.king_timeline(Target::Brain, entries, c, cx),
+                        None => self.king_timeline(Target::Brain, &ui.brain.entries, c, cx),
+                    })
+                    .child(match &ui.viewing {
+                        Some((past, _)) => column()
+                            .flex_none()
+                            .px(px(16.))
+                            .pb(px(12.))
+                            .child(self.king_past_bar(past, c, cx))
+                            .into_any_element(),
+                        None => column()
                             .flex_none()
                             .px(px(16.))
                             .pb(px(12.))
@@ -273,8 +301,9 @@ impl Shell {
                                 c,
                                 cx,
                             ))
-                            .child(self.king_composer(status, c, cx)),
-                    ),
+                            .child(self.king_composer(status, c, cx))
+                            .into_any_element(),
+                    }),
             )
             .child(
                 div()
@@ -294,7 +323,10 @@ impl Shell {
                             .and_then(|id| status.workers.iter().find(|worker| worker.id == id))
                         {
                             Some(worker) => self.king_worker(worker, c, cx),
-                            None => self.king_cards(status, c, cx),
+                            None => match &ui.history {
+                                Some(list) => self.king_history(status, list, c, cx),
+                                None => self.king_cards(status, c, cx),
+                            },
                         },
                     ),
             )
@@ -781,6 +813,60 @@ impl Shell {
                             .text_color(c.text_muted),
                     ),
             );
+        // How much King asks; a click asks how much it should.
+        let mode = brain.mode.as_ref().map(|id| {
+            self.king_ui
+                .modes
+                .iter()
+                .find(|mode| mode.agent == brain.agent && &mode.id == id)
+                .map_or_else(
+                    || (id.to_uppercase(), false),
+                    |mode| (mode.label.to_uppercase(), mode.dangerous),
+                )
+        });
+        let (mode_label, dangerous) = mode.unwrap_or_else(|| ("DEFAULT MODE".to_owned(), false));
+        foot = foot.child(
+            div()
+                .id("king-mode-chip")
+                .debug_selector(|| "king-mode-chip".into())
+                .flex_none()
+                .h(px(22.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .rounded(metrics::RADIUS())
+                .border_1()
+                .border_color(if dangerous { c.warning } else { c.border })
+                .cursor_pointer()
+                .hover(move |style| style.bg(chip_hover))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.begin_flow(crate::keys::Command::KingMode, window, cx);
+                }))
+                .child(mono(mode_label).text_color(if dangerous {
+                    c.warning
+                } else {
+                    c.text_muted
+                })),
+        );
+        foot = foot.child(
+            div()
+                .id("king-new")
+                .debug_selector(|| "king-new".into())
+                .flex_none()
+                .h(px(22.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .rounded(metrics::RADIUS())
+                .cursor_pointer()
+                .hover(move |style| style.bg(chip_hover))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.king_new_conversation(cx);
+                }))
+                .child(icon(IconName::Plus, px(12.), c.text_faint))
+                .child(mono("NEW").text_color(c.text_muted)),
+        );
         if brain.queued > 0 {
             foot = foot.child(
                 mono(format!("{} QUEUED", brain.queued))
@@ -850,25 +936,7 @@ impl Shell {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .flex_none()
-                    .h(px(36.))
-                    .px(px(12.))
-                    .border_b_1()
-                    .border_color(c.border)
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(mono("WORKERS").text_color(c.text_muted))
-                    .child(mono(status.workers.len().to_string()).text_color(c.text_faint))
-                    .child(div().flex_1())
-                    .child(
-                        mono(spent(status).to_uppercase())
-                            .debug_selector(|| "king-spent".into())
-                            .text_color(c.text_faint),
-                    ),
-            )
+            .child(self.king_side_tabs(status, false, c, cx))
             .child(
                 div()
                     .id("king-cards")
@@ -877,6 +945,219 @@ impl Shell {
                     .min_h_0()
                     .overflow_y_scroll()
                     .child(cards),
+            )
+            .into_any_element()
+    }
+
+    /// The head of the right column: the workers or the past
+    /// conversations, and what was spent today.
+    fn king_side_tabs(
+        &self,
+        status: &Status,
+        history: bool,
+        c: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let hover = c.surface_2;
+        let tab = |id: &'static str, label: String, on: bool| {
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .flex_none()
+                .h(px(24.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .rounded(metrics::RADIUS())
+                .cursor_pointer()
+                .when(on, |this| this.bg(c.surface_2))
+                .hover(move |style| style.bg(hover))
+                .child(mono(label).text_color(if on { c.text } else { c.text_muted }))
+        };
+        div()
+            .flex_none()
+            .h(px(36.))
+            .px(px(8.))
+            .border_b_1()
+            .border_color(c.border)
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .child(
+                tab(
+                    "king-tab-workers",
+                    format!("WORKERS {}", status.workers.len()),
+                    !history,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.king_toggle_history(false, cx);
+                })),
+            )
+            .child(
+                tab("king-tab-history", "HISTORY".to_owned(), history).on_click(cx.listener(
+                    |this, _: &ClickEvent, _, cx| {
+                        this.king_toggle_history(true, cx);
+                    },
+                )),
+            )
+            .child(div().flex_1())
+            .child(
+                mono(spent(status).to_uppercase())
+                    .debug_selector(|| "king-spent".into())
+                    .text_color(c.text_faint),
+            )
+            .into_any_element()
+    }
+
+    /// King's past conversations, newest first; one opened is read in the
+    /// conversation's place.
+    fn king_history(
+        &self,
+        status: &Status,
+        list: &[Past],
+        c: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let hover = c.surface_2;
+        let viewing = self.king_ui.viewing.as_ref().map(|(past, _)| past.id);
+        let mut rows = div()
+            .w_full()
+            .min_w_0()
+            .p(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(2.));
+        rows = rows.child(
+            div().px(px(6.)).pb(px(6.)).child(
+                button(
+                    "king-new-conversation".into(),
+                    "NEW CONVERSATION",
+                    Look::Outline,
+                    c,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.king_new_conversation(cx);
+                })),
+            ),
+        );
+        if list.is_empty() {
+            rows = rows.child(
+                div()
+                    .debug_selector(|| "king-no-history".into())
+                    .px(px(6.))
+                    .text_size(metrics::TEXT_SMALL())
+                    .text_color(c.text_faint)
+                    .child(
+                        "No past conversations. Start a new one and the one now is kept here, to \
+                         read or to take up again.",
+                    ),
+            );
+        }
+        let offset = super::shelf::local_offset();
+        for past in list {
+            let id = past.id;
+            let when = chrono::DateTime::from_timestamp_millis(past.ended_ms as i64)
+                .map(|at| {
+                    at.with_timezone(&offset)
+                        .format("%b %-d %H:%M")
+                        .to_string()
+                        .to_uppercase()
+                })
+                .unwrap_or_default();
+            let runs = match &past.model {
+                Some(model) => format!("{} {}", past.agent, model).to_uppercase(),
+                None => past.agent.to_uppercase(),
+            };
+            rows = rows.child(
+                div()
+                    .id(SharedString::from(format!("king-past-{id}")))
+                    .debug_selector(move || format!("king-past-{id}"))
+                    .w_full()
+                    .min_w_0()
+                    .px(px(8.))
+                    .py(px(7.))
+                    .rounded(metrics::RADIUS())
+                    .cursor_pointer()
+                    .when(viewing == Some(id), |this| this.bg(c.surface_2))
+                    .hover(move |style| style.bg(hover))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.king_view_past(id, cx);
+                    }))
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .max_h(px(40.))
+                            .overflow_hidden()
+                            .text_color(c.text)
+                            .child(past.title.clone()),
+                    )
+                    .child(
+                        mono(format!("{when} · {runs} · {} ENTRIES", past.entries))
+                            .w_full()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(c.text_faint),
+                    ),
+            );
+        }
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(self.king_side_tabs(status, true, c, cx))
+            .child(
+                div()
+                    .id("king-history")
+                    .debug_selector(|| "king-history".into())
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(rows),
+            )
+            .into_any_element()
+    }
+
+    /// Under a past conversation on screen: what it is, taking it up again,
+    /// and the way back to the one now.
+    fn king_past_bar(&self, past: &Past, c: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .debug_selector(|| "king-past-bar".into())
+            .w_full()
+            .min_w_0()
+            .px(px(12.))
+            .py(px(10.))
+            .rounded(metrics::RADIUS())
+            .border_1()
+            .border_color(c.elevated_border)
+            .bg(c.surface)
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(mono("PAST CONVERSATION").text_color(c.text_faint))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_color(c.text)
+                            .child(past.title.clone()),
+                    ),
+            )
+            .child(
+                button("king-back-to-now".into(), "BACK", Look::Outline, c)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.king_back_to_now(cx))),
+            )
+            .child(
+                button("king-resume".into(), "TAKE IT UP AGAIN", Look::Primary, c)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.king_resume(cx))),
             )
             .into_any_element()
     }
@@ -1198,6 +1479,150 @@ fn note(title: &str, body: &str, c: &Palette, cx: &mut Context<Shell>) -> AnyEle
         .into_any_element()
 }
 
+/// A number of the report: the figure, then what it counts.
+fn stat(value: String, unit: &'static str, c: &Palette) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_baseline()
+        .gap(px(4.))
+        .child(mono(value).text_color(c.text_muted))
+        .child(mono(unit).text_color(c.text_faint))
+}
+
+/// The colour of what is left of a window: plenty, getting low, nearly out.
+fn left_colour(left: f64, c: &Palette) -> gpui_kit::Hsla {
+    if left > 0.5 {
+        c.success
+    } else if left > 0.2 {
+        c.warning
+    } else {
+        c.error
+    }
+}
+
+/// Leon's report under an answer, drawn: the turn's numbers on one line,
+/// the day's beside them, and under them a bar for each usage window with
+/// what is left of it and when it resets.
+fn report_strip(target: Target, seq: u64, report: &Report, c: &Palette) -> AnyElement {
+    let key = key_of(target);
+    let mut numbers = div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_x(px(14.))
+        .gap_y(px(4.));
+    if let Some(turn) = report.turn {
+        numbers = numbers
+            .child(stat(count(turn.total()), "TOKENS", c))
+            .child(stat(count(turn.cached_input), "CACHED", c))
+            .child(stat(count(turn.output), "WRITTEN", c));
+        if let Some(rate) = turn.per_second() {
+            numbers = numbers.child(stat(format!("{rate:.0}"), "TOK/S", c));
+        }
+        if turn.duration_ms > 0 {
+            numbers = numbers.child(stat(span((turn.duration_ms / 1000) as i64), "", c));
+        }
+        if let Some(cost) = turn.cost_usd {
+            numbers = numbers.child(mono(format!("${cost:.3}")).text_color(c.text));
+        }
+    }
+    let today = match report.budget_usd {
+        Some(budget) => format!("${:.2} OF ${budget:.2}", report.spent_today_usd),
+        None => format!("${:.2}", report.spent_today_usd),
+    };
+    numbers = numbers.child(div().flex_1()).child(
+        div()
+            .flex_none()
+            .flex()
+            .items_baseline()
+            .gap(px(4.))
+            .child(mono("TODAY").text_color(c.text_faint))
+            .child(mono(today).text_color(c.text_muted))
+            .child(
+                mono(format!(
+                    "{} TOKENS",
+                    count(report.king_today.total() + report.workers_today.total())
+                ))
+                .text_color(c.text_faint),
+            ),
+    );
+    let mut windows = div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_x(px(16.))
+        .gap_y(px(4.));
+    for agent in report
+        .usage
+        .iter()
+        .filter(|agent| !agent.windows.is_empty())
+    {
+        let name = AgentId::parse(&agent.agent)
+            .map_or_else(|| agent.agent.to_uppercase(), |id| id.tag().to_uppercase());
+        let mut group = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(mono(name).text_color(c.text_muted));
+        for window in &agent.windows {
+            let left = (1.0 - window.used).clamp(0.0, 1.0);
+            group = group.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .child(mono(window.label.to_uppercase()).text_color(c.text_faint))
+                    .child(
+                        div()
+                            .w(px(44.))
+                            .h(px(4.))
+                            .rounded(px(2.))
+                            .bg(c.surface_2)
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(px(44. * left as f32))
+                                    .rounded(px(2.))
+                                    .bg(left_colour(left, c)),
+                            ),
+                    )
+                    .child(mono(format!("{:.0}%", left * 100.0)).text_color(c.text_muted))
+                    .children(window.resets_in_secs.map(|secs| {
+                        mono(format!("\u{21bb}{}", span(secs))).text_color(c.text_faint)
+                    })),
+            );
+        }
+        windows = windows.child(group);
+    }
+    div()
+        .debug_selector(move || format!("king-report-{key}-{seq}"))
+        .w_full()
+        .min_w_0()
+        .px(px(10.))
+        .py(px(7.))
+        .rounded(metrics::RADIUS())
+        .border_1()
+        .border_color(c.border)
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(numbers)
+        .when(
+            report.usage.iter().any(|agent| !agent.windows.is_empty()),
+            |this| {
+                this.child(div().w_full().h(px(1.)).bg(c.border))
+                    .child(windows)
+            },
+        )
+        .into_any_element()
+}
+
 /// One entry that is not a tool.
 fn king_entry(target: Target, entry: &Entry, agent: Option<AgentId>, c: &Palette) -> AnyElement {
     let key = key_of(target);
@@ -1251,13 +1676,19 @@ fn king_entry(target: Target, entry: &Entry, agent: Option<AgentId>, c: &Palette
                     ),
             )
             .child(
-                div().w_full().min_w_0().text_color(c.text).child(
-                    TextView::markdown(
-                        SharedString::from(format!("king-{}-message-{seq}", key_of(target))),
-                        entry.text.clone(),
-                    )
-                    .selectable(true),
-                ),
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(c.text)
+                    .line_height(gpui_kit::relative(ANSWER_LINE))
+                    .child(
+                        TextView::markdown(
+                            SharedString::from(format!("king-{}-message-{seq}", key_of(target))),
+                            entry.text.clone(),
+                        )
+                        .style(answer_style())
+                        .selectable(true),
+                    ),
             )
             .into_any_element(),
         Kind::Question => div()
@@ -1293,6 +1724,12 @@ fn king_entry(target: Target, entry: &Entry, agent: Option<AgentId>, c: &Palette
             )
             .into_any_element(),
         // Leon's report under an answer: tokens, speed, cost, what is left.
+        Kind::Report if entry.report.is_some() => report_strip(
+            target,
+            seq,
+            entry.report.as_ref().unwrap_or(&Report::default()),
+            c,
+        ),
         Kind::Report => div()
             .debug_selector(selector("report"))
             .w_full()
@@ -1327,6 +1764,7 @@ mod tests {
             at_ms: 0,
             kind,
             text: String::new(),
+            report: None,
         }
     }
 
@@ -1355,6 +1793,7 @@ mod tests {
             agent: "claude".into(),
             model: Some("opus".into()),
             effort: Some("high".into()),
+            mode: None,
             session_id: None,
             busy: false,
             queued: 0,

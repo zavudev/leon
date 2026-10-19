@@ -357,6 +357,8 @@ pub enum Command {
     ShowKing,
     /// Asks which agent, model and effort King runs on, and runs it there.
     KingBrain,
+    /// Asks how much King asks before it acts: its permission mode.
+    KingMode,
     /// The board of tasks of the project: columns, shared with the agents.
     ShowTasks,
     /// Asks for the title of a new task and puts it on the board.
@@ -2148,7 +2150,7 @@ pub const BINDINGS: &[Binding] = &[
     ),
     bind(
         C::ShowKing,
-        "Talk to King Leon",
+        "Open the King",
         S::View,
         W::Anywhere,
         &[with_alt(secondary_shift("k"))],
@@ -2157,6 +2159,14 @@ pub const BINDINGS: &[Binding] = &[
     bind(
         C::KingBrain,
         "Change the model King runs on\u{2026}",
+        S::View,
+        W::Anywhere,
+        &[],
+        true,
+    ),
+    bind(
+        C::KingMode,
+        "Change how much King asks\u{2026}",
         S::View,
         W::Anywhere,
         &[],
@@ -2518,6 +2528,7 @@ pub fn keywords(command: Command) -> &'static str {
         C::Settings => "preferences options configuration config",
         C::RestoreSessions => "reopen open terminals tabs panes crash power quit previous session workspace",
         C::WhyMissing => "history sessions lost gone disappeared import diagnose opencode claude codex report",
+        C::KingMode => "king permission mode ask approve allow accept edits auto bypass yolo questions",
         C::KingBrain => "king brain agent model effort switch change opus fable gpt codex claude cheaper smarter",
         C::ShowKing => "king coordinator principal engineer orchestrate delegate workers agents plan research cheap models budget pull request",
         C::ShowDen => "lions pride office agents live sessions watch activity pixel narrator who is working",
@@ -2818,6 +2829,7 @@ mod tests {
             C::Dictate,
             C::ShowKing,
             C::KingBrain,
+            C::KingMode,
             C::ShowTasks,
             C::NewTask,
             C::StartTask,
@@ -3002,6 +3014,7 @@ mod tests {
                 | C::Dictate
                 | C::ShowKing
                 | C::KingBrain
+                | C::KingMode
                 | C::ShowTasks
                 | C::NewTask
                 | C::StartTask

@@ -139,7 +139,11 @@ pub enum Action {
         words: String,
     },
     /// Serve the board over MCP.
-    Mcp,
+    Mcp {
+        /// Every board, not only the folder's project's: for King Leon,
+        /// which runs in no project and names the project of each call.
+        anywhere: bool,
+    },
     /// Print the usage.
     Help,
 }
@@ -224,6 +228,7 @@ pub fn parse(
     let mut command: Option<String> = None;
     let mut words: Vec<String> = Vec::new();
     let (mut global, mut json, mut all) = (false, false, false);
+    let mut anywhere = false;
     let (mut no_labels, mut no_assignee, mut no_branch) = (false, false, false);
     let mut branch: Option<String> = None;
     let mut title: Option<String> = None;
@@ -277,6 +282,10 @@ pub fn parse(
             "--global" => {
                 global = true;
                 given.push("--global");
+            }
+            "--anywhere" => {
+                anywhere = true;
+                given.push("--anywhere");
             }
             "--json" => {
                 json = true;
@@ -387,7 +396,8 @@ pub fn parse(
         ],
         "move" => &["--before"],
         "search" => &["--global", "--limit", "--json"],
-        "done" | "rm" | "mcp" | "help" => &[],
+        "mcp" => &["--anywhere"],
+        "done" | "rm" | "help" => &[],
         other => {
             return Err(format!(
                 "unknown command {other:?}: use add, list, board, show, edit, move, done, \
@@ -518,7 +528,7 @@ pub fn parse(
             if !words.is_empty() {
                 return Err("`task mcp` takes no arguments.".to_owned());
             }
-            Action::Mcp
+            Action::Mcp { anywhere }
         }
     };
     Ok(Invocation { data_dir, action })
@@ -592,7 +602,11 @@ fn carry_out(invocation: Invocation) -> Result<(), String> {
     let data_dir = data_dir_of(invocation.data_dir, &variable, product::data_dir);
     let folder = std::env::current_dir()
         .map_err(|error| format!("cannot tell the current folder: {error}"))?;
-    let folder = if invocation.action == Action::Mcp {
+    let mcp = match invocation.action {
+        Action::Mcp { anywhere } => Some(anywhere),
+        _ => None,
+    };
+    let folder = if mcp.is_some() {
         mcp_folder(&variable, folder)
     } else {
         folder
@@ -602,8 +616,8 @@ fn carry_out(invocation: Invocation) -> Result<(), String> {
     let database = data_dir.join("leon.db");
     let store = Store::open(&database).map_err(|error| open_failure(&database, &error))?;
     let root = memory::resolve_root(&store, &memory::Disk, &folder);
-    let service = Service::new(store, root);
-    if invocation.action == Action::Mcp {
+    let service = Service::new(store, root).anywhere(mcp == Some(true));
+    if mcp.is_some() {
         tracing::info!(root = service.root(), "serving the board over MCP");
         let mut server = task_mcp::Server::new(service, product::VERSION);
         return converse(
@@ -622,7 +636,7 @@ fn carry_out(invocation: Invocation) -> Result<(), String> {
     };
 
     match invocation.action {
-        Action::Help | Action::Mcp => {}
+        Action::Help | Action::Mcp { .. } => {}
         Action::Add {
             global,
             title,

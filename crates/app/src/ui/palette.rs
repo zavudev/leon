@@ -1450,7 +1450,8 @@ impl Shell {
                 agent,
                 model,
                 effort,
-            } => self.king_set_brain(agent, model, effort, cx),
+                mode,
+            } => self.king_set_brain(agent, model, effort, mode, cx),
             Action::SetScale(step) => {
                 crate::settings::update(cx, |settings| settings.interface_scale = step)
             }

@@ -34,15 +34,17 @@ and King hears all of it together when its turn ends.
 
 ## In the window
 
-**King Leon** is a row of the sidebar's navigation, under Home
-(Ctrl+Shift+Alt+K, the palette's "Talk to King Leon"). It opens King's view
-in the main pane:
+**The King** is a row of the sidebar's navigation, above The Den
+(Ctrl+Shift+Alt+K, the palette's "Open the King"). It opens King's view in
+the main pane:
 
 * **King's conversation** on the left, with the field you speak to King in.
   The tools King used between two answers are one folded line, what Leon
   told King of its workers is a folded "news" line, and Leon's report sits
-  under each answer. A question King waits on is a framed card with its
-  answers (allow, always, deny; start or not yet for a plan), and any
+  under each answer, drawn as a strip: the turn's tokens, cache, speed,
+  time and cost, the day's spending, and a bar for each agent's usage window
+  with what is left and when it resets. A question King waits on is a
+  framed card with its answers (allow, always, deny; start or not yet for a plan), and any
   question can be answered with what is written in the field. Alt and the
   answer's number (written on its button) answer from the keyboard: the
   open worker's question first, else King's. Escape stops King's turn, or
@@ -52,6 +54,12 @@ in the main pane:
   of the models the agents of this computer offer, then the effort; the
   agent's own model or effort is always on offer. King's next turn runs
   there, and the change lasts until `king.toml` is edited (see Settings).
+* **How much King asks** is the chip beside it ("DEFAULT MODE" until one is
+  chosen), or the palette's "Change how much King asks…": the permission
+  modes of the agent King runs on, as the agent lists them (for Claude
+  Code: accept edits, plan, bypass permissions…). A mode that never asks is
+  drawn in the warning colour. It is kept like the model, and is
+  `[brain] mode` in `king.toml`; the workers' modes are `[modes]`.
 * **The workers** on the right, as cards, newest first: what each is for,
   what it runs on, its job and tier, what it cost and the last thing it
   said. Workers are not in the sidebar while they are King's.
@@ -62,6 +70,20 @@ in the main pane:
 * **Taking a worker over** takes it from King and opens it as a session of
   the window in its worktree, continuing the agent's conversation where the
   worker left it. From then on it is yours, in the sidebar like any other.
+
+**Tasks.** King puts on each project's board what it finds and does not do
+now, and the steps of its plans. A card of the board is given to King with
+`a` (or "Give it to the King" in its details): King moves it to doing, gives
+it to a worker, sets its branch, and moves it to review when its pull
+request is open. Done is yours, after the merge.
+
+**Conversations.** NEW under the field puts the conversation away and starts
+a new one (`leon king new`). HISTORY, beside WORKERS, lists the past ones
+(title, when, what they ran on); one opened is read in the conversation's
+place, and TAKE IT UP AGAIN continues it: the agent's own session goes on,
+and the conversation it replaces is put away in turn (`leon king history`,
+`leon king resume <n>`). Each keeps its last 400 entries, in
+`king/history/` in Leon's data folder.
 
 The sidebar's row shows how King stands when it is not on screen: a dot
 while King or a worker works, the waiting dot when one of them asks you

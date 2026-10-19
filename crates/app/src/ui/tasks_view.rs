@@ -377,7 +377,7 @@ impl Shell {
     }
 
     /// The project of this computer with this root.
-    fn local_project(&self, root: &str) -> Option<(ProjectId, String)> {
+    pub(super) fn local_project(&self, root: &str) -> Option<(ProjectId, String)> {
         let key = leon_core::path::key(root);
         self.snapshot
             .projects
@@ -584,6 +584,7 @@ impl Shell {
             Action::Priority => self.tasks_raise_priority(),
             Action::New => self.open_create(None, window, cx),
             Action::Start => self.tasks_start(window, cx),
+            Action::King => self.tasks_send_to_king(window, cx),
             Action::Scope => {
                 let which = if self.tasks_ui.want_global {
                     self.tasks_pick_project()
@@ -1263,6 +1264,7 @@ impl Shell {
             .child(hint("e", "details"))
             .child(hint("s", "sync with GitHub"))
             .child(hint("w", "create worktree"))
+            .child(hint("a", "give it to the King"))
             .child(hint("n", "new"))
             .child(hint("d", "done"))
             .child(hint("p", "priority"))

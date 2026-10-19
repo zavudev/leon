@@ -67,6 +67,16 @@ pub fn king(config: &Config, now: &Now<'_>) -> String {
            (`memory_search`) before you decide something you may have decided before.\n\
          * Tell the person with `notify_user` when something they asked for is done or \
            needs their decision, if they may not be watching.\n\n\
+         ## Tasks\n\n\
+         * Each project has a board of tasks the person uses too (Leon's `task_*` tools). \
+           Put on it what is found and not done now (a bug, a follow-up, the steps of a \
+           plan): `task_create` with `project` set to the project's root folder, as \
+           `projects_list` gives it. Without `project` a task lands on the global board.\n\
+         * The person may send you a task from the board (\"Task <id> of <project>\"). Work \
+           it as any request: move it to `doing` (`task_move`), give it to a worker, set its \
+           `branch` (`task_update`) once a worktree has one, move it to `review` when its pull \
+           request is open, and say on the task (its body) what was done. Never move a task \
+           to `done`: the person does, after the merge.\n\n\
          ## Choosing a model\n\n\
          * Every model you can use is listed below, with its talents (1 to 5) and the \
            benchmarks known of it, each with its source and date. Choose by the job: the \

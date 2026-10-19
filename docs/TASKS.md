@@ -81,6 +81,7 @@ nothing. Dropping a card where it already is changes nothing.
 | `e` | Open the card's details beside the columns, or close them |
 | `n` | Open the panel for a new task, in the cursor's column, with the title ready to type |
 | `s` | Sync with GitHub now, or ask to turn it on |
+| `a` | Give the card to the King (also a button of the details): King's view opens, and King is told the task, its project and its id, and works it (see [KING.md](KING.md)) |
 | `d` | Finish the card |
 | `p` | Raise its priority: none, low, medium, high, urgent, none |
 | `g` | Switch between the project's board and the global one |
@@ -286,6 +287,11 @@ agent was started in (`CLAUDE_PROJECT_DIR` when the client sets it).
 
 No tool deletes a task: an agent that no longer wants one cancels it, and
 removing for good is `leon task rm`, the person's.
+
+`leon task mcp --anywhere` is the server King Leon is given: King runs in no
+project, so every board is its own, and `task_create`, `task_list` and
+`task_search` take `project`, the root folder of the project whose board it
+is. Every task's JSON names its board's `project`.
 
 ## Where it is stored
 

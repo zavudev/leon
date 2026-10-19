@@ -53,6 +53,9 @@ pub struct Entry {
     pub kind: Kind,
     /// The words.
     pub text: String,
+    /// For a report, its facts, for a client to draw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<crate::report::Report>,
 }
 
 /// The entries of one conversation.
@@ -66,9 +69,44 @@ pub struct Transcript {
 }
 
 impl Transcript {
+    /// A transcript that goes on from `entries`, as kept before.
+    pub fn restored(entries: Vec<Entry>) -> Self {
+        let next = entries.last().map_or(0, |entry| entry.seq + 1);
+        Self {
+            entries: entries.into(),
+            next,
+            draft: String::new(),
+        }
+    }
+
+    /// Every entry it keeps, oldest first.
+    pub fn entries(&self) -> Vec<Entry> {
+        self.entries.iter().cloned().collect()
+    }
+
+    /// Whether it holds nothing.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// Keeps an entry.
     pub fn push(&mut self, kind: Kind, text: impl Into<String>, at_ms: u64) {
-        let text = text.into();
+        self.keep(kind, text.into(), None, at_ms);
+    }
+
+    /// Keeps Leon's report under an answer: its line, and its facts.
+    pub fn push_report(&mut self, report: crate::report::Report, at_ms: u64) {
+        let text = crate::report::line(&report.facts());
+        self.keep(Kind::Report, text, Some(report), at_ms);
+    }
+
+    fn keep(
+        &mut self,
+        kind: Kind,
+        text: String,
+        report: Option<crate::report::Report>,
+        at_ms: u64,
+    ) {
         if text.trim().is_empty() {
             return;
         }
@@ -77,6 +115,7 @@ impl Transcript {
             at_ms,
             kind,
             text,
+            report,
         });
         self.next += 1;
         while self.entries.len() > KEPT {

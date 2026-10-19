@@ -31,13 +31,14 @@ use gpui_kit::prelude::*;
 use gpui_kit::{Context, Entity, ScrollHandle, Subscription, Task, Window};
 use leon_core::{AgentId, MachineId};
 use leon_king::coordinator::{Form, Open, Reply as Answer, Target};
+use leon_king::history::Past;
 use leon_king::protocol::{Entries, Notice, Request, Status};
 use leon_king::transcript::{Entry, KEPT};
 use serde_json::Value;
 
 use super::home::Nav;
 use super::shell::{Main, Pane, Shell};
-use super::steps::{KingInfo, KingModel};
+use super::steps::{KingInfo, KingMode, KingModel};
 use super::terminals::Place;
 use crate::engine::StatusKind;
 use crate::king::link::Heard;
@@ -206,6 +207,44 @@ fn models_of(value: &Value) -> Vec<KingModel> {
         .unwrap_or_default()
 }
 
+/// The permission modes of the service's `models` answer.
+fn modes_of(value: &Value) -> Vec<KingMode> {
+    value["modes"]
+        .as_array()
+        .map(|modes| {
+            modes
+                .iter()
+                .filter_map(|mode| {
+                    Some(KingMode {
+                        agent: mode["agent"].as_str()?.to_owned(),
+                        id: mode["id"].as_str()?.to_owned(),
+                        label: mode["label"].as_str().or(mode["id"].as_str())?.to_owned(),
+                        description: mode["description"].as_str().unwrap_or_default().to_owned(),
+                        dangerous: mode["dangerous"].as_bool().unwrap_or(false),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What King is told of a task given to it from the board.
+pub fn task_for_king(task: &leon_core::Task, place: &str) -> String {
+    let mut text = format!(
+        "Task {} {place}: {}\n\nWork this task (id {}).",
+        task.short_id(),
+        task.title,
+        task.id
+    );
+    if !task.body.trim().is_empty() {
+        text.push_str(&format!("\n\nWhat the task says:\n{}", task.body.trim()));
+    }
+    if let Some(branch) = &task.branch {
+        text.push_str(&format!("\n\nIts branch: {branch}."));
+    }
+    text
+}
+
 /// The card to open from `open` going down (or up) the cards `ids`, as
 /// drawn; `None` is none open (above the first one).
 pub fn step_card(ids: &[u32], open: Option<u32>, down: bool) -> Option<u32> {
@@ -230,12 +269,20 @@ enum Asked {
     Release(u32),
     /// The models the agents offer.
     Models,
+    /// The past conversations.
+    Conversations,
+    /// What a past conversation said.
+    Past(u64),
+    /// A past conversation taken up again.
+    Resumed,
     /// Anything else: only a refusal is said.
     Done,
 }
 
 /// What the window keeps of King.
 pub struct KingUi {
+    /// What was said to King before the line was open: said once it is.
+    pending: Vec<String>,
     /// The line to the service, once it is open.
     link: Option<flume::Sender<(u64, Request)>>,
     /// A connection is being opened.
@@ -263,6 +310,13 @@ pub struct KingUi {
     /// The models the agents of this computer offer, as the service found
     /// them: what King can be moved to.
     pub models: Vec<KingModel>,
+    /// The permission modes they offer.
+    pub modes: Vec<KingMode>,
+    /// King's past conversations, newest first, while the column of the
+    /// workers shows them instead.
+    pub history: Option<Vec<Past>>,
+    /// A past conversation on screen instead of the one now, read only.
+    pub viewing: Option<(Past, Vec<Entry>)>,
     /// What the service was last told: the person is looking at King here.
     pub(super) watching: bool,
     /// The last thing King's service had for the person.
@@ -278,6 +332,7 @@ pub struct KingUi {
 impl Default for KingUi {
     fn default() -> Self {
         Self {
+            pending: Vec::new(),
             link: None,
             connecting: false,
             error: None,
@@ -291,6 +346,9 @@ impl Default for KingUi {
             worker_scroll: ScrollHandle::new(),
             open_tools: HashSet::new(),
             models: Vec::new(),
+            modes: Vec::new(),
+            history: None,
+            viewing: None,
             watching: false,
             note: None,
             back: None,
@@ -409,7 +467,9 @@ impl Shell {
             agent: brain.agent.clone(),
             model: brain.model.clone(),
             effort: brain.effort.clone(),
+            mode: brain.mode.clone(),
             models: self.king_ui.models.clone(),
+            modes: self.king_ui.modes.clone(),
         })
     }
 
@@ -419,6 +479,7 @@ impl Shell {
         agent: String,
         model: Option<String>,
         effort: Option<String>,
+        mode: Option<String>,
         cx: &mut Context<Self>,
     ) {
         self.king_ask(
@@ -426,7 +487,7 @@ impl Shell {
                 agent,
                 model,
                 effort,
-                mode: None,
+                mode,
             },
             Asked::Done,
             cx,
@@ -541,6 +602,9 @@ impl Shell {
                         }
                         this.king_ask(Request::Status, Asked::Status, cx);
                         this.king_ask(Request::Models, Asked::Models, cx);
+                        for text in std::mem::take(&mut this.king_ui.pending) {
+                            this.king_ask(Request::Say { text }, Asked::Done, cx);
+                        }
                         this.king_ui.watching = false;
                         this.king_watch(cx);
                         cx.notify();
@@ -661,8 +725,30 @@ impl Shell {
                 cx.notify();
             }
             (Asked::Release(_), Ok(value)) => self.king_extract(&value, window, cx),
+            (Asked::Conversations, Ok(value)) => {
+                self.king_ui.history = Some(serde_json::from_value(value).unwrap_or_default());
+                cx.notify();
+            }
+            (Asked::Past(id), Ok(value)) => {
+                let past = self
+                    .king_ui
+                    .history
+                    .as_ref()
+                    .and_then(|list| list.iter().find(|past| past.id == id).cloned());
+                if let (Some(past), Ok(entries)) = (past, serde_json::from_value(value)) {
+                    self.king_ui.viewing = Some((past, entries));
+                    self.king_ui.scroll.scroll_to_bottom();
+                }
+                cx.notify();
+            }
+            (Asked::Resumed, Ok(_)) => {
+                self.king_ui.viewing = None;
+                self.king_ask(Request::Conversations, Asked::Conversations, cx);
+                cx.notify();
+            }
             (Asked::Models, Ok(value)) => {
                 self.king_ui.models = models_of(&value);
+                self.king_ui.modes = modes_of(&value);
                 cx.notify();
             }
             (_, Err(error)) => {
@@ -677,6 +763,19 @@ impl Shell {
     /// The service's new status: kept, and what it says the window lacks is
     /// asked for.
     fn king_status(&mut self, status: Status, cx: &mut Context<Self>) {
+        // Another conversation now (a new one, or a past one taken up): what
+        // the window had of King's is not of it.
+        let before = self.king_ui.status.as_ref().map(|now| now.conversation);
+        if before.is_some_and(|before| before != status.conversation) {
+            self.king_ui.brain = Feed::default();
+            self.king_ui
+                .open_tools
+                .retain(|(target, _)| *target != Target::Brain);
+            self.king_ui.scroll.scroll_to_bottom();
+            if self.king_ui.history.is_some() {
+                self.king_ask(Request::Conversations, Asked::Conversations, cx);
+            }
+        }
         // A card whose worker is gone (stopped and forgotten, or taken over)
         // closes.
         if let Some(open) = self.king_ui.open {
@@ -740,6 +839,45 @@ impl Shell {
         self.king_ui.note = None;
         self.king_ui.scroll.scroll_to_bottom();
         cx.notify();
+    }
+
+    /// Says `text` to King for the person, from elsewhere in the window (a
+    /// task given to King): now when the line is open, else as soon as it
+    /// is. King's view opens on it.
+    pub(super) fn king_say(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.king_open() {
+            self.toggle_king(window, cx);
+        }
+        if self.king_ui.connected() {
+            self.king_ask(Request::Say { text }, Asked::Done, cx);
+        } else {
+            self.king_ui.pending.push(text);
+            self.king_connect(window, cx);
+        }
+        self.king_ui.scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    /// Gives the card the board's cursor is on to King: King is told what
+    /// it is and where, and works it (its instructions say how).
+    pub(super) fn tasks_send_to_king(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task) = self.tasks_ui.board.selected().cloned() else {
+            return;
+        };
+        let place = match &task.scope {
+            leon_core::MemoryScope::Project(root) => {
+                let name = self
+                    .local_project(root)
+                    .and_then(|(id, _)| self.snapshot.project(&id))
+                    .map(|entry| entry.project.name.clone());
+                match name {
+                    Some(name) => format!("of {name} (board of {root})"),
+                    None => format!("of the project at {root}"),
+                }
+            }
+            leon_core::MemoryScope::Global => "of the global board".to_owned(),
+        };
+        self.king_say(task_for_king(&task, &place), window, cx);
     }
 
     /// What the person wrote to the open worker is told to it.
@@ -826,6 +964,10 @@ impl Shell {
                         .any(|worker| worker.id == id && worker.conversation.busy),
                 })
         };
+        if self.king_ui.viewing.is_some() && self.king_ui.open.is_none() {
+            self.king_back_to_now(cx);
+            return true;
+        }
         match self.king_ui.open {
             Some(id) if busy(Target::Worker(id)) => self.king_interrupt(Target::Worker(id), cx),
             Some(_) => self.king_close_worker(window, cx),
@@ -833,6 +975,48 @@ impl Shell {
             None => self.close_king(window, cx),
         }
         true
+    }
+
+    /// Puts King's conversation away and starts a new one.
+    pub(super) fn king_new_conversation(&mut self, cx: &mut Context<Self>) {
+        self.king_ui.viewing = None;
+        self.king_ask(Request::NewConversation, Asked::Done, cx);
+        cx.notify();
+    }
+
+    /// Shows King's past conversations in the column of the workers, or
+    /// the workers again.
+    pub(super) fn king_toggle_history(&mut self, show: bool, cx: &mut Context<Self>) {
+        if show {
+            self.king_ui.open = None;
+            self.king_ui.history.get_or_insert_with(Vec::new);
+            self.king_ask(Request::Conversations, Asked::Conversations, cx);
+        } else {
+            self.king_ui.history = None;
+            self.king_ui.viewing = None;
+        }
+        cx.notify();
+    }
+
+    /// Shows what a past conversation said, in place of the one now.
+    pub(super) fn king_view_past(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.king_ask(Request::PastConversation { id }, Asked::Past(id), cx);
+    }
+
+    /// Back to the conversation now.
+    pub(super) fn king_back_to_now(&mut self, cx: &mut Context<Self>) {
+        self.king_ui.viewing = None;
+        self.king_ui.scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    /// Takes the past conversation on screen up again.
+    pub(super) fn king_resume(&mut self, cx: &mut Context<Self>) {
+        let Some((past, _)) = &self.king_ui.viewing else {
+            return;
+        };
+        let id = past.id;
+        self.king_ask(Request::ResumeConversation { id }, Asked::Resumed, cx);
     }
 
     /// Opens a worker's card: its conversation, live.
@@ -987,6 +1171,7 @@ mod tests {
             at_ms: seq,
             kind: Kind::Agent,
             text: format!("entry {seq}"),
+            report: None,
         }
     }
 
@@ -995,6 +1180,7 @@ mod tests {
             agent: "claude".into(),
             model: None,
             effort: None,
+            mode: None,
             session_id: None,
             busy: false,
             queued: 0,
@@ -1006,6 +1192,7 @@ mod tests {
 
     fn status(brain: Option<u64>, workers: &[(u32, Option<u64>)]) -> Status {
         Status {
+            conversation: 0,
             brain: conversation(brain),
             workers: workers
                 .iter()
@@ -1085,7 +1272,20 @@ mod tests {
             {"agent": "claude", "id": "opus", "label": "Opus", "efforts": ["low", "high"]},
             {"agent": "codex", "id": "gpt-5.5", "label": null, "efforts": []},
             {"id": "no agent"},
+        ], "modes": [
+            {"agent": "claude", "id": "bypassPermissions", "label": "Bypass",
+             "description": null, "dangerous": true},
         ]});
+        assert_eq!(
+            modes_of(&value),
+            [KingMode {
+                agent: "claude".into(),
+                id: "bypassPermissions".into(),
+                label: "Bypass".into(),
+                description: String::new(),
+                dangerous: true,
+            }]
+        );
         assert_eq!(
             models_of(&value),
             [

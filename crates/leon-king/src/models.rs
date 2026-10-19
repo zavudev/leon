@@ -98,6 +98,22 @@ pub struct Available {
     pub efforts: Vec<String>,
 }
 
+/// A permission mode an agent of this computer offers: how much it asks
+/// before it acts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvailableMode {
+    /// The agent's tag.
+    pub agent: String,
+    /// The mode's id, as a turn is started with it.
+    pub id: String,
+    /// Its name.
+    pub label: String,
+    /// What it means, in a sentence.
+    pub description: Option<String>,
+    /// It lets the agent do anything without asking.
+    pub dangerous: bool,
+}
+
 impl Catalogue {
     /// Reads a catalogue's text.
     pub fn parse(text: &str) -> Result<Self, String> {

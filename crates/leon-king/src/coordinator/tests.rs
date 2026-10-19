@@ -471,3 +471,58 @@ fn every_turn_is_measured_and_added_to_the_days_counts() {
     // A new day starts from nothing.
     assert_eq!(king.facts(day + DAY_MS).king_today.total(), 0);
 }
+
+#[test]
+fn a_new_conversation_puts_the_old_one_away_and_a_past_one_can_go_on() {
+    let mut king = Coordinator::new(config());
+    // Nothing said: nothing to put away.
+    let (archived, _) = king.new_conversation(0).unwrap();
+    assert!(archived.is_none());
+    let first = king.status(0).conversation;
+
+    king.say("How does the router work?", 10);
+    // Not while King works.
+    assert!(king.new_conversation(11).is_err());
+    answer(&mut king, Target::Brain, "By tiers.", 12);
+    let (archived, effects) = king.new_conversation(20).unwrap();
+    let archived = archived.expect("the conversation is put away");
+    assert!(effects.contains(&Effect::Changed));
+    assert_eq!(archived.past.id, first);
+    assert_eq!(archived.past.title, "How does the router work?");
+    assert_eq!(archived.past.session_id.as_deref(), Some("s-Brain"));
+    assert_eq!((archived.past.started_ms, archived.past.ended_ms), (10, 20));
+    assert!(archived.entries.len() >= 2);
+    // A fresh conversation: no session, nothing said, a number of its own.
+    let now = king.status(20);
+    assert_ne!(now.conversation, first);
+    assert_eq!(now.brain.session_id, None);
+    assert_eq!(now.brain.last_seq, None);
+    assert_eq!(king.past().len(), 1);
+
+    // Something said in the new one, then the old one taken up again.
+    king.say("Another thing", 30);
+    answer(&mut king, Target::Brain, "Done.", 31);
+    let (put_away, _) = king
+        .resume_conversation(first, archived.entries.clone(), 40)
+        .unwrap();
+    assert_eq!(
+        put_away.expect("the new one is put away").past.title,
+        "Another thing"
+    );
+    let now = king.status(40);
+    assert_eq!(now.conversation, first);
+    assert_eq!(now.brain.session_id.as_deref(), Some("s-Brain"));
+    assert_eq!(
+        now.brain.last_seq,
+        archived.entries.last().map(|entry| entry.seq)
+    );
+    // The next turn goes on with the agent's session, after what was kept.
+    king.say("And the budget?", 41);
+    assert_eq!(
+        king.plan(Target::Brain).unwrap().resume.as_deref(),
+        Some("s-Brain")
+    );
+    let ids: Vec<u64> = king.past().iter().map(|past| past.id).collect();
+    assert_eq!(ids.len(), 1, "the one taken up is not in the list any more");
+    assert!(king.resume_conversation(999, Vec::new(), 50).is_err());
+}

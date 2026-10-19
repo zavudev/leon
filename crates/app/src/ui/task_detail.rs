@@ -799,6 +799,16 @@ impl Shell {
                 cx.notify();
             })),
         );
+        if !finished {
+            actions = actions.child(
+                pill("task-action-king", "Give it to the King  a", &c).on_click(cx.listener(
+                    |this, _, window, cx| {
+                        this.tasks_send_to_king(window, cx);
+                        cx.notify();
+                    },
+                )),
+            );
+        }
         if sessions > 0 {
             actions = actions.child(pill("task-action-session", "Open session", &c).on_click(
                 cx.listener(|this, _, window, cx| {

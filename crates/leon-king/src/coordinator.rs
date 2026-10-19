@@ -31,11 +31,12 @@ use leon_turn::{Action, Answer, ChoiceAnswer, PermissionEffect, QuestionKind, Tu
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Brain, Config};
+use crate::history::{self, Archived, Past};
 use crate::prompt;
 use crate::protocol::{ConversationStatus, Status, WorkerStatus};
-use crate::report::{Facts, Totals, TurnStats};
+use crate::report::{Facts, Report, Totals, TurnStats};
 use crate::route::Choice;
-use crate::transcript::{self, Kind, Transcript};
+use crate::transcript::{self, Entry, Kind, Transcript};
 
 /// A day, in milliseconds.
 const DAY_MS: u64 = 86_400_000;
@@ -326,6 +327,12 @@ pub struct State {
     /// What the workers read and wrote that day.
     #[serde(default)]
     pub workers_today: Totals,
+    /// The number of King's conversation now.
+    #[serde(default)]
+    pub conversation: u64,
+    /// King's past conversations, newest last ([`crate::history`]).
+    #[serde(default)]
+    pub past: Vec<Past>,
 }
 
 /// The turn a target is to have, as the service needs it.
@@ -380,6 +387,8 @@ impl Coordinator {
                 configured,
                 king_today: Totals::default(),
                 workers_today: Totals::default(),
+                conversation: 0,
+                past: Vec::new(),
             },
         }
     }
@@ -496,12 +505,110 @@ impl Coordinator {
         }
     }
 
+    /// Puts King's conversation away and starts a new one. `None` when there
+    /// was nothing to put away. Refused while King is in a turn.
+    pub fn new_conversation(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<(Option<Archived>, Vec<Effect>), String> {
+        if self.state.brain.busy {
+            return Err("King is in a turn; stop it or wait for it to end first".to_owned());
+        }
+        let archived = self.archive(now_ms);
+        self.state.conversation = self.next_conversation();
+        Ok((archived, vec![Effect::Changed]))
+    }
+
+    /// Takes a past conversation up again: its agent's session goes on, its
+    /// entries (`entries`, as the service kept them) are on screen again,
+    /// and the conversation now is put away. Refused while King is in a turn.
+    pub fn resume_conversation(
+        &mut self,
+        id: u64,
+        entries: Vec<Entry>,
+        now_ms: u64,
+    ) -> Result<(Option<Archived>, Vec<Effect>), String> {
+        if self.state.brain.busy {
+            return Err("King is in a turn; stop it or wait for it to end first".to_owned());
+        }
+        let at = self
+            .state
+            .past
+            .iter()
+            .position(|past| past.id == id)
+            .ok_or_else(|| format!("there is no past conversation {id}"))?;
+        let past = self.state.past.remove(at);
+        let archived = self.archive(now_ms);
+        let brain = &mut self.state.brain;
+        // The session is its agent's: King goes back to that agent.
+        if brain.agent != past.agent {
+            brain.agent = past.agent.clone();
+            brain.model = past.model.clone();
+            brain.effort = None;
+            brain.mode = None;
+            self.config.brain.agent = past.agent.clone();
+            self.config.brain.model = past.model.clone();
+            self.config.brain.effort = None;
+            self.config.brain.mode = None;
+        }
+        brain.session_id = past.session_id;
+        brain.transcript = Transcript::restored(entries);
+        brain.questions.clear();
+        self.state.conversation = past.id;
+        Ok((archived, vec![Effect::Changed]))
+    }
+
+    /// The past conversations, newest last.
+    pub fn past(&self) -> &[Past] {
+        &self.state.past
+    }
+
+    /// Puts the conversation now away, when it said anything.
+    fn archive(&mut self, now_ms: u64) -> Option<Archived> {
+        let brain = &mut self.state.brain;
+        let session_id = brain.session_id.take();
+        let transcript = std::mem::take(&mut brain.transcript);
+        brain.questions.clear();
+        if transcript.is_empty() {
+            return None;
+        }
+        let entries = transcript.entries();
+        let past = Past {
+            id: self.state.conversation,
+            title: history::title_of(&entries),
+            started_ms: entries.first().map_or(now_ms, |entry| entry.at_ms),
+            ended_ms: now_ms,
+            agent: brain.agent.clone(),
+            model: brain.model.clone(),
+            session_id,
+            entries: entries.len(),
+        };
+        let dropped = history::keep(&mut self.state.past, past.clone());
+        Some(Archived {
+            past,
+            entries,
+            dropped,
+        })
+    }
+
+    /// A number no conversation has.
+    fn next_conversation(&self) -> u64 {
+        self.state
+            .past
+            .iter()
+            .map(|past| past.id)
+            .chain(std::iter::once(self.state.conversation))
+            .max()
+            .map_or(0, |most| most + 1)
+    }
+
     /// King and its workers, in short, as clients are told.
     pub fn status(&self, now_ms: u64) -> Status {
         let summary = |conversation: &Conversation| ConversationStatus {
             agent: conversation.agent.clone(),
             model: conversation.model.clone(),
             effort: conversation.effort.clone(),
+            mode: conversation.mode.clone(),
             session_id: conversation.session_id.clone(),
             busy: conversation.busy,
             queued: conversation.queue.len(),
@@ -510,6 +617,7 @@ impl Coordinator {
             last_seq: conversation.transcript.last_seq(),
         };
         Status {
+            conversation: self.state.conversation,
             brain: summary(&self.state.brain),
             workers: self
                 .state
@@ -937,9 +1045,9 @@ impl Coordinator {
 
     /// Keeps a line of Leon's in a conversation's transcript: the report
     /// under an answer.
-    pub fn annotate(&mut self, target: Target, text: &str, now_ms: u64) {
+    pub fn annotate(&mut self, target: Target, report: Report, now_ms: u64) {
         if let Some(conversation) = self.conversation_mut(target) {
-            conversation.transcript.push(Kind::Report, text, now_ms);
+            conversation.transcript.push_report(report, now_ms);
         }
     }
 

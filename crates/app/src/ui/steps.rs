@@ -74,9 +74,28 @@ pub struct KingInfo {
     pub model: Option<String>,
     /// Its effort; the agent's own when absent.
     pub effort: Option<String>,
+    /// Its permission mode; the agent's own when absent.
+    pub mode: Option<String>,
     /// The models the agents of this computer offer, as King's service
     /// found them.
     pub models: Vec<KingModel>,
+    /// The permission modes they offer.
+    pub modes: Vec<KingMode>,
+}
+
+/// One permission mode an agent offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KingMode {
+    /// The agent's tag.
+    pub agent: String,
+    /// The mode's id.
+    pub id: String,
+    /// Its name.
+    pub label: String,
+    /// What it means.
+    pub description: String,
+    /// It lets the agent do anything without asking.
+    pub dangerous: bool,
 }
 
 /// One model an agent offers.
@@ -853,6 +872,8 @@ pub enum Action {
         model: Option<String>,
         /// The effort; the agent's own when absent.
         effort: Option<String>,
+        /// The permission mode; the agent's own when absent.
+        mode: Option<String>,
     },
     /// Start an agent session.
     StartSession(SessionIntent),
@@ -1103,6 +1124,7 @@ pub fn is_flow(command: Command) -> bool {
             | Command::NewThemeFromCurrent
             | Command::ChooseDen
             | Command::KingBrain
+            | Command::KingMode
             | Command::SaveDenAs
             | Command::NewTask
             | Command::StartTask
@@ -1188,6 +1210,7 @@ pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
         },
         Command::ChooseDen => choose_den(answers, world),
         Command::KingBrain => king_brain(answers, world),
+        Command::KingMode => king_mode(answers, world),
         Command::StartTask => start_task(answers, world),
         Command::NewTask => match answers {
             [] => text("Task title", "What is to be done", Validate::Required),
@@ -3413,6 +3436,8 @@ fn king_brain(answers: &[String], world: &World) -> Outcome {
         );
     };
     let own = |chosen: &str| (chosen != AGENTS_OWN).then(|| chosen.to_owned());
+    // A mode is an agent's own: it stays with the agent, and goes with it.
+    let mode_for = |agent: &str| (agent == king.agent).then(|| king.mode.clone()).flatten();
     match answers {
         [] => {
             let mut agents: Vec<&str> = Vec::new();
@@ -3476,6 +3501,7 @@ fn king_brain(answers: &[String], world: &World) -> Outcome {
                     agent: agent.clone(),
                     model: own(model),
                     effort: None,
+                    mode: mode_for(agent),
                 });
             }
             let same = *agent == king.agent && king.model.as_deref() == own(model).as_deref();
@@ -3491,7 +3517,54 @@ fn king_brain(answers: &[String], world: &World) -> Outcome {
             agent: agent.clone(),
             model: own(model),
             effort: own(effort),
+            mode: mode_for(agent),
         }),
+    }
+}
+
+/// How much King asks before it acts: the permission modes of the agent it
+/// runs on, the one in use marked. The rest of what it runs on stays.
+fn king_mode(answers: &[String], world: &World) -> Outcome {
+    let Some(king) = &world.king else {
+        return Outcome::Refuse(
+            "King is not connected: open King's view (Ctrl+Shift+Alt+K) first.".to_owned(),
+        );
+    };
+    let modes: Vec<&KingMode> = king
+        .modes
+        .iter()
+        .filter(|mode| mode.agent == king.agent)
+        .collect();
+    match answers {
+        [] => {
+            let mut offered = vec![Choice::new(
+                "The agent's own",
+                "as the agent is set up on this computer; it asks as it would in a terminal",
+                AGENTS_OWN,
+            )
+            .current(king.mode.is_none())];
+            offered.extend(modes.iter().map(|mode| {
+                let detail = if mode.dangerous {
+                    format!("{} (never asks: King may do anything)", mode.description)
+                } else {
+                    mode.description.clone()
+                };
+                Choice::new(mode.label.clone(), detail, mode.id.clone())
+                    .current(king.mode.as_deref() == Some(mode.id.as_str()))
+            }));
+            choices("King asks", offered, Custom::No)
+        }
+        [chosen, ..] => {
+            if chosen != AGENTS_OWN && !modes.iter().any(|mode| mode.id == *chosen) {
+                return Outcome::Refuse(format!("Unknown mode {chosen:?}."));
+            }
+            Outcome::Run(Action::KingBrain {
+                agent: king.agent.clone(),
+                model: king.model.clone(),
+                effort: king.effort.clone(),
+                mode: (chosen != AGENTS_OWN).then(|| chosen.clone()),
+            })
+        }
     }
 }
 
@@ -5352,6 +5425,30 @@ mod tests {
             agent: "claude".into(),
             model: Some("opus".into()),
             effort: Some("high".into()),
+            mode: Some("acceptEdits".into()),
+            modes: vec![
+                KingMode {
+                    agent: "claude".into(),
+                    id: "acceptEdits".into(),
+                    label: "Accept edits".into(),
+                    description: "edits without asking".into(),
+                    dangerous: false,
+                },
+                KingMode {
+                    agent: "claude".into(),
+                    id: "bypassPermissions".into(),
+                    label: "Bypass".into(),
+                    description: "everything without asking".into(),
+                    dangerous: true,
+                },
+                KingMode {
+                    agent: "codex".into(),
+                    id: "full-auto".into(),
+                    label: "Full auto".into(),
+                    description: String::new(),
+                    dangerous: false,
+                },
+            ],
             models: vec![
                 model("claude", "opus", &["low", "high"]),
                 model("claude", "haiku", &[]),
@@ -5398,7 +5495,8 @@ mod tests {
             Outcome::Run(Action::KingBrain {
                 agent: "claude".into(),
                 model: Some("haiku".into()),
-                effort: None
+                effort: None,
+                mode: Some("acceptEdits".into()),
             })
         );
         assert_eq!(
@@ -5406,7 +5504,8 @@ mod tests {
             Outcome::Run(Action::KingBrain {
                 agent: "codex".into(),
                 model: None,
-                effort: None
+                effort: None,
+                mode: None,
             })
         );
         assert_eq!(
@@ -5414,9 +5513,42 @@ mod tests {
             Outcome::Run(Action::KingBrain {
                 agent: "codex".into(),
                 model: Some("gpt-5.5".into()),
-                effort: Some("high".into())
+                effort: Some("high".into()),
+                mode: None,
             })
         );
+        // How much it asks: the modes of its own agent, the rest kept.
+        let modes = match advance(Command::KingMode, &[], &world) {
+            Outcome::Ask(Step {
+                kind: StepKind::Choices { choices, .. },
+                ..
+            }) => choices
+                .into_iter()
+                .map(|c| (c.value, c.current))
+                .collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            modes,
+            [
+                (AGENTS_OWN.into(), false),
+                ("acceptEdits".into(), true),
+                ("bypassPermissions".into(), false)
+            ]
+        );
+        assert_eq!(
+            advance(Command::KingMode, &["bypassPermissions".into()], &world),
+            Outcome::Run(Action::KingBrain {
+                agent: "claude".into(),
+                model: Some("opus".into()),
+                effort: Some("high".into()),
+                mode: Some("bypassPermissions".into()),
+            })
+        );
+        assert!(matches!(
+            advance(Command::KingMode, &["full-auto".into()], &world),
+            Outcome::Refuse(_)
+        ));
     }
 
     #[test]

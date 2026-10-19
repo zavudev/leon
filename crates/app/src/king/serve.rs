@@ -31,7 +31,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use leon_core::{Machine, MachineId, MachineKind, Store};
 use leon_king::coordinator::{Coordinator, Effect, State, Target, WorkerSpec};
-use leon_king::models::{self, Available, Catalogue};
+use leon_king::models::{self, Available, AvailableMode, Catalogue};
 use leon_king::prompt::{self, ProjectLine};
 use leon_king::protocol::{Envelope, Notice, Reply, Request, WorkerRequest, MAX_LINE};
 use leon_king::report::{self, AgentWindows, Window};
@@ -58,8 +58,8 @@ enum Input {
         generation: u64,
         output: Output,
     },
-    /// The agents said which models they offer.
-    Models(Vec<Available>),
+    /// The agents said which models and permission modes they offer.
+    Models(Vec<Available>, Vec<AvailableMode>),
 }
 
 /// How often the agents are asked again which models they offer.
@@ -88,6 +88,8 @@ struct Service {
     installed: Option<(u64, Vec<bool>)>,
     /// The models the agents offer, as they last said.
     models: Vec<Available>,
+    /// The permission modes the agents offer, as they last said.
+    modes: Vec<AvailableMode>,
 }
 
 /// The connections whose client shows King to the person right now, by the
@@ -162,6 +164,7 @@ pub fn run(paths: Paths) -> Result<(), String> {
         spawner: Arc::new(Piped),
         installed: None,
         models: Vec::new(),
+        modes: Vec::new(),
     };
     {
         let inputs = service.inputs.clone();
@@ -169,7 +172,8 @@ pub fn run(paths: Paths) -> Result<(), String> {
         std::thread::Builder::new()
             .name("leon-king-models".to_owned())
             .spawn(move || loop {
-                if inputs.send(Input::Models(probe_models(&*spawner))).is_err() {
+                let (models, modes) = probe_models(&*spawner);
+                if inputs.send(Input::Models(models, modes)).is_err() {
                     return;
                 }
                 std::thread::sleep(MODELS_EVERY);
@@ -323,14 +327,17 @@ impl Service {
                     .collect();
                 // Under every answer of King's: what it took, and what is left.
                 if ended && target == Target::Brain {
-                    let line = self.report(now);
-                    self.coordinator.annotate(Target::Brain, &line, now);
+                    let report = self.report(now);
+                    self.coordinator.annotate(Target::Brain, report, now);
                 }
                 effects
             }
-            Input::Models(models) => {
+            Input::Models(models, modes) => {
                 if !models.is_empty() {
                     self.models = models;
+                }
+                if !modes.is_empty() {
+                    self.modes = modes;
                 }
                 Vec::new()
             }
@@ -338,11 +345,55 @@ impl Service {
     }
 
     /// The line under King's last answer.
-    fn report(&self, now: u64) -> String {
-        let usage = usage_windows(self.store.as_deref(), now);
-        let mut facts = self.coordinator.facts(now);
-        facts.usage = &usage;
-        report::line(&facts)
+    fn report(&self, now: u64) -> report::Report {
+        let facts = self.coordinator.facts(now);
+        report::Report {
+            turn: facts.turn,
+            workers_today: facts.workers_today,
+            king_today: facts.king_today,
+            spent_today_usd: facts.spent_today_usd,
+            budget_usd: facts.budget_usd,
+            usage: usage_windows(self.store.as_deref(), now),
+        }
+    }
+
+    /// Where a past conversation's entries are kept.
+    fn archived_path(&self, id: u64) -> PathBuf {
+        self.paths.folder.join("history").join(format!("{id}.json"))
+    }
+
+    /// Writes a conversation just put away, and removes the ones that fell
+    /// off the list.
+    fn keep_archived(&self, archived: Option<leon_king::history::Archived>) {
+        let Some(archived) = archived else {
+            return;
+        };
+        let path = self.archived_path(archived.past.id);
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| {
+                std::fs::write(
+                    &path,
+                    serde_json::to_string(&archived.entries).unwrap_or_default(),
+                )
+            });
+        if let Err(error) = written {
+            tracing::warn!(%error, "a past conversation of King's could not be written");
+        }
+        for id in archived.dropped {
+            let _ = std::fs::remove_file(self.archived_path(id));
+        }
+    }
+
+    /// What a past conversation said.
+    fn read_archived(&self, id: u64) -> Result<Vec<leon_king::transcript::Entry>, String> {
+        if !self.coordinator.past().iter().any(|past| past.id == id) {
+            return Err(format!("there is no past conversation {id}"));
+        }
+        let text = std::fs::read_to_string(self.archived_path(id))
+            .map_err(|error| format!("past conversation {id} could not be read: {error}"))?;
+        serde_json::from_str(&text).map_err(|error| error.to_string())
     }
 
     /// What is known of models' talents: the catalogue built in, and the
@@ -433,6 +484,7 @@ impl Service {
                 Ok((
                     json!({
                         "models": models,
+                        "modes": self.modes,
                         "jobs": self.coordinator.config().jobs,
                         "tiers": self.coordinator.config().tiers,
                     }),
@@ -491,6 +543,25 @@ impl Service {
                     }),
                     effects,
                 ))
+            }
+            Request::NewConversation => {
+                let (archived, effects) = self.coordinator.new_conversation(now)?;
+                let id = archived.as_ref().map(|archived| archived.past.id);
+                self.keep_archived(archived);
+                Ok((json!({ "archived": id }), effects))
+            }
+            Request::Conversations => {
+                let mut past = self.coordinator.past().to_vec();
+                past.reverse();
+                Ok((json!(past), Vec::new()))
+            }
+            Request::PastConversation { id } => Ok((json!(self.read_archived(id)?), Vec::new())),
+            Request::ResumeConversation { id } => {
+                let entries = self.read_archived(id)?;
+                let (archived, effects) = self.coordinator.resume_conversation(id, entries, now)?;
+                self.keep_archived(archived);
+                let _ = std::fs::remove_file(self.archived_path(id));
+                Ok((Value::Null, effects))
             }
             Request::Notify { title, body } => done(vec![Effect::Notify {
                 title,
@@ -678,7 +749,7 @@ impl Service {
         vec![
             server("leon-king", &["king", "mcp"]),
             server("leon-memory", &["memory", "mcp"]),
-            server("leon-tasks", &["task", "mcp"]),
+            server("leon-tasks", &["task", "mcp", "--anywhere"]),
         ]
     }
 
@@ -695,7 +766,7 @@ impl Service {
             })
             .collect();
         let models = models::render(&self.models, &self.catalogue());
-        let usage = self.report(now_ms());
+        let usage = report::line(&self.report(now_ms()).facts());
         let text = prompt::king(
             self.coordinator.config(),
             &prompt::Now {
@@ -927,8 +998,9 @@ fn usage_windows(store: Option<&Store>, now_ms: u64) -> Vec<AgentWindows> {
 
 /// Asks every installed agent which models it offers, the way the window's
 /// conversations ask (`leon_turn::Adapter::options`).
-fn probe_models(spawner: &dyn Spawner) -> Vec<Available> {
+fn probe_models(spawner: &dyn Spawner) -> (Vec<Available>, Vec<AvailableMode>) {
     let mut found = Vec::new();
+    let mut modes = Vec::new();
     for adapter in leon_turn::ADAPTERS {
         if !installed(adapter.program) {
             continue;
@@ -966,6 +1038,13 @@ fn probe_models(spawner: &dyn Spawner) -> Vec<Available> {
             }
         }
         let options = (adapter.options.parse)(&printed);
+        modes.extend(options.modes.into_iter().map(|mode| AvailableMode {
+            agent: adapter.id.to_owned(),
+            id: mode.id,
+            label: mode.label,
+            description: mode.description,
+            dangerous: mode.dangerous,
+        }));
         found.extend(options.models.into_iter().map(|model| Available {
             agent: adapter.id.to_owned(),
             id: model.id,
@@ -974,7 +1053,7 @@ fn probe_models(spawner: &dyn Spawner) -> Vec<Available> {
             efforts: model.efforts,
         }));
     }
-    found
+    (found, modes)
 }
 
 /// Whether `program` is on the login shell's path.

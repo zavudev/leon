@@ -46,12 +46,14 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 
 /// Which board a tool is asked about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reach {
     /// The project the server was started in.
     Project,
     /// The global board.
     Global,
+    /// The project rooted at this folder, named by the agent.
+    Root(String),
 }
 
 /// A task an agent asks to create.
@@ -128,6 +130,12 @@ pub fn tool_list() -> Value {
         "default": "project",
         "description": "\"global\" for a task that is not of this project.",
     });
+    let project = json!({
+        "type": "string",
+        "description": "The root folder of the project whose board it is, as the project list \
+                        gives it. Only for an agent that runs in no project (King Leon); \
+                        others leave it out.",
+    });
     let id = json!({
         "type": "string",
         "minLength": 6,
@@ -172,6 +180,7 @@ pub fn tool_list() -> Value {
                 "labels": labels.clone(),
                 "assignee": { "type": "string", "description": "A person or an agent." },
                 "scope": scope.clone(),
+                "project": project.clone(),
             }),
             &["title"],
         ),
@@ -185,6 +194,7 @@ pub fn tool_list() -> Value {
                 "assignee": { "type": "string" },
                 "label": { "type": "string" },
                 "scope": scope.clone(),
+                "project": project.clone(),
                 "limit": {
                     "type": "integer", "minimum": 1, "maximum": MOST, "default": DEFAULT_LISTED,
                 },
@@ -242,6 +252,7 @@ pub fn tool_list() -> Value {
             json!({
                 "query": { "type": "string", "minLength": 1 },
                 "scope": scope,
+                "project": project,
                 "limit": {
                     "type": "integer", "minimum": 1, "maximum": MOST, "default": 10,
                 },
@@ -288,10 +299,16 @@ impl Arguments<'_> {
     }
 
     fn reach(&self) -> Result<Reach, Refusal> {
-        match self.text("scope")?.as_deref() {
-            None | Some("project") => Ok(Reach::Project),
-            Some("global") => Ok(Reach::Global),
-            Some(other) => Err(refuse(
+        let project = self.text("project")?.filter(|root| !root.trim().is_empty());
+        match (self.text("scope")?.as_deref(), project) {
+            (Some("global"), Some(_)) => Err(refuse(
+                INVALID_PARAMS,
+                "\"project\" names a project's board; it cannot be given with \"global\"",
+            )),
+            (None | Some("project"), Some(root)) => Ok(Reach::Root(root)),
+            (None | Some("project"), None) => Ok(Reach::Project),
+            (Some("global"), None) => Ok(Reach::Global),
+            (Some(other), _) => Err(refuse(
                 INVALID_PARAMS,
                 format!("\"scope\" must be \"project\" or \"global\", not {other:?}"),
             )),
@@ -488,7 +505,7 @@ impl<B: Backend> Server<B> {
         let result = match name {
             "task_create" => {
                 args.known(&[
-                    "title", "body", "status", "priority", "labels", "assignee", "scope",
+                    "title", "body", "status", "priority", "labels", "assignee", "scope", "project",
                 ])?;
                 let draft = Draft {
                     reach: args.reach()?,
@@ -523,6 +540,7 @@ impl<B: Backend> Server<B> {
                     "assignee",
                     "label",
                     "scope",
+                    "project",
                     "limit",
                 ])?;
                 let filter = TaskFilter {
@@ -575,7 +593,7 @@ impl<B: Backend> Server<B> {
                     .map(|task| json_of(&task, None))
             }
             _ => {
-                args.known(&["query", "scope", "limit"])?;
+                args.known(&["query", "scope", "project", "limit"])?;
                 self.backend
                     .search(&args.required("query")?, args.reach()?, args.limit(10)?)
                     .map(|hits| {
@@ -627,6 +645,48 @@ mod tests {
         let text = result["content"][0]["text"].as_str().unwrap_or_default();
         let value = serde_json::from_str(text).unwrap_or(Value::String(text.to_owned()));
         (value, result["isError"].as_bool().unwrap())
+    }
+
+    #[test]
+    fn king_names_the_project_of_each_task_and_sees_every_board() {
+        // King's server runs in no project, and sees every board.
+        let service = Service::new(Store::open_in_memory().unwrap(), "/data/king".to_owned())
+            .at(|| 1_000)
+            .anywhere(true);
+        let mut server = Server::new(service, "0.0.0-test");
+        ask(
+            &mut server,
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "clientInfo": { "name": "Claude Code" } },
+            }),
+        );
+        let (created, failed) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Fix the login", "project": "/srv/web" }),
+        ));
+        assert!(!failed, "{created}");
+        assert_eq!(created["scope"], "project");
+        assert_eq!(created["project"], "/srv/web");
+        let id = created["id"].as_str().unwrap().to_owned();
+        let (found, failed) = payload(&call(&mut server, "task_get", json!({ "id": id })));
+        assert!(!failed, "a task of another project is King's too: {found}");
+        let (listed, _) = payload(&call(
+            &mut server,
+            "task_list",
+            json!({ "project": "/srv/web" }),
+        ));
+        assert_eq!(listed.as_array().map(Vec::len), Some(1));
+        let both = call(
+            &mut server,
+            "task_create",
+            json!({ "title": "x", "project": "/srv/web", "scope": "global" }),
+        );
+        assert_eq!(
+            both["error"]["code"], INVALID_PARAMS,
+            "a project and the global board at once is refused"
+        );
     }
 
     #[test]

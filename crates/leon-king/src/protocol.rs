@@ -124,6 +124,20 @@ pub enum Request {
     },
     /// Send [`Notice`]s on this connection from now on.
     Subscribe,
+    /// Put King's conversation away and start a new one.
+    NewConversation,
+    /// King's past conversations ([`crate::history::Past`]), newest first.
+    Conversations,
+    /// What a past conversation said ([`Entry`]s).
+    PastConversation {
+        /// Its number.
+        id: u64,
+    },
+    /// Take a past conversation up again.
+    ResumeConversation {
+        /// Its number.
+        id: u64,
+    },
     /// Whether the person is looking at King on this connection's client:
     /// while anybody is, what King's conversation shows already is not also
     /// sent to the desktop.
@@ -233,6 +247,10 @@ pub enum Notice {
 /// King and its workers, in short.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Status {
+    /// The number of King's conversation now: another one after the person
+    /// started a new one or took up a past one.
+    #[serde(default)]
+    pub conversation: u64,
     /// King's own conversation.
     pub brain: ConversationStatus,
     /// The workers that are still King's, newest last.
@@ -254,6 +272,9 @@ pub struct ConversationStatus {
     pub model: Option<String>,
     /// How hard it thinks.
     pub effort: Option<String>,
+    /// Its permission mode; the agent's own when absent.
+    #[serde(default)]
+    pub mode: Option<String>,
     /// The agent's id of the conversation.
     pub session_id: Option<String>,
     /// In a turn.

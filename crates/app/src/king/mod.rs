@@ -124,6 +124,9 @@ pub fn usage() -> String {
        leon king say <words…>        say something to King and print its answer\n  \
        leon king status              King and its workers\n  \
        leon king log [worker]        what King, or a worker, said lately\n  \
+       leon king new                 put King's conversation away and start a new one\n  \
+       leon king history [n]         King's past conversations, or what one said\n  \
+       leon king resume <n>          take a past conversation up again\n  \
        leon king start <title> --prompt <text> [--project <name>] [--tier <tier>]\n  \
        \x20                            [--agent <agent> --model <model>] [--research | --plan]\n  \
        leon king tell <worker> <words…>\n  \
@@ -171,6 +174,27 @@ fn parse(arguments: &[String]) -> Result<Command, String> {
         "mcp" => Command::Mcp,
         "help" | "--help" | "-h" => Command::Help,
         "status" => Command::Ask(Request::Status, false),
+        "new" => Command::Ask(Request::NewConversation, false),
+        "history" => match rest.first() {
+            None => Command::Ask(Request::Conversations, false),
+            Some(id) => Command::Ask(
+                Request::PastConversation {
+                    id: id
+                        .parse()
+                        .map_err(|_| "name the conversation by its number")?,
+                },
+                false,
+            ),
+        },
+        "resume" => Command::Ask(
+            Request::ResumeConversation {
+                id: rest
+                    .first()
+                    .and_then(|id| id.parse().ok())
+                    .ok_or("name the conversation by its number")?,
+            },
+            false,
+        ),
         "say" if !rest.is_empty() => Command::Ask(Request::Say { text: words(rest) }, true),
         "log" => match rest.first() {
             None => Command::Log(Target::Brain),
