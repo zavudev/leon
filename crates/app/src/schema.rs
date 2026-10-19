@@ -1510,7 +1510,7 @@ fn network_texts(provider: UsageProvider) -> (String, String, &'static str) {
         ),
         UsageProvider::OpencodeGo => (
             "Read the opencode Go limits from opencode".into(),
-            "For an opencode Go subscription, Leon reads the API key opencode stored (its auth.json, its credential database, or OPENCODE_API_KEY, read only) and sends it over HTTPS to opencode.ai only to ask for the usage; it is never stored, logged or shown. On by default.".into(),
+            "For an opencode Go subscription, Leon reads the API key opencode stored (its auth.json, its credential database, or OPENCODE_API_KEY, read only) or, without one, its OpenCode Console sign-in, and sends it over HTTPS to opencode.ai only to ask for the usage; it is never stored, logged or shown. On by default.".into(),
             "network go credential key privacy limits",
         ),
         UsageProvider::Codex => (
