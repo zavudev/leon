@@ -603,6 +603,7 @@ platform (see below).
 | Show usage | `⇧⌘U` | `Ctrl+Shift+Alt+U` |
 | Refresh usage now | palette only | palette only |
 | Talk to King Leon | `⌥⇧⌘K` | `Ctrl+Shift+Alt+K` |
+| Change the model King runs on… | palette only | palette only |
 | Show the task board | `⇧⌘I` | `Ctrl+Shift+Alt+I` |
 | New task… | palette only | palette only |
 | Create worktree for the task… | palette only | palette only |

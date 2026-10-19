@@ -14,11 +14,12 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::prelude::*;
 use gpui_kit::{div, AnyElement, ClickEvent, Context, Div, FontWeight, SharedString, Stateful};
 use leon_core::AgentId;
-use leon_king::coordinator::{Form, Open, Reply as Answer, Target, WorkerState};
+use leon_king::coordinator::{Open, Target, WorkerState};
 use leon_king::protocol::{ConversationStatus, Status, WorkerStatus};
 use leon_king::transcript::{Entry, Kind};
 
 use super::activity::Activity;
+use super::king::{picks, Pick, Tone};
 use super::shell::Shell;
 use super::widgets::{activity_dot, key_cap, led, mark, mono, Lion};
 use crate::icons::{agent_icon, icon, IconName};
@@ -156,6 +157,15 @@ fn button(name: String, label: &str, look: Look, c: &Palette) -> Stateful<Div> {
             .border_color(c.error)
             .text_color(c.error)
             .hover(move |style| style.bg(hover)),
+    }
+}
+
+/// How Alt with a number is written on this platform.
+fn alt_key(n: usize) -> String {
+    if crate::platform::is_mac() {
+        format!("\u{2325}{n}")
+    } else {
+        format!("ALT+{n}")
     }
 }
 
@@ -658,72 +668,41 @@ impl Shell {
             .iter()
             .map(|open| {
                 let mut answers = div().flex().flex_wrap().items_center().gap(px(6.));
-                let reply = |choice: Option<String>, approve: Option<bool>| Answer {
-                    choice,
-                    approve,
-                    text: None,
-                };
-                match &open.form {
-                    Form::Permission { choices } => {
-                        for (id, effect) in choices {
-                            let (label, look) = match effect.as_str() {
-                                "allow" => ("ALLOW", Look::Primary),
-                                "always" => ("ALWAYS ALLOW", Look::Outline),
-                                _ => ("DENY", Look::Danger),
-                            };
-                            let question = open.id.clone();
-                            let choice = id.clone();
-                            answers = answers.child(
-                                button(format!("king-answer-{key}-{id}"), label, look, c).on_click(
-                                    cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.king_answer(
-                                            target,
-                                            question.clone(),
-                                            reply(Some(choice.clone()), None),
-                                            cx,
-                                        );
-                                    }),
-                                ),
-                            );
-                        }
-                    }
-                    Form::Plan => {
-                        for (approve, label, look) in [
-                            (true, "START", Look::Primary),
-                            (false, "NOT YET", Look::Outline),
-                        ] {
-                            let question = open.id.clone();
-                            answers = answers.child(
-                                button(format!("king-answer-{key}-plan-{approve}"), label, look, c)
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.king_answer(
-                                            target,
-                                            question.clone(),
-                                            reply(None, Some(approve)),
-                                            cx,
-                                        );
-                                    })),
-                            );
-                        }
-                    }
-                    Form::Choices { .. } => {}
+                // The question the keys answer says which key is which.
+                let keyed = self
+                    .king_question_in_view()
+                    .is_some_and(|(on, first)| on == target && first.id == open.id);
+                for (place, pickable) in picks(open).into_iter().enumerate() {
+                    let n = place + 1;
+                    let look = match pickable.tone {
+                        Tone::Go => Look::Primary,
+                        Tone::Plain => Look::Outline,
+                        Tone::Stop => Look::Danger,
+                    };
+                    let label = if keyed && n <= 9 {
+                        format!("{}  {}", pickable.label, alt_key(n))
+                    } else {
+                        pickable.label.to_owned()
+                    };
+                    let question = open.id.clone();
+                    answers = answers.child(
+                        button(format!("king-answer-{key}-{n}"), &label, look, c).on_click(
+                            cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                match pickable.pick.clone() {
+                                    Pick::Reply(reply) => {
+                                        this.king_answer(target, question.clone(), reply, cx)
+                                    }
+                                    Pick::Words => this.king_answer_with_words(
+                                        target,
+                                        question.clone(),
+                                        window,
+                                        cx,
+                                    ),
+                                }
+                            }),
+                        ),
+                    );
                 }
-                // Words of one's own answer any question: the reason for a
-                // refusal, an option of one's own, what to change in a plan.
-                let question = open.id.clone();
-                answers = answers.child(
-                    button(
-                        format!("king-answer-{key}-words"),
-                        "ANSWER WITH WHAT IS WRITTEN",
-                        Look::Outline,
-                        c,
-                    )
-                    .on_click(cx.listener(
-                        move |this, _: &ClickEvent, window, cx| {
-                            this.king_answer_with_words(target, question.clone(), window, cx);
-                        },
-                    )),
-                );
                 div()
                     .debug_selector({
                         let key = key.clone();
@@ -765,20 +744,42 @@ impl Shell {
                 },
             ))
         };
+        let chip_hover = c.surface_2;
         let mut foot = div()
             .flex_1()
             .min_w_0()
             .flex()
             .items_center()
             .gap(px(8.))
-            .child(icon(IconName::Crown, px(12.), c.text_faint))
             .child(
-                mono(runs_on(brain))
-                    .debug_selector(|| "king-brain-runs-on".into())
+                // What King runs on; a click asks what it should run on.
+                div()
+                    .id("king-brain-chip")
+                    .debug_selector(|| "king-brain-chip".into())
                     .flex_initial()
                     .min_w_0()
-                    .truncate()
-                    .text_color(c.text_muted),
+                    .h(px(22.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .rounded(metrics::RADIUS())
+                    .border_1()
+                    .border_color(c.border)
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(chip_hover))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.begin_flow(crate::keys::Command::KingBrain, window, cx);
+                    }))
+                    .child(icon(IconName::Crown, px(12.), c.text_faint))
+                    .child(
+                        mono(runs_on(brain))
+                            .debug_selector(|| "king-brain-runs-on".into())
+                            .flex_initial()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(c.text_muted),
+                    ),
             );
         if brain.queued > 0 {
             foot = foot.child(

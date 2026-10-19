@@ -43,8 +43,15 @@ in the main pane:
   told King of its workers is a folded "news" line, and Leon's report sits
   under each answer. A question King waits on is a framed card with its
   answers (allow, always, deny; start or not yet for a plan), and any
-  question can be answered with what is written in the field. Escape stops
-  King's turn, or closes the view when King is not working.
+  question can be answered with what is written in the field. Alt and the
+  answer's number (written on its button) answer from the keyboard: the
+  open worker's question first, else King's. Escape stops King's turn, or
+  closes the view when King is not working.
+* **What King runs on** is the chip under the field. A click, or the
+  palette's "Change the model King runs on…", asks for the agent, then one
+  of the models the agents of this computer offer, then the effort; the
+  agent's own model or effort is always on offer. King's next turn runs
+  there, and the change lasts until `king.toml` is edited (see Settings).
 * **The workers** on the right, as cards, newest first: what each is for,
   what it runs on, its job and tier, what it cost and the last thing it
   said. Workers are not in the sidebar while they are King's.
@@ -62,10 +69,12 @@ something, and how many workers King runs.
 
 The window is one more client of King's service, as the phone and
 `leon king …` are: it starts the service when it is not running, and
-closing the window stops nothing King does. King's own answers, questions
-and failures also reach the desktop as notifications, for when the window
-is not looking; inside the view only what King sends you with `notify_user`
-shows up over the field.
+closing the window stops nothing King does. King's answers, questions and
+failures reach the desktop as notifications only while you are not looking
+at King: the window tells the service when King's view is open in the
+window in front, and while it is (or the phone shows King), the
+conversation is enough. What King sends you with `notify_user` always
+reaches the desktop, and shows over the field.
 
 ## What every answer tells you
 
@@ -263,8 +272,6 @@ conversation; changing its model or effort keeps the same one.
 
 ## Not built yet
 
-* Changing King's agent, model and effort from the window (today:
-  `leon king brain`, or `king.toml`).
 * King on the phone, through the paired host.
 * Installing the service as a background service of your session
   (`leon king service install`), the way `leon host service` is.

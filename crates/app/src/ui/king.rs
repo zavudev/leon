@@ -30,13 +30,14 @@ use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::prelude::*;
 use gpui_kit::{Context, Entity, ScrollHandle, Subscription, Task, Window};
 use leon_core::{AgentId, MachineId};
-use leon_king::coordinator::{Reply as Answer, Target};
+use leon_king::coordinator::{Form, Open, Reply as Answer, Target};
 use leon_king::protocol::{Entries, Notice, Request, Status};
 use leon_king::transcript::{Entry, KEPT};
 use serde_json::Value;
 
 use super::home::Nav;
 use super::shell::{Main, Pane, Shell};
+use super::steps::{KingInfo, KingModel};
 use super::terminals::Place;
 use crate::engine::StatusKind;
 use crate::king::link::Heard;
@@ -96,6 +97,115 @@ pub fn wanted(status: &Status, brain: &Feed, open: Option<(u32, &Feed)>) -> Vec<
     targets
 }
 
+/// How an answer of a question looks: the one that lets the agent go on,
+/// another one, or the one that stops it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// Lets it go on.
+    Go,
+    /// Another answer.
+    Plain,
+    /// Refuses.
+    Stop,
+}
+
+/// What an answer does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pick {
+    /// Answers with this.
+    Reply(Answer),
+    /// Answers with what is written in the conversation's field.
+    Words,
+}
+
+/// One answer of a question, as a button and as Alt with its place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pickable {
+    /// What the button says.
+    pub label: &'static str,
+    /// How it looks.
+    pub tone: Tone,
+    /// What it does.
+    pub pick: Pick,
+}
+
+/// The answers of a question, in the order they are drawn and numbered:
+/// its own (the choices of a permission, or start and not yet for a plan),
+/// then what is written in the field, which answers anything.
+pub fn picks(open: &Open) -> Vec<Pickable> {
+    let reply = |choice: Option<String>, approve: Option<bool>| {
+        Pick::Reply(Answer {
+            choice,
+            approve,
+            text: None,
+        })
+    };
+    let mut all: Vec<Pickable> = match &open.form {
+        Form::Permission { choices } => choices
+            .iter()
+            .map(|(id, effect)| {
+                let (label, tone) = match effect.as_str() {
+                    "allow" => ("ALLOW", Tone::Go),
+                    "always" => ("ALWAYS ALLOW", Tone::Plain),
+                    _ => ("DENY", Tone::Stop),
+                };
+                Pickable {
+                    label,
+                    tone,
+                    pick: reply(Some(id.clone()), None),
+                }
+            })
+            .collect(),
+        Form::Plan => vec![
+            Pickable {
+                label: "START",
+                tone: Tone::Go,
+                pick: reply(None, Some(true)),
+            },
+            Pickable {
+                label: "NOT YET",
+                tone: Tone::Plain,
+                pick: reply(None, Some(false)),
+            },
+        ],
+        Form::Choices { .. } => Vec::new(),
+    };
+    all.push(Pickable {
+        label: "ANSWER WITH WHAT IS WRITTEN",
+        tone: Tone::Plain,
+        pick: Pick::Words,
+    });
+    all
+}
+
+/// The models of the service's `models` answer.
+fn models_of(value: &Value) -> Vec<KingModel> {
+    value["models"]
+        .as_array()
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|model| {
+                    Some(KingModel {
+                        agent: model["agent"].as_str()?.to_owned(),
+                        id: model["id"].as_str()?.to_owned(),
+                        label: model["label"].as_str().or(model["id"].as_str())?.to_owned(),
+                        efforts: model["efforts"]
+                            .as_array()
+                            .map(|efforts| {
+                                efforts
+                                    .iter()
+                                    .filter_map(|effort| effort.as_str().map(str::to_owned))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The card to open from `open` going down (or up) the cards `ids`, as
 /// drawn; `None` is none open (above the first one).
 pub fn step_card(ids: &[u32], open: Option<u32>, down: bool) -> Option<u32> {
@@ -118,6 +228,8 @@ enum Asked {
     Transcript(Target),
     /// A worker the person takes over.
     Release(u32),
+    /// The models the agents offer.
+    Models,
     /// Anything else: only a refusal is said.
     Done,
 }
@@ -148,6 +260,11 @@ pub struct KingUi {
     pub worker_scroll: ScrollHandle,
     /// The runs of tools opened by hand, by the number of their first entry.
     pub open_tools: HashSet<(Target, u64)>,
+    /// The models the agents of this computer offer, as the service found
+    /// them: what King can be moved to.
+    pub models: Vec<KingModel>,
+    /// What the service was last told: the person is looking at King here.
+    pub(super) watching: bool,
     /// The last thing King's service had for the person.
     pub note: Option<(String, String)>,
     /// What the main pane showed before, to put back.
@@ -173,6 +290,8 @@ impl Default for KingUi {
             scroll: ScrollHandle::new(),
             worker_scroll: ScrollHandle::new(),
             open_tools: HashSet::new(),
+            models: Vec::new(),
+            watching: false,
             note: None,
             back: None,
             asked: HashMap::new(),
@@ -233,6 +352,7 @@ impl Shell {
         self.pane = Pane::Main;
         self.king_fields(window, cx);
         self.king_connect(window, cx);
+        self.king_watch(cx);
         self.king_ui.scroll.scroll_to_bottom();
         self.sync_focus(window, cx);
         cx.notify();
@@ -265,8 +385,68 @@ impl Shell {
             }
         }
         self.home.nav = matches!(self.main, Main::Empty).then_some(Nav::Home);
+        self.king_watch(cx);
         self.sync_focus(window, cx);
         cx.notify();
+    }
+
+    /// Tells the service whether the person is looking at King here: King's
+    /// view is open in the window that is in front. While they are, the
+    /// service sends nothing to the desktop that the view shows already.
+    pub(super) fn king_watch(&mut self, cx: &mut Context<Self>) {
+        let looking = self.king_open() && self.window_active;
+        if !self.king_ui.connected() || looking == self.king_ui.watching {
+            return;
+        }
+        self.king_ui.watching = looking;
+        self.king_ask(Request::Watch { on: looking }, Asked::Done, cx);
+    }
+
+    /// What the palette's questions know of King.
+    pub(super) fn king_info(&self) -> Option<KingInfo> {
+        let brain = &self.king_ui.status.as_ref()?.brain;
+        Some(KingInfo {
+            agent: brain.agent.clone(),
+            model: brain.model.clone(),
+            effort: brain.effort.clone(),
+            models: self.king_ui.models.clone(),
+        })
+    }
+
+    /// Runs King on another agent, model or effort, from its next turn.
+    pub(super) fn king_set_brain(
+        &mut self,
+        agent: String,
+        model: Option<String>,
+        effort: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.king_ask(
+            Request::SetBrain {
+                agent,
+                model,
+                effort,
+                mode: None,
+            },
+            Asked::Done,
+            cx,
+        );
+    }
+
+    /// The question the keys answer: the open worker's, else King's.
+    pub(super) fn king_question_in_view(&self) -> Option<(Target, &Open)> {
+        let status = self.king_ui.status.as_ref()?;
+        if let Some(id) = self.king_ui.open {
+            let worker = status.workers.iter().find(|worker| worker.id == id)?;
+            if let Some(open) = worker.conversation.questions.first() {
+                return Some((Target::Worker(id), open));
+            }
+        }
+        status
+            .brain
+            .questions
+            .first()
+            .map(|open| (Target::Brain, open))
     }
 
     /// The fields the person writes in, made the first time the view opens.
@@ -360,6 +540,9 @@ impl Shell {
                             feed.asking = false;
                         }
                         this.king_ask(Request::Status, Asked::Status, cx);
+                        this.king_ask(Request::Models, Asked::Models, cx);
+                        this.king_ui.watching = false;
+                        this.king_watch(cx);
                         cx.notify();
                     });
                     if ok.is_err() {
@@ -411,6 +594,7 @@ impl Shell {
         self.king_ui.link = None;
         self.king_ui.reader = None;
         self.king_ui.asked.clear();
+        self.king_ui.watching = false;
         self.king_ui.error = Some(why);
         cx.notify();
     }
@@ -477,6 +661,10 @@ impl Shell {
                 cx.notify();
             }
             (Asked::Release(_), Ok(value)) => self.king_extract(&value, window, cx),
+            (Asked::Models, Ok(value)) => {
+                self.king_ui.models = models_of(&value);
+                cx.notify();
+            }
             (_, Err(error)) => {
                 self.engine
                     .report(StatusKind::Error, format!("King's service: {error}"));
@@ -585,6 +773,23 @@ impl Shell {
             && !stroke.modifiers.control
             && !stroke.modifiers.platform
             && !stroke.modifiers.shift;
+        // Alt with a number picks that answer of the question in view.
+        if let Some(place) = only_alt
+            .then(|| stroke.key.parse::<usize>().ok())
+            .flatten()
+            .filter(|n| (1..=9).contains(n))
+        {
+            let Some((target, open)) = self.king_question_in_view() else {
+                return false;
+            };
+            let question = open.id.clone();
+            match picks(open).into_iter().nth(place - 1).map(|pick| pick.pick) {
+                Some(Pick::Reply(reply)) => self.king_answer(target, question, reply, cx),
+                Some(Pick::Words) => self.king_answer_with_words(target, question, window, cx),
+                None => return false,
+            }
+            return true;
+        }
         if only_alt && matches!(stroke.key.as_str(), "down" | "up") {
             let ids: Vec<u32> = self
                 .king_ui
@@ -821,6 +1026,83 @@ mod tests {
             spent_today_usd: 0.0,
             daily_budget_usd: None,
         }
+    }
+
+    #[test]
+    fn a_question_is_answered_by_its_own_answers_then_by_words() {
+        let permission = Open {
+            id: "q1".into(),
+            text: "May it run ls?".into(),
+            form: Form::Permission {
+                choices: vec![
+                    ("a".into(), "allow".into()),
+                    ("b".into(), "always".into()),
+                    ("c".into(), "deny".into()),
+                ],
+            },
+        };
+        let labels: Vec<&str> = picks(&permission).iter().map(|p| p.label).collect();
+        assert_eq!(
+            labels,
+            [
+                "ALLOW",
+                "ALWAYS ALLOW",
+                "DENY",
+                "ANSWER WITH WHAT IS WRITTEN"
+            ]
+        );
+        assert_eq!(
+            picks(&permission)[2].pick,
+            Pick::Reply(Answer {
+                choice: Some("c".into()),
+                ..Answer::default()
+            })
+        );
+        let plan = Open {
+            form: Form::Plan,
+            ..permission.clone()
+        };
+        assert_eq!(
+            picks(&plan)[0].pick,
+            Pick::Reply(Answer {
+                approve: Some(true),
+                ..Answer::default()
+            })
+        );
+        let options = Open {
+            form: Form::Choices {
+                questions: vec!["x".into()],
+            },
+            ..permission
+        };
+        assert_eq!(picks(&options).len(), 1);
+        assert_eq!(picks(&options)[0].pick, Pick::Words);
+    }
+
+    #[test]
+    fn the_models_are_read_from_the_services_answer() {
+        let value = serde_json::json!({"models": [
+            {"agent": "claude", "id": "opus", "label": "Opus", "efforts": ["low", "high"]},
+            {"agent": "codex", "id": "gpt-5.5", "label": null, "efforts": []},
+            {"id": "no agent"},
+        ]});
+        assert_eq!(
+            models_of(&value),
+            [
+                KingModel {
+                    agent: "claude".into(),
+                    id: "opus".into(),
+                    label: "Opus".into(),
+                    efforts: vec!["low".into(), "high".into()],
+                },
+                KingModel {
+                    agent: "codex".into(),
+                    id: "gpt-5.5".into(),
+                    label: "gpt-5.5".into(),
+                    efforts: Vec::new(),
+                },
+            ]
+        );
     }
 
     #[test]

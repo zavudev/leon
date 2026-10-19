@@ -785,6 +785,7 @@ impl Shell {
             // Back in the window: what runs in other terminals may have changed.
             cx.observe_window_activation(window, |this, window, cx| {
                 this.window_active = window.is_window_active();
+                this.king_watch(cx);
                 if window.is_window_active() {
                     this.request_import(cx);
                     this.scan_elsewhere_now(true, cx);
@@ -1418,6 +1419,7 @@ impl Shell {
         }))
         .with_update_ready(self.ready_update_version())
         .with_dens(self.dens(cx).0, self.dens(cx).1)
+        .with_king(self.king_info())
         .with_installed(self.installed_agents())
         .with_repositories(
             self.connect_ui
@@ -3113,6 +3115,7 @@ impl Shell {
             C::ShowUsage => self.toggle_usage(window, cx),
             C::ShowKing => self.toggle_king(window, cx),
             C::CleanUp => self.toggle_sweep(window, cx),
+            C::KingBrain => self.begin_flow(command, window, cx),
             C::ShowTasks => self.toggle_tasks(window, cx),
             C::NewTask if self.tasks_open() => self.open_create(None, window, cx),
             C::NewTask => self.begin_flow(command, window, cx),

@@ -124,6 +124,13 @@ pub enum Request {
     },
     /// Send [`Notice`]s on this connection from now on.
     Subscribe,
+    /// Whether the person is looking at King on this connection's client:
+    /// while anybody is, what King's conversation shows already is not also
+    /// sent to the desktop.
+    Watch {
+        /// Looking, or not any more.
+        on: bool,
+    },
 }
 
 /// How a worker is asked for.

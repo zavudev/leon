@@ -59,6 +59,14 @@ fn entries(texts: &[(u64, &str, &str)]) -> Value {
     )
 }
 
+fn models() -> Value {
+    json!({"models": [
+        {"agent": "claude", "id": "opus", "label": "Opus", "efforts": ["low", "high"]},
+        {"agent": "claude", "id": "haiku", "label": "Haiku", "efforts": []},
+        {"agent": "codex", "id": "gpt-5.5", "label": "GPT-5.5", "efforts": ["medium", "high"]},
+    ]})
+}
+
 /// Answers the window's requests: `answer` gives the result of each, by
 /// what was asked. Returns what was asked.
 fn serve(
@@ -87,9 +95,14 @@ fn with_conversation(cx: &mut TestAppContext, workers: Value) -> (Harness, End) 
     let end = open_king(&h, cx);
     let asked = serve(&h, &end, cx, |request| match request {
         Request::Status => status(Some(2), workers.clone()),
+        Request::Models => models(),
         _ => Value::Null,
     });
-    assert_eq!(asked, [Request::Status]);
+    let asked: Vec<Request> = asked
+        .into_iter()
+        .filter(|request| !matches!(request, Request::Watch { .. }))
+        .collect();
+    assert_eq!(asked, [Request::Status, Request::Models]);
     let asked = serve(&h, &end, cx, |request| match request {
         Request::Transcript { .. } => entries(&[
             (0, "prompt", "What is the state of api?"),
@@ -284,4 +297,128 @@ fn the_sidebar_row_opens_king_and_shows_how_it_stands(cx: &mut TestAppContext) {
         h.shell(cx, |s| s.king_glance()),
         Some((crate::ui::activity::Activity::NeedsYou, 2))
     );
+}
+
+/// The status with a question King waits on: may it run a command.
+fn asking() -> Value {
+    let mut now = status(Some(2), json!([]));
+    now["brain"]["busy"] = json!(true);
+    now["brain"]["questions"] = json!([{
+        "id": "q1", "text": "May it run ls?",
+        "form": {"type": "permission", "choices": [["a", "allow"], ["b", "always"], ["c", "deny"]]},
+    }]);
+    now
+}
+
+fn tell_status(end: &End, status: Value) {
+    end.tell
+        .send(Heard::Notice(
+            serde_json::from_value::<Notice>(json!({"notice": "changed", "status": status}))
+                .unwrap(),
+        ))
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn alt_and_a_number_answer_the_question_in_view(cx: &mut TestAppContext) {
+    let (h, end) = with_conversation(cx, json!([]));
+    tell_status(&end, asking());
+    h.settle(cx);
+    assert!(h.shows_dynamic("king-question-brain-q1".into(), cx));
+    assert!(h.shows_dynamic("king-answer-brain-4".into(), cx));
+    // The third answer is the refusal.
+    h.press("alt-3", cx);
+    let asked = serve(&h, &end, cx, |_| Value::Null);
+    assert_eq!(
+        asked,
+        [Request::Answer {
+            target: Target::Brain,
+            question: "q1".into(),
+            reply: leon_king::coordinator::Reply {
+                choice: Some("c".into()),
+                ..Default::default()
+            },
+        }]
+    );
+    // The last answers with what is written.
+    h.type_text("use the tests instead", cx);
+    h.press("alt-4", cx);
+    let asked = serve(&h, &end, cx, |_| Value::Null);
+    assert_eq!(
+        asked,
+        [Request::Answer {
+            target: Target::Brain,
+            question: "q1".into(),
+            reply: leon_king::coordinator::Reply {
+                text: Some("use the tests instead".into()),
+                ..Default::default()
+            },
+        }]
+    );
+    // With nothing asked, the keys are nobody's.
+    tell_status(&end, status(Some(2), json!([])));
+    h.settle(cx);
+    h.press("alt-1", cx);
+    assert!(serve(&h, &end, cx, |_| Value::Null).is_empty());
+}
+
+#[gpui_kit::test]
+fn kings_model_is_changed_from_the_window(cx: &mut TestAppContext) {
+    let (h, end) = with_conversation(cx, json!([]));
+    h.mouse_on("king-brain-chip".into(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Palette);
+    // The agent in use is first: Enter keeps it.
+    h.press("enter", cx);
+    h.set_palette_text("haiku", cx);
+    h.press("enter", cx);
+    let asked = serve(&h, &end, cx, |_| Value::Null);
+    assert_eq!(
+        asked,
+        [Request::SetBrain {
+            agent: "claude".into(),
+            model: Some("haiku".into()),
+            effort: None,
+            mode: None,
+        }]
+    );
+}
+
+#[gpui_kit::test]
+fn the_service_is_told_while_the_person_looks_at_king(cx: &mut TestAppContext) {
+    let (h, end) = with_conversation(cx, json!([]));
+    let watch = |h: &Harness, cx: &mut TestAppContext| -> Vec<bool> {
+        serve(h, &end, cx, |_| Value::Null)
+            .into_iter()
+            .filter_map(|request| match request {
+                Request::Watch { on } => Some(on),
+                _ => None,
+            })
+            .collect()
+    };
+    cx.update(|cx| {
+        h.shell.update(cx, |shell, cx| {
+            shell.window_active = true;
+            shell.king_watch(cx);
+        })
+    });
+    let _ = watch(&h, cx);
+    assert!(h.shell(cx, |s| s.king_ui.watching));
+    // Another window in front: not looking.
+    cx.update(|cx| {
+        h.shell.update(cx, |shell, cx| {
+            shell.window_active = false;
+            shell.king_watch(cx);
+        })
+    });
+    assert_eq!(watch(&h, cx), [false]);
+    cx.update(|cx| {
+        h.shell.update(cx, |shell, cx| {
+            shell.window_active = true;
+            shell.king_watch(cx);
+        })
+    });
+    assert_eq!(watch(&h, cx), [true]);
+    // The view closed: not looking.
+    h.press("escape", cx);
+    assert_eq!(watch(&h, cx), [false]);
 }

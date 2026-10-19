@@ -80,12 +80,38 @@ struct Service {
     generation: u64,
     inputs: flume::Sender<Input>,
     subscribers: Vec<flume::Sender<String>>,
+    /// The clients the person is looking at King on.
+    watchers: Watchers,
     store: Option<Arc<Store>>,
     spawner: Arc<dyn Spawner>,
     /// Which agents are installed, and when that was found out.
     installed: Option<(u64, Vec<bool>)>,
     /// The models the agents offer, as they last said.
     models: Vec<Available>,
+}
+
+/// The connections whose client shows King to the person right now, by the
+/// channel their replies go out on. A connection that closed stops counting.
+#[derive(Default)]
+struct Watchers {
+    list: Vec<flume::Sender<String>>,
+}
+
+impl Watchers {
+    /// The client on `connection` shows King, or stopped.
+    fn set(&mut self, connection: &flume::Sender<String>, on: bool) {
+        self.list
+            .retain(|kept| !kept.same_channel(connection) && !kept.is_disconnected());
+        if on {
+            self.list.push(connection.clone());
+        }
+    }
+
+    /// Whether any client shows King now.
+    fn any(&mut self) -> bool {
+        self.list.retain(|kept| !kept.is_disconnected());
+        !self.list.is_empty()
+    }
 }
 
 /// How long it is believed which agents are installed.
@@ -131,6 +157,7 @@ pub fn run(paths: Paths) -> Result<(), String> {
         generation: 0,
         inputs: sender,
         subscribers: Vec::new(),
+        watchers: Watchers::default(),
         store,
         spawner: Arc::new(Piped),
         installed: None,
@@ -260,6 +287,9 @@ impl Service {
             Input::Request { envelope, reply } => {
                 let id = envelope.id;
                 let subscribe = matches!(envelope.request, Request::Subscribe);
+                if let Request::Watch { on } = envelope.request {
+                    self.watchers.set(&reply, on);
+                }
                 let (answer, effects) = match self.request(envelope.request) {
                     Ok((result, effects)) => (Reply::done(id, result), effects),
                     Err(error) => (Reply::refused(id, error), Vec::new()),
@@ -329,6 +359,8 @@ impl Service {
         let now = now_ms();
         let done = |effects: Vec<Effect>| Ok((Value::Null, effects));
         match request {
+            // Kept per connection, in `input`.
+            Request::Watch { .. } => done(Vec::new()),
             Request::Status | Request::Subscribe => {
                 Ok((json!(self.coordinator.status(now)), Vec::new()))
             }
@@ -515,7 +547,10 @@ impl Service {
     }
 
     fn notify(&mut self, title: String, body: String, echo: bool) {
-        crate::king::serve::desktop_notification(&title, &body);
+        // What the person is looking at already does not also pop up.
+        if !(echo && self.watchers.any()) {
+            crate::king::serve::desktop_notification(&title, &body);
+        }
         self.broadcast(&Notice::Notify { title, body, echo });
     }
 
@@ -1077,6 +1112,24 @@ fn applescript_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_client_watches_until_it_says_so_or_goes_away() {
+        let mut watchers = Watchers::default();
+        let (window, window_end) = flume::unbounded::<String>();
+        let (phone, phone_end) = flume::unbounded::<String>();
+        assert!(!watchers.any());
+        watchers.set(&window, true);
+        // Said twice, kept once.
+        watchers.set(&window, true);
+        watchers.set(&phone, true);
+        assert_eq!(watchers.list.len(), 2);
+        watchers.set(&window, false);
+        assert!(watchers.any(), "the phone still looks");
+        drop(phone_end);
+        assert!(!watchers.any(), "a connection that closed stops counting");
+        drop(window_end);
+    }
 
     #[test]
     fn a_workers_branch_is_its_title_in_a_few_words() {

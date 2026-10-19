@@ -194,6 +194,7 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
             Cmd(C::ShowUsage),
             Cmd(C::RefreshUsage),
             Cmd(C::ShowKing),
+            Cmd(C::KingBrain),
             Cmd(C::ShowTasks),
             Cmd(C::NewTask),
             Cmd(C::StartTask),
