@@ -20,6 +20,7 @@ mod chat;
 mod cli;
 mod connect;
 mod diagnose;
+mod disk;
 mod durable;
 mod elsewhere;
 mod engine;

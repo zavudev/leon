@@ -2816,6 +2816,32 @@ impl Engine {
         )))
     }
 
+    /// Measures what the folder `path` takes on `machine`, in the
+    /// background: walked here on this computer, asked of `du` elsewhere.
+    /// `None` when it could not be measured (the folder is gone, the machine
+    /// is not reachable, it has no `du`).
+    pub fn measure_folder(
+        &self,
+        machine: MachineId,
+        path: String,
+    ) -> JoinHandle<Option<crate::disk::DiskUse>> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            let machine = engine.inner.store.machine(&machine).ok()?;
+            if matches!(machine.kind, MachineKind::Local) {
+                return tokio::task::spawn_blocking(move || {
+                    crate::disk::measure_local(std::path::Path::new(&path)).ok()
+                })
+                .await
+                .ok()
+                .flatten();
+            }
+            let placed = run_on(&machine, &crate::disk::du_command(&path), &engine.ssh());
+            let output = engine.inner.runner.exec(&placed).await.ok()?;
+            crate::disk::parse_du(&output.stdout, &path)
+        })
+    }
+
     // ----- machines and projects ------------------------------------------
 
     /// Saves an SSH machine from the Connect screen: a new one, or the one

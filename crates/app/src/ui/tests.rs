@@ -7992,6 +7992,9 @@ mod tests_updates;
 #[path = "tests_shelf.rs"]
 mod tests_shelf;
 
+#[path = "tests_sweep.rs"]
+mod tests_sweep;
+
 #[cfg(leon_posix_tests)]
 #[path = "tests_restore.rs"]
 mod tests_restore;

@@ -68,6 +68,8 @@ mod shell;
 mod shelving;
 mod sidebar;
 mod steps;
+mod sweep;
+mod sweep_view;
 mod task_create;
 mod task_detail;
 mod task_github;

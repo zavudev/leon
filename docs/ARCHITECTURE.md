@@ -1195,6 +1195,17 @@ open from it stay, as they may hold unsaved text. The banner that offers the cle
 `steps::merged_offer` each time the store is read, and only when the setting
 `offer_merged_cleanup` is on; showing it removes nothing.
 
+The cleaner (`Overlay::Cleanup`, `Command::CleanUp`, the broom beside the
+project filter) is the same removal with more to weigh. `ui/sweep.rs` decides,
+as pure functions, what each linked worktree is (`candidates`: merged, sessions
+in it, idle days, size, `cleanup::blockers`), which are suggested (removable,
+and merged or idle for `IDLE_DAYS`), how the list is filtered and ordered
+(`visible`) and which sessions are old (`old_sessions`: older than the age
+picked, not pinned, not running, not on a shelf). `ui/sweep_view.rs` draws it,
+asks `Engine::measure_folder` for each worktree's size when it opens (the walk
+and the `du` reading are in `disk.rs`), removes through
+`Shell::remove_worktrees` and settles through `Op::SetShelves`.
+
 ### Changes, commit and pull request
 
 A worktree's changes are a tab, a leaf like a file's: `Shell::changes` maps the

@@ -501,6 +501,7 @@ platform (see below).
 | Turn off agent memory for this project | palette only | palette only |
 | Remove a worktree | palette only | palette only |
 | Remove merged worktrees… | palette only | palette only |
+| Clean up worktrees and old sessions… | palette only | palette only |
 | Remove the machine | palette only | palette only |
 | Edit a machine… | palette only | palette only |
 | Why is it offline? | palette only | palette only |
@@ -2319,6 +2320,35 @@ and whose next answer does. A branch first seen merged is not announced, and a
 branch with no pull request counts as not merged, so a pull request opened and
 merged between two answers is announced too. GitHub is asked at most once a
 minute per project, so the banner can come a minute late.
+
+### Cleaning up worktrees and old sessions
+
+The broom beside the project filter (or **Clean up worktrees and old sessions…**
+in the palette) opens the cleaner. Its **Worktrees** list has every linked
+worktree of every project with what it weighs on disk, how much of that is build
+output (`node_modules`, `target`, `.venv`, `dist` and the like), how many
+sessions ran in it and when the last one did something. The sizes are measured
+each time it opens, in the background: walked on this computer, asked of `du` on
+another machine.
+
+A worktree is **suggested** when removing it loses nothing and its pull request
+is merged or nobody worked in it for 14 days. Losing nothing means what
+**Remove merged worktrees…** asks for: no uncommitted or untracked files, no
+commits its upstream lacks, no session running in it, its checkout read. The
+others are listed with what keeps them and cannot be ticked. The chips filter
+the list (all, suggested, merged, idle, kept), the field filters it by project,
+branch or folder, and the order is by size, by idle time or by name. **TICK
+SUGGESTED** ticks the suggested ones in view; **REMOVE** removes the ticked ones
+exactly as **Remove merged worktrees…** does (`git worktree remove`, one after
+another, never forced; the branches stay).
+
+The **Old sessions** list has the sessions of the history nobody touched for 7,
+30 or 90 days that are not pinned, not running and not on a shelf. **SETTLE**
+puts the ticked ones on the Settled shelf, where **Bring back** returns any of
+them; nothing is deleted.
+
+Up and down move, Enter ticks the row, Shift+Enter cleans, Tab switches the list,
+and what else is typed filters.
 
 ## Running tests
 
