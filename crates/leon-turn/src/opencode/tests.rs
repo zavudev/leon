@@ -265,6 +265,34 @@ fn the_model_and_the_effort_wait_for_its_providers_and_go_one_after_the_other() 
 }
 
 #[test]
+fn a_model_the_sessions_answer_lists_is_set_without_waiting_for_an_update() {
+    // opencode 2.0.32 lists every provider's models in its answer, and
+    // sends no update after it.
+    let mut session = fresh();
+    let turn = TurnSpec {
+        model: Some("opencode-go/deepseek-v4.1-flash"),
+        ..spec("write the poem")
+    };
+    session.first(&turn);
+    let answer = json!({
+        "jsonrpc": "2.0", "id": "leon-session",
+        "result": { "sessionId": SESSION, "configOptions": [{
+            "id": "model", "type": "select", "currentValue": "opencode-go/minimax-m3.1-flash-free",
+            "options": [
+                { "value": "opencode-go/minimax-m3.1-flash-free", "name": "MiniMax" },
+                { "value": "opencode-go/deepseek-v4.1-flash", "name": "DeepSeek" },
+            ],
+        }] },
+    });
+    let step = read(session.as_mut(), &answer.to_string());
+    assert_eq!(methods(&step), ["session/set_config_option"]);
+    assert_eq!(
+        value(&step.send[0])["params"]["value"],
+        "opencode-go/deepseek-v4.1-flash"
+    );
+}
+
+#[test]
 fn a_mode_alone_does_not_wait_for_the_providers() {
     let mut session = fresh();
     let turn = TurnSpec {

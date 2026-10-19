@@ -92,10 +92,11 @@ pub struct Dialect {
     /// option of the session. `None`: it has no modes to set, and the only
     /// ones are this library's (asking, and never asking).
     pub auto_agent: Option<&'static str>,
-    /// The models of every provider are only known a moment after the
+    /// The models of every provider may only be known a moment after the
     /// session answered: the first `config_option_update` says so, and a
     /// model or an effort waits for it (set before, the session would be
-    /// tied to a model it may not be able to use).
+    /// tied to a model it may not be able to use), unless the answer lists
+    /// the model asked for already.
     pub models_come_late: bool,
     /// A refusal ends the turn, which the choice then says.
     pub refusal_ends_turn: bool,
@@ -346,6 +347,23 @@ impl AcpSession {
         }
     }
 
+    /// Whether the session's options list the model this turn asks for.
+    fn lists_wanted_model(&self, options: &Value) -> bool {
+        let Some(wanted) = self
+            .todo
+            .iter()
+            .find(|setting| setting.option == "model")
+            .map(|setting| setting.value.as_str())
+        else {
+            return false;
+        };
+        blocks(options)
+            .iter()
+            .filter(|option| option["id"] == "model")
+            .flat_map(|option| blocks(&option["options"]))
+            .any(|choice| choice["value"].as_str() == Some(wanted))
+    }
+
     fn set(&self, id: &str, option: &str, value: &str) -> Option<String> {
         let session = self.session.as_deref()?;
         Some(request(
@@ -507,6 +525,12 @@ impl AcpSession {
                     None => {}
                 }
                 self.options_are(&result["configOptions"], step);
+                // An agent that lists the model asked for in its answer
+                // knows it already: no update may follow (opencode 2.0.32
+                // sends none).
+                if self.lists_wanted_model(&result["configOptions"]) {
+                    self.models_known = true;
+                }
                 self.ready = true;
                 self.advance(step);
             }
