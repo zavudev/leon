@@ -61,6 +61,20 @@ pub enum TurnEvent {
         /// error. Empty when the summary says it all.
         detail: String,
     },
+    /// The tokens the turn used so far, as the agent counts them: each one
+    /// replaces the one before, and the last is the turn's.
+    Usage {
+        /// Read by the model, cached reads included.
+        input: u64,
+        /// Of those, read from the provider's cache.
+        cached_input: u64,
+        /// Written by the model, its reasoning included.
+        output: u64,
+        /// Of those, its reasoning, when the agent says.
+        reasoning: u64,
+        /// How many the model can hold at once, when the agent says.
+        context_window: Option<u64>,
+    },
     /// The agent finished the turn. Exactly one per turn, before
     /// [`TurnEvent::Exited`].
     Finished {
@@ -237,13 +251,17 @@ pub enum Answer {
 
 impl TurnEvent {
     /// The event as it crosses to the application, or nothing for one the
-    /// application does not show: the tokens of a turn
-    /// ([`leon_turn::TurnEvent::Usage`]), which the coordinator on the
-    /// computer reads.
+    /// application does not show.
     pub(crate) fn crossing(event: leon_turn::TurnEvent) -> Option<Self> {
         use leon_turn::TurnEvent as T;
         Some(match event {
-            T::Usage { .. } => return None,
+            T::Usage { tokens } => Self::Usage {
+                input: tokens.input,
+                cached_input: tokens.cached_input,
+                output: tokens.output,
+                reasoning: tokens.reasoning,
+                context_window: tokens.context_window,
+            },
             T::Started { session_id, model } => Self::Started { session_id, model },
             T::TextDelta { text } => Self::TextDelta { text },
             T::Text { text } => Self::Text { text },
@@ -388,5 +406,31 @@ impl From<Answer> for leon_turn::Answer {
             },
             Answer::Plan { approve, feedback } => Self::Plan { approve, feedback },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_turns_tokens_cross_to_the_application() {
+        let tokens = leon_turn::Tokens {
+            input: 45_100,
+            cached_input: 31_000,
+            output: 3_100,
+            reasoning: 900,
+            context_window: Some(200_000),
+        };
+        assert_eq!(
+            TurnEvent::crossing(leon_turn::TurnEvent::Usage { tokens }),
+            Some(TurnEvent::Usage {
+                input: 45_100,
+                cached_input: 31_000,
+                output: 3_100,
+                reasoning: 900,
+                context_window: Some(200_000),
+            })
+        );
     }
 }
