@@ -453,11 +453,23 @@ conversation; changing its model or effort keeps the same one.
   state machine, the router, the transcripts and King's instructions. It is
   pure, and tested without processes.
 
+## On the phone
+
+A paired phone speaks to King of the computer it paired with, through that
+computer's host (`King` lines, `docs/REMOTE.md`): the host of the window and
+`leon host` both pass them on. The computer's screen in the phone shows a
+King row when its host says it can; it opens King's conversation, a field
+to say something, and King's workers and runs, followed live while the
+screen is open. `leon-mobile` offers it as `king_ask` (one request of King's
+protocol and its answer) and `king_watch` (King's notices).
+
 ## Not built yet
 
-* King's screen in the phone application. The way there is built: a
-  paired device speaks King's protocol through the host (`King` lines,
-  `docs/REMOTE.md`), and `leon-mobile` offers `king_ask` and `king_watch`.
+* From the phone: answering King's or a worker's questions, telling a
+  worker more, stopping it, and starting or going on with runs. The phone
+  reads King, its workers and its runs, and says things to King.
+* King's notices on the phone while the application is closed: they come
+  only while a King screen is open.
 * Workers on SSH and relay machines, and agents that only run in a terminal
   (Kimi, ZCode, Antigravity) as workers.
 * Showing the tokens in the window's own conversations and on the phone:

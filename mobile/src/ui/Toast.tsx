@@ -1,10 +1,11 @@
 // The line across the top that says an agent elsewhere needs the person or is
-// done. Pressing it opens the chat; it leaves by itself.
+// done, or what King told them. Pressing it opens the chat, or King; it
+// leaves by itself.
 import Feather from '@expo/vector-icons/Feather';
 import { Pressable, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { dismissToast, openChat, useAlerts } from '@/store/alerts';
+import { dismissToast, openToast, useAlerts } from '@/store/alerts';
 import { metrics } from '@/theme/tokens';
 import { useTheme } from '@/theme/useTheme';
 
@@ -15,7 +16,14 @@ export function Toast() {
   const insets = useSafeAreaInsets();
   const toast = useAlerts((s) => s.toast);
   if (!toast) return null;
-  const color = toast.kind === 'waiting' ? t.warning : toast.kind === 'failed' ? t.error : t.success;
+  const color =
+    toast.kind === 'waiting'
+      ? t.warning
+      : toast.kind === 'failed'
+        ? t.error
+        : toast.kind === 'king'
+          ? t.signal
+          : t.success;
   return (
     <View
       accessibilityLiveRegion="assertive"
@@ -23,8 +31,8 @@ export function Toast() {
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`${toast.title}. ${toast.line}`}
-        accessibilityHint="Opens the chat."
-        onPress={() => openChat(toast.chatId)}
+        accessibilityHint={'chatId' in toast ? 'Opens the chat.' : 'Opens King.'}
+        onPress={() => openToast(toast)}
         style={({ pressed }) => ({
           flexDirection: 'row',
           alignItems: 'center',
@@ -40,7 +48,7 @@ export function Toast() {
         <Led color={color} />
         <View style={{ flex: 1, paddingVertical: 8, gap: 2 }}>
           <Label style={{ color }}>
-            {toast.kind === 'waiting' ? '? ' : toast.kind === 'failed' ? '! ' : '✓ '}
+            {toast.kind === 'waiting' ? '? ' : toast.kind === 'failed' ? '! ' : toast.kind === 'king' ? '' : '✓ '}
             {toast.title}
           </Label>
           {toast.line ? (

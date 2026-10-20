@@ -1,7 +1,8 @@
 // A computer that is not there: what the app shows before anything is paired,
 // so that it can be tried (and reviewed) without a Leon to connect to. Its
 // projects, sessions and Den are made up, and its agent answers every prompt
-// with the same short, scripted turn. Nothing leaves the phone.
+// with the same short, scripted turn; its King answers in the same way.
+// Nothing leaves the phone.
 import {
   LinkError,
   type AgentOptions,
@@ -9,6 +10,8 @@ import {
   type DenCub,
   type HistorySession,
   type HostLink,
+  type KingRequest,
+  type KingWatch,
   type PairedHost,
   type SharedState,
   type TranscriptEntry,
@@ -243,6 +246,158 @@ function runTurn(prompt: string, onEvent: (event: TurnEvent) => void): TurnHandl
   };
 }
 
+/** One entry of a made-up conversation, as King's service sends it. */
+type DemoEntry = { seq: number; at_ms: number; kind: string; text: string };
+
+const KING_REPLY =
+  'This is the demo computer, so I started nobody. On your own computer I would split this into tasks, give each to a worker in its own worktree, check what they did, and tell you here when it is ready.';
+
+/**
+ * King of the demo computer: two workers and a run, made up, and a
+ * conversation it adds to when spoken to. It answers the way King's service
+ * does, in its own JSON, so the app reads it as it reads the real one.
+ */
+function demoKing() {
+  const start = Date.now() - 50 * MIN;
+  const brain: DemoEntry[] = [];
+  const say = (into: DemoEntry[], kind: string, text: string, at = Date.now()) => {
+    into.push({ seq: (into.at(-1)?.seq ?? -1) + 1, at_ms: at, kind, text });
+  };
+  say(brain, 'prompt', 'Fix the rounding at checkout, and add rate limits to the public API.', start);
+  say(brain, 'tool', 'start_worker: Fix the rounding of totals at checkout', start + MIN);
+  say(brain, 'tool', 'start_worker: Rate limits for the public endpoints', start + MIN);
+  say(
+    brain,
+    'agent',
+    'Two workers are on it: **#1** fixes the rounding in `shop`, **#2** adds the limits in `api`. I will check their work and tell you when each is ready.',
+    start + 2 * MIN,
+  );
+  say(brain, 'news', '[Leon] News of your workers:\n\n- #1 "Fix the rounding of totals at checkout" is done.', start + 30 * MIN);
+  say(
+    brain,
+    'agent',
+    'Worker #1 is done: totals are added in whole cents now, with a test for the three prices that failed. I read the change and the tests pass.',
+    start + 31 * MIN,
+  );
+  const workers: Record<number, DemoEntry[]> = { 1: [], 2: [] };
+  say(workers[1]!, 'prompt', 'The totals at checkout are off by a cent sometimes. Find out why and fix it.', start + MIN);
+  say(workers[1]!, 'tool', 'Read: src/cart.ts', start + 2 * MIN);
+  say(workers[1]!, 'tool', 'Bash: npm test -- cart', start + 3 * MIN);
+  say(workers[1]!, 'agent', 'Fixed: `cartTotal` adds whole cents and formats only at the end.', start + 29 * MIN);
+  say(workers[2]!, 'prompt', 'Add rate limiting to the public endpoints, 60 requests a minute per key.', start + MIN);
+  say(workers[2]!, 'tool', 'Edit: src/middleware/limit.ts', start + 20 * MIN);
+
+  let busySince: number | null = null;
+  let spent = 1.84;
+  const listeners = new Set<(notice: unknown) => void>();
+  const timers = new Set<ReturnType<typeof setTimeout>>();
+  const later = (ms: number, run: () => void) => {
+    const timer = setTimeout(() => {
+      timers.delete(timer);
+      run();
+    }, ms);
+    timers.add(timer);
+  };
+
+  const conversation = (agent: string, model: string, entries: DemoEntry[], busy: boolean, cost: number) => ({
+    agent,
+    model,
+    effort: null,
+    busy,
+    busy_since_ms: busy ? (busySince ?? Date.now()) : null,
+    queued: 0,
+    questions: [],
+    cost_usd: cost,
+    last_seq: entries.at(-1)?.seq ?? null,
+  });
+
+  const status = () => ({
+    conversation: 1,
+    brain: conversation('claude', 'opus', brain, busySince !== null, 1.12),
+    workers: [
+      {
+        id: 1,
+        title: 'Fix the rounding of totals at checkout',
+        project: 'shop',
+        cwd: SHOP,
+        state: 'done',
+        conversation: conversation('claude', 'sonnet', workers[1]!, false, 0.41),
+        last_answer: 'Fixed: `cartTotal` adds whole cents and formats only at the end.',
+        updated_ms: start + 29 * MIN,
+      },
+      {
+        id: 2,
+        title: 'Rate limits for the public endpoints',
+        project: 'api',
+        cwd: API,
+        state: 'working',
+        conversation: conversation('codex', 'gpt-5', workers[2]!, true, 0.31),
+        last_answer: null,
+        updated_ms: start + 20 * MIN,
+      },
+    ],
+    news: 0,
+    spent_today_usd: spent,
+    daily_budget_usd: 10,
+    runs: [
+      {
+        id: 1,
+        title: 'Checkout and limits',
+        project: 'shop',
+        state: 'running',
+        steps: [{ state: 'done' }, { state: 'working' }, { state: 'waiting' }],
+      },
+    ],
+  });
+
+  const tell = (notice: unknown) => {
+    for (const listener of listeners) listener(notice);
+  };
+  const changed = () => tell({ notice: 'changed', status: status() });
+
+  return {
+    async ask(request: KingRequest): Promise<unknown> {
+      await wait(150);
+      switch (request.op) {
+        case 'status':
+          return status();
+        case 'transcript': {
+          const entries = request.target === 'brain' ? brain : workers[request.target.worker];
+          if (!entries) throw new LinkError('Host', 'no such worker');
+          const after = entries.filter((e) => request.since === undefined || e.seq > request.since);
+          return after.slice(-(request.limit ?? after.length));
+        }
+        case 'say': {
+          say(brain, 'prompt', request.text);
+          busySince = Date.now();
+          changed();
+          later(900, () => {
+            say(brain, 'tool', 'list_workers');
+            changed();
+          });
+          later(2_400, () => {
+            say(brain, 'agent', KING_REPLY);
+            busySince = null;
+            spent += 0.07;
+            changed();
+            tell({ notice: 'notify', title: 'Worker #2 is checking', body: 'Rate limits for the public endpoints.', echo: false });
+          });
+          return null;
+        }
+      }
+    },
+    watch(onNotice: (notice: unknown) => void): KingWatch {
+      listeners.add(onNotice);
+      return { stop: () => listeners.delete(onNotice) };
+    },
+    close() {
+      for (const timer of timers) clearTimeout(timer);
+      timers.clear();
+      listeners.clear();
+    },
+  };
+}
+
 /** The connection to the demo computer: online a moment after it is opened. */
 export function createDemoLink(onState: (state: ConnState) => void): HostLink {
   let state: ConnState = { kind: 'connecting' };
@@ -251,6 +406,7 @@ export function createDemoLink(onState: (state: ConnState) => void): HostLink {
     onState(state);
   }, 300);
   queueMicrotask(() => onState(state));
+  const king = demoKing();
 
   return {
     state: () => state,
@@ -258,6 +414,7 @@ export function createDemoLink(onState: (state: ConnState) => void): HostLink {
     reconnectNow() {},
     close() {
       clearTimeout(timer);
+      king.close();
       state = { kind: 'closed' };
     },
     async shareState(): Promise<SharedState> {
@@ -271,6 +428,7 @@ export function createDemoLink(onState: (state: ConnState) => void): HostLink {
         truncated: false,
         pinned: all.filter((s) => s.externalId === 'demo-rate-limit' || s.externalId === 'demo-dark'),
         den: true,
+        king: true,
       };
     },
     den: async () => den(),
@@ -298,5 +456,7 @@ export function createDemoLink(onState: (state: ConnState) => void): HostLink {
     async attachTurn() {
       throw new LinkError('TurnNotFound');
     },
+    kingAsk: (request) => king.ask(request),
+    kingWatch: (onNotice) => king.watch(onNotice),
   };
 }

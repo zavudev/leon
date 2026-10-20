@@ -16,6 +16,7 @@ import {
   type ProjectNode,
 } from '@/chat/list';
 import { useApp } from '@/store/app';
+import { useKing } from '@/store/king';
 import { recheckLogos } from '@/store/logos';
 import { ensureLink, forgetHost, refreshShared, useRuntime, watchHost } from '@/store/runtime';
 import { useTheme } from '@/theme/useTheme';
@@ -30,6 +31,58 @@ type Item =
   | { type: 'project'; project: ProjectNode }
   | ({ type: 'session' } & FoundRow)
   | { type: 'unsorted'; count: number; folders: number; latest: number };
+
+/** The way to King of this computer: what it does, in a line, and how many workers it has. */
+function KingRow({ hostId }: { hostId: string }) {
+  const t = useTheme();
+  const workers = useKing((s) => s.status[hostId]?.workers.length);
+  const busy = useKing((s) => s.status[hostId]?.brain.busy === true);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`King${busy ? ', working' : ''}${workers ? `, ${workers} ${workers === 1 ? 'worker' : 'workers'}` : ''}`}
+      accessibilityHint="Opens King: talk to it, and see its workers."
+      onPress={() => router.push({ pathname: '/host/[hostId]/king', params: { hostId } })}
+      style={({ pressed }) => ({
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
+        minHeight: 56,
+        marginHorizontal: 12,
+        marginTop: 12,
+        paddingVertical: 10,
+        paddingLeft: 14,
+        paddingRight: 10,
+        backgroundColor: pressed ? t.surface2 : t.surface,
+        borderWidth: 1,
+        borderColor: pressed ? t.elevatedBorder : t.border,
+        borderLeftWidth: 2,
+        borderLeftColor: t.signal,
+      })}>
+      <Feather name="award" size={20} color={t.signal} />
+      <View style={{ flex: 1, gap: 3 }}>
+        <Txt variant="strong">King</Txt>
+        <Txt variant="small" tone="faint" numberOfLines={1}>
+          Tell it what to do; it runs the workers
+        </Txt>
+      </View>
+      <View style={{ alignItems: 'flex-end', gap: 4 }}>
+        {busy ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <Led color={t.signal} />
+            <Label tone="signal">Working</Label>
+          </View>
+        ) : null}
+        {workers ? (
+          <Label tone="faint">
+            {workers} {workers === 1 ? 'worker' : 'workers'}
+          </Label>
+        ) : null}
+      </View>
+      <Feather name="chevron-right" size={18} color={t.textMuted} />
+    </Pressable>
+  );
+}
 
 export default function HostChats() {
   const { hostId } = useLocalSearchParams<{ hostId: string }>();
@@ -100,6 +153,8 @@ export default function HostChats() {
   }
 
   const noProjects = shared !== undefined && tree.projects.length === 0;
+  // King of this computer, when it has one, above everything but a search.
+  const kingRow = shared?.king && words.length === 0 ? <KingRow hostId={hostId} /> : null;
 
   return (
     <Screen
@@ -149,42 +204,45 @@ export default function HostChats() {
         }
         getItemType={(item) => item.type}
         ListHeaderComponent={
-          words.length > 0 ? (
-            <View style={{ paddingHorizontal: 16, paddingTop: 16, paddingBottom: 8 }}>
-              <Label tone="faint">[ {items.length} found ]</Label>
-            </View>
-          ) : flat || tree.projects.length > 0 || pinned.length > 0 ? (
-            <View>
-              {pinned.length > 0 ? (
-                <View style={{ paddingTop: 16, paddingBottom: 4 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingBottom: 8 }}>
-                    <Feather name="bookmark" size={12} color={t.signal} />
-                    <Label tone="faint">[ Pinned ]</Label>
-                    <Label tone="faint" style={{ marginLeft: 'auto' }}>
-                      {pinned.length}
-                    </Label>
+          <>
+            {kingRow}
+            {words.length > 0 ? (
+              <View style={{ paddingHorizontal: 16, paddingTop: 16, paddingBottom: 8 }}>
+                <Label tone="faint">[ {items.length} found ]</Label>
+              </View>
+            ) : flat || tree.projects.length > 0 || pinned.length > 0 ? (
+              <View>
+                {pinned.length > 0 ? (
+                  <View style={{ paddingTop: 16, paddingBottom: 4 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingBottom: 8 }}>
+                      <Feather name="bookmark" size={12} color={t.signal} />
+                      <Label tone="faint">[ Pinned ]</Label>
+                      <Label tone="faint" style={{ marginLeft: 'auto' }}>
+                        {pinned.length}
+                      </Label>
+                    </View>
+                    {pinned.map(({ row, where }) => (
+                      <SessionCell key={row.key} hostId={hostId} row={row} where={where} />
+                    ))}
                   </View>
-                  {pinned.map(({ row, where }) => (
-                    <SessionCell key={row.key} hostId={hostId} row={row} where={where} />
-                  ))}
-                </View>
-              ) : null}
-              {flat || tree.projects.length > 0 ? (
-                <View style={{ paddingHorizontal: 16, paddingTop: 16, paddingBottom: 8 }}>
-                  <Label tone="faint">{flat ? '[ Recent ]' : '[ Projects ]'}</Label>
-                </View>
-              ) : null}
-            </View>
-          ) : noProjects ? (
-            // The whole of what a computer without projects has to say.
-            <View style={{ paddingHorizontal: 16, paddingTop: 16, paddingBottom: 12, gap: 6 }}>
-              <Label tone="faint">[ No projects ]</Label>
-              <Txt variant="small" tone="muted">
-                This computer shares no projects: add them in its Leon and they are listed
-                here. Chats you start from this device work either way.
-              </Txt>
-            </View>
-          ) : null
+                ) : null}
+                {flat || tree.projects.length > 0 ? (
+                  <View style={{ paddingHorizontal: 16, paddingTop: 16, paddingBottom: 8 }}>
+                    <Label tone="faint">{flat ? '[ Recent ]' : '[ Projects ]'}</Label>
+                  </View>
+                ) : null}
+              </View>
+            ) : noProjects ? (
+              // The whole of what a computer without projects has to say.
+              <View style={{ paddingHorizontal: 16, paddingTop: 16, paddingBottom: 12, gap: 6 }}>
+                <Label tone="faint">[ No projects ]</Label>
+                <Txt variant="small" tone="muted">
+                  This computer shares no projects: add them in its Leon and they are listed
+                  here. Chats you start from this device work either way.
+                </Txt>
+              </View>
+            ) : null}
+          </>
         }
         refreshControl={
           <RefreshControl

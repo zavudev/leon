@@ -83,7 +83,24 @@ export type SharedState = {
   pinned: HistorySession[];
   /** Whether that computer has a Den to show; one that does not say must not be asked. */
   den: boolean;
+  /** Whether its King can be spoken to; one that does not say must not be asked. */
+  king: boolean;
 };
+
+/** Whose conversation, in King's service: King's own, or one of its workers'. */
+export type KingTarget = 'brain' | { worker: number };
+
+/**
+ * A request of King's control protocol, as its service reads it: its name in
+ * `op`, its fields in snake case. Only what this app asks is listed.
+ */
+export type KingRequest =
+  | { op: 'status' }
+  | { op: 'say'; text: string }
+  | { op: 'transcript'; target: KingTarget; since?: number; limit?: number };
+
+/** A watch on King's notices; `stop` ends it. */
+export type KingWatch = { stop(): void };
 
 /**
  * One lion of a computer's Den: a live agent session there, or a sub-agent of
@@ -311,6 +328,18 @@ export interface HostLink {
   startTurn(request: TurnRequest, onEvent: (event: TurnEvent) => void): Promise<TurnHandle>;
   runningTurns(): Promise<RunningTurn[]>;
   attachTurn(pty: string, onEvent: (event: TurnEvent) => void): Promise<TurnHandle>;
+  /**
+   * Asks King's service; the answer is the reply's `result`, parsed but not
+   * checked (see `@/king/model`). A refusal throws a `LinkError` `Host` with
+   * King's sentence. Only when its `SharedState.king` is set.
+   */
+  kingAsk(request: KingRequest): Promise<unknown>;
+  /**
+   * Tells `onNotice` every notice of King's service, parsed, until `stop`.
+   * `onClosed` says the line to King closed: what was said meanwhile is not
+   * known, so the status is to be asked again. It subscribes again by itself.
+   */
+  kingWatch(onNotice: (notice: unknown) => void, onClosed: (reason: string) => void): KingWatch;
 }
 
 /** Everything the application asks of the native module. */

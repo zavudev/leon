@@ -277,6 +277,7 @@ function wrapSession(session: HostSessionLike): HostLink {
           // An installed build older than the pins has no such field.
           pinned: (shared.pinned ?? []).map(historySession),
           den: shared.den === true,
+          king: shared.king === true,
         };
       }),
     den: () =>
@@ -381,6 +382,32 @@ function wrapSession(session: HostSessionLike): HostLink {
           }),
         ),
       ),
+    kingAsk: (request) =>
+      guard(async (): Promise<unknown> => {
+        // A reply without a result (`say`) comes as `null`.
+        const result = await session.kingAsk(JSON.stringify(request));
+        return result ? JSON.parse(result) : null;
+      }),
+    kingWatch: (onNotice, onClosed) => {
+      try {
+        const watch = session.kingWatch({
+          onNotice: (notice) => {
+            let read: unknown;
+            try {
+              read = JSON.parse(notice);
+            } catch {
+              // Not JSON: nothing this app could read in it.
+              return;
+            }
+            onNotice(read);
+          },
+          onClosed,
+        });
+        return { stop: () => watch.stop() };
+      } catch (error) {
+        throw toLinkError(error);
+      }
+    },
   };
 }
 
