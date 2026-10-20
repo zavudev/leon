@@ -277,6 +277,12 @@ installed here, so a missing agent is a worker that fails to start, and King
 hears why. A check that runs past its time limit over SSH loses its
 connection, and may go on running on the other machine.
 
+Leon's memory (see [MEMORY.md](MEMORY.md)) lives on this computer, and its
+tools do not run on the other machine. A worker there is given it with its
+instructions instead: the global notes and its project's, as a memory file
+has them. It reads them and cannot write them; what it says is worth keeping
+at the end of its answer, King keeps with `memory_add`.
+
 ### Agents that only run in a terminal
 
 Leon drives Claude Code, Codex, opencode, Grok and Cursor on a pipe: it hears

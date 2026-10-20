@@ -63,7 +63,8 @@ pub fn king(config: &Config, now: &Now<'_>) -> String {
            worktree is made there, its agent runs there (it must be installed there) and \
            `worktree_diff`, `worktree_check`, `pr_open` and `project_status` run there. \
            For a folder of another machine, name the machine (`machine`) in `worker_start` \
-           and `open_terminal`.\n\
+           and `open_terminal`. Such a worker reads Leon's memory with its instructions but \
+           cannot write it: keep what it says is worth keeping (`memory_add`).\n\
          * **Agents that only run in a terminal** (Kimi, ZCode, Antigravity…) can work too: \
            `worker_start` with that `agent` opens it in a terminal of Leon's window, in the \
            worker's worktree, on its prompt. You hear nothing from it and cannot tell it more; \
