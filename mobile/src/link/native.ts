@@ -174,6 +174,18 @@ function fromEvent(event: NativeTurnEvent): TurnEvent {
   switch (event.tag) {
     case TurnEvent_Tags.Started:
       return { type: 'started', sessionId: event.inner.sessionId, model: event.inner.model };
+    case TurnEvent_Tags.Usage:
+      return {
+        type: 'usage',
+        tokens: {
+          input: Number(event.inner.input),
+          cachedInput: Number(event.inner.cachedInput),
+          output: Number(event.inner.output),
+          reasoning: Number(event.inner.reasoning),
+          contextWindow:
+            event.inner.contextWindow === undefined ? undefined : Number(event.inner.contextWindow),
+        },
+      };
     case TurnEvent_Tags.TextDelta:
       return { type: 'text-delta', text: event.inner.text };
     case TurnEvent_Tags.Text:

@@ -130,6 +130,7 @@ export default function Chat() {
   const transcript = useRuntime((s) => s.transcripts[chatId]);
   const local = useRuntime((s) => s.messages[chatId]);
   const turn = useRuntime((s) => s.turns[chatId]);
+  const lastTokens = useRuntime((s) => s.lastTokens[chatId]);
   const hostId = chat?.hostId ?? '';
   const online = useRuntime((s) => s.conn[hostId]?.kind === 'online');
 
@@ -357,6 +358,11 @@ export default function Chat() {
                 color={online ? agentColor(t, chat.agent) : t.textFaint}
                 word={online ? `${agentName} is working` : 'Waiting for the connection'}
               />
+            ) : !running && lastTokens ? (
+              // The foot of the last answer: what it read and wrote, and how fast.
+              <Label tone="faint" style={styles.foot} accessibilityLabel={`Last answer: ${lastTokens}`}>
+                {lastTokens}
+              </Label>
             ) : null
           }
         />
@@ -546,6 +552,7 @@ export default function Chat() {
 }
 
 const styles = StyleSheet.create({
+  foot: { marginHorizontal: metrics.pad, marginTop: 10, textTransform: 'none', letterSpacing: 0 },
   mode: {
     minHeight: metrics.touch,
     paddingHorizontal: metrics.pad,

@@ -3828,6 +3828,7 @@ export enum TurnEvent_Tags {
   Thought = "Thought",
   ToolUse = "ToolUse",
   ToolResult = "ToolResult",
+  Usage = "Usage",
   Finished = "Finished",
   Question = "Question",
   QuestionResolved = "QuestionResolved",
@@ -4058,6 +4059,60 @@ export const TurnEvent = (() => {
 
     static instanceOf(obj: any): obj is ToolResult_ {
       return obj.tag === TurnEvent_Tags.ToolResult;
+    }
+  }
+
+  type Usage__interface = {
+    tag: TurnEvent_Tags.Usage;
+    inner: Readonly<{
+      input: bigint;
+      cachedInput: bigint;
+      output: bigint;
+      reasoning: bigint;
+      contextWindow?: bigint;
+    }>;
+  };
+  /**
+   * The tokens the turn used so far, as the agent counts them: each one
+   * replaces the one before, and the last is the turn's.
+   */
+  class Usage_ extends UniffiEnum implements Usage__interface {
+    /**
+     * @private
+     * This field is private and should not be used, use `tag` instead.
+     */
+    readonly [uniffiTypeNameSymbol] = "TurnEvent";
+    readonly tag = TurnEvent_Tags.Usage;
+    readonly inner: Readonly<{
+      input: bigint;
+      cachedInput: bigint;
+      output: bigint;
+      reasoning: bigint;
+      contextWindow?: bigint;
+    }>;
+    constructor(inner: {
+      input: bigint;
+      cachedInput: bigint;
+      output: bigint;
+      reasoning: bigint;
+      contextWindow?: bigint;
+    }) {
+      super("TurnEvent", "Usage");
+
+      this.inner = Object.freeze(inner);
+    }
+    static new(inner: {
+      input: bigint;
+      cachedInput: bigint;
+      output: bigint;
+      reasoning: bigint;
+      contextWindow?: bigint;
+    }): Usage_ {
+      return new Usage_(inner);
+    }
+
+    static instanceOf(obj: any): obj is Usage_ {
+      return obj.tag === TurnEvent_Tags.Usage;
     }
   }
 
@@ -4359,6 +4414,7 @@ export const TurnEvent = (() => {
     Thought: Thought_,
     ToolUse: ToolUse_,
     ToolResult: ToolResult_,
+    Usage: Usage_,
     Finished: Finished_,
     Question: Question_,
     QuestionResolved: QuestionResolved_,
@@ -4381,6 +4437,7 @@ export type TurnEvent = InstanceType<
     | "Thought"
     | "ToolUse"
     | "ToolResult"
+    | "Usage"
     | "Finished"
     | "Question"
     | "QuestionResolved"
@@ -4430,6 +4487,14 @@ const FfiConverterTypeTurnEvent = (() => {
             detail: FfiConverterString.readFromCursor(c),
           });
         case 7:
+          return new TurnEvent.Usage({
+            input: FfiConverterUInt64.readFromCursor(c),
+            cachedInput: FfiConverterUInt64.readFromCursor(c),
+            output: FfiConverterUInt64.readFromCursor(c),
+            reasoning: FfiConverterUInt64.readFromCursor(c),
+            contextWindow: FfiConverterOptionalUInt64.readFromCursor(c),
+          });
+        case 8:
           return new TurnEvent.Finished({
             ok: FfiConverterBool.readFromCursor(c),
             error: FfiConverterOptionalString.readFromCursor(c),
@@ -4438,30 +4503,30 @@ const FfiConverterTypeTurnEvent = (() => {
             deniedTools: FfiConverterSequenceString.readFromCursor(c),
             interrupted: FfiConverterBool.readFromCursor(c),
           });
-        case 8:
+        case 9:
           return new TurnEvent.Question({
             id: FfiConverterString.readFromCursor(c),
             kind: FfiConverterTypeQuestionKind.readFromCursor(c),
           });
-        case 9:
+        case 10:
           return new TurnEvent.QuestionResolved({
             id: FfiConverterString.readFromCursor(c),
           });
-        case 10:
+        case 11:
           return new TurnEvent.ModeChanged({
             mode: FfiConverterString.readFromCursor(c),
           });
-        case 11:
-          return new TurnEvent.Disconnected();
         case 12:
-          return new TurnEvent.Reconnected();
+          return new TurnEvent.Disconnected();
         case 13:
-          return new TurnEvent.Gap();
+          return new TurnEvent.Reconnected();
         case 14:
+          return new TurnEvent.Gap();
+        case 15:
           return new TurnEvent.Exited({
             code: FfiConverterUInt32.readFromCursor(c),
           });
-        case 15:
+        case 16:
           return new TurnEvent.Gone();
         default:
           throw new UniffiInternalError.UnexpectedEnumCase();
@@ -4512,8 +4577,18 @@ const FfiConverterTypeTurnEvent = (() => {
           FfiConverterString.writeIntoCursor(inner.detail, c);
           return;
         }
-        case TurnEvent_Tags.Finished: {
+        case TurnEvent_Tags.Usage: {
           c.writeI32(7);
+          const inner = value.inner;
+          FfiConverterUInt64.writeIntoCursor(inner.input, c);
+          FfiConverterUInt64.writeIntoCursor(inner.cachedInput, c);
+          FfiConverterUInt64.writeIntoCursor(inner.output, c);
+          FfiConverterUInt64.writeIntoCursor(inner.reasoning, c);
+          FfiConverterOptionalUInt64.writeIntoCursor(inner.contextWindow, c);
+          return;
+        }
+        case TurnEvent_Tags.Finished: {
+          c.writeI32(8);
           const inner = value.inner;
           FfiConverterBool.writeIntoCursor(inner.ok, c);
           FfiConverterOptionalString.writeIntoCursor(inner.error, c);
@@ -4524,44 +4599,44 @@ const FfiConverterTypeTurnEvent = (() => {
           return;
         }
         case TurnEvent_Tags.Question: {
-          c.writeI32(8);
+          c.writeI32(9);
           const inner = value.inner;
           FfiConverterString.writeIntoCursor(inner.id, c);
           FfiConverterTypeQuestionKind.writeIntoCursor(inner.kind, c);
           return;
         }
         case TurnEvent_Tags.QuestionResolved: {
-          c.writeI32(9);
+          c.writeI32(10);
           const inner = value.inner;
           FfiConverterString.writeIntoCursor(inner.id, c);
           return;
         }
         case TurnEvent_Tags.ModeChanged: {
-          c.writeI32(10);
+          c.writeI32(11);
           const inner = value.inner;
           FfiConverterString.writeIntoCursor(inner.mode, c);
           return;
         }
         case TurnEvent_Tags.Disconnected: {
-          c.writeI32(11);
-          return;
-        }
-        case TurnEvent_Tags.Reconnected: {
           c.writeI32(12);
           return;
         }
-        case TurnEvent_Tags.Gap: {
+        case TurnEvent_Tags.Reconnected: {
           c.writeI32(13);
           return;
         }
-        case TurnEvent_Tags.Exited: {
+        case TurnEvent_Tags.Gap: {
           c.writeI32(14);
+          return;
+        }
+        case TurnEvent_Tags.Exited: {
+          c.writeI32(15);
           const inner = value.inner;
           FfiConverterUInt32.writeIntoCursor(inner.code, c);
           return;
         }
         case TurnEvent_Tags.Gone: {
-          c.writeI32(15);
+          c.writeI32(16);
           return;
         }
         default:
@@ -4612,6 +4687,18 @@ const FfiConverterTypeTurnEvent = (() => {
           size += FfiConverterBool.allocationSize(inner.ok);
           size += FfiConverterString.allocationSize(inner.summary);
           size += FfiConverterString.allocationSize(inner.detail);
+          return size;
+        }
+        case TurnEvent_Tags.Usage: {
+          const inner = value.inner;
+          let size = 4;
+          size += FfiConverterUInt64.allocationSize(inner.input);
+          size += FfiConverterUInt64.allocationSize(inner.cachedInput);
+          size += FfiConverterUInt64.allocationSize(inner.output);
+          size += FfiConverterUInt64.allocationSize(inner.reasoning);
+          size += FfiConverterOptionalUInt64.allocationSize(
+            inner.contextWindow,
+          );
           return size;
         }
         case TurnEvent_Tags.Finished: {

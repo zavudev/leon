@@ -216,8 +216,24 @@ export type Answer =
   | { kind: 'choices'; answers: ChoiceAnswer[] }
   | { kind: 'plan'; approve: boolean; feedback?: string };
 
+/** The tokens a turn used, as its agent counts them. */
+export type TurnTokens = {
+  /** Read by the model, cached reads included. */
+  input: number;
+  /** Of those, read from the provider's cache. */
+  cachedInput: number;
+  /** Written by the model, its reasoning included. */
+  output: number;
+  /** Of those, its reasoning, when the agent says. */
+  reasoning: number;
+  /** How many the model can hold at once, when the agent says. */
+  contextWindow?: number;
+};
+
 export type TurnEvent =
   | { type: 'started'; sessionId: string; model?: string }
+  /** The tokens the turn used so far: each replaces the one before, and the last is the turn's. */
+  | { type: 'usage'; tokens: TurnTokens }
   | { type: 'text-delta'; text: string }
   | { type: 'text'; text: string }
   /** More of what the agent thinks before it answers: kept apart, out of sight unless asked for. */

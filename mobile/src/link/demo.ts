@@ -171,6 +171,12 @@ function runTurn(prompt: string, onEvent: (event: TurnEvent) => void): TurnHandl
     say({ type: 'exited', code: 0 });
     over = true;
   };
+  /** What the made-up agent read (the folder, mostly cached) and wrote so far. */
+  const usage = (output: number) =>
+    say({
+      type: 'usage',
+      tokens: { input: 45_100, cachedInput: 31_000, output, reasoning: 0, contextWindow: 200_000 },
+    });
 
   void (async () => {
     say({ type: 'started', sessionId: `demo-${Date.now().toString(36)}`, model: 'Demo' });
@@ -205,12 +211,16 @@ function runTurn(prompt: string, onEvent: (event: TurnEvent) => void): TurnHandl
     }
     await wait(300);
     const text = `You asked: “${prompt.trim().slice(0, 120)}”.\n\n${REPLY}`;
-    for (const word of text.split(/(?<= )/)) {
+    const words = text.split(/(?<= )/);
+    for (const [at, word] of words.entries()) {
       if (over) return;
       say({ type: 'text-delta', text: word });
+      // The agent counts its tokens as it goes; the last count is the turn's.
+      if (at % 20 === 0) usage(at * 2);
       await wait(25);
     }
     say({ type: 'text', text });
+    usage(words.length * 2);
     end({
       type: 'finished',
       ok: true,
