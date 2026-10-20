@@ -222,6 +222,20 @@ pub enum Request {
         #[serde(default)]
         args: Vec<String>,
     },
+    /// Send King's notices to a phone while its application is closed,
+    /// through Expo's push service (`king/push.json`).
+    PushRegister {
+        /// The phone's Expo push token.
+        token: String,
+        /// What the phone calls itself.
+        #[serde(default)]
+        name: String,
+    },
+    /// Stop sending King's notices to a phone that is closed.
+    PushForget {
+        /// The phone's Expo push token.
+        token: String,
+    },
     /// Whether the person is looking at King on this connection's client:
     /// while anybody is, what King's conversation shows already is not also
     /// sent to the desktop.
@@ -543,6 +557,13 @@ mod tests {
                 machine: Some("build".to_owned()),
             },
             Request::TerminalTaken { terminal: 4 },
+            Request::PushRegister {
+                token: "ExpoPushToken[a]".to_owned(),
+                name: "Pixel".to_owned(),
+            },
+            Request::PushForget {
+                token: "ExpoPushToken[a]".to_owned(),
+            },
         ] {
             let line = serde_json::to_string(&Envelope {
                 id: 91,

@@ -35,6 +35,8 @@ pub mod mcp;
 #[cfg(unix)]
 pub mod place;
 #[cfg(unix)]
+pub mod push;
+#[cfg(unix)]
 pub mod serve;
 
 use std::path::{Path, PathBuf};

@@ -77,6 +77,8 @@ enum Input {
         worker: u32,
         seen: Result<leon_king::verify::Seen, String>,
     },
+    /// Expo said these phones are no longer registered.
+    PushGone(Vec<String>),
 }
 
 /// How long a process may go on after its turn said its result before the
@@ -196,6 +198,8 @@ struct Service {
     /// What reaching the other machines takes; none when it could not be
     /// set up, and workers then work on this computer only.
     machines: Option<Arc<super::place::Machines>>,
+    /// The phones that get King's notices while closed.
+    push: super::push::Devices,
     /// Which agents are installed, and when that was found out.
     installed: Option<(u64, Vec<bool>)>,
     /// The models the agents offer, as they last said.
@@ -285,6 +289,7 @@ pub fn run(paths: Paths) -> Result<(), String> {
             .spawn(move || listen(listener, sender))
             .map_err(|error| error.to_string())?;
     }
+    let push = super::push::Devices::load(&paths.folder);
     let mut service = Service {
         exe: std::env::current_exe().map_err(|error| error.to_string())?,
         paths,
@@ -297,6 +302,7 @@ pub fn run(paths: Paths) -> Result<(), String> {
         store,
         spawner,
         machines,
+        push,
         installed: None,
         models: Vec::new(),
         modes: Vec::new(),
@@ -539,6 +545,12 @@ impl Service {
             } => self
                 .coordinator
                 .check_finished(worker, passed, &output, now_ms()),
+            Input::PushGone(tokens) => {
+                for token in tokens {
+                    self.push.remove(&token);
+                }
+                Vec::new()
+            }
             Input::PullRequest { worker, seen } => {
                 let now = now_ms();
                 let every = self.coordinator.config().limits.ci_poll_secs.max(10) * 1000;
@@ -973,6 +985,20 @@ impl Service {
                 ))
             }
             Request::Check { worker } => self.start_check(worker, now),
+            Request::PushRegister { token, name } => {
+                self.push.add(&token, &name, now)?;
+                Ok((
+                    json!({
+                        "phones": self.push.list().len(),
+                        "note": "King's notices reach it through Expo's push service while no \
+                                 client shows King.",
+                    }),
+                    Vec::new(),
+                ))
+            }
+            Request::PushForget { token } => {
+                Ok((json!({ "forgotten": self.push.remove(&token) }), Vec::new()))
+            }
             Request::Run {
                 machine,
                 cwd,
@@ -1126,8 +1152,31 @@ impl Service {
 
     fn notify(&mut self, title: String, body: String, echo: bool) {
         // What the person is looking at already does not also pop up.
-        if !(echo && self.watchers.any()) {
+        let watched = self.watchers.any();
+        if !(echo && watched) {
             crate::king::serve::desktop_notification(&title, &body);
+        }
+        // Nobody shows King: a phone that asked hears it while closed.
+        if !watched && !self.push.list().is_empty() {
+            let tokens: Vec<String> = self
+                .push
+                .list()
+                .iter()
+                .map(|device| device.token.clone())
+                .collect();
+            let messages = super::push::messages(&tokens, &title, &body);
+            let inputs = self.inputs.clone();
+            let _ = std::thread::Builder::new()
+                .name("leon-king-push".to_owned())
+                .spawn(move || match super::push::send(&messages) {
+                    Ok(answer) => {
+                        let gone = super::push::gone(&tokens, &answer);
+                        if !gone.is_empty() {
+                            let _ = inputs.send(Input::PushGone(gone));
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "King's notice was not pushed"),
+                });
         }
         self.broadcast(&Notice::Notify { title, body, echo });
     }

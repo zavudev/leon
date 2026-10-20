@@ -536,11 +536,19 @@ run of a task, go on with a blocked one or cancel one. `leon-mobile` offers
 it as `king_ask` (one request of King's protocol and its answer) and
 `king_watch` (King's notices).
 
+While the application is closed the relay reaches nothing. A phone can ask
+for King's notices then too: the setting "King's notices while closed" (off
+until you turn it on) gives King's service the phone's Expo push token
+(`push_register`; `push_forget` when turned off), kept in `king/push.json`.
+When King tells you something and no window or phone shows King, the service
+sends its title and body, with the token, to Expo's push service
+(`exp.host`), which hands them to Apple's or Google's. That is all that
+leaves the computer for it. A phone Expo says is gone is forgotten. The
+application's build needs its push credentials set up in EAS for Expo to
+deliver them.
+
 ## Not built yet
 
-* King's notices on the phone while the application is closed: they come
-  only while a King screen is open. Reaching a closed application needs a
-  push service, which the relay does not have.
 * Hearing from a worker that runs in a terminal: Leon does not read its
   screen, so King learns from the person, or from its worktree, that it is
   done.
