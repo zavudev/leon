@@ -320,12 +320,13 @@ fn computer() -> Scripted {
     })
 }
 
-/// When a new shell is ready for an agent's command line in the tests: at its
-/// first output, looked for every millisecond.
+/// When a new shell is ready for an agent's command line in the tests: at
+/// once, typed on the test's thread. A line typed from a thread of its own
+/// would wake the window's tasks from outside the test's scheduler.
 const READY_NOW: Readiness = Readiness {
     quiet: std::time::Duration::ZERO,
-    timeout: std::time::Duration::from_secs(5),
-    poll: std::time::Duration::from_millis(1),
+    timeout: std::time::Duration::ZERO,
+    poll: std::time::Duration::ZERO,
 };
 
 // Some fields are read only by the Unix-only test modules.

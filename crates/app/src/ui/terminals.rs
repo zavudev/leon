@@ -67,7 +67,7 @@ pub struct Readiness {
     pub quiet: Duration,
     /// How long to wait for that at most; the line is typed anyway then.
     pub timeout: Duration,
-    /// How often to look.
+    /// How often to look; never (zero) types the line at once.
     pub poll: Duration,
 }
 
@@ -757,6 +757,12 @@ impl Shell {
         ready: Readiness,
         line: String,
     ) {
+        // A readiness that never looks (the tests' scripted shells, which
+        // print their prompt as they start) types the line at once, here.
+        if ready.poll.is_zero() {
+            terminal.write(line.into_bytes());
+            return;
+        }
         let terminal = std::sync::Arc::downgrade(terminal);
         std::thread::spawn(move || {
             let begun = Instant::now();

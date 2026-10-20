@@ -764,8 +764,16 @@ fn a_terminal_king_asks_for_opens_here_once_this_window_took_it(cx: &mut TestApp
     super::live::wait_until(&h, cx, "King's terminal", |h, cx| {
         h.shell(cx, |shell| shell.live.all().len() == 1)
     });
-    let cwd = h.shell(cx, |shell| shell.live.all()[0].cwd.clone());
+    let (id, cwd) = h.shell(cx, |shell| {
+        let session = &shell.live.all()[0];
+        (session.id.0, session.cwd.clone())
+    });
     assert_eq!(cwd, folder.path().to_str().unwrap());
+    // The command is typed into the shell from a thread of its own: the test
+    // waits for it rather than go on while that thread still writes.
+    super::live::wait_until(&h, cx, "King's command typed", |h, cx| {
+        super::live::screen(h, cx, id).contains("echo KING-RAN")
+    });
 
     // Told again before the service forgot it: it is not asked for twice.
     end.tell.send(notice(&told)).unwrap();
@@ -805,12 +813,15 @@ fn a_worker_of_an_agent_that_only_runs_in_a_terminal_opens_that_agent_here(
     super::live::wait_until(&h, cx, "the agent's terminal", |h, cx| {
         h.shell(cx, |shell| shell.live.all().len() == 1)
     });
-    let (cwd, agent) = h.shell(cx, |shell| {
+    let (id, cwd, agent) = h.shell(cx, |shell| {
         let session = &shell.live.all()[0];
-        (session.cwd.clone(), session.agent)
+        (session.id.0, session.cwd.clone(), session.agent)
     });
     assert_eq!(cwd, folder.path().to_str().unwrap());
     assert_eq!(agent, Some(leon_core::AgentId::KIMI));
+    super::live::wait_until(&h, cx, "the agent's line typed", |h, cx| {
+        super::live::screen(h, cx, id).contains("kimi")
+    });
 }
 
 #[gpui_kit::test]
