@@ -754,11 +754,11 @@ fn a_terminal_king_asks_for_opens_here_once_this_window_took_it(cx: &mut TestApp
     };
     end.tell.send(notice(&told)).unwrap();
     let asked = serve(&h, &end, cx, |request| match request {
-        Request::TerminalTaken { id: 1 } => ask.clone(),
+        Request::TerminalTaken { terminal: 1 } => ask.clone(),
         _ => Value::Null,
     });
     assert!(
-        asked.contains(&Request::TerminalTaken { id: 1 }),
+        asked.contains(&Request::TerminalTaken { terminal: 1 }),
         "{asked:?}"
     );
     super::live::wait_until(&h, cx, "King's terminal", |h, cx| {
@@ -771,7 +771,7 @@ fn a_terminal_king_asks_for_opens_here_once_this_window_took_it(cx: &mut TestApp
     end.tell.send(notice(&told)).unwrap();
     let asked = serve(&h, &end, cx, |_| Value::Null);
     assert!(
-        !asked.contains(&Request::TerminalTaken { id: 1 }),
+        !asked.contains(&Request::TerminalTaken { terminal: 1 }),
         "{asked:?}"
     );
 }

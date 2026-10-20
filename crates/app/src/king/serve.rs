@@ -858,9 +858,9 @@ impl Service {
                     vec![Effect::Changed],
                 ))
             }
-            Request::TerminalTaken { id } => {
-                let Some(at) = self.terminals.iter().position(|ask| ask.id == id) else {
-                    return Err(format!("terminal {id} is not waiting for a window"));
+            Request::TerminalTaken { terminal } => {
+                let Some(at) = self.terminals.iter().position(|ask| ask.id == terminal) else {
+                    return Err(format!("terminal {terminal} is not waiting for a window"));
                 };
                 let ask = self.terminals.remove(at);
                 Ok((

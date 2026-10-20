@@ -202,8 +202,9 @@ pub enum Request {
     /// A window takes a terminal King asked for, to open it; only the first
     /// that asks gets it.
     TerminalTaken {
-        /// The terminal's number ([`TerminalAsk::id`]).
-        id: u64,
+        /// The terminal's number ([`TerminalAsk::id`]). Not `id`, which is
+        /// the envelope's.
+        terminal: u64,
     },
     /// Whether the person is looking at King on this connection's client:
     /// while anybody is, what King's conversation shows already is not also
@@ -502,6 +503,12 @@ mod tests {
                 budget_usd: None,
             },
             Request::RunCancel { run: 4 },
+            Request::OpenTerminal {
+                cwd: "/code/api".to_owned(),
+                command: "bun run dev".to_owned(),
+                title: None,
+            },
+            Request::TerminalTaken { terminal: 4 },
         ] {
             let line = serde_json::to_string(&Envelope {
                 id: 91,

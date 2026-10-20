@@ -660,6 +660,7 @@ impl Shell {
                 .await;
             let heard = match opened {
                 Ok(connection) => {
+                    tracing::info!(started = start, "on the line to King's service");
                     let heard = connection.heard;
                     let ok = this.update(cx, |this, cx| {
                         this.king_ui.connecting = false;
@@ -687,6 +688,9 @@ impl Shell {
                     heard
                 }
                 Err(error) => {
+                    if !start {
+                        tracing::debug!(%error, "King's service is not there to join");
+                    }
                     this.update(cx, |this, cx| {
                         this.king_ui.connecting = false;
                         if start {
@@ -837,7 +841,9 @@ impl Shell {
                 }
             }
             // Another window took it first.
-            (Asked::Terminal, Err(_)) => {}
+            (Asked::Terminal, Err(error)) => {
+                tracing::debug!(%error, "a terminal King asked for is not this window's");
+            }
             (Asked::Models, Ok(value)) => {
                 self.king_ui.models = models_of(&value);
                 self.king_ui.modes = modes_of(&value);
@@ -883,7 +889,11 @@ impl Shell {
             .retain(|id| status.terminals.iter().any(|ask| ask.id == *id));
         for ask in &status.terminals {
             if self.king_ui.taking.insert(ask.id) {
-                self.king_ask(Request::TerminalTaken { id: ask.id }, Asked::Terminal, cx);
+                self.king_ask(
+                    Request::TerminalTaken { terminal: ask.id },
+                    Asked::Terminal,
+                    cx,
+                );
             }
         }
         self.king_ui.status = Some(status);
