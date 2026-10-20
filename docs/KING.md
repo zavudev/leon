@@ -262,6 +262,21 @@ changes code and commits on that branch. A `research` job only reads and
 reports. A `plan` job writes a plan and changes nothing. A worker is never started in a project's main checkout, and never on
 the default branch.
 
+### Workers on other machines
+
+A project on another machine (one reached over SSH, or a computer paired
+through a relay, see [REMOTE.md](REMOTE.md)) gets its workers there. The
+service makes the worktree there with `git`, starts the agent there the way
+the window's conversations do (over `ssh`, or in a terminal of the other
+computer's host behind the bridge), and runs `worktree_check`, `worktree_diff`,
+`pr_open` and `project_status` there. `gh` then needs to be signed in on that
+machine. A worker of an existing folder there names the machine:
+`worker_start` and `open_terminal` take `machine`, by the name Leon shows.
+The agent has to be installed on that machine; the router only knows what is
+installed here, so a missing agent is a worker that fails to start, and King
+hears why. A check that runs past its time limit over SSH loses its
+connection, and may go on running on the other machine.
+
 King is never asked to poll. When a worker finishes, fails or asks something,
 Leon gathers the news for a few seconds and then wakes King with it. If you
 speak first, the news comes with your message. King answers a worker's
@@ -502,7 +517,6 @@ protocol and its answer) and `king_watch` (King's notices).
   reads King, its workers and its runs, and says things to King.
 * King's notices on the phone while the application is closed: they come
   only while a King screen is open.
-* Workers on SSH and relay machines, and agents that only run in a terminal
-  (Kimi, ZCode, Antigravity) as workers.
+* Agents that only run in a terminal (Kimi, ZCode, Antigravity) as workers.
 * Showing the tokens in the window's own conversations and on the phone:
   the event is read, and only King uses it so far.

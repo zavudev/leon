@@ -60,9 +60,16 @@ const INVALID_PARAMS: i64 = -32602;
 pub trait Backend {
     /// A request to King's service.
     fn ask(&mut self, request: Request) -> Result<Value, String>;
-    /// Runs `program` with `args` in `cwd` and gives what it printed, or
-    /// what it said on failing.
-    fn run(&mut self, program: &str, args: &[&str], cwd: &str) -> Result<String, String>;
+    /// Runs `program` with `args` in `cwd` on `machine` (by Leon's id of
+    /// it; this computer when `None`) and gives what it printed, or what it
+    /// said on failing.
+    fn run(
+        &mut self,
+        machine: Option<&str>,
+        program: &str,
+        args: &[&str],
+        cwd: &str,
+    ) -> Result<String, String>;
 }
 
 /// The real backend: the service's socket, and this computer's processes.
@@ -87,7 +94,23 @@ impl Backend for Live {
         answer
     }
 
-    fn run(&mut self, program: &str, args: &[&str], cwd: &str) -> Result<String, String> {
+    fn run(
+        &mut self,
+        machine: Option<&str>,
+        program: &str,
+        args: &[&str],
+        cwd: &str,
+    ) -> Result<String, String> {
+        if let Some(machine) = machine {
+            // Another machine's folder: the service reaches it.
+            let printed = self.ask(Request::Run {
+                machine: machine.to_owned(),
+                cwd: cwd.to_owned(),
+                program: program.to_owned(),
+                args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            })?;
+            return Ok(printed.as_str().unwrap_or_default().to_owned());
+        }
         let output = leon_remote::spawn::std_child(program)
             .args(args)
             .current_dir(cwd)
@@ -152,6 +175,9 @@ pub struct Server<B> {
     /// A pull request needs its last commit checked ([guards]
     /// verify_before_pr).
     verify_before_pr: bool,
+    /// The machine the folder at hand is on, by Leon's id of it: the
+    /// worker's or the project's last looked up; this computer when `None`.
+    on: Option<String>,
 }
 
 struct Refusal {
@@ -264,6 +290,7 @@ pub fn tool_list() -> Value {
                 "project": { "type": "string" },
                 "branch": { "type": "string", "description": "The new worktree's branch; made up when absent." },
                 "cwd": { "type": "string", "description": "An existing worktree to work in instead." },
+                "machine": { "type": "string", "description": "The machine `cwd` is on, by name, when it is not this computer. A project's worker works on the project's machine by itself." },
                 "tier": { "type": "string", "description": "cheap, standard, premium, or one king.toml names." },
                 "agent": { "type": "string", "enum": ["claude", "codex", "opencode", "grok", "cursor"] },
                 "model": { "type": "string" },
@@ -412,6 +439,10 @@ pub fn tool_list() -> Value {
                     "description": "One line, typed into the terminal's shell.",
                 },
                 "title": { "type": "string", "description": "What the terminal is called." },
+                "machine": {
+                    "type": "string",
+                    "description": "The machine the folder is on, by name, when it is not this computer.",
+                },
             }),
             &["cwd", "command"],
         ),
@@ -438,6 +469,7 @@ impl<B: Backend> Server<B> {
             backend,
             protected: guards.protected_branches.clone(),
             verify_before_pr: guards.verify_before_pr,
+            on: None,
         }
     }
 
@@ -570,6 +602,7 @@ impl<B: Backend> Server<B> {
                         project: text("project"),
                         branch: text("branch"),
                         cwd: text("cwd"),
+                        machine: text("machine"),
                         tier: text("tier"),
                         agent: text("agent"),
                         model: text("model"),
@@ -632,6 +665,7 @@ impl<B: Backend> Server<B> {
                 cwd: needed("cwd")?,
                 command: needed("command")?,
                 title: text("title"),
+                machine: text("machine"),
             }),
             "notify_user" => self.backend.ask(Request::Notify {
                 title: needed("title")?,
@@ -654,6 +688,13 @@ impl<B: Backend> Server<B> {
             .filter(|w| w["cwd"].is_string())
             .cloned()
             .ok_or_else(|| format!("there is no worker #{worker} of yours"))
+            .inspect(|found| self.on = found["machine"].as_str().map(str::to_owned))
+    }
+
+    /// Runs `program` on the machine of the folder at hand.
+    fn run(&mut self, program: &str, args: &[&str], cwd: &str) -> Result<String, String> {
+        let on = self.on.clone();
+        self.backend.run(on.as_deref(), program, args, cwd)
     }
 
     /// The folder of a worker that is still King's.
@@ -671,26 +712,18 @@ impl<B: Backend> Server<B> {
             .and_then(|all| all.iter().find(|p| p["name"].as_str() == Some(name)))
             .ok_or_else(|| format!("Leon knows no project {name:?}"))?
             .clone();
-        if project["local"].as_bool() != Some(true) {
-            return Ok(json!({
-                "project": project,
-                "note": "it is on another machine; its git state is not read from here yet",
-            }));
-        }
+        self.on = (project["local"].as_bool() != Some(true))
+            .then(|| project["machine_id"].as_str().map(str::to_owned))
+            .flatten();
         let root = project["root"].as_str().unwrap_or_default().to_owned();
-        let status = self
-            .backend
-            .run("git", &["status", "--short", "--branch"], &root)?;
+        let status = self.run("git", &["status", "--short", "--branch"], &root)?;
         let worktrees = self
-            .backend
             .run("git", &["worktree", "list"], &root)
             .unwrap_or_default();
         let log = self
-            .backend
             .run("git", &["log", "--oneline", "-10"], &root)
             .unwrap_or_default();
         let prs = self
-            .backend
             .run(
                 "gh",
                 &[
@@ -716,25 +749,22 @@ impl<B: Backend> Server<B> {
     }
 
     fn base_of(&mut self, cwd: &str) -> String {
-        self.backend
-            .run(
-                "git",
-                &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-                cwd,
-            )
-            .map(|name| name.trim().to_owned())
-            .unwrap_or_else(|_| "main".to_owned())
+        self.run(
+            "git",
+            &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            cwd,
+        )
+        .map(|name| name.trim().to_owned())
+        .unwrap_or_else(|_| "main".to_owned())
     }
 
     fn worktree_diff(&mut self, worker: u32) -> Result<Value, String> {
         let cwd = self.worker_folder(worker)?;
         let base = self.base_of(&cwd);
         let range = format!("{base}...HEAD");
-        let commits = self
-            .backend
-            .run("git", &["log", "--oneline", &range], &cwd)?;
-        let uncommitted = self.backend.run("git", &["status", "--short"], &cwd)?;
-        let diff = self.backend.run("git", &["diff", &range], &cwd)?;
+        let commits = self.run("git", &["log", "--oneline", &range], &cwd)?;
+        let uncommitted = self.run("git", &["status", "--short"], &cwd)?;
+        let diff = self.run("git", &["diff", &range], &cwd)?;
         Ok(json!({
             "base": base,
             "commits": commits,
@@ -754,7 +784,6 @@ impl<B: Backend> Server<B> {
         let status = self.worker_status(worker)?;
         let cwd = status["cwd"].as_str().unwrap_or_default().to_owned();
         let branch = self
-            .backend
             .run("git", &["symbolic-ref", "--short", "HEAD"], &cwd)
             .map_err(|_| "the worktree is not on a branch".to_owned())?;
         let branch = branch.trim().to_owned();
@@ -766,13 +795,13 @@ impl<B: Backend> Server<B> {
                  nothing is pushed to it from here"
             ));
         }
-        let uncommitted = self.backend.run("git", &["status", "--porcelain"], &cwd)?;
+        let uncommitted = self.run("git", &["status", "--porcelain"], &cwd)?;
         if !uncommitted.trim().is_empty() {
             return Err(format!(
                 "the worktree has changes not committed; have the worker commit them first:\n{uncommitted}"
             ));
         }
-        let head = self.backend.run("git", &["rev-parse", "HEAD"], &cwd)?;
+        let head = self.run("git", &["rev-parse", "HEAD"], &cwd)?;
         let check: Option<Check> = serde_json::from_value(status["check"].clone()).ok();
         let evidence = match (&check, &unverified) {
             (Some(check), _) if check.proves(&head) => Some(check.evidence()),
@@ -804,11 +833,9 @@ impl<B: Backend> Server<B> {
             Some(evidence) => format!("{}\n\n---\n{evidence}", body.trim_end()),
             None => body.to_owned(),
         };
-        self.backend
-            .run("git", &["push", "--set-upstream", "origin", &branch], &cwd)?;
+        self.run("git", &["push", "--set-upstream", "origin", &branch], &cwd)?;
         // A branch that has its pull request already: pushing it was all.
         let existing = self
-            .backend
             .run(
                 "gh",
                 &[
@@ -835,10 +862,7 @@ impl<B: Backend> Server<B> {
                 if draft {
                     args.push("--draft");
                 }
-                (
-                    self.backend.run("gh", &args, &cwd)?.trim().to_owned(),
-                    false,
-                )
+                (self.run("gh", &args, &cwd)?.trim().to_owned(), false)
             }
         };
         let watched = self
@@ -894,6 +918,10 @@ mod tests {
         check: Value,
         /// The address of the branch's open pull request.
         open_pr: Option<String>,
+        /// The machine the worker and the project are on, when not here.
+        machine: Option<String>,
+        /// The machine each command ran on.
+        ran_on: Vec<Option<String>>,
     }
 
     /// A check of the worker's last commit (`abc1234def`, as `Fake` has it).
@@ -909,16 +937,26 @@ mod tests {
             self.asked.push(request.clone());
             Ok(match request {
                 Request::Status => {
-                    json!({ "workers": [{ "id": 2, "cwd": "/w/fix", "check": self.check }] })
+                    json!({ "workers": [{
+                        "id": 2, "cwd": "/w/fix", "check": self.check, "machine": self.machine,
+                    }] })
                 }
-                Request::Projects => {
-                    json!([{ "name": "leon", "root": "/code/leon", "local": true }])
-                }
+                Request::Projects => json!([{
+                    "name": "leon", "root": "/code/leon", "local": self.machine.is_none(),
+                    "machine_id": self.machine,
+                }]),
                 _ => Value::Null,
             })
         }
 
-        fn run(&mut self, program: &str, args: &[&str], cwd: &str) -> Result<String, String> {
+        fn run(
+            &mut self,
+            machine: Option<&str>,
+            program: &str,
+            args: &[&str],
+            cwd: &str,
+        ) -> Result<String, String> {
+            self.ran_on.push(machine.map(str::to_owned));
             self.ran.push((
                 program.to_owned(),
                 args.iter().map(|arg| (*arg).to_owned()).collect(),
@@ -1118,6 +1156,38 @@ mod tests {
 
         let (why, error) = call(&mut server, "pr_open", json!({ "worker": 7, "title": "x" }));
         assert!(error && why.contains("no worker #7"), "{why}");
+    }
+
+    #[test]
+    fn a_worker_on_another_machine_is_pushed_and_looked_at_there() {
+        let mut server = Server::new(Fake {
+            branch: "king/fix-login".into(),
+            check: passed(),
+            machine: Some("m-build".into()),
+            ..Fake::default()
+        });
+        let (text, error) = call(&mut server, "pr_open", json!({ "worker": 2, "title": "x" }));
+        assert!(!error, "{text}");
+        assert!(!server.backend.ran_on.is_empty());
+        assert!(server
+            .backend
+            .ran_on
+            .iter()
+            .all(|on| on.as_deref() == Some("m-build")));
+        let (text, error) = call(&mut server, "project_status", json!({ "project": "leon" }));
+        assert!(!error && !text.contains("not read from here"), "{text}");
+        assert_eq!(
+            server.backend.ran_on.last().unwrap().as_deref(),
+            Some("m-build")
+        );
+
+        let mut here = Server::new(Fake {
+            branch: "king/fix-login".into(),
+            check: passed(),
+            ..Fake::default()
+        });
+        call(&mut here, "worktree_diff", json!({ "worker": 2 }));
+        assert!(here.backend.ran_on.iter().all(Option::is_none));
     }
 
     #[test]

@@ -38,6 +38,7 @@ fn spec(title: &str) -> WorkerSpec {
         title: title.into(),
         prompt: format!("do {title}"),
         cwd: format!("/work/{title}"),
+        machine: None,
         project: Some("leon".into()),
         job: Job::Code,
         choice: Choice {

@@ -918,7 +918,9 @@ impl Shell {
             crate::launch::First::Script,
             Some(ask.title),
             Launch::Shell,
-            &MachineId::local(),
+            &ask.machine
+                .map(MachineId::from_string)
+                .unwrap_or_else(MachineId::local),
             &ask.cwd,
             Place::Session,
             window,
@@ -1581,6 +1583,7 @@ mod tests {
                     title: format!("worker {id}"),
                     project: None,
                     cwd: "/tmp".into(),
+                    machine: None,
                     job: Default::default(),
                     tier: None,
                     state: leon_king::coordinator::WorkerState::Working,

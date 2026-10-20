@@ -283,8 +283,12 @@ pub struct Worker {
     pub id: u32,
     /// What it is for, in a few words.
     pub title: String,
-    /// The folder it works in, on this computer.
+    /// The folder it works in, on its machine.
     pub cwd: String,
+    /// The machine it works on, by Leon's id of it; this computer when
+    /// absent.
+    #[serde(default)]
+    pub machine: Option<String>,
     /// The project's name, when it belongs to one Leon knows.
     pub project: Option<String>,
     /// What kind of job it has.
@@ -333,6 +337,8 @@ pub struct WorkerSpec {
     pub prompt: String,
     /// The folder it works in.
     pub cwd: String,
+    /// The machine it works on; this computer when absent.
+    pub machine: Option<String>,
     /// The project's name, when known.
     pub project: Option<String>,
     /// What kind of job.
@@ -404,6 +410,8 @@ pub struct Plan {
     pub resume: Option<String>,
     /// The folder; `None` for King, whose folder is the service's.
     pub cwd: Option<String>,
+    /// The machine the folder is on; this computer when absent.
+    pub machine: Option<String>,
     /// The instructions it is given beside its own, for a worker.
     pub instructions: Option<String>,
 }
@@ -776,6 +784,7 @@ impl Coordinator {
                     title: worker.title.clone(),
                     project: worker.project.clone(),
                     cwd: worker.cwd.clone(),
+                    machine: worker.machine.clone(),
                     job: worker.job,
                     tier: worker.tier.clone(),
                     state: worker.state,
@@ -803,11 +812,15 @@ impl Coordinator {
     /// The turn `target` is to have next.
     pub fn plan(&self, target: Target) -> Option<Plan> {
         let conversation = self.conversation(target)?;
-        let (cwd, instructions) = match target {
-            Target::Brain => (None, None),
+        let (cwd, machine, instructions) = match target {
+            Target::Brain => (None, None, None),
             Target::Worker(id) => {
                 let worker = self.state.workers.get(&id)?;
-                (Some(worker.cwd.clone()), Some(prompt::worker(worker)))
+                (
+                    Some(worker.cwd.clone()),
+                    worker.machine.clone(),
+                    Some(prompt::worker(worker)),
+                )
             }
         };
         Some(Plan {
@@ -817,6 +830,7 @@ impl Coordinator {
             mode: conversation.mode.clone(),
             resume: conversation.session_id.clone(),
             cwd,
+            machine,
             instructions,
         })
     }
@@ -879,6 +893,7 @@ impl Coordinator {
             id,
             title: transcript::cut(spec.title.trim(), 80),
             cwd: spec.cwd,
+            machine: spec.machine,
             project: spec.project,
             job: spec.job,
             tier: spec.choice.tier.clone(),

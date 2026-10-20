@@ -58,6 +58,12 @@ pub fn king(config: &Config, now: &Now<'_>) -> String {
            and reports; a `code` job changes code and commits on its branch. Pick the \
            cheapest tier that will do the job well; `usage_status` says what each agent has \
            left. Then summarise for the person what the worker found or did.\n\
+         * **A project's worker works on the project's machine.** For a project on \
+           another machine (an SSH machine, or a computer paired through a relay) its \
+           worktree is made there, its agent runs there (it must be installed there) and \
+           `worktree_diff`, `worktree_check`, `pr_open` and `project_status` run there. \
+           For a folder of another machine, name the machine (`machine`) in `worker_start` \
+           and `open_terminal`.\n\
          * You are woken with news of your workers when they finish, fail or ask something: \
            do not wait or poll for them. Answer their questions with `worker_answer`, tell \
            them more with `worker_send`, read what they did with `worker_transcript`. \

@@ -2,79 +2,92 @@
 //! request's CI: the processes behind [`leon_king::verify`].
 //!
 //! Both run on a thread of their own and end in an input of the service's,
-//! so the service never waits on them. A check writes what it prints to
-//! `king/checks/<worker>.log` (the whole of it stays there; the state keeps
-//! its end), and is ended, with all it started, when it runs past
-//! `[limits] check_timeout_secs`.
+//! so the service never waits on them. They run on the worker's machine
+//! ([`Place`]). A check writes what it prints to `king/checks/<worker>.log`
+//! here (the whole of it stays there; the state keeps its end), and is
+//! ended, with all it started, when it runs past `[limits]
+//! check_timeout_secs`. On another machine what ends is its connection: a
+//! check over SSH may go on there after it, unseen.
 
 use std::path::Path;
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use leon_king::verify;
+
+use super::place::{process, Place};
 
 /// The command that checks the project in `cwd`: the one `king.toml` names
 /// for it, else the one its files say.
 pub fn command_for(
     configured: &std::collections::BTreeMap<String, String>,
     project: Option<&str>,
+    place: &Place,
     cwd: &str,
 ) -> Result<String, String> {
     if let Some(command) = project.and_then(|name| configured.get(name)) {
         return Ok(command.clone());
     }
-    let root = Path::new(cwd);
-    verify::detect_check(
-        |name| root.join(name).exists(),
-        |name| std::fs::read_to_string(root.join(name)).ok(),
-    )
-    .ok_or_else(|| {
-        format!(
-            "Leon does not know how {} is checked: name its command in king.toml, under \
+    verify::detect_check(|name| place.exists(cwd, name), |name| place.read(cwd, name)).ok_or_else(
+        || {
+            format!(
+                "Leon does not know how {} is checked: name its command in king.toml, under \
              [checks] ({} = \"…\")",
-            project.unwrap_or("this project"),
-            project.unwrap_or("<project>")
-        )
-    })
+                project.unwrap_or("this project"),
+                project.unwrap_or("<project>")
+            )
+        },
+    )
 }
 
 /// The commit `cwd` is on, and whether it has changes not committed.
-pub fn head_of(cwd: &str) -> Result<(String, bool), String> {
-    let commit = git(cwd, &["rev-parse", "HEAD"])?;
-    let status = git(cwd, &["status", "--porcelain"])?;
+pub fn head_of(place: &Place, cwd: &str) -> Result<(String, bool), String> {
+    let commit = git(place, cwd, &["rev-parse", "HEAD"])?;
+    let status = git(place, cwd, &["status", "--porcelain"])?;
     Ok((commit.trim().to_owned(), !status.trim().is_empty()))
 }
 
 /// Commits everything not committed in `cwd`, with `message`: what a run
 /// step's worker left. Whether there was anything to commit.
-pub fn commit_all(cwd: &str, message: &str) -> Result<bool, String> {
-    let (_, dirty) = head_of(cwd)?;
+pub fn commit_all(place: &Place, cwd: &str, message: &str) -> Result<bool, String> {
+    let (_, dirty) = head_of(place, cwd)?;
     if !dirty {
         return Ok(false);
     }
-    git(cwd, &["add", "--all"])?;
-    git(cwd, &["commit", "--quiet", "--message", message])?;
+    git(place, cwd, &["add", "--all"])?;
+    git(place, cwd, &["commit", "--quiet", "--message", message])?;
     Ok(true)
 }
 
-fn git(cwd: &str, args: &[&str]) -> Result<String, String> {
-    let output = leon_remote::spawn::std_child("git")
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("git could not run: {error}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+fn git(place: &Place, cwd: &str, args: &[&str]) -> Result<String, String> {
+    place
+        .run("git", args, cwd)
+        .map_err(|error| format!("git: {error}"))
 }
 
-/// Runs `command` with `sh -c` in `cwd`, what it prints going to `log`,
-/// for at most `timeout`. Whether it passed, and what it printed.
-pub fn run(command: &str, cwd: &str, log: &Path, timeout: Duration) -> (bool, String) {
+/// Runs `command` with `sh -c` in `cwd` on `place`, what it prints going to
+/// `log`, for at most `timeout`. Whether it passed, and what it printed.
+pub fn run(
+    place: &Place,
+    command: &str,
+    cwd: &str,
+    log: &Path,
+    timeout: Duration,
+) -> (bool, String) {
     if let Some(folder) = log.parent() {
         let _ = std::fs::create_dir_all(folder);
+    }
+    let placed = place.placed("sh", &["-c", command], cwd);
+    if placed.route.is_some() {
+        // Through a relay: the host runs it and answers once it ended.
+        let (passed, printed) = match place.output(&placed, timeout) {
+            Ok(output) => (
+                output.success(),
+                format!("{}{}", output.stdout, output.stderr),
+            ),
+            Err(error) => (false, error),
+        };
+        let _ = std::fs::write(log, &printed);
+        return (passed, printed);
     }
     let file = match std::fs::File::create(log) {
         Ok(file) => file,
@@ -83,13 +96,8 @@ pub fn run(command: &str, cwd: &str, log: &Path, timeout: Duration) -> (bool, St
     let Ok(errors) = file.try_clone() else {
         return (false, "its log could not be written".to_owned());
     };
-    let mut child = leon_remote::spawn::std_child("sh");
-    child
-        .args(["-c", command])
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(file)
-        .stderr(errors);
+    let mut child = process(&placed);
+    child.stdout(file).stderr(errors);
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut child, 0);
     let mut child = match child.spawn() {
@@ -138,17 +146,14 @@ fn end_group(pid: u32) {
 
 /// What `gh` says of the pull request at `url`, as [`verify::read_ci`]
 /// reads it.
-pub fn look_at(url: &str, cwd: &str) -> Result<String, String> {
-    let output = leon_remote::spawn::std_child("gh")
-        .args(["pr", "view", url, "--json", "state,statusCheckRollup"])
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("gh could not run: {error}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+pub fn look_at(place: &Place, url: &str, cwd: &str) -> Result<String, String> {
+    place
+        .run(
+            "gh",
+            &["pr", "view", url, "--json", "state,statusCheckRollup"],
+            cwd,
+        )
+        .map_err(|error| format!("gh: {error}"))
 }
 
 #[cfg(all(test, unix))]
@@ -160,7 +165,9 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         let cwd = folder.path().to_str().unwrap();
         let log = folder.path().join("checks/1.log");
+        let here = Place::here();
         let (passed, printed) = run(
+            &here,
             "echo fine; echo warned >&2",
             cwd,
             &log,
@@ -171,9 +178,9 @@ mod tests {
             printed.contains("fine") && printed.contains("warned"),
             "{printed}"
         );
-        let (passed, _) = run("exit 3", cwd, &log, Duration::from_secs(10));
+        let (passed, _) = run(&here, "exit 3", cwd, &log, Duration::from_secs(10));
         assert!(!passed);
-        let (passed, printed) = run("sleep 30", cwd, &log, Duration::from_millis(300));
+        let (passed, printed) = run(&here, "sleep 30", cwd, &log, Duration::from_millis(300));
         assert!(!passed);
         assert!(printed.contains("was ended"), "{printed}");
     }
@@ -182,20 +189,23 @@ mod tests {
     fn what_a_worker_left_is_committed_once() {
         let folder = tempfile::tempdir().unwrap();
         let cwd = folder.path().to_str().unwrap();
+        let here = Place::here();
         for args in [
             &["init", "-q"][..],
             &["config", "user.name", "t"],
             &["config", "user.email", "t@t"],
             &["commit", "-q", "--allow-empty", "-m", "base"],
         ] {
-            git(cwd, args).unwrap();
+            git(&here, cwd, args).unwrap();
         }
-        assert!(!commit_all(cwd, "Nothing").unwrap());
+        assert!(!commit_all(&here, cwd, "Nothing").unwrap());
         std::fs::write(folder.path().join("new.txt"), "x").unwrap();
-        assert!(commit_all(cwd, "Billing schema").unwrap());
-        assert!(!head_of(cwd).unwrap().1);
+        assert!(commit_all(&here, cwd, "Billing schema").unwrap());
+        assert!(!head_of(&here, cwd).unwrap().1);
         assert_eq!(
-            git(cwd, &["log", "-1", "--format=%s"]).unwrap().trim(),
+            git(&here, cwd, &["log", "-1", "--format=%s"])
+                .unwrap()
+                .trim(),
             "Billing schema"
         );
     }
@@ -205,17 +215,17 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         let cwd = folder.path().to_str().unwrap();
         let mut configured = std::collections::BTreeMap::new();
-        assert!(command_for(&configured, Some("leon"), cwd)
+        assert!(command_for(&configured, Some("leon"), &Place::here(), cwd)
             .unwrap_err()
             .contains("[checks]"));
         std::fs::write(folder.path().join("Cargo.toml"), "").unwrap();
         assert_eq!(
-            command_for(&configured, Some("leon"), cwd).unwrap(),
+            command_for(&configured, Some("leon"), &Place::here(), cwd).unwrap(),
             "cargo test"
         );
         configured.insert("leon".to_owned(), "scripts/check.sh".to_owned());
         assert_eq!(
-            command_for(&configured, Some("leon"), cwd).unwrap(),
+            command_for(&configured, Some("leon"), &Place::here(), cwd).unwrap(),
             "scripts/check.sh"
         );
     }

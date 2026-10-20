@@ -198,6 +198,9 @@ pub enum Request {
         /// What the terminal is called.
         #[serde(default)]
         title: Option<String>,
+        /// The machine the folder is on, by name; this computer when absent.
+        #[serde(default)]
+        machine: Option<String>,
     },
     /// A window takes a terminal King asked for, to open it; only the first
     /// that asks gets it.
@@ -205,6 +208,19 @@ pub enum Request {
         /// The terminal's number ([`TerminalAsk::id`]). Not `id`, which is
         /// the envelope's.
         terminal: u64,
+    },
+    /// Run `git` or `gh` in a folder of another machine (King's tools run
+    /// them here themselves): what it printed, or what it said on failing.
+    Run {
+        /// The machine, by Leon's id of it.
+        machine: String,
+        /// The folder.
+        cwd: String,
+        /// `git` or `gh`.
+        program: String,
+        /// Its arguments.
+        #[serde(default)]
+        args: Vec<String>,
     },
     /// Whether the person is looking at King on this connection's client:
     /// while anybody is, what King's conversation shows already is not also
@@ -233,6 +249,9 @@ pub struct WorkerRequest {
     /// A folder to work in instead: an existing worktree.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// The machine `cwd` is on, by name; this computer when absent.
+    #[serde(default)]
+    pub machine: Option<String>,
     /// The tier.
     #[serde(default)]
     pub tier: Option<String>,
@@ -349,6 +368,10 @@ pub struct TerminalAsk {
     pub id: u64,
     /// The folder it runs in.
     pub cwd: String,
+    /// The machine the folder is on, by Leon's id of it; this computer when
+    /// absent.
+    #[serde(default)]
+    pub machine: Option<String>,
     /// The command.
     pub command: String,
     /// What it is called.
@@ -408,8 +431,11 @@ pub struct WorkerStatus {
     pub title: String,
     /// Its project.
     pub project: Option<String>,
-    /// Its folder.
+    /// Its folder, on its machine.
     pub cwd: String,
+    /// Its machine, by Leon's id of it; this computer when absent.
+    #[serde(default)]
+    pub machine: Option<String>,
     /// Its kind of job.
     pub job: Job,
     /// The tier it came from.
@@ -507,6 +533,7 @@ mod tests {
                 cwd: "/code/api".to_owned(),
                 command: "bun run dev".to_owned(),
                 title: None,
+                machine: Some("build".to_owned()),
             },
             Request::TerminalTaken { terminal: 4 },
         ] {

@@ -10,6 +10,7 @@ use leon_king::route::{self, Ask};
 use leon_king::run::{self, RunSpec, StepSpec};
 use serde_json::{json, Value};
 
+use super::super::place::Place;
 use super::{add_worktree_from, now_ms, slug, Service};
 
 impl Service {
@@ -176,17 +177,21 @@ impl Service {
         )?;
         let branch = format!("king/run{id}-{}", slug(&step.title));
         let needed = run.needed_branches(index);
+        let machine = (!project.local).then(|| project.machine_id.clone());
+        let place = self.place(machine.as_deref())?;
         let path = add_worktree_from(
+            &place,
             &project.root,
             &branch,
             &self.coordinator.config().guards.protected_branches,
             needed.first().map(String::as_str),
         )?;
-        let merged = merge_into(&path, needed.get(1..).unwrap_or_default());
+        let merged = merge_into(&place, &path, needed.get(1..).unwrap_or_default());
         let spec = WorkerSpec {
             title: step.title.clone(),
             prompt: run::step_prompt(&run, index, merged.as_deref()),
             cwd: path,
+            machine,
             project: Some(project.name.clone()),
             job: step.job,
             choice,
@@ -211,7 +216,11 @@ impl Service {
             found.title.clone(),
             found.project.clone(),
         );
-        if let Err(error) = super::super::checks::commit_all(&cwd, &title) {
+        let place = match self.worker_place(worker) {
+            Ok(place) => place,
+            Err(error) => return self.coordinator.step_not_verified(worker, &error, now),
+        };
+        if let Err(error) = super::super::checks::commit_all(&place, &cwd, &title) {
             return self.coordinator.step_not_verified(
                 worker,
                 &format!("its work could not be committed: {error}"),
@@ -221,6 +230,7 @@ impl Service {
         if let Err(why) = super::super::checks::command_for(
             &self.coordinator.config().checks,
             project.as_deref(),
+            &place,
             &cwd,
         ) {
             return self.coordinator.step_unchecked(worker, &why, now);
@@ -259,22 +269,14 @@ impl Service {
 /// Merges `branches` into the worktree at `path`, one after the other: what
 /// a step needs besides the branch its own starts from. What could not be
 /// merged cleanly is said to the step's worker, which resolves it.
-fn merge_into(path: &str, branches: &[String]) -> Option<String> {
-    let git = |args: &[&str]| {
-        leon_remote::spawn::std_child("git")
-            .arg("-C")
-            .arg(path)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()
-    };
+fn merge_into(place: &Place, path: &str, branches: &[String]) -> Option<String> {
+    let git = |args: &[&str]| place.run("git", args, path);
     for (at, branch) in branches.iter().enumerate() {
-        let merged = git(&["merge", "--no-edit", branch.as_str()]);
-        if merged.as_ref().is_ok_and(|output| output.status.success()) {
+        if git(&["merge", "--no-edit", branch.as_str()]).is_ok() {
             continue;
         }
         let conflicted = git(&["diff", "--name-only", "--diff-filter=U"])
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .map(|text| text.trim().to_owned())
             .unwrap_or_default();
         let rest = &branches[at + 1..];
         let mut note = if conflicted.is_empty() {
@@ -339,9 +341,14 @@ mod tests {
         git(root, &["config", "user.name", "t"]);
         git(root, &["config", "user.email", "t@t"]);
         let path = root.to_str().unwrap();
-        assert_eq!(merge_into(path, &["two".to_owned()]), None);
+        assert_eq!(merge_into(&Place::here(), path, &["two".to_owned()]), None);
         assert!(root.join("two.txt").exists());
-        let note = merge_into(path, &["three".to_owned(), "four".to_owned()]).unwrap();
+        let note = merge_into(
+            &Place::here(),
+            path,
+            &["three".to_owned(), "four".to_owned()],
+        )
+        .unwrap();
         assert!(note.contains("four conflicts in: a.txt"), "{note}");
     }
 }

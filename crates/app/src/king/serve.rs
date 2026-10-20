@@ -41,6 +41,7 @@ use serde_json::{json, Value};
 
 mod runs;
 
+use super::place::Place;
 use super::Paths;
 use crate::chat::turn::{Output, Piped, Spawner, Start, Turn};
 
@@ -87,9 +88,11 @@ const MAX_TERMINALS: usize = 20;
 const MAX_TERMINAL_COMMAND: usize = 4096;
 
 /// A terminal King asks for, once what it runs is checked: a folder that is
-/// there, and a command of one line, typed into the terminal's shell.
+/// there on `place`, and a command of one line, typed into the terminal's
+/// shell.
 fn terminal_ask(
     id: u64,
+    place: &Place,
     cwd: &str,
     command: &str,
     title: Option<String>,
@@ -105,8 +108,8 @@ fn terminal_ask(
              commands with && or put them in a script"
         ));
     }
-    if !Path::new(cwd).is_absolute() || !Path::new(cwd).is_dir() {
-        return Err(format!("{cwd} is not a folder of this computer"));
+    if !cwd.starts_with('/') || !place.is_folder(cwd) {
+        return Err(format!("{cwd} is not a folder of {}", place.machine().name));
     }
     let title = title
         .map(|title| title.trim().to_owned())
@@ -115,6 +118,7 @@ fn terminal_ask(
     Ok(leon_king::protocol::TerminalAsk {
         id,
         cwd: cwd.to_owned(),
+        machine: place.id(),
         command: command.to_owned(),
         title,
         since_ms: now,
@@ -154,6 +158,9 @@ struct Service {
     watchers: Watchers,
     store: Option<Arc<Store>>,
     spawner: Arc<dyn Spawner>,
+    /// What reaching the other machines takes; none when it could not be
+    /// set up, and workers then work on this computer only.
+    machines: Option<Arc<super::place::Machines>>,
     /// Which agents are installed, and when that was found out.
     installed: Option<(u64, Vec<bool>)>,
     /// The models the agents offer, as they last said.
@@ -222,6 +229,17 @@ pub fn run(paths: Paths) -> Result<(), String> {
         None => (Coordinator::new(config), vec![Effect::Changed]),
     };
     let store = Store::open(paths.data_dir.join("leon.db")).ok();
+    let machines = match super::place::Machines::new(&paths.data_dir) {
+        Ok(machines) => Some(Arc::new(machines)),
+        Err(error) => {
+            tracing::warn!(%error, "other machines cannot be reached; workers work here only");
+            None
+        }
+    };
+    let spawner: Arc<dyn Spawner> = match &machines {
+        Some(machines) => machines.spawner(),
+        None => Arc::new(Piped),
+    };
     let (sender, receiver) = flume::unbounded();
     let _ = std::fs::remove_file(&paths.socket);
     let listener = UnixListener::bind(&paths.socket).map_err(|error| error.to_string())?;
@@ -242,7 +260,8 @@ pub fn run(paths: Paths) -> Result<(), String> {
         subscribers: Vec::new(),
         watchers: Watchers::default(),
         store,
-        spawner: Arc::new(Piped),
+        spawner,
+        machines,
         installed: None,
         models: Vec::new(),
         modes: Vec::new(),
@@ -526,12 +545,16 @@ impl Service {
             if busy || now < due {
                 continue;
             }
+            let place = match self.worker_place(worker) {
+                Ok(place) => place,
+                Err(_) => continue,
+            };
             self.pr_looks.insert(worker, (due, true));
             let inputs = self.inputs.clone();
             let spawned = std::thread::Builder::new()
                 .name(format!("leon-king-ci-{worker}"))
                 .spawn(move || {
-                    let seen = super::checks::look_at(&url, &cwd)
+                    let seen = super::checks::look_at(&place, &url, &cwd)
                         .and_then(|json| leon_king::verify::read_ci(&json));
                     let _ = inputs.send(Input::PullRequest { worker, seen });
                 });
@@ -867,8 +890,14 @@ impl Service {
                 cwd,
                 command,
                 title,
+                machine,
             } => {
-                let ask = terminal_ask(self.next_terminal, &cwd, &command, title, now)?;
+                let machine = match machine {
+                    Some(name) => Some(self.machine_named(&name)?),
+                    None => None,
+                };
+                let place = self.place(machine.as_deref())?;
+                let ask = terminal_ask(self.next_terminal, &place, &cwd, &command, title, now)?;
                 self.next_terminal += 1;
                 self.terminals.push(ask.clone());
                 // The oldest go first when King asks for more than anybody
@@ -895,6 +924,22 @@ impl Service {
                 ))
             }
             Request::Check { worker } => self.start_check(worker, now),
+            Request::Run {
+                machine,
+                cwd,
+                program,
+                args,
+            } => {
+                // King's tools run these here themselves; this is for the
+                // folders of other machines, and for nothing else.
+                if !matches!(program.as_str(), "git" | "gh") {
+                    return Err(format!("{program} is not run for King's tools"));
+                }
+                let place = self.place(Some(&machine))?;
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                let printed = place.run(&program, &args, &cwd)?;
+                Ok((json!(printed.trim_end()), Vec::new()))
+            }
             Request::RunStart {
                 task,
                 max_parallel,
@@ -935,12 +980,15 @@ impl Service {
             .worker(worker)
             .ok_or_else(|| format!("there is no worker #{worker}"))?;
         let cwd = found.cwd.clone();
+        let project = found.project.clone();
+        let place = self.worker_place(worker)?;
         let command = super::checks::command_for(
             &self.coordinator.config().checks,
-            found.project.as_deref(),
+            project.as_deref(),
+            &place,
             &cwd,
         )?;
-        let (commit, dirty) = super::checks::head_of(&cwd)?;
+        let (commit, dirty) = super::checks::head_of(&place, &cwd)?;
         let effects = self
             .coordinator
             .check_started(worker, &command, &commit, dirty, now)?;
@@ -957,7 +1005,8 @@ impl Service {
             std::thread::Builder::new()
                 .name(format!("leon-king-check-{worker}"))
                 .spawn(move || {
-                    let (passed, output) = super::checks::run(&command, &cwd, &log, timeout);
+                    let (passed, output) =
+                        super::checks::run(&place, &command, &cwd, &log, timeout);
                     let _ = inputs.send(Input::Checked {
                         worker,
                         passed,
@@ -1056,6 +1105,10 @@ impl Service {
             let why = format!("{} is not an agent Leon can drive", plan.agent);
             return self.coordinator.failed_to_start(target, &why, now);
         };
+        let place = match self.place(plan.machine.as_deref()) {
+            Ok(place) => place,
+            Err(why) => return self.coordinator.failed_to_start(target, &why, now),
+        };
         let mut env = vec![
             (
                 leon_memory::ENV_BIN.to_owned(),
@@ -1087,6 +1140,10 @@ impl Service {
             }
             Target::Worker(_) => (plan.cwd.clone().unwrap_or_default(), Vec::new(), Vec::new()),
         };
+        if !place.is_here() {
+            // This program and its data are this computer's.
+            env.clear();
+        }
         let program = adapter.program.to_owned();
         let spec = TurnSpec {
             program: &program,
@@ -1101,11 +1158,7 @@ impl Service {
             instructions: plan.instructions.as_deref(),
         };
         let start = Start {
-            machine: Machine {
-                id: MachineId::local(),
-                name: "This computer".to_owned(),
-                kind: MachineKind::Local,
-            },
+            machine: place.machine().clone(),
             argv: (adapter.argv)(&spec),
             cwd: cwd.clone(),
             env,
@@ -1219,6 +1272,7 @@ impl Service {
                     machine: machine
                         .map(|m| m.name.clone())
                         .unwrap_or_else(|| "?".to_owned()),
+                    machine_id: project.machine_id.as_str().to_owned(),
                     local: machine.is_some_and(|m| m.kind == MachineKind::Local),
                     root: project.root.clone(),
                     branches: worktrees
@@ -1259,40 +1313,57 @@ impl Service {
             self.coordinator.spent_today(now),
         )?;
         let projects = self.projects();
-        let (cwd, project) = match (&asked.cwd, &asked.project) {
+        let (cwd, project, machine) = match (&asked.cwd, &asked.project) {
             (Some(cwd), _) => {
+                let machine = match &asked.machine {
+                    Some(name) => Some(self.machine_named(name)?),
+                    None => None,
+                };
+                let on_it = |project: &&ProjectInfo| match &machine {
+                    Some(id) => project.machine_id == *id,
+                    None => project.local,
+                };
                 let project = projects
                     .iter()
+                    .filter(on_it)
                     .find(|project| Path::new(cwd).starts_with(&project.root));
-                if projects.iter().any(|project| project.root == *cwd) {
+                if projects
+                    .iter()
+                    .filter(on_it)
+                    .any(|project| project.root == *cwd)
+                {
                     return Err(
                         "that is a project's main checkout; a worker works in a worktree"
                             .to_owned(),
                     );
                 }
-                (cwd.clone(), project.map(|project| project.name.clone()))
+                if !self.place(machine.as_deref())?.is_folder(cwd) {
+                    return Err(format!("there is no folder {cwd}"));
+                }
+                (
+                    cwd.clone(),
+                    project.map(|project| project.name.clone()),
+                    machine,
+                )
             }
             (None, Some(name)) => {
                 let project = projects
                     .iter()
                     .find(|project| project.name == *name)
                     .ok_or_else(|| format!("Leon knows no project {name:?}"))?;
-                if !project.local {
-                    return Err(format!(
-                        "{name} is on {}; workers run on this computer for now",
-                        project.machine
-                    ));
-                }
+                let machine = (!project.local).then(|| project.machine_id.clone());
+                let place = self.place(machine.as_deref())?;
                 let branch = asked
                     .branch
                     .clone()
                     .unwrap_or_else(|| branch_for(&asked.title, now));
                 let path = add_worktree(
+                    &place,
                     &project.root,
                     &branch,
                     &self.coordinator.config().guards.protected_branches,
                 )?;
-                (path, Some(project.name.clone()))
+                (path, Some(project.name.clone()), machine)
             }
             (None, None) => return Err("name the project, or the folder to work in".to_owned()),
         };
@@ -1300,6 +1371,7 @@ impl Service {
             title: asked.title,
             prompt: asked.prompt,
             cwd,
+            machine,
             project,
             job: asked.job,
             choice,
@@ -1309,6 +1381,52 @@ impl Service {
 }
 
 impl Service {
+    /// A machine by Leon's id of it, with what reaching it takes; this
+    /// computer when `None`.
+    fn place(&self, machine: Option<&str>) -> Result<Place, String> {
+        let Some(id) = machine else {
+            return Ok(Place::here());
+        };
+        let found = self
+            .store
+            .as_deref()
+            .and_then(|store| store.machine(&MachineId::from_string(id)).ok())
+            .ok_or_else(|| format!("Leon knows no machine {id:?}"))?;
+        if found.kind == MachineKind::Local {
+            return Ok(Place::here());
+        }
+        let machines = self
+            .machines
+            .as_ref()
+            .ok_or("other machines cannot be reached from King's service")?;
+        Ok(machines.place(found))
+    }
+
+    /// The machine a worker works on.
+    fn worker_place(&self, worker: u32) -> Result<Place, String> {
+        let machine = self
+            .coordinator
+            .worker(worker)
+            .ok_or_else(|| format!("there is no worker #{worker}"))?
+            .machine
+            .clone();
+        self.place(machine.as_deref())
+    }
+
+    /// Leon's id of the machine called `name`.
+    fn machine_named(&self, name: &str) -> Result<String, String> {
+        let machines = self
+            .store
+            .as_deref()
+            .and_then(|store| store.machines().ok())
+            .unwrap_or_default();
+        machines
+            .iter()
+            .find(|machine| machine.name.eq_ignore_ascii_case(name))
+            .map(|machine| machine.id.as_str().to_owned())
+            .ok_or_else(|| format!("Leon knows no machine called {name:?}"))
+    }
+
     /// Where each agent stands, with what is installed found out at most
     /// every few minutes (each look is a login shell per agent).
     fn standings(&mut self, now: u64) -> Vec<Standing> {
@@ -1337,6 +1455,7 @@ impl Service {
 struct ProjectInfo {
     name: String,
     machine: String,
+    machine_id: String,
     local: bool,
     root: String,
     branches: Vec<String>,
@@ -1519,32 +1638,30 @@ fn slug(title: &str) -> String {
 /// Makes a worktree of `root` on a new branch, `branch`, from what the
 /// project's checkout has, and returns its folder. Never on the default
 /// branch nor on a `protected` one.
-fn add_worktree(root: &str, branch: &str, protected: &[String]) -> Result<String, String> {
-    add_worktree_from(root, branch, protected, None)
+fn add_worktree(
+    place: &Place,
+    root: &str,
+    branch: &str,
+    protected: &[String],
+) -> Result<String, String> {
+    add_worktree_from(place, root, branch, protected, None)
 }
 
 /// [`add_worktree`] whose new branch starts at `from` (a branch), when
 /// given.
 fn add_worktree_from(
+    place: &Place,
     root: &str,
     branch: &str,
     protected: &[String],
     from: Option<&str>,
 ) -> Result<String, String> {
     let git = |args: &[&str]| -> Result<String, String> {
-        let output = leon_remote::spawn::std_child("git")
-            .arg("-C")
-            .arg(root)
-            .args(args)
-            .output()
-            .map_err(|error| format!("git: {error}"))?;
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        } else {
-            Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
-        }
+        place
+            .run("git", args, root)
+            .map(|text| text.trim().to_owned())
     };
-    let default = default_branch(root);
+    let default = default_branch(place, root);
     if default.as_deref() == Some(branch) || protected.iter().any(|name| name == branch) {
         return Err(format!(
             "{branch} is protected (the default branch, or [guards] protected_branches); a \
@@ -1570,16 +1687,12 @@ fn add_worktree_from(
 }
 
 /// The branch `origin/HEAD` names, else the one checked out at `root`.
-pub(crate) fn default_branch(root: &str) -> Option<String> {
+pub(crate) fn default_branch(place: &Place, root: &str) -> Option<String> {
     let run = |args: &[&str]| {
-        leon_remote::spawn::std_child("git")
-            .arg("-C")
-            .arg(root)
-            .args(args)
-            .output()
+        place
+            .run("git", args, root)
             .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .map(|text| text.trim().to_owned())
             .filter(|text| !text.is_empty())
     };
     run(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
@@ -1648,15 +1761,16 @@ mod tests {
     fn a_terminal_king_asks_for_runs_one_line_in_a_folder_that_is_there() {
         let folder = tempfile::tempdir().unwrap();
         let cwd = folder.path().to_str().unwrap();
-        let ask = terminal_ask(4, cwd, "  bun run dev  ", None, 9).unwrap();
+        let here = Place::here();
+        let ask = terminal_ask(4, &here, cwd, "  bun run dev  ", None, 9).unwrap();
         assert_eq!((ask.id, ask.command.as_str()), (4, "bun run dev"));
         assert_eq!((ask.title.as_str(), ask.since_ms), ("bun run dev", 9));
-        let named = terminal_ask(5, cwd, "make watch", Some("Watch".into()), 9).unwrap();
+        let named = terminal_ask(5, &here, cwd, "make watch", Some("Watch".into()), 9).unwrap();
         assert_eq!(named.title, "Watch");
-        assert!(terminal_ask(6, cwd, " ", None, 9).is_err());
-        assert!(terminal_ask(6, cwd, "make\nrm -rf x", None, 9).is_err());
-        assert!(terminal_ask(6, "relative/dir", "ls", None, 9).is_err());
-        assert!(terminal_ask(6, "/no/such/folder/here", "ls", None, 9).is_err());
+        assert!(terminal_ask(6, &here, cwd, " ", None, 9).is_err());
+        assert!(terminal_ask(6, &here, cwd, "make\nrm -rf x", None, 9).is_err());
+        assert!(terminal_ask(6, &here, "relative/dir", "ls", None, 9).is_err());
+        assert!(terminal_ask(6, &here, "/no/such/folder/here", "ls", None, 9).is_err());
     }
 
     #[test]
@@ -1699,9 +1813,9 @@ mod tests {
         ]);
         let root = root.to_string_lossy().into_owned();
         let protected = ["release".to_owned()];
-        assert!(add_worktree(&root, "main", &protected).is_err());
-        assert!(add_worktree(&root, "release", &protected).is_err());
-        let path = add_worktree(&root, "king/fix", &protected).unwrap();
+        assert!(add_worktree(&Place::here(), &root, "main", &protected).is_err());
+        assert!(add_worktree(&Place::here(), &root, "release", &protected).is_err());
+        let path = add_worktree(&Place::here(), &root, "king/fix", &protected).unwrap();
         assert_eq!(path, format!("{root}-worktrees/king-fix"));
         assert!(Path::new(&path).join(".git").exists());
     }
