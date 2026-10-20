@@ -145,6 +145,7 @@ impl FakeSystem {
     }
 
     /// The same computer with these programs too.
+    #[cfg(leon_posix_tests)]
     fn with(extra: &[&'static str]) -> Rc<Self> {
         let mut computer = Rc::try_unwrap(Self::new()).ok().expect("just made");
         computer.extra = extra.to_vec();
