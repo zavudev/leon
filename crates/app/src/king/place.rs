@@ -19,6 +19,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leon_core::{Machine, MachineId, MachineKind};
+use leon_link::client::ConnState;
+use leon_remote::relay::{describe, split_route};
 use leon_remote::{
     run_on, CommandSpec, ProcessRunner, RelayHub, RoutingRunner, Runner, SshOptions,
 };
@@ -28,6 +30,9 @@ use crate::chat::turn::Spawner;
 
 /// How long a command on a machine may take, but a check.
 const COMMAND_TIME_LIMIT: Duration = Duration::from_secs(120);
+/// How long past its limit a relayed command's answer is waited for: the
+/// host stops the command at the limit and answers.
+const ANSWER_GRACE: Duration = Duration::from_secs(15);
 
 /// What reaching the other machines takes.
 pub struct Machines {
@@ -168,11 +173,25 @@ impl Place {
             let Some((hub, handle)) = &self.relay else {
                 return Err(format!("{} cannot be reached from here", self.machine.name));
             };
+            // King's service waits for the command: a computer its
+            // connection already found away fails at once, and one that
+            // went quiet is not waited for past the limit.
+            if let Some(why) = placed.route.as_deref().and_then(|route| away(hub, route)) {
+                return Err(format!("{}: {why}", self.machine.name));
+            }
             let runner =
                 RoutingRunner::new(ProcessRunner::new(), hub.clone()).with_time_limit(limit);
-            return handle
-                .block_on(runner.run(placed))
-                .map_err(|error| format!("{}: {error}", self.machine.name));
+            // The timer is made on the runtime, which keeps time.
+            return match handle.block_on(async {
+                tokio::time::timeout(limit + ANSWER_GRACE, runner.run(placed)).await
+            }) {
+                Ok(result) => result.map_err(|error| format!("{}: {error}", self.machine.name)),
+                Err(_) => Err(format!(
+                    "{} did not answer within {} seconds",
+                    self.machine.name,
+                    (limit + ANSWER_GRACE).as_secs()
+                )),
+            };
         }
         let output = process(placed)
             .stdout(Stdio::piped())
@@ -184,6 +203,20 @@ impl Place {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
+    }
+}
+
+/// Why the computer behind `route` is away, when its connection last failed
+/// to reach it; `None` while it is online, still connecting, or not dialled.
+fn away(hub: &RelayHub, route: &str) -> Option<String> {
+    let (host_id, _, url) = split_route(route)?;
+    away_from(&hub.state(host_id)?, url)
+}
+
+fn away_from(state: &ConnState, relay_url: &str) -> Option<String> {
+    match state {
+        ConnState::Offline { .. } => describe(state, relay_url),
+        _ => None,
     }
 }
 
@@ -278,5 +311,28 @@ mod tests {
         let placed = relayed.placed("git", &["status"], "/Users/me/api");
         assert!(placed.route.is_some());
         assert!(relayed.run("git", &["status"], "/Users/me/api").is_err());
+    }
+
+    #[test]
+    fn a_computer_found_away_fails_at_once_and_one_connecting_is_waited_for() {
+        let why = away_from(
+            &ConnState::Offline {
+                failure: leon_link::client::Failure::HostOffline,
+                reason: "host offline".to_owned(),
+                attempt: 2,
+            },
+            "wss://relay",
+        )
+        .unwrap();
+        assert!(why.contains("not connected to the relay"), "{why}");
+        assert_eq!(away_from(&ConnState::Online, "wss://relay"), None);
+        assert_eq!(away_from(&ConnState::Connecting, "wss://relay"), None);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let hub = RelayHub::new(
+            Arc::new(leon_link::Identity::generate()),
+            "me",
+            runtime.handle().clone(),
+        );
+        assert_eq!(away(&hub, "h k wss://relay"), None, "not dialled yet");
     }
 }
