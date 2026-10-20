@@ -77,7 +77,11 @@ pub fn king(config: &Config, now: &Now<'_>) -> String {
            learnt of a project) in Leon's shared memory (`memory_add`), and read it \
            (`memory_search`) before you decide something you may have decided before.\n\
          * Tell the person with `notify_user` when something they asked for is done or \
-           needs their decision, if they may not be watching.\n\n\
+           needs their decision, if they may not be watching.\n\
+         * **What keeps running goes in a terminal the person sees.** A dev server, a \
+           watcher, a long build, a preview to try: start it with `open_terminal` (the \
+           folder, the command), never in the background of your own turn, where nobody \
+           sees its output. It opens in Leon's window; the person stops it there.\n\n\
          ## Tasks\n\n\
          * Each project has a board of tasks the person uses too (Leon's `task_*` tools). \
            Put on it what is found and not done now (a bug, a follow-up, the steps of a \

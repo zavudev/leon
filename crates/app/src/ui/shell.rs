@@ -1059,11 +1059,14 @@ impl Shell {
     }
 
     /// The coarse timer: while the window is focused, this computer is looked
-    /// at every `elsewhere_poll`, the SSH machines every few polls.
+    /// at every `elsewhere_poll`, the SSH machines every few polls. At each
+    /// turn the window also joins King's service when it runs, so that King's
+    /// workers are in the Den and the terminals King asks for open here.
     fn watch_elsewhere(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.options.elsewhere_poll.is_none() {
             return;
         }
+        self.king_join(window, cx);
         self.elsewhere_ticker = Some(cx.spawn_in(window, async move |this, cx| {
             let mut tick = 0u32;
             loop {
@@ -1074,6 +1077,7 @@ impl Shell {
                 cx.background_executor().timer(poll).await;
                 tick = tick.wrapping_add(1);
                 let alive = this.update_in(cx, |this, window, cx| {
+                    this.king_join(window, cx);
                     if window.is_window_active() {
                         this.scan_elsewhere_now(tick % REMOTE_EVERY == 0, cx);
                     }

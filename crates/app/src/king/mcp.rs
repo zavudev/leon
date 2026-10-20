@@ -25,7 +25,7 @@ use crate::task_mcp::PROTOCOL_VERSIONS;
 pub const SERVER_NAME: &str = "leon-king";
 
 /// The names of the tools, in the order they are listed.
-pub const TOOLS: [&str; 19] = [
+pub const TOOLS: [&str; 20] = [
     "king_status",
     "projects_list",
     "project_status",
@@ -44,6 +44,7 @@ pub const TOOLS: [&str; 19] = [
     "run_continue",
     "run_cancel",
     "pr_open",
+    "open_terminal",
     "notify_user",
 ];
 
@@ -393,6 +394,26 @@ pub fn tool_list() -> Value {
             &["worker", "title"],
         ),
         tool(
+            "open_terminal",
+            "Run a command in a terminal of Leon's window, where the person sees its output: \
+             a dev server, a watcher, a long build, anything that keeps running or that they \
+             should see. Use it instead of starting such a process in the background yourself. \
+             It opens in the window now when one is open, else when one opens; the person \
+             stops it.",
+            json!({
+                "cwd": {
+                    "type": "string",
+                    "description": "The folder it runs in: a project's or a worker's worktree.",
+                },
+                "command": {
+                    "type": "string",
+                    "description": "One line, typed into the terminal's shell.",
+                },
+                "title": { "type": "string", "description": "What the terminal is called." },
+            }),
+            &["cwd", "command"],
+        ),
+        tool(
             "notify_user",
             "Tell the person, on their desktop: something they asked for is done, or needs \
              their decision.",
@@ -605,6 +626,11 @@ impl<B: Backend> Server<B> {
                 budget_usd: arguments.get("budget_usd").and_then(Value::as_f64),
             }),
             "run_cancel" => self.backend.ask(Request::RunCancel { run: run()? }),
+            "open_terminal" => self.backend.ask(Request::OpenTerminal {
+                cwd: needed("cwd")?,
+                command: needed("command")?,
+                title: text("title"),
+            }),
             "notify_user" => self.backend.ask(Request::Notify {
                 title: needed("title")?,
                 body: text("body").unwrap_or_default(),

@@ -17,6 +17,11 @@ pub trait Link: Send + Sync {
     /// A new connection, subscribed to the notices. It may wait: the window
     /// calls it off its own thread.
     fn open(&self) -> Result<Connection, String>;
+
+    /// [`Link::open`], only when the service runs: it is not started.
+    fn join(&self) -> Result<Connection, String> {
+        Err("King's service is not running".to_owned())
+    }
 }
 
 /// One connection, as two channels.
@@ -53,9 +58,20 @@ pub struct Socket {
 #[cfg(unix)]
 impl Link for Socket {
     fn open(&self) -> Result<Connection, String> {
-        use super::client::{Client, Incoming};
+        self.connect(super::client::Client::dial_or_start(&self.paths)?)
+    }
 
-        let client = Client::dial_or_start(&self.paths)?;
+    fn join(&self) -> Result<Connection, String> {
+        self.connect(super::client::Client::dial(&self.paths)?)
+    }
+}
+
+#[cfg(unix)]
+impl Socket {
+    /// The two channels over a connection, subscribed to the notices.
+    fn connect(&self, client: super::client::Client) -> Result<Connection, String> {
+        use super::client::Incoming;
+
         let (mut writer, mut reader) = client.split();
         // Tag 0 is never the window's: the subscription's reply is dropped.
         writer.send_as(0, Request::Subscribe)?;

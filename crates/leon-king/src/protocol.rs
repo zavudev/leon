@@ -187,6 +187,24 @@ pub enum Request {
         /// The branch.
         branch: String,
     },
+    /// Open a terminal in Leon's window that runs a command where the person
+    /// sees it: a server, a watcher, anything whose output matters. The
+    /// service keeps it until a window takes it ([`Request::TerminalTaken`]).
+    OpenTerminal {
+        /// The folder it runs in.
+        cwd: String,
+        /// The command, typed into the terminal's shell.
+        command: String,
+        /// What the terminal is called.
+        #[serde(default)]
+        title: Option<String>,
+    },
+    /// A window takes a terminal King asked for, to open it; only the first
+    /// that asks gets it.
+    TerminalTaken {
+        /// The terminal's number ([`TerminalAsk::id`]).
+        id: u64,
+    },
     /// Whether the person is looking at King on this connection's client:
     /// while anybody is, what King's conversation shows already is not also
     /// sent to the desktop.
@@ -317,6 +335,25 @@ pub struct Status {
     /// The runs of tasks' steps, oldest first.
     #[serde(default)]
     pub runs: Vec<crate::run::Run>,
+    /// The terminals King asked for that no window has opened yet, oldest
+    /// first. Filled by the service.
+    #[serde(default)]
+    pub terminals: Vec<TerminalAsk>,
+}
+
+/// A terminal King asked a window to open ([`Request::OpenTerminal`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalAsk {
+    /// Its number, for [`Request::TerminalTaken`].
+    pub id: u64,
+    /// The folder it runs in.
+    pub cwd: String,
+    /// The command.
+    pub command: String,
+    /// What it is called.
+    pub title: String,
+    /// When King asked for it, in milliseconds since the epoch.
+    pub since_ms: u64,
 }
 
 /// A process a turn left running.

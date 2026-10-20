@@ -32,7 +32,7 @@ use gpui_kit::{Context, Entity, ScrollHandle, Subscription, Task, Window};
 use leon_core::{AgentId, MachineId};
 use leon_king::coordinator::{Form, Open, Reply as Answer, Target};
 use leon_king::history::Past;
-use leon_king::protocol::{Entries, Notice, Request, Status};
+use leon_king::protocol::{Entries, Notice, Request, Status, TerminalAsk};
 use leon_king::transcript::{Entry, KEPT};
 use serde_json::Value;
 
@@ -295,6 +295,8 @@ enum Asked {
     Resumed,
     /// A run of a task's steps started.
     Run,
+    /// A terminal King asked for, this window's to open.
+    Terminal,
     /// Anything else: only a refusal is said.
     Done,
 }
@@ -303,6 +305,8 @@ enum Asked {
 pub struct KingUi {
     /// What was said to King before the line was open: said once it is.
     pending: Vec<Request>,
+    /// The terminals King asked for that this window asked to take.
+    taking: HashSet<u64>,
     /// The line to the service, once it is open.
     link: Option<flume::Sender<(u64, Request)>>,
     /// A connection is being opened.
@@ -358,6 +362,7 @@ impl Default for KingUi {
     fn default() -> Self {
         Self {
             pending: Vec::new(),
+            taking: HashSet::new(),
             link: None,
             connecting: false,
             error: None,
@@ -618,17 +623,41 @@ impl Shell {
     /// answers. Nothing happens while one is open or being opened, or where
     /// the window has no link (tests that do not need one).
     pub(super) fn king_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.king_connect_as(true, window, cx);
+    }
+
+    /// Opens the line to King's service when the service runs, without
+    /// starting it: the window follows King (its workers in the Den, the
+    /// terminals it asks for) from then on. Nothing is said when nothing
+    /// answers.
+    pub(super) fn king_join(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.king_connect_as(false, window, cx);
+    }
+
+    fn king_connect_as(&mut self, start: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.king_ui.link.is_some() || self.king_ui.connecting {
             return;
         }
         let Some(link) = self.options.king.clone() else {
-            self.king_ui.error = Some("King is not available in this window.".to_owned());
+            if start {
+                self.king_ui.error = Some("King is not available in this window.".to_owned());
+            }
             return;
         };
         self.king_ui.connecting = true;
-        self.king_ui.error = None;
+        if start {
+            self.king_ui.error = None;
+        }
         let task = cx.spawn_in(window, async move |this, cx| {
-            let opened = cx.background_spawn(async move { link.open() }).await;
+            let opened = cx
+                .background_spawn(async move {
+                    if start {
+                        link.open()
+                    } else {
+                        link.join()
+                    }
+                })
+                .await;
             let heard = match opened {
                 Ok(connection) => {
                     let heard = connection.heard;
@@ -660,7 +689,9 @@ impl Shell {
                 Err(error) => {
                     this.update(cx, |this, cx| {
                         this.king_ui.connecting = false;
-                        this.king_ui.error = Some(error);
+                        if start {
+                            this.king_ui.error = Some(error);
+                        }
                         cx.notify();
                     })
                     .ok();
@@ -800,6 +831,13 @@ impl Shell {
                 );
                 cx.notify();
             }
+            (Asked::Terminal, Ok(value)) => {
+                if let Ok(ask) = serde_json::from_value::<TerminalAsk>(value) {
+                    self.king_open_terminal(ask, window, cx);
+                }
+            }
+            // Another window took it first.
+            (Asked::Terminal, Err(_)) => {}
             (Asked::Models, Ok(value)) => {
                 self.king_ui.models = models_of(&value);
                 self.king_ui.modes = modes_of(&value);
@@ -838,9 +876,44 @@ impl Shell {
             }
         }
         self.king_fetch(&status, cx);
+        // The terminals King asked for are this window's to open, once the
+        // service gives them to it.
+        self.king_ui
+            .taking
+            .retain(|id| status.terminals.iter().any(|ask| ask.id == *id));
+        for ask in &status.terminals {
+            if self.king_ui.taking.insert(ask.id) {
+                self.king_ask(Request::TerminalTaken { id: ask.id }, Asked::Terminal, cx);
+            }
+        }
         self.king_ui.status = Some(status);
         self.king_spin(cx);
         cx.notify();
+    }
+
+    /// Opens a terminal King asked for: a session of its own, the command
+    /// typed into its shell as a project's script is.
+    fn king_open_terminal(
+        &mut self,
+        ask: TerminalAsk,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.engine.report(
+            StatusKind::Info,
+            format!("King opened a terminal: {}", ask.title),
+        );
+        self.start_live_first(
+            &ask.command,
+            crate::launch::First::Script,
+            Some(ask.title),
+            Launch::Shell,
+            &MachineId::local(),
+            &ask.cwd,
+            Place::Session,
+            window,
+            cx,
+        );
     }
 
     /// Keeps the spinner turning while King or a worker is in a turn: the
@@ -1513,6 +1586,7 @@ mod tests {
             spent_today_usd: 0.0,
             daily_budget_usd: None,
             running: Vec::new(),
+            terminals: Vec::new(),
             runs: Vec::new(),
         }
     }

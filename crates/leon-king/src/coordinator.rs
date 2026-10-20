@@ -791,6 +791,7 @@ impl Coordinator {
             daily_budget_usd: self.config.limits.daily_budget_usd,
             running: Vec::new(),
             runs: self.state.runs.values().cloned().collect(),
+            terminals: Vec::new(),
         }
     }
 

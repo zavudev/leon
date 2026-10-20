@@ -81,6 +81,45 @@ enum Input {
 /// How long a process may go on after its turn said its result before the
 /// turn is taken as over and the process as one that runs something.
 const LINGER_AFTER: Duration = Duration::from_secs(4);
+/// The most terminals King's asks may wait for a window; older ones go.
+const MAX_TERMINALS: usize = 20;
+/// The longest command a terminal King asks for is given.
+const MAX_TERMINAL_COMMAND: usize = 4096;
+
+/// A terminal King asks for, once what it runs is checked: a folder that is
+/// there, and a command of one line, typed into the terminal's shell.
+fn terminal_ask(
+    id: u64,
+    cwd: &str,
+    command: &str,
+    title: Option<String>,
+    now: u64,
+) -> Result<leon_king::protocol::TerminalAsk, String> {
+    let command = command.trim();
+    if command.is_empty() {
+        return Err("say what the terminal runs".to_owned());
+    }
+    if command.len() > MAX_TERMINAL_COMMAND || command.chars().any(char::is_control) {
+        return Err(format!(
+            "the command must be one line of at most {MAX_TERMINAL_COMMAND} bytes; chain \
+             commands with && or put them in a script"
+        ));
+    }
+    if !Path::new(cwd).is_absolute() || !Path::new(cwd).is_dir() {
+        return Err(format!("{cwd} is not a folder of this computer"));
+    }
+    let title = title
+        .map(|title| title.trim().to_owned())
+        .filter(|title| !title.is_empty() && !title.chars().any(char::is_control))
+        .unwrap_or_else(|| command.chars().take(40).collect());
+    Ok(leon_king::protocol::TerminalAsk {
+        id,
+        cwd: cwd.to_owned(),
+        command: command.to_owned(),
+        title,
+        since_ms: now,
+    })
+}
 
 /// A turn whose process outlived it: what it started still runs.
 struct Lingering {
@@ -125,6 +164,10 @@ struct Service {
     lingering: Vec<Lingering>,
     /// What those left running, as last looked at.
     running: Vec<leon_king::protocol::RunningProcess>,
+    /// The terminals King asked for that no window took yet.
+    terminals: Vec<leon_king::protocol::TerminalAsk>,
+    /// The number of the next terminal King asks for.
+    next_terminal: u64,
     /// When each watched pull request is to be looked at next, by worker,
     /// and whether a look is under way.
     pr_looks: HashMap<u32, (u64, bool)>,
@@ -205,6 +248,8 @@ pub fn run(paths: Paths) -> Result<(), String> {
         modes: Vec::new(),
         lingering: Vec::new(),
         running: Vec::new(),
+        terminals: Vec::new(),
+        next_terminal: 1,
         pr_looks: HashMap::new(),
     };
     {
@@ -513,6 +558,7 @@ impl Service {
     fn status(&self, now: u64) -> leon_king::protocol::Status {
         let mut status = self.coordinator.status(now);
         status.running = self.running.clone();
+        status.terminals = self.terminals.clone();
         status
     }
 
@@ -790,6 +836,37 @@ impl Service {
                 std::thread::sleep(Duration::from_millis(300));
                 self.refresh_running();
                 done(vec![Effect::Changed])
+            }
+            Request::OpenTerminal {
+                cwd,
+                command,
+                title,
+            } => {
+                let ask = terminal_ask(self.next_terminal, &cwd, &command, title, now)?;
+                self.next_terminal += 1;
+                self.terminals.push(ask.clone());
+                // The oldest go first when King asks for more than anybody
+                // opens.
+                let excess = self.terminals.len().saturating_sub(MAX_TERMINALS);
+                self.terminals.drain(..excess);
+                Ok((
+                    json!({
+                        "terminal": ask.id,
+                        "note": "It opens in Leon's window: now when one is open, else when one \
+                                 opens. The person sees its output there; it is theirs to stop.",
+                    }),
+                    vec![Effect::Changed],
+                ))
+            }
+            Request::TerminalTaken { id } => {
+                let Some(at) = self.terminals.iter().position(|ask| ask.id == id) else {
+                    return Err(format!("terminal {id} is not waiting for a window"));
+                };
+                let ask = self.terminals.remove(at);
+                Ok((
+                    serde_json::to_value(ask).map_err(|error| error.to_string())?,
+                    vec![Effect::Changed],
+                ))
             }
             Request::Check { worker } => self.start_check(worker, now),
             Request::RunStart {
@@ -1538,6 +1615,21 @@ mod tests {
         drop(phone_end);
         assert!(!watchers.any(), "a connection that closed stops counting");
         drop(window_end);
+    }
+
+    #[test]
+    fn a_terminal_king_asks_for_runs_one_line_in_a_folder_that_is_there() {
+        let folder = tempfile::tempdir().unwrap();
+        let cwd = folder.path().to_str().unwrap();
+        let ask = terminal_ask(4, cwd, "  bun run dev  ", None, 9).unwrap();
+        assert_eq!((ask.id, ask.command.as_str()), (4, "bun run dev"));
+        assert_eq!((ask.title.as_str(), ask.since_ms), ("bun run dev", 9));
+        let named = terminal_ask(5, cwd, "make watch", Some("Watch".into()), 9).unwrap();
+        assert_eq!(named.title, "Watch");
+        assert!(terminal_ask(6, cwd, " ", None, 9).is_err());
+        assert!(terminal_ask(6, cwd, "make\nrm -rf x", None, 9).is_err());
+        assert!(terminal_ask(6, "relative/dir", "ls", None, 9).is_err());
+        assert!(terminal_ask(6, "/no/such/folder/here", "ls", None, 9).is_err());
     }
 
     #[test]

@@ -736,3 +736,74 @@ fn the_workers_shown_are_the_conversations_on_screen(cx: &mut TestAppContext) {
     assert!(h.shows_dynamic("king-card-2".into(), cx));
     assert!(!h.shows_dynamic("king-card-3".into(), cx));
 }
+
+#[gpui_kit::test]
+fn a_terminal_king_asks_for_opens_here_once_this_window_took_it(cx: &mut TestAppContext) {
+    let (h, end) = with_conversation(cx, json!([]));
+    let folder = tempfile::tempdir().unwrap();
+    let ask = json!({
+        "id": 1, "cwd": folder.path().to_str().unwrap(), "command": "echo KING-RAN",
+        "title": "Dev server", "since_ms": 0,
+    });
+    let mut told = status(Some(2), json!([]));
+    told["terminals"] = json!([ask.clone()]);
+    let notice = |told: &Value| {
+        Heard::Notice(
+            serde_json::from_value::<Notice>(json!({"notice": "changed", "status": told})).unwrap(),
+        )
+    };
+    end.tell.send(notice(&told)).unwrap();
+    let asked = serve(&h, &end, cx, |request| match request {
+        Request::TerminalTaken { id: 1 } => ask.clone(),
+        _ => Value::Null,
+    });
+    assert!(
+        asked.contains(&Request::TerminalTaken { id: 1 }),
+        "{asked:?}"
+    );
+    super::live::wait_until(&h, cx, "King's terminal", |h, cx| {
+        h.shell(cx, |shell| shell.live.all().len() == 1)
+    });
+    let cwd = h.shell(cx, |shell| shell.live.all()[0].cwd.clone());
+    assert_eq!(cwd, folder.path().to_str().unwrap());
+
+    // Told again before the service forgot it: it is not asked for twice.
+    end.tell.send(notice(&told)).unwrap();
+    let asked = serve(&h, &end, cx, |_| Value::Null);
+    assert!(
+        !asked.contains(&Request::TerminalTaken { id: 1 }),
+        "{asked:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn kings_workers_are_lions_of_the_den_and_a_lion_opens_its_card(cx: &mut TestAppContext) {
+    let (h, _end) = with_conversation(cx, json!([worker(2, "working", None)]));
+    h.press_chord("cmd-alt-shift-l", "ctrl-alt-shift-l", cx);
+    h.settle(cx);
+    let lions: Vec<(u64, String, leon_den::CubState)> = h.shell(cx, |shell| {
+        shell
+            .den
+            .cubs
+            .iter()
+            .map(|cub| (cub.id, cub.name.clone(), cub.state))
+            .collect()
+    });
+    assert_eq!(
+        lions,
+        [(
+            super::super::den::king_id(2),
+            "Fix the calculator".to_owned(),
+            leon_den::CubState::Thinking
+        )]
+    );
+    cx.update_window(h.window.into(), |_, window, cx| {
+        h.shell.update(cx, |shell, cx| {
+            shell.den_open_lion(super::super::den::king_id(2), window, cx)
+        })
+    })
+    .unwrap();
+    h.settle(cx);
+    assert_eq!(h.main_kind(cx), "king");
+    assert_eq!(h.shell(cx, |shell| shell.king_ui.open), Some(2));
+}
