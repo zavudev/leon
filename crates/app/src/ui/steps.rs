@@ -6835,7 +6835,15 @@ mod tests {
                 .iter()
                 .map(|(value, _)| value.as_str())
                 .collect::<Vec<_>>(),
-            ["claude", "codex", "opencode", "grok", "cursor", "gemini"],
+            [
+                "claude",
+                "codex",
+                "opencode",
+                "grok",
+                "cursor",
+                "antigravity",
+                "gemini"
+            ],
             "only the agents with a verified prompt form, in the catalogue's order"
         );
         assert!(offered.iter().all(|(_, on)| !on));
