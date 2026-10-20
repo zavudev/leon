@@ -181,15 +181,36 @@ pub fn picks(open: &Open) -> Vec<Pickable> {
 
 /// The models of the service's `models` answer.
 fn models_of(value: &Value) -> Vec<KingModel> {
+    // How each model did, per kind of job, as the service's record says.
+    let record = |agent: &str, id: &str| -> Vec<String> {
+        value["record"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|summary| {
+                summary["agent"].as_str() == Some(agent) && summary["model"].as_str() == Some(id)
+            })
+            .filter_map(|summary| {
+                Some(format!(
+                    "{}: {}",
+                    summary["job"].as_str()?,
+                    summary["line"].as_str()?
+                ))
+            })
+            .collect()
+    };
     value["models"]
         .as_array()
         .map(|models| {
             models
                 .iter()
                 .filter_map(|model| {
+                    let agent = model["agent"].as_str()?;
+                    let id = model["id"].as_str()?;
                     Some(KingModel {
-                        agent: model["agent"].as_str()?.to_owned(),
-                        id: model["id"].as_str()?.to_owned(),
+                        record: record(agent, id),
+                        agent: agent.to_owned(),
+                        id: id.to_owned(),
                         label: model["label"].as_str().or(model["id"].as_str())?.to_owned(),
                         efforts: model["efforts"]
                             .as_array()
@@ -1709,6 +1730,10 @@ mod tests {
             {"agent": "claude", "id": "opus", "label": "Opus", "efforts": ["low", "high"]},
             {"agent": "codex", "id": "gpt-5.5", "label": null, "efforts": []},
             {"id": "no agent"},
+        ], "record": [
+            {"agent": "claude", "model": "opus", "job": "plan",
+             "line": "3 of 3 judged did well (3 workers)"},
+            {"agent": "claude", "model": "haiku", "job": "code", "line": "not this one"},
         ], "modes": [
             {"agent": "claude", "id": "bypassPermissions", "label": "Bypass",
              "description": null, "dangerous": true},
@@ -1731,12 +1756,14 @@ mod tests {
                     id: "opus".into(),
                     label: "Opus".into(),
                     efforts: vec!["low".into(), "high".into()],
+                    record: vec!["plan: 3 of 3 judged did well (3 workers)".into()],
                 },
                 KingModel {
                     agent: "codex".into(),
                     id: "gpt-5.5".into(),
                     label: "gpt-5.5".into(),
                     efforts: Vec::new(),
+                    record: Vec::new(),
                 },
             ]
         );

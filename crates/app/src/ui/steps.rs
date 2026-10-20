@@ -109,6 +109,8 @@ pub struct KingModel {
     pub label: String,
     /// The efforts it can be asked for, the lightest first.
     pub efforts: Vec<String>,
+    /// How it did here, per kind of job: `code: 4 of 6 judged did well…`.
+    pub record: Vec<String>,
 }
 
 /// The answer that leaves a model or an effort to the agent.
@@ -3483,7 +3485,12 @@ fn king_brain(answers: &[String], world: &World) -> Outcome {
                     .iter()
                     .filter(|model| &model.agent == agent)
                     .map(|model| {
-                        Choice::new(model.label.clone(), model.id.clone(), model.id.clone())
+                        // What the model did here, when it did anything.
+                        let said = std::iter::once(model.id.clone())
+                            .chain(model.record.iter().cloned())
+                            .collect::<Vec<_>>()
+                            .join(" \u{b7} ");
+                        Choice::new(model.label.clone(), said, model.id.clone())
                             .current(same && king.model.as_deref() == Some(model.id.as_str()))
                     }),
             );
@@ -5420,6 +5427,7 @@ mod tests {
             id: id.into(),
             label: id.to_uppercase(),
             efforts: efforts.iter().map(|e| (*e).to_owned()).collect(),
+            record: Vec::new(),
         };
         world.king = Some(KingInfo {
             agent: "claude".into(),

@@ -781,6 +781,11 @@ fn a_worker_of_an_agent_that_only_runs_in_a_terminal_opens_that_agent_here(
     cx: &mut TestAppContext,
 ) {
     let (h, end) = with_conversation(cx, json!([]));
+    cx.update(|cx| {
+        h.shell.update(cx, |shell, _| {
+            shell.options.system = FakeSystem::with(&["kimi"])
+        })
+    });
     let folder = tempfile::tempdir().unwrap();
     let ask = json!({
         "id": 3, "cwd": folder.path().to_str().unwrap(), "command": "Add the billing schema",
