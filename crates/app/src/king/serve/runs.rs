@@ -171,6 +171,7 @@ impl Service {
             self.coordinator.config(),
             &ask,
             &standings,
+            &self.coordinator.record(),
             self.coordinator.spent_today(now),
         )?;
         let branch = format!("king/run{id}-{}", slug(&step.title));

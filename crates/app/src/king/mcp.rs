@@ -214,7 +214,9 @@ pub fn tool_list() -> Value {
             "Every model the agents of this computer offer, each with its efforts and what is \
              known of it: its talents (1 to 5: planning, architecture, coding, review, \
              research, speed, economy) and its benchmarks with their sources. Also the tiers, \
-             and which tier each kind of job goes to.",
+             which tier each kind of job goes to, and under `record` how each model did here, \
+             per kind of job: how many of its workers did well, passed their first check or \
+             their CI, failed, and what one cost and took.",
             json!({}),
             &[],
         ),

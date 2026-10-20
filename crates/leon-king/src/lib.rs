@@ -24,6 +24,8 @@
 //! * [`protocol`]: the messages of the service's control socket, which the
 //!   window, the phone's host, the command line and King's own tools speak;
 //! * [`models`]: what King knows of each model's talents and benchmarks;
+//! * [`record`]: how each model did: every worker's outcome, summed per
+//!   model and kind of job for King and the router;
 //! * [`report`]: the line under every answer of King's: its tokens, how
 //!   fast they came, and what is left of the budget and the usage windows;
 //! * [`run`]: a task of the board carried out as its steps, in the order
@@ -46,6 +48,7 @@ pub mod models;
 pub mod policy;
 pub mod prompt;
 pub mod protocol;
+pub mod record;
 pub mod report;
 pub mod route;
 pub mod run;

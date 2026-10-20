@@ -110,6 +110,13 @@ pub fn king(config: &Config, now: &Now<'_>) -> String {
            pay for least first: give a job its tier and let Leon pick, by default. Name \
            an agent and model in `worker_start` only when the job needs a talent the \
            tier's pick lacks, and tell the person why you passed over it.\n\
+         * **Each model has a record here.** `models_list` gives it under `record`, per \
+           kind of job: how many of its workers did well (their check passed, their CI \
+           did not fail, no turn failed), how many passed their first check, what one \
+           cost and how long it took. Weigh it beside the talents: it is how the model did \
+           on these projects. A tier passes over a model that keeps doing poorly at a kind \
+           of job while another has room; `worker_start` then says so under \
+           `passed_over`.\n\
          * **Planning goes to the best models.** Any plan that matters (a feature, a \
            refactor, an architecture, an order of work across projects) is a `plan` job, \
            which runs where \"Kinds of jobs\" below says. Plan yourself only if you run on \

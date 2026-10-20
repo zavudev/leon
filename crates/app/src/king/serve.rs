@@ -736,6 +736,17 @@ impl Service {
                 Ok((
                     json!({
                         "models": models,
+                        "record": self
+                            .coordinator
+                            .record()
+                            .into_iter()
+                            .map(|summary| {
+                                let line = summary.line();
+                                let mut value = json!(summary);
+                                value["line"] = json!(line);
+                                value
+                            })
+                            .collect::<Vec<_>>(),
                         "modes": self.modes,
                         "jobs": self.coordinator.config().jobs,
                         "tiers": self.coordinator.config().tiers,
@@ -773,6 +784,21 @@ impl Service {
                 });
                 // An agent says its own default model only once its turn
                 // starts: King is told where to read it then.
+                let choice = route::Choice {
+                    agent: worker.conversation.agent.clone(),
+                    model: worker.conversation.model.clone(),
+                    effort: worker.conversation.effort.clone(),
+                    tier: worker.tier.clone(),
+                };
+                let passed_over = route::passed_over(
+                    self.coordinator.config(),
+                    &self.coordinator.record(),
+                    worker.job.as_str(),
+                    &choice,
+                );
+                if !passed_over.is_empty() {
+                    answer["passed_over"] = json!(passed_over);
+                }
                 if worker.conversation.model.is_none() {
                     answer["model_note"] = json!(
                         "No model was named, so the worker runs on its agent's default. Its \
@@ -1229,6 +1255,7 @@ impl Service {
             self.coordinator.config(),
             &ask,
             &standings,
+            &self.coordinator.record(),
             self.coordinator.spent_today(now),
         )?;
         let projects = self.projects();

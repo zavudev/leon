@@ -387,6 +387,21 @@ back. Once the day's spending reaches `daily_budget_usd` (as the agents
 report their cost), no worker starts until you say so. King sees all of this
 through `usage_status`.
 
+**Leon learns from what workers did.** Every worker leaves an outcome: each
+run of its project's check and whether it passed, whether the CI of its pull
+request passed, whether a turn of it failed, what it cost and how long it
+took. They are summed per agent, model and kind of job (`code`, `research`,
+`plan`) into a record, kept with King's state. A worker is judged once a
+check ran, its CI ended or it failed, and it did well when its last check
+passed, its CI did not fail and no turn failed.
+
+King reads the record in `models_list`, beside each model's talents. A tier
+also reads it: a candidate that did poorly at the kind of job (of at least
+`learn_after` judged workers, fewer than `learn_below` did well) is passed
+over while a later candidate has room, and `worker_start` says so under
+`passed_over`. When no other candidate has room, the tier's order wins. A
+model King names is taken as named.
+
 ## Settings: `king.toml`
 
 Nothing of King's choices is fixed in code. Leon's defaults are a file,
@@ -431,7 +446,7 @@ claude = "auto"
 | Section | What it sets | Default |
 | --- | --- | --- |
 | `[brain]` | The agent, model, effort and mode King runs on; `mode = ""` is the agent's own | Claude Code, its own model, mode `auto` |
-| `[limits]` | `max_workers`, `daily_budget_usd`, `limit_threshold`, `wake_delay_secs`, `compact_at_tokens`, `check_timeout_secs`, `ci_poll_secs`, `run_parallel`, `run_fixes` | 6, none, 0.85, 5, 600000, 1800, 60, 2, 1 |
+| `[limits]` | `max_workers`, `daily_budget_usd`, `limit_threshold`, `wake_delay_secs`, `compact_at_tokens`, `check_timeout_secs`, `ci_poll_secs`, `run_parallel`, `run_fixes`, `learn_after`, `learn_below` | 6, none, 0.85, 5, 600000, 1800, 60, 2, 1, 5, 0.5 |
 | `[tiers]` | Each tier's candidates in order: agent, model, effort | `cheap`, `standard`, `premium`, `planning` |
 | `[jobs]` | The tier each kind of job (`code`, `research`, `plan`) goes to, and whether it is `strict` (only ever that tier) | code: standard, research: cheap, plan: planning (strict) |
 | `[guards]` | Branches nothing is pushed to, besides each project's default branch; `verify_before_pr`: a pull request needs a passed check of its last commit | `main`, `master`; on |

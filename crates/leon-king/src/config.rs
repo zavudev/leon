@@ -107,6 +107,12 @@ pub struct Limits {
     /// How many times a step's worker is told to mend a failed check before
     /// the step fails and King is told.
     pub run_fixes: u32,
+    /// How many workers of a model must be judged for a kind of job before
+    /// its record counts in routing ([`crate::record`]); 0 never.
+    pub learn_after: u32,
+    /// The share of those that must have done well for a tier not to pass
+    /// the model over.
+    pub learn_below: f64,
 }
 
 /// One agent a tier may give work to.

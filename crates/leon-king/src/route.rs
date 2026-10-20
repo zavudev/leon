@@ -13,11 +13,19 @@
 //! room; then the answer says why and which agent would do instead, so King
 //! can decide. Nothing is started once the day's budget is spent.
 //!
-//! Pure: standings in, a choice out.
+//! A tier also reads the record ([`crate::record`]): a candidate whose model
+//! did poorly at this kind of job (of at least `[limits] learn_after`
+//! workers judged, fewer than `learn_below` did well) is passed over while a
+//! later one has room, and the answer says so. When none has, the tier's
+//! order wins: the first with room takes the job all the same. An agent
+//! King names is taken as named; King reads the record in `models_list`.
+//!
+//! Pure: standings and the record in, a choice out.
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Candidate, Config};
+use crate::record::{self, Summary};
 
 /// Where one agent stands now.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -65,6 +73,7 @@ pub fn route(
     config: &Config,
     ask: &Ask,
     standings: &[Standing],
+    learned: &[Summary],
     spent_today_usd: f64,
 ) -> Result<Choice, String> {
     if let Some(budget) = config.limits.daily_budget_usd {
@@ -77,7 +86,7 @@ pub fn route(
     }
     let rule = config.job(&ask.job);
     if rule.strict {
-        return strict(config, &rule.tier, ask, standings, spent_today_usd);
+        return strict(config, &rule.tier, ask, standings, learned, spent_today_usd);
     }
     let threshold = config.limits.limit_threshold;
     let room = |agent: &str| -> Result<(), String> {
@@ -128,24 +137,67 @@ pub fn route(
             known.join(", ")
         ));
     };
+    let choice = |candidate: &Candidate| Choice {
+        agent: candidate.agent.clone(),
+        model: candidate.model.clone(),
+        effort: candidate.effort.clone(),
+        tier: Some(tier.to_owned()),
+    };
+    let poor = |candidate: &Candidate| poor(config, learned, &ask.job, candidate);
     let mut reasons = Vec::new();
+    let mut passed_over = None;
     for candidate in candidates {
         match room(&candidate.agent) {
-            Ok(()) => {
-                return Ok(Choice {
-                    agent: candidate.agent.clone(),
-                    model: candidate.model.clone(),
-                    effort: candidate.effort.clone(),
-                    tier: Some(tier.to_owned()),
-                })
-            }
+            Ok(()) => match poor(candidate) {
+                Some(why) => {
+                    reasons.push(why);
+                    passed_over.get_or_insert(candidate);
+                }
+                None => return Ok(choice(candidate)),
+            },
             Err(why) => reasons.push(why),
         }
+    }
+    // Every one with room did poorly: the person's order decides.
+    if let Some(candidate) = passed_over {
+        return Ok(choice(candidate));
     }
     Err(format!(
         "no agent of the tier {tier:?} can take it: {}",
         reasons.join("; ")
     ))
+}
+
+/// Why a candidate is passed over for `job` on its record, when it is.
+fn poor(config: &Config, learned: &[Summary], job: &str, candidate: &Candidate) -> Option<String> {
+    let summary = record::of(learned, &candidate.agent, candidate.model.as_deref(), job)?;
+    let rate = summary.rate(config.limits.learn_after)?;
+    (rate < config.limits.learn_below).then(|| {
+        format!(
+            "{} did poorly at {job} jobs: {}",
+            describe(candidate),
+            summary.line()
+        )
+    })
+}
+
+/// The candidates of the tier `choice` came from that are before it and
+/// were passed over on their record: what King is told the job did not go
+/// to, and why.
+pub fn passed_over(
+    config: &Config,
+    learned: &[Summary],
+    job: &str,
+    choice: &Choice,
+) -> Vec<String> {
+    let Some(candidates) = choice.tier.as_ref().and_then(|tier| config.tiers.get(tier)) else {
+        return Vec::new();
+    };
+    candidates
+        .iter()
+        .take_while(|candidate| candidate.agent != choice.agent || candidate.model != choice.model)
+        .filter_map(|candidate| poor(config, learned, job, candidate))
+        .collect()
 }
 
 /// A job that only runs on `tier`'s models: on a named agent only when the
@@ -155,6 +207,7 @@ fn strict(
     tier: &str,
     ask: &Ask,
     standings: &[Standing],
+    learned: &[Summary],
     spent_today_usd: f64,
 ) -> Result<Choice, String> {
     let candidates = config.tiers.get(tier).cloned().unwrap_or_default();
@@ -191,9 +244,10 @@ fn strict(
     );
     let ask = Ask {
         tier: Some(tier.to_owned()),
+        job: ask.job.clone(),
         ..Ask::default()
     };
-    route(&config, &ask, standings, spent_today_usd)
+    route(&config, &ask, standings, learned, spent_today_usd)
 }
 
 fn describe(candidate: &Candidate) -> String {
@@ -232,13 +286,13 @@ mod tests {
     #[test]
     fn a_tier_takes_its_first_candidate_with_room() {
         let config = Config::default();
-        let chosen = route(&config, &tier("cheap"), &everyone(), 0.0).unwrap();
+        let chosen = route(&config, &tier("cheap"), &everyone(), &[], 0.0).unwrap();
         assert_eq!(chosen.agent, "opencode");
         assert_eq!(chosen.tier.as_deref(), Some("cheap"));
 
         let mut standings = everyone();
         standings[2] = standing("opencode", false, None);
-        let chosen = route(&config, &tier("cheap"), &standings, 0.0).unwrap();
+        let chosen = route(&config, &tier("cheap"), &standings, &[], 0.0).unwrap();
         assert_eq!(chosen.agent, "cursor");
     }
 
@@ -248,7 +302,7 @@ mod tests {
         let mut standings = everyone();
         standings[1] = standing("codex", true, Some(0.9));
         standings[0] = standing("claude", true, None);
-        let chosen = route(&config, &Ask::default(), &standings, 0.0).unwrap();
+        let chosen = route(&config, &Ask::default(), &standings, &[], 0.0).unwrap();
         // The default tier is standard: codex first, then claude.
         assert_eq!(chosen.agent, "claude");
         assert_eq!(chosen.tier.as_deref(), Some("standard"));
@@ -262,7 +316,7 @@ mod tests {
             model: Some("grok-5".into()),
             ..Ask::default()
         };
-        let chosen = route(&config, &ask, &everyone(), 0.0).unwrap();
+        let chosen = route(&config, &ask, &everyone(), &[], 0.0).unwrap();
         assert_eq!(
             (chosen.agent.as_str(), chosen.model.as_deref()),
             ("grok", Some("grok-5"))
@@ -271,7 +325,7 @@ mod tests {
 
         let mut standings = everyone();
         standings[3] = standing("grok", true, Some(0.97));
-        let refused = route(&config, &ask, &standings, 0.0).unwrap_err();
+        let refused = route(&config, &ask, &standings, &[], 0.0).unwrap_err();
         assert!(refused.contains("97%"), "{refused}");
         assert!(refused.contains("opencode has room"), "{refused}");
     }
@@ -284,7 +338,7 @@ mod tests {
             job: "plan".into(),
             ..Ask::default()
         };
-        let chosen = route(&config, &cheap_plan, &everyone(), 0.0).unwrap();
+        let chosen = route(&config, &cheap_plan, &everyone(), &[], 0.0).unwrap();
         assert_eq!(chosen.agent, "claude");
         assert_eq!(chosen.model.as_deref(), Some("opus"));
         assert_eq!(chosen.tier.as_deref(), Some("planning"));
@@ -292,7 +346,7 @@ mod tests {
         // Out of room: the next best, never a cheaper one.
         let mut standings = everyone();
         standings[0] = standing("claude", true, Some(0.99));
-        let chosen = route(&config, &cheap_plan, &standings, 0.0).unwrap();
+        let chosen = route(&config, &cheap_plan, &standings, &[], 0.0).unwrap();
         assert_eq!(chosen.agent, "codex");
         assert_eq!(chosen.effort.as_deref(), Some("high"));
 
@@ -301,7 +355,7 @@ mod tests {
             job: "plan".into(),
             ..Ask::default()
         };
-        let refused = route(&config, &named_cheap, &everyone(), 0.0).unwrap_err();
+        let refused = route(&config, &named_cheap, &everyone(), &[], 0.0).unwrap_err();
         assert!(
             refused.contains("a plan job only runs on the planning tier"),
             "{refused}"
@@ -312,7 +366,7 @@ mod tests {
             ..Ask::default()
         };
         assert_eq!(
-            route(&config, &named_codex, &everyone(), 0.0)
+            route(&config, &named_codex, &everyone(), &[], 0.0)
                 .unwrap()
                 .agent,
             "codex"
@@ -330,7 +384,7 @@ mod tests {
             job: "plan".into(),
             ..Ask::default()
         };
-        let chosen = route(&config, &plan, &everyone(), 0.0).unwrap();
+        let chosen = route(&config, &plan, &everyone(), &[], 0.0).unwrap();
         assert_eq!(
             (chosen.agent.as_str(), chosen.model.as_deref()),
             ("grok", Some("grok-5"))
@@ -340,7 +394,9 @@ mod tests {
             ..Ask::default()
         };
         assert_eq!(
-            route(&config, &research, &everyone(), 0.0).unwrap().agent,
+            route(&config, &research, &everyone(), &[], 0.0)
+                .unwrap()
+                .agent,
             "claude"
         );
         // Strict code: the cheap tier, whatever is asked.
@@ -349,7 +405,7 @@ mod tests {
             ..Ask::default()
         };
         assert_eq!(
-            route(&config, &premium_code, &everyone(), 0.0)
+            route(&config, &premium_code, &everyone(), &[], 0.0)
                 .unwrap()
                 .tier
                 .as_deref(),
@@ -361,11 +417,11 @@ mod tests {
     fn nothing_starts_once_the_budget_is_spent_or_without_an_agent() {
         let mut config = Config::default();
         config.limits.daily_budget_usd = Some(10.0);
-        let refused = route(&config, &tier("cheap"), &everyone(), 10.5).unwrap_err();
+        let refused = route(&config, &tier("cheap"), &everyone(), &[], 10.5).unwrap_err();
         assert!(refused.contains("budget"), "{refused}");
-        assert!(route(&config, &tier("cheap"), &everyone(), 9.0).is_ok());
+        assert!(route(&config, &tier("cheap"), &everyone(), &[], 9.0).is_ok());
 
-        let unknown = route(&config, &tier("gold"), &everyone(), 0.0).unwrap_err();
+        let unknown = route(&config, &tier("gold"), &everyone(), &[], 0.0).unwrap_err();
         assert!(
             unknown.contains("cheap, planning, premium, standard"),
             "{unknown}"
@@ -374,7 +430,103 @@ mod tests {
             .into_iter()
             .map(|s| standing(&s.agent, false, None))
             .collect();
-        let refused = route(&config, &tier("premium"), &none, 0.0).unwrap_err();
+        let refused = route(&config, &tier("premium"), &none, &[], 0.0).unwrap_err();
         assert!(refused.contains("claude is not installed"), "{refused}");
+    }
+
+    fn record_of(model: &str, did_well: usize, did_poorly: usize) -> Vec<Summary> {
+        let outcomes: Vec<crate::record::Outcome> = (0..did_well + did_poorly)
+            .map(|n| {
+                let mut outcome =
+                    crate::record::Outcome::new(n as u32, "opencode", Some(model), "code", None, 0);
+                outcome.checked(n < did_well);
+                outcome
+            })
+            .collect();
+        crate::record::summarize(&outcomes)
+    }
+
+    #[test]
+    fn a_tier_passes_over_a_model_that_did_poorly_while_another_has_room() {
+        let mut config = Config::default();
+        config.tiers.insert(
+            "cheap".to_owned(),
+            vec![
+                Candidate {
+                    agent: "opencode".to_owned(),
+                    model: Some("flash".to_owned()),
+                    effort: None,
+                },
+                Candidate {
+                    agent: "codex".to_owned(),
+                    model: None,
+                    effort: None,
+                },
+            ],
+        );
+        let code = Ask {
+            tier: Some("cheap".to_owned()),
+            job: "code".to_owned(),
+            ..Ask::default()
+        };
+        let poor = record_of("flash", 1, 5);
+        let chosen = route(&config, &code, &everyone(), &poor, 0.0).unwrap();
+        assert_eq!(chosen.agent, "codex", "flash did well 1 time of 6");
+        let why = passed_over(&config, &poor, "code", &chosen);
+        assert_eq!(why.len(), 1);
+        assert!(
+            why[0].starts_with("opencode (flash) did poorly at code jobs: 1 of 6"),
+            "{why:?}"
+        );
+        // Too few judged yet, or a good record: the person's order stands.
+        let few = record_of("flash", 0, 3);
+        assert_eq!(
+            route(&config, &code, &everyone(), &few, 0.0).unwrap().agent,
+            "opencode"
+        );
+        let good = record_of("flash", 5, 1);
+        assert_eq!(
+            route(&config, &code, &everyone(), &good, 0.0)
+                .unwrap()
+                .agent,
+            "opencode"
+        );
+        // Nobody else has room: it takes the job all the same.
+        let only = vec![
+            Standing {
+                agent: "opencode".to_owned(),
+                installed: true,
+                used: None,
+            },
+            Standing {
+                agent: "codex".to_owned(),
+                installed: false,
+                used: None,
+            },
+        ];
+        assert_eq!(
+            route(&config, &code, &only, &poor, 0.0).unwrap().agent,
+            "opencode"
+        );
+        // Learning off.
+        config.limits.learn_after = 0;
+        assert_eq!(
+            route(&config, &code, &everyone(), &poor, 0.0)
+                .unwrap()
+                .agent,
+            "opencode"
+        );
+        // Another kind of job has a record of its own.
+        config.limits.learn_after = 5;
+        let research = Ask {
+            job: "research".to_owned(),
+            ..code
+        };
+        assert_eq!(
+            route(&config, &research, &everyone(), &poor, 0.0)
+                .unwrap()
+                .agent,
+            "opencode"
+        );
     }
 }

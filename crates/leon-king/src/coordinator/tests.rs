@@ -992,3 +992,46 @@ fn a_step_interrupted_by_a_restart_goes_on_by_itself() {
     let (_, effects) = Coordinator::restored(config(), saved, 200);
     assert!(effects.contains(&Effect::Verify { worker: schema }));
 }
+
+#[test]
+fn a_workers_checks_and_failures_go_on_its_models_record() {
+    let mut king = Coordinator::new(config());
+    let (one, _) = king.start_worker(spec("one"), 0).unwrap();
+    answer(&mut king, Target::Worker(one), "Done.", 60_000);
+    assert!(king.record().is_empty() || king.record()[0].judged == 0);
+    king.check_started(one, "cargo test", "0123456789", false, 61_000)
+        .unwrap();
+    king.check_finished(one, false, "1 failed", 62_000);
+    king.check_started(one, "cargo test", "0123456789", false, 63_000)
+        .unwrap();
+    king.check_finished(one, true, "ok", 64_000);
+    let (two, _) = king.start_worker(spec("two"), 70_000).unwrap();
+    king.failed_to_start(Target::Worker(two), "no such model", 71_000);
+
+    let record = king.record();
+    assert_eq!(record.len(), 1, "one model, one kind of job: {record:?}");
+    let summary = &record[0];
+    assert_eq!(
+        (
+            summary.agent.as_str(),
+            summary.model.as_deref(),
+            summary.job.as_str()
+        ),
+        ("opencode", Some("cheap-model"), "code")
+    );
+    assert_eq!(
+        (
+            summary.workers,
+            summary.judged,
+            summary.did_well,
+            summary.failed
+        ),
+        (2, 2, 1, 1)
+    );
+    assert_eq!((summary.checked, summary.first_try), (1, 0));
+    assert_eq!(summary.minutes, Some(64_000.0 / 60_000.0));
+    // It is kept with the rest of the state.
+    let saved = serde_json::to_string(king.state()).unwrap();
+    let state: State = serde_json::from_str(&saved).unwrap();
+    assert_eq!(state.record.len(), 2);
+}

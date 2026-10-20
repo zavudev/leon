@@ -39,6 +39,7 @@ use crate::config::{Brain, Config};
 use crate::history::{self, Archived, Past};
 use crate::prompt;
 use crate::protocol::{ConversationStatus, Status, WorkerStatus};
+use crate::record::{self, Outcome};
 use crate::report::{Facts, Report, Totals, TurnStats};
 use crate::route::Choice;
 use crate::run::Run;
@@ -383,6 +384,9 @@ pub struct State {
     /// The runs of tasks' steps, by number.
     #[serde(default)]
     pub runs: BTreeMap<u32, Run>,
+    /// What happened to each worker, newest last ([`crate::record`]).
+    #[serde(default)]
+    pub record: Vec<Outcome>,
 }
 
 /// The turn a target is to have, as the service needs it.
@@ -441,6 +445,7 @@ impl Coordinator {
                 past: Vec::new(),
                 carry: None,
                 runs: BTreeMap::new(),
+                record: Vec::new(),
             },
         }
     }
@@ -1026,6 +1031,7 @@ impl Coordinator {
                     worker.state = WorkerState::Failed;
                     worker.updated_ms = now_ms;
                 }
+                self.note(id, now_ms, |outcome| outcome.failed = true);
                 self.add_news(
                     News {
                         run: None,
@@ -1301,6 +1307,8 @@ impl Coordinator {
                         "failed without a word; read its transcript".to_owned()
                     }
                 };
+                let failed = !ok && !stopped;
+                self.note(id, now_ms, |outcome| outcome.failed |= failed);
                 if let Some(more) = self.step_turn_ended(id, ok, &text, now_ms) {
                     effects.extend(more);
                     return effects;
@@ -1380,6 +1388,7 @@ impl Coordinator {
         check.duration_ms = Some(took);
         check.tail = verify::tail(output, verify::TAIL_CHARS);
         let tail = check.tail.clone();
+        self.note(id, now_ms, |outcome| outcome.checked(passed));
         if let Some(more) = self.step_check_finished(id, passed, &tail, now_ms) {
             let mut effects = vec![Effect::Changed];
             effects.extend(more);
@@ -1517,6 +1526,9 @@ impl Coordinator {
             (None, Ci::Pending) => None,
         };
         worker.updated_ms = now_ms;
+        if matches!(ci, Ci::Passed | Ci::Failed) && seen.closed.is_none() {
+            self.note(id, now_ms, |outcome| outcome.ci = Some(ci == Ci::Passed));
+        }
         if let Some(text) = text {
             self.add_news(
                 News {
@@ -1529,6 +1541,41 @@ impl Coordinator {
             effects.extend(self.tick(now_ms));
         }
         effects
+    }
+
+    /// Writes what happened to a worker in its outcome, with what it cost
+    /// and how long it has worked so far; a worker of before the record
+    /// gets one now.
+    fn note(&mut self, id: u32, now_ms: u64, change: impl FnOnce(&mut Outcome)) {
+        let Some(worker) = self.state.workers.get(&id) else {
+            return;
+        };
+        let record = &mut self.state.record;
+        let at = match record.iter().rposition(|outcome| outcome.worker == id) {
+            Some(at) => at,
+            None => {
+                record.push(Outcome::new(
+                    id,
+                    &worker.conversation.agent,
+                    worker.conversation.model.as_deref(),
+                    worker.job.as_str(),
+                    worker.project.as_deref(),
+                    worker.started_ms,
+                ));
+                let excess = record.len().saturating_sub(record::KEPT);
+                record.drain(..excess);
+                record.len() - 1
+            }
+        };
+        let outcome = &mut record[at];
+        change(outcome);
+        outcome.cost_usd = worker.conversation.cost_usd;
+        outcome.took_ms = now_ms.saturating_sub(worker.started_ms);
+    }
+
+    /// What the record says of each model, per kind of job.
+    pub fn record(&self) -> Vec<record::Summary> {
+        record::summarize(&self.state.record)
     }
 
     fn add_news(&mut self, news: News, now_ms: u64) {

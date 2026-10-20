@@ -28,6 +28,11 @@ check_timeout_secs = 1800 # how long a project's check may run in a worktree
 ci_poll_secs = 60         # how often an open pull request's CI is looked at
 run_parallel = 2          # steps of one run working at the same time
 run_fixes = 1             # times a step's worker mends a failed check before King is told
+# A tier passes over a model whose record for a kind of job is poor: of at
+# least `learn_after` workers judged (a check, CI, a failure), fewer than
+# `learn_below` did well. Only while another candidate has room. 0 never does.
+learn_after = 5
+learn_below = 0.5
 
 # Tiers of workers: each an ordered list of candidates, the first one installed
 # and with room in its usage windows is taken. A model is named as its agent
