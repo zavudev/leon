@@ -32,6 +32,22 @@ service starts by itself the first time a command needs it (`leon king serve`
 runs it in the foreground instead). What you say while King is working waits,
 and King hears all of it together when its turn ends.
 
+To keep King and its workers going with the window closed, from login on and
+back after a failure, install the service in your session:
+
+```sh
+leon king service install [--linger]   # a systemd user unit, or a launchd agent
+leon king service status
+leon king service logs
+leon king service uninstall
+```
+
+It is `leon host service` for King: the same rules (your own user, never
+root; `--linger` keeps it running when you log out), a unit of its own
+(`leon-king.service`, `dev.zavu.leon.king`), and it runs
+`leon --data-dir <dir> king serve` with the `PATH` of the session that
+installed it, which King's workers need.
+
 ## In the window
 
 **The King** is a row of the sidebar's navigation, above The Den
@@ -440,8 +456,6 @@ conversation; changing its model or effort keeps the same one.
 ## Not built yet
 
 * King on the phone, through the paired host.
-* Installing the service as a background service of your session
-  (`leon king service install`), the way `leon host service` is.
 * Workers on SSH and relay machines, and agents that only run in a terminal
   (Kimi, ZCode, Antigravity) as workers.
 * Showing the tokens in the window's own conversations and on the phone:

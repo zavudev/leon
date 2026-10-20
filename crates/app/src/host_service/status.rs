@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use leon_remote::{Output, RunError};
 
 use super::plan::Os;
+use super::unit::Program;
 
 /// What the manager says the service is doing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,6 +232,8 @@ pub struct Devices {
 pub struct Report {
     /// The system.
     pub os: Os,
+    /// Which service.
+    pub program: Program,
     /// The unit file or property list.
     pub definition: PathBuf,
     /// Whether that file exists.
@@ -241,8 +244,8 @@ pub struct Report {
     pub linger: Option<bool>,
     /// The running host's heartbeat, when there is a recent one.
     pub heartbeat: Option<Heartbeat>,
-    /// The paired devices, or why they cannot be read.
-    pub devices: Result<Devices, String>,
+    /// The paired devices, or why they cannot be read; the host's only.
+    pub devices: Option<Result<Devices, String>>,
     /// Now, in seconds since the epoch.
     pub now: u64,
 }
@@ -273,26 +276,32 @@ pub fn duration_text(seconds: u64) -> String {
 
 fn state_line(report: &Report) -> String {
     let manager = &report.manager;
+    let command = report.program.command();
     match &manager.activity {
         Activity::Running => {
-            let pid = manager.pid.map(|pid| format!(" (pid {pid})")).unwrap_or_default();
+            let pid = manager
+                .pid
+                .map(|pid| format!(" (pid {pid})"))
+                .unwrap_or_default();
             let since = match (
                 report.heartbeat.as_ref().and_then(|beat| beat.started),
                 &manager.since,
             ) {
-                (Some(started), _) => format!(", up {}", duration_text(report.now.saturating_sub(started))),
+                (Some(started), _) => {
+                    format!(", up {}", duration_text(report.now.saturating_sub(started)))
+                }
                 (None, Some(since)) => format!(", since {since}"),
                 (None, None) => String::new(),
             };
             format!("running{pid}{since}")
         }
-        Activity::Failed => "failed. See `leon host service logs`.".into(),
+        Activity::Failed => format!("failed. See `{command} service logs`."),
         Activity::Stopped => "installed, not running".into(),
         Activity::NotLoaded if report.installed => {
-            "installed, but the system manager has not loaded it. Run `leon host service install` again.".into()
+            format!("installed, but the system manager has not loaded it. Run `{command} service install` again.")
         }
         Activity::NotLoaded => "not running".into(),
-        Activity::Other(state) => format!("{state}. See `leon host service logs`."),
+        Activity::Other(state) => format!("{state}. See `{command} service logs`."),
         Activity::Unavailable(why) => format!("unknown. {why}"),
     }
 }
@@ -305,7 +314,10 @@ fn starts_line(report: &Report) -> Option<String> {
         (_, Some(false), _) => "never by itself: the service is not enabled".into(),
         (Os::Linux, _, Some(true)) => "at boot (lingering is on)".into(),
         (Os::Linux, _, Some(false)) => {
-            "at login. It stops when you log out of your last session; `leon host service install --linger` keeps it running".into()
+            format!(
+                "at login. It stops when you log out of your last session; `{} service install --linger` keeps it running",
+                report.program.command()
+            )
         }
         (Os::MacOs, None, _) => {
             "at login, unless launchd has switched it off (that could not be checked)".into()
@@ -326,16 +338,19 @@ fn devices_line(devices: &Result<Devices, String>) -> String {
     }
 }
 
-/// The text of `leon host service status`.
+/// The text of `leon host service status` (and of `leon king service status`).
 pub fn render(report: &Report) -> String {
     let mut lines = Vec::new();
+    let command = report.program.command();
     if report.installed {
         lines.push(format!(
             "Service:   installed ({})",
             report.definition.display()
         ));
     } else {
-        lines.push("Service:   not installed. `leon host service install` installs it".into());
+        lines.push(format!(
+            "Service:   not installed. `{command} service install` installs it"
+        ));
     }
     lines.push(format!("State:     {}", state_line(report)));
     if let Some(starts) = starts_line(report) {
@@ -357,11 +372,13 @@ pub fn render(report: &Report) -> String {
                 .map(|pid| format!(" (pid {pid})"))
                 .unwrap_or_default();
             lines.push(format!(
-                "Note:      a `leon host` started by hand is running{pid} for this data directory; it is not the service"
+                "Note:      a `{command}` started by hand is running{pid} for this data directory; it is not the service"
             ));
         }
     }
-    lines.push(format!("Devices:   {}", devices_line(&report.devices)));
+    if let Some(devices) = &report.devices {
+        lines.push(format!("Devices:   {}", devices_line(devices)));
+    }
     lines.join("\n") + "\n"
 }
 
@@ -540,6 +557,7 @@ mod tests {
     fn report() -> Report {
         Report {
             os: Os::Linux,
+            program: Program::Host,
             definition: PathBuf::from("/home/ana/.config/systemd/user/leon-host.service"),
             installed: true,
             manager: parse_systemd(&ok(RUNNING)),
@@ -550,10 +568,10 @@ mod tests {
                 relay: Some("online".into()),
                 started: Some(1_000),
             }),
-            devices: Ok(Devices {
+            devices: Some(Ok(Devices {
                 active: 2,
                 revoked: 1,
-            }),
+            })),
             now: 1_000 + 3 * 3600 + 12 * 60,
         }
     }
@@ -592,15 +610,33 @@ Devices:   2 paired, 1 revoked
     }
 
     #[test]
+    fn kings_service_speaks_of_king_and_has_no_devices() {
+        let text = render(&Report {
+            program: Program::King,
+            definition: PathBuf::from("/home/ana/.config/systemd/user/leon-king.service"),
+            manager: Manager::of(Activity::Failed),
+            heartbeat: None,
+            devices: None,
+            ..report()
+        });
+        let expected = "\
+Service:   installed (/home/ana/.config/systemd/user/leon-king.service)
+State:     failed. See `leon king service logs`.
+Starts:    at login. It stops when you log out of your last session; `leon king service install --linger` keeps it running
+";
+        assert_eq!(text, expected);
+    }
+
+    #[test]
     fn a_service_that_is_not_installed_says_how_to_install_it() {
         let text = render(&Report {
             installed: false,
             manager: Manager::of(Activity::NotLoaded),
             heartbeat: None,
-            devices: Ok(Devices {
+            devices: Some(Ok(Devices {
                 active: 0,
                 revoked: 0,
-            }),
+            })),
             ..report()
         });
         let expected = "\
@@ -627,7 +663,7 @@ Devices:   none paired. `leon host pair` prints a code
         let text = render(&Report {
             manager: Manager::of(Activity::Failed),
             heartbeat: None,
-            devices: Err("corrupt".into()),
+            devices: Some(Err("corrupt".into())),
             ..report()
         });
         assert!(text.contains("State:     failed. See `leon host service logs`.\n"));

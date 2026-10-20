@@ -105,6 +105,7 @@ fn main() {
             std::process::exit(host_service::run(
                 arguments[2..].to_vec(),
                 product::data_dir(),
+                host_service::Program::Host,
             ));
         }
         std::process::exit(leon_host::cli::run(

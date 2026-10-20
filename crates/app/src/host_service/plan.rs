@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use leon_remote::CommandSpec;
 
-use super::unit::{launchd_label, launchd_plist, systemd_unit, Service, UNIT_NAME};
+use super::unit::{launchd_label, launchd_plist, systemd_unit, Program, Service};
 
 /// A system a service can be installed on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +31,8 @@ pub enum Os {
 pub struct Layout {
     /// The system.
     pub os: Os,
+    /// Which service.
+    pub program: Program,
     /// The unit file (Linux) or the property list (macOS).
     pub definition: PathBuf,
     /// The file the agent writes its output to (macOS; Linux has the journal).
@@ -43,17 +45,22 @@ impl Layout {
     /// The files of the service for a person's directories: `config_dir` is
     /// the user configuration directory (`~/.config` or `$XDG_CONFIG_HOME`),
     /// `home` the home directory.
-    pub fn new(os: Os, home: &Path, config_dir: &Path, app_id: &str) -> Self {
-        let label = launchd_label(app_id);
+    pub fn new(os: Os, home: &Path, config_dir: &Path, app_id: &str, program: Program) -> Self {
+        let label = launchd_label(app_id, program);
         match os {
             Os::Linux => Self {
                 os,
-                definition: config_dir.join("systemd").join("user").join(UNIT_NAME),
+                program,
+                definition: config_dir
+                    .join("systemd")
+                    .join("user")
+                    .join(program.unit_name()),
                 log: None,
                 label,
             },
             Os::MacOs => Self {
                 os,
+                program,
                 definition: home
                     .join("Library")
                     .join("LaunchAgents")
@@ -62,11 +69,16 @@ impl Layout {
                     home.join("Library")
                         .join("Logs")
                         .join("Leon")
-                        .join("host.log"),
+                        .join(format!("{}.log", program.word())),
                 ),
                 label,
             },
         }
+    }
+
+    /// The systemd user unit's file name.
+    fn unit(&self) -> &'static str {
+        self.program.unit_name()
     }
 
     /// The agent in launchd's domain of this user: `gui/<uid>/<label>`.
@@ -143,12 +155,12 @@ pub fn install(service: &Service, layout: &Layout, uid: u32, linger: bool) -> Pl
             actions.push(run("reload systemd", systemctl(&["daemon-reload"]), true));
             actions.push(run(
                 "start it at every login",
-                systemctl(&["enable", UNIT_NAME]),
+                systemctl(&["enable", layout.unit()]),
                 true,
             ));
             actions.push(run(
                 "start it now",
-                systemctl(&["restart", UNIT_NAME]),
+                systemctl(&["restart", layout.unit()]),
                 true,
             ));
             if linger {
@@ -196,7 +208,7 @@ pub fn install(service: &Service, layout: &Layout, uid: u32, linger: bool) -> Pl
 /// [`remove`].
 pub fn stop(layout: &Layout, uid: u32) -> CommandSpec {
     match layout.os {
-        Os::Linux => systemctl(&["disable", "--now", UNIT_NAME]),
+        Os::Linux => systemctl(&["disable", "--now", layout.unit()]),
         Os::MacOs => launchctl(&["bootout", &layout.target(uid)]),
     }
 }
@@ -210,7 +222,7 @@ pub fn remove(layout: &Layout) -> Plan {
         actions.push(run("reload systemd", systemctl(&["daemon-reload"]), false));
         actions.push(run(
             "forget a failure it left",
-            systemctl(&["reset-failed", UNIT_NAME]),
+            systemctl(&["reset-failed", layout.unit()]),
             false,
         ));
     }
@@ -222,7 +234,7 @@ pub fn probe(layout: &Layout, uid: u32) -> CommandSpec {
     match layout.os {
         Os::Linux => systemctl(&[
             "show",
-            UNIT_NAME,
+            layout.unit(),
             "--property=LoadState,ActiveState,SubState,UnitFileState,MainPID,ActiveEnterTimestamp",
         ]),
         Os::MacOs => launchctl(&["print", &layout.target(uid)]),
@@ -250,7 +262,7 @@ pub fn logs(layout: &Layout, lines: usize) -> Option<CommandSpec> {
         CommandSpec::new("journalctl").args([
             "--user",
             "--unit",
-            UNIT_NAME,
+            layout.unit(),
             "--lines",
             &lines.to_string(),
             "--no-pager",
@@ -266,6 +278,7 @@ mod tests {
 
     fn service() -> Service {
         Service {
+            program: Program::Host,
             exe: PathBuf::from("/usr/bin/leon"),
             data_dir: PathBuf::from("/home/ana/.local/share/leon"),
             relay: None,
@@ -280,6 +293,7 @@ mod tests {
             Path::new("/home/ana"),
             Path::new("/home/ana/.config"),
             APP_ID,
+            Program::Host,
         )
     }
 
@@ -289,6 +303,7 @@ mod tests {
             Path::new("/Users/ana"),
             Path::new("/Users/ana/Library/Application Support"),
             APP_ID,
+            Program::Host,
         )
     }
 
@@ -332,6 +347,54 @@ mod tests {
             Some(Path::new("/Users/ana/Library/Logs/Leon/host.log"))
         );
         assert_eq!(linux().log, None);
+    }
+
+    #[test]
+    fn kings_service_has_files_and_a_unit_of_its_own() {
+        let king = |os, home: &str, config: &str| {
+            Layout::new(
+                os,
+                Path::new(home),
+                Path::new(config),
+                APP_ID,
+                Program::King,
+            )
+        };
+        let linux = king(Os::Linux, "/home/ana", "/home/ana/.config");
+        assert_eq!(
+            linux.definition,
+            Path::new("/home/ana/.config/systemd/user/leon-king.service")
+        );
+        let plan = install(
+            &Service {
+                program: Program::King,
+                ..service()
+            },
+            &linux,
+            1000,
+            false,
+        );
+        assert_eq!(
+            commands(&plan),
+            [
+                "systemctl --user daemon-reload",
+                "systemctl --user enable leon-king.service",
+                "systemctl --user restart leon-king.service",
+            ]
+        );
+        let mac = king(
+            Os::MacOs,
+            "/Users/ana",
+            "/Users/ana/Library/Application Support",
+        );
+        assert_eq!(
+            mac.definition,
+            Path::new("/Users/ana/Library/LaunchAgents/dev.zavu.leon.king.plist")
+        );
+        assert_eq!(
+            mac.log.as_deref(),
+            Some(Path::new("/Users/ana/Library/Logs/Leon/king.log"))
+        );
     }
 
     #[test]

@@ -148,6 +148,9 @@ pub fn usage() -> String {
        leon king brain <agent> [model] [effort]\n  \
        leon king config [--defaults] the configuration in force (king.toml over the defaults)\n  \
        leon king serve               run the service in the foreground\n  \
+       leon king service install | uninstall | status | logs\n  \
+       \x20                            run the service in the background of your session,\n  \
+       \x20                            so King goes on with the window closed\n  \
        leon king mcp                 King's tools, for the agent King runs on\n\n\
      The service starts by itself when a command needs it. Its settings are\n\
      king.toml in Leon's data folder; see docs/KING.md.\n"
@@ -158,6 +161,8 @@ pub fn usage() -> String {
 #[derive(Debug, Clone, PartialEq)]
 enum Command {
     Serve,
+    /// `leon king service …`: the service of the user's session.
+    Service(Vec<String>),
     Mcp,
     Help,
     /// A request, and whether to wait for King's answer after it.
@@ -178,6 +183,7 @@ fn parse(arguments: &[String]) -> Result<Command, String> {
     };
     Ok(match first.as_str() {
         "serve" => Command::Serve,
+        "service" => Command::Service(rest.to_vec()),
         "config" => match rest {
             [] => Command::Config(false),
             [flag] if flag == "--defaults" => Command::Config(true),
@@ -359,6 +365,9 @@ pub fn run(data_dir: Option<PathBuf>, arguments: Vec<String>) -> i32 {
     };
     let variable = |name: &str| std::env::var(name).ok();
     let data_dir = data_dir_of(data_dir, &variable, product::data_dir);
+    if let Command::Service(arguments) = command {
+        return crate::host_service::run(arguments, data_dir, crate::host_service::Program::King);
+    }
     #[cfg(not(unix))]
     {
         let _ = (command, data_dir);
@@ -377,6 +386,7 @@ pub fn run(data_dir: Option<PathBuf>, arguments: Vec<String>) -> i32 {
                 Ok(())
             }
             Command::Serve => serve::run(paths),
+            Command::Service(_) => unreachable!("the service command is carried out above"),
             Command::Mcp => mcp::run(&paths),
             Command::Ask(request, wait) => client::ask_and_print(&paths, request, wait),
             Command::Log(target) => client::print_log(&paths, target),
@@ -504,6 +514,10 @@ mod tests {
         assert!(parse(&strings(&["run", "cancel"])).is_err());
         assert!(parse(&strings(&["dance"])).is_err());
         assert_eq!(parse(&[]).unwrap(), Command::Help);
+        assert_eq!(
+            parse(&strings(&["service", "install", "--linger"])).unwrap(),
+            Command::Service(strings(&["install", "--linger"]))
+        );
         assert_eq!(
             parse(&strings(&["config", "--defaults"])).unwrap(),
             Command::Config(true)
