@@ -97,7 +97,19 @@ export type KingTarget = 'brain' | { worker: number };
 export type KingRequest =
   | { op: 'status' }
   | { op: 'say'; text: string }
-  | { op: 'transcript'; target: KingTarget; since?: number; limit?: number };
+  | { op: 'transcript'; target: KingTarget; since?: number; limit?: number }
+  /**
+   * The answer's fields sit beside the question's, as the service reads
+   * them: `choice` (a permission's choice id, or an option's label),
+   * `approve` (a plan), `text` (a reason, words of one's own, what to change).
+   */
+  | { op: 'answer'; target: KingTarget; question: string; choice?: string; approve?: boolean; text?: string }
+  | { op: 'tell_worker'; worker: number; text: string }
+  | { op: 'interrupt'; target: KingTarget }
+  | { op: 'stop_worker'; worker: number }
+  | { op: 'run_start'; task: string; max_parallel?: number; budget_usd?: number }
+  | { op: 'run_continue'; run: number; text?: string; budget_usd?: number }
+  | { op: 'run_cancel'; run: number };
 
 /** A watch on King's notices; `stop` ends it. */
 export type KingWatch = { stop(): void };

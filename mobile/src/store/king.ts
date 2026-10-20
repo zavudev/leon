@@ -18,9 +18,9 @@ import {
   type KingStatus,
 } from '@/king/model';
 import { explain } from '@/link/errors';
-import { LinkError, type KingTarget, type KingWatch } from '@/link/types';
+import { LinkError, type KingRequest, type KingTarget, type KingWatch } from '@/link/types';
 
-import { announceKing } from './alerts';
+import { announceKing, announceKingRefusal } from './alerts';
 import { ensureLink, refreshShared, useRuntime } from './runtime';
 
 type KingState = {
@@ -161,12 +161,34 @@ export function refreshKing(hostId: string): Promise<void> {
   });
 }
 
-/** Says something to King. Throws what refused it, for the screen to say. */
-export async function sayToKing(hostId: string, text: string): Promise<void> {
+/**
+ * Asks King to do something (see `@/king/model` for the requests), then reads
+ * its status again. Throws what refused it, for the screen to say.
+ */
+export async function askKing(hostId: string, request: KingRequest): Promise<void> {
   const opened = ensureLink(hostId);
   if (!opened || !canAsk(hostId)) throw new LinkError('Offline');
-  await opened.kingAsk({ op: 'say', text });
+  await opened.kingAsk(request);
   await refreshKing(hostId);
+}
+
+/** Says something to King. Throws what refused it, for the screen to say. */
+export function sayToKing(hostId: string, text: string): Promise<void> {
+  return askKing(hostId, { op: 'say', text });
+}
+
+/**
+ * Asks King to do something, and says across the top what refused it.
+ * Whether it was done.
+ */
+export async function tryKing(hostId: string, request: KingRequest): Promise<boolean> {
+  try {
+    await askKing(hostId, request);
+    return true;
+  } catch (error) {
+    announceKingRefusal(hostId, kingRefusal(error));
+    return false;
+  }
 }
 
 const watchers = new Map<string, { count: number; stop(): void }>();

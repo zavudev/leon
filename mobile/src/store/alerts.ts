@@ -138,3 +138,12 @@ export function announceKing(hostId: string, title: string, body: string, echo: 
   clearTimeout(hide);
   hide = setTimeout(dismissToast, TOAST_MS);
 }
+
+/** Says why King would not do what the person asked: its own sentence. */
+export function announceKingRefusal(hostId: string, sentence: string): void {
+  buzz('failed');
+  made += 1;
+  useAlerts.setState({ toast: { key: made, kingOf: hostId, kind: 'failed', title: 'King refused', line: sentence } });
+  clearTimeout(hide);
+  hide = setTimeout(dismissToast, TOAST_MS);
+}

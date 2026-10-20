@@ -4,11 +4,29 @@
 // not known here is ignored, and one that is missing or of the wrong kind
 // leaves its default.
 
+import type { KingRequest, KingTarget } from '@/link/types';
+
 /** What kind of thing an entry of a conversation is, as King's service says it. */
 export type EntryKind = 'prompt' | 'news' | 'agent' | 'tool' | 'question' | 'notice' | 'report';
 
 /** One thing a conversation said. */
 export type KingEntry = { seq: number; atMs: number; kind: EntryKind; text: string };
+
+/**
+ * How a question may be answered: one of a permission's choices, by id, each
+ * with what it does (`allow`, `always`, `deny`); an option, by label, or
+ * words of one's own; a plan approved or not; or, for a form this app does
+ * not know, words alone.
+ */
+export type QuestionForm =
+  | { kind: 'permission'; choices: { id: string; effect: string }[] }
+  /** `options`: the labels, read from the question's text; none when they could not be. */
+  | { kind: 'options'; options: string[] }
+  | { kind: 'plan' }
+  | { kind: 'words' };
+
+/** A question King or a worker asked and nobody answered yet. */
+export type KingQuestion = { id: string; text: string; form: QuestionForm };
 
 /** A conversation, in short: King's own or a worker's. */
 export type KingConversation = {
@@ -18,8 +36,8 @@ export type KingConversation = {
   /** In a turn. */
   busy: boolean;
   busySinceMs?: number;
-  /** How many questions it waits on. */
-  questions: number;
+  /** The questions it waits on, oldest first. */
+  questions: KingQuestion[];
   costUsd: number;
   /** The number of its newest entry. */
   lastSeq?: number;
@@ -36,6 +54,10 @@ export type KingWorker = {
   title: string;
   project?: string;
   cwd: string;
+  /** The machine it works on, by Leon's id of it; this computer when absent. */
+  machine?: string;
+  /** It runs in a terminal of the desktop window: it cannot be told more from here. */
+  terminal: boolean;
   state: WorkerState;
   conversation: KingConversation;
   /** The last thing it answered, cut short. */
@@ -46,6 +68,8 @@ export type KingWorker = {
 /** A task of the board carried out as its steps. */
 export type KingRun = {
   id: number;
+  /** Its task, by id. */
+  task: string;
   title: string;
   project: string;
   /** `running`, `blocked`, `done` or `canceled`. */
@@ -102,6 +126,52 @@ function list(value: unknown): unknown[] {
 
 const KINDS = new Set<string>(['prompt', 'news', 'agent', 'tool', 'question', 'notice', 'report']);
 
+/**
+ * The labels of the options a question offers. The service gives them only in
+ * its text, `<question> Options: a | b | c.`, and only one question's are
+ * offered: an option picked answers every question of the form.
+ */
+export function optionLabels(said: string): string[] {
+  const at = said.indexOf('Options: ');
+  if (at < 0 || said.indexOf('Options: ', at + 1) >= 0) return [];
+  return said
+    .slice(at + 'Options: '.length)
+    .trim()
+    .replace(/\.$/, '')
+    .split(' | ')
+    .map((label) => label.trim())
+    .filter(Boolean);
+}
+
+function formOf(value: unknown, said: string): QuestionForm {
+  const json = record(value);
+  switch (json?.type) {
+    case 'permission': {
+      const choices = list(json.choices)
+        .map((pair) => {
+          const [id, effect] = Array.isArray(pair) ? pair : [];
+          return typeof id === 'string' && typeof effect === 'string' ? { id, effect } : undefined;
+        })
+        .filter(defined);
+      return choices.length > 0 ? { kind: 'permission', choices } : { kind: 'words' };
+    }
+    case 'choices':
+      return { kind: 'options', options: list(json.questions).length === 1 ? optionLabels(said) : [] };
+    case 'plan':
+      return { kind: 'plan' };
+    default:
+      return { kind: 'words' };
+  }
+}
+
+function questionOf(value: unknown): KingQuestion | undefined {
+  const json = record(value);
+  const id = text(json?.id);
+  if (!json || !id) return undefined;
+  const said = text(json.text) ?? '';
+  return { id, text: said, form: formOf(json.form, said) };
+}
+
 function conversationOf(value: unknown): KingConversation {
   const json = record(value) ?? {};
   return {
@@ -110,7 +180,7 @@ function conversationOf(value: unknown): KingConversation {
     effort: text(json.effort) || undefined,
     busy: json.busy === true,
     busySinceMs: count(json.busy_since_ms),
-    questions: list(json.questions).length,
+    questions: list(json.questions).map(questionOf).filter(defined),
     costUsd: count(json.cost_usd) ?? 0,
     lastSeq: count(json.last_seq),
   };
@@ -125,6 +195,8 @@ function workerOf(value: unknown): KingWorker | undefined {
     title: text(json.title) || `Worker #${id}`,
     project: text(json.project) || undefined,
     cwd: text(json.cwd) ?? '',
+    machine: text(json.machine) || undefined,
+    terminal: json.terminal === true,
     state: text(json.state) ?? 'working',
     conversation: conversationOf(json.conversation),
     lastAnswer: text(json.last_answer)?.trim() || undefined,
@@ -138,6 +210,7 @@ function runOf(value: unknown): KingRun | undefined {
   if (!json || id === undefined) return undefined;
   return {
     id,
+    task: text(json.task) ?? '',
     title: text(json.title) ?? '',
     project: text(json.project) ?? '',
     state: text(json.state) ?? 'running',
@@ -295,4 +368,142 @@ export function spentLine(status: KingStatus): string {
 /** The first line of a text, for an entry shown folded. */
 export function firstLine(said: string): string {
   return said.trim().split('\n')[0]?.trim() ?? '';
+}
+
+/** One way to answer a question at a press: what the button says, and the answer. */
+export type Pick = { label: string; tone: 'go' | 'plain' | 'stop'; reply: KingReply };
+
+/** An answer, as the service reads it beside the question. */
+export type KingReply = { choice?: string; approve?: boolean; text?: string };
+
+const EFFECTS: Record<string, [string, Pick['tone'], number]> = {
+  allow: ['Allow', 'go', 0],
+  always: ['Always', 'plain', 1],
+  deny: ['Deny', 'stop', 2],
+};
+
+/**
+ * The answers of a question one press gives, in the order they are drawn: a
+ * permission's choices (allow, always, deny), an option per label, or
+ * approve and reject for a plan. What is written in the field goes with it
+ * (see `answerRequest`); some questions take words alone.
+ */
+export function picksOf(question: KingQuestion): Pick[] {
+  const { form } = question;
+  switch (form.kind) {
+    case 'permission':
+      return form.choices
+        .map((choice) => {
+          const [label, tone, rank] = EFFECTS[choice.effect] ?? [choice.id, 'plain', 3];
+          return { rank, pick: { label, tone, reply: { choice: choice.id } } };
+        })
+        .sort((a, b) => a.rank - b.rank)
+        .map(({ pick }) => pick);
+    case 'options':
+      return form.options.map((label) => ({ label, tone: 'plain', reply: { choice: label } }));
+    case 'plan':
+      return [
+        { label: 'Approve', tone: 'go', reply: { approve: true } },
+        { label: 'Reject', tone: 'stop', reply: { approve: false } },
+      ];
+    case 'words':
+      return [];
+  }
+}
+
+/** Whether a question can be answered with words alone: options, and the forms not known here. */
+export function takesWords(question: KingQuestion): boolean {
+  return question.form.kind === 'options' || question.form.kind === 'words';
+}
+
+/** What the field under a question is for. */
+export function wordsHint(question: KingQuestion): string {
+  switch (question.form.kind) {
+    case 'permission':
+      return 'Why not, or what to do instead (optional)';
+    case 'plan':
+      return 'What to change (optional)';
+    case 'options':
+      return question.form.options.length > 0 ? 'Or in your own words' : 'Your answer';
+    case 'words':
+      return 'Your answer';
+  }
+}
+
+function trimmed(said: string | undefined): string | undefined {
+  return said?.trim() || undefined;
+}
+
+/**
+ * The request that answers question `question` of `target`'s conversation.
+ * `words`, written in the field, go with the answer: a permission's reason,
+ * an answer of one's own, what to change in a plan.
+ */
+export function answerRequest(target: KingTarget, question: string, reply: KingReply, words?: string): KingRequest {
+  const request: Extract<KingRequest, { op: 'answer' }> = { op: 'answer', target, question };
+  if (reply.choice !== undefined) request.choice = reply.choice;
+  if (reply.approve !== undefined) request.approve = reply.approve;
+  const said = trimmed(reply.text ?? words);
+  if (said) request.text = said;
+  return request;
+}
+
+/** What can be done to a worker from here, as it is now. */
+export type WorkerActions = { tell: boolean; interrupt: boolean; stop: boolean };
+
+/**
+ * A worker taken over is no longer King's: nothing. One in a terminal of the
+ * desktop window cannot be told more. Only a turn can be interrupted; one
+ * stopped already is not stopped again (telling it more starts it again).
+ */
+export function workerActions(worker: KingWorker): WorkerActions {
+  if (worker.state === 'released') return { tell: false, interrupt: false, stop: false };
+  return {
+    tell: !worker.terminal,
+    interrupt: worker.conversation.busy,
+    stop: worker.state !== 'stopped',
+  };
+}
+
+export function tellWorkerRequest(worker: number, said: string): KingRequest {
+  return { op: 'tell_worker', worker, text: said.trim() };
+}
+
+export function interruptRequest(target: KingTarget): KingRequest {
+  return { op: 'interrupt', target };
+}
+
+export function stopWorkerRequest(worker: number): KingRequest {
+  return { op: 'stop_worker', worker };
+}
+
+/** Where a worker works, when it is not this computer: `on build-box`. */
+export function machineLine(worker: KingWorker): string | undefined {
+  return worker.machine ? `on ${worker.machine}` : undefined;
+}
+
+/** What can be done to a run: go on with it while it is blocked, call it off until it is over. */
+export type RunActions = { continue: boolean; cancel: boolean };
+
+export function runActions(run: KingRun): RunActions {
+  const over = run.state === 'done' || run.state === 'canceled';
+  return { continue: run.state === 'blocked', cancel: !over };
+}
+
+/** A run of a task of the board, by its id or the end of it; nothing when none is written. */
+export function runStartRequest(task: string): KingRequest | undefined {
+  const id = task.trim().replace(/^#/, '');
+  return id ? { op: 'run_start', task: id } : undefined;
+}
+
+/** Goes on with a blocked run; `said` is told to the workers of its failed steps. */
+export function runContinueRequest(run: number, said?: string): KingRequest {
+  const request: Extract<KingRequest, { op: 'run_continue' }> = { op: 'run_continue', run };
+  const told = trimmed(said);
+  if (told) request.text = told;
+  return request;
+}
+
+export function runCancelRequest(run: number): KingRequest {
+  return { op: 'run_cancel', run };
 }

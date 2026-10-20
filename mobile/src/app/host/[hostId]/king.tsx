@@ -1,6 +1,7 @@
 // King of one computer: its conversation with the person, newest at the
-// bottom, a line to say something to it, and its workers and runs. It is
-// followed while this screen is open; a worker opens its own conversation.
+// bottom, what it asks, a line to say something to it, and its workers and
+// runs, which go on, are called off or are started here. It is followed
+// while this screen is open; a worker opens its own conversation.
 import Feather from '@expo/vector-icons/Feather';
 import { FlashList } from '@shopify/flash-list';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -9,15 +10,27 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, TextInput, View }
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { piecesOf, runLine, runsOn, spentLine, workersInOrder, type Piece } from '@/king/model';
+import {
+  answerRequest,
+  piecesOf,
+  runCancelRequest,
+  runContinueRequest,
+  runsOn,
+  runStartRequest,
+  spentLine,
+  workersInOrder,
+  type KingReply,
+  type Piece,
+} from '@/king/model';
 import { kingInFront, tap } from '@/store/alerts';
 import { useApp } from '@/store/app';
-import { kingRefusal, sayToKing, useKing, watchKing } from '@/store/king';
+import { kingRefusal, sayToKing, tryKing, useKing, watchKing } from '@/store/king';
 import { ensureLink, useRuntime } from '@/store/runtime';
 import { agentColor, fonts, metrics } from '@/theme/tokens';
 import { useTheme } from '@/theme/useTheme';
 import { ConnectionBanner } from '@/ui/ConnectionBanner';
-import { KingPiece, WorkerCard, Working } from '@/ui/King';
+import { KingPiece, RunRow, StartRun, WorkerCard, Working } from '@/ui/King';
+import { KingQuestionPanel } from '@/ui/KingQuestion';
 import { Callout, Chip, Label, Rule, Screen, Txt } from '@/ui/kit';
 
 type Tab = 'talk' | 'workers';
@@ -50,6 +63,20 @@ export default function King() {
   const brain = status?.brain;
   const busy = brain?.busy === true;
   const noKing = shared !== undefined && !shared.king;
+  const asks = (brain?.questions.length ?? 0) > 0;
+
+  const answer = useCallback(
+    (question: string, reply: KingReply, words: string) =>
+      tryKing(hostId, answerRequest('brain', question, reply, words)),
+    [hostId],
+  );
+  const startRun = useCallback(
+    async (task: string) => {
+      const request = runStartRequest(task);
+      return request ? tryKing(hostId, request) : false;
+    },
+    [hostId],
+  );
 
   const canSend = online && !sending && !noKing && draft.trim().length > 0;
   const submit = useCallback(() => {
@@ -87,9 +114,9 @@ export default function King() {
       bottomInset={false}>
       <ConnectionBanner
         hostId={hostId}
-        detail={busy ? 'King is working' : brain && brain.questions > 0 ? 'King asks you' : undefined}
+        detail={busy ? 'King is working' : asks ? 'King asks you' : undefined}
         detailLive={busy}
-        detailWaits={brain !== undefined && brain.questions > 0}
+        detailWaits={asks}
       />
       <View style={[styles.tabs, { borderBottomColor: t.border }]}>
         <Chip title="Talk" selected={tab === 'talk'} onPress={() => setTab('talk')} />
@@ -112,27 +139,22 @@ export default function King() {
           </Txt>
         </View>
       ) : tab === 'workers' ? (
-        <ScrollView contentContainerStyle={{ paddingTop: 12, paddingBottom: insets.bottom + 16 }}>
-          {runs.length > 0 ? (
-            <View style={{ paddingHorizontal: 16, paddingBottom: 12, gap: 6 }}>
+        <ScrollView
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={{ paddingTop: 12, paddingBottom: insets.bottom + 16 }}>
+          {status ? (
+            <View style={{ paddingHorizontal: 16, paddingBottom: 16, gap: 12 }}>
               <Label tone="faint">[ Runs ]</Label>
               {runs.map((run) => (
-                <View key={run.id} style={{ gap: 2 }}>
-                  <Label
-                    tone={run.state === 'blocked' ? 'error' : run.state === 'done' ? 'success' : 'muted'}>
-                    {runLine(run)}
-                  </Label>
-                  <Txt variant="small" numberOfLines={1}>
-                    {run.title}
-                    {run.project ? ` · ${run.project}` : ''}
-                  </Txt>
-                  {run.note ? (
-                    <Txt variant="small" tone="error" numberOfLines={2}>
-                      {run.note}
-                    </Txt>
-                  ) : null}
-                </View>
+                <RunRow
+                  key={run.id}
+                  run={run}
+                  online={online}
+                  onContinue={(words) => tryKing(hostId, runContinueRequest(run.id, words))}
+                  onCancel={() => void tryKing(hostId, runCancelRequest(run.id))}
+                />
               ))}
+              <StartRun online={online} onStart={startRun} />
             </View>
           ) : null}
           <View style={{ paddingHorizontal: 16, paddingBottom: 8 }}>
@@ -199,10 +221,14 @@ export default function King() {
           </View>
           <Rule />
           <View style={{ backgroundColor: t.surface, paddingBottom: insets.bottom }}>
-            {brain && brain.questions > 0 ? (
-              <Callout tone="warning" style={styles.note}>
-                <Txt variant="small">King asks you something. Answer it on that computer.</Txt>
-              </Callout>
+            {brain && asks ? (
+              <KingQuestionPanel
+                key={brain.questions[0]?.id}
+                questions={brain.questions}
+                who="King"
+                online={online}
+                onAnswer={answer}
+              />
             ) : null}
             {refused || error ? (
               <Callout tone="error" style={styles.note}>

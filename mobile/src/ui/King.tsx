@@ -1,26 +1,30 @@
 // The parts of King's screens: a piece of a conversation (what was asked,
 // what was answered, the tools used, news and notes), the card of a worker,
-// and the line that says King works.
+// the line that says King works, and a run with what can be done to it.
 import Feather from '@expo/vector-icons/Feather';
 import { memo, useMemo, useState } from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { Alert, Pressable, StyleSheet, TextInput, View } from 'react-native';
 import Markdown from 'react-native-markdown-display';
 
 import { fromCwd } from '@/chat/model';
 import {
   dollars,
   firstLine,
+  machineLine,
+  runActions,
+  runLine,
   runsOn,
   workerWord,
+  type KingRun,
   type KingWorker,
   type Piece,
   type WorkerMood,
 } from '@/king/model';
-import { agentColor, metrics, type Palette } from '@/theme/tokens';
+import { agentColor, fonts, metrics, type Palette } from '@/theme/tokens';
 import { useTheme } from '@/theme/useTheme';
 
 import { useClock } from './clock';
-import { Callout, Label, Led, Txt } from './kit';
+import { Button, Callout, Label, Led, Txt } from './kit';
 import { markdownStyles, openLink } from './MessageRow';
 
 export function moodColor(t: Palette, mood: WorkerMood): string {
@@ -209,6 +213,8 @@ export function WorkerCard({ worker, onPress }: { worker: KingWorker; onPress():
           <Label numberOfLines={1} style={{ color: agentColor(t, worker.conversation.agent), flexShrink: 1, textTransform: 'none' }}>
             {runsOn(worker.conversation)}
             {worker.project ? ` · ${worker.project}` : ''}
+            {worker.machine ? ` · ${machineLine(worker)}` : ''}
+            {worker.terminal ? ' · in a terminal' : ''}
           </Label>
         </View>
         {answer ? (
@@ -222,7 +228,166 @@ export function WorkerCard({ worker, onPress }: { worker: KingWorker; onPress():
   );
 }
 
+/** A field of one line, in the style of the run's own controls. */
+function Line({
+  label,
+  value,
+  onChangeText,
+  placeholder,
+  mono = false,
+}: {
+  label: string;
+  value: string;
+  onChangeText(text: string): void;
+  placeholder: string;
+  mono?: boolean;
+}) {
+  const t = useTheme();
+  return (
+    <TextInput
+      accessibilityLabel={label}
+      value={value}
+      onChangeText={onChangeText}
+      placeholder={placeholder}
+      placeholderTextColor={t.textFaint}
+      selectionColor={t.signal}
+      cursorColor={t.signal}
+      autoCorrect={!mono}
+      autoCapitalize={mono ? 'none' : 'sentences'}
+      style={[
+        styles.line,
+        { color: t.text, borderColor: t.border, backgroundColor: t.surface, fontFamily: mono ? fonts.mono : fonts.sans },
+      ]}
+    />
+  );
+}
+
+/**
+ * A run of a task's steps: where it is, and while it is not over, what can be
+ * done to it. A blocked one goes on, with words for the workers of its failed
+ * steps; one not over is called off, once the person says so.
+ */
+export function RunRow({
+  run,
+  online,
+  onContinue,
+  onCancel,
+}: {
+  run: KingRun;
+  online: boolean;
+  onContinue(words: string): Promise<boolean>;
+  onCancel(): void;
+}) {
+  const actions = runActions(run);
+  const [open, setOpen] = useState(false);
+  const [words, setWords] = useState('');
+  const [sending, setSending] = useState(false);
+  return (
+    <View style={{ gap: 4 }}>
+      <Label tone={run.state === 'blocked' ? 'error' : run.state === 'done' ? 'success' : 'muted'}>{runLine(run)}</Label>
+      <Txt variant="small" numberOfLines={1}>
+        {run.title}
+        {run.project ? ` · ${run.project}` : ''}
+      </Txt>
+      {run.note ? (
+        <Txt variant="small" tone="error" numberOfLines={2}>
+          {run.note}
+        </Txt>
+      ) : null}
+      {open && actions.continue ? (
+        <View style={{ gap: 6, marginTop: 2 }}>
+          <Line
+            label={`What to tell the workers of run ${run.id}`}
+            value={words}
+            onChangeText={setWords}
+            placeholder="What to tell its failed steps (optional)"
+          />
+          <View style={styles.actions}>
+            <Button
+              compact
+              title="Go on"
+              busy={sending}
+              disabled={!online}
+              onPress={() => {
+                setSending(true);
+                void onContinue(words).then((done) => {
+                  setSending(false);
+                  if (done) {
+                    setOpen(false);
+                    setWords('');
+                  }
+                });
+              }}
+            />
+            <Button compact title="Not now" onPress={() => setOpen(false)} />
+          </View>
+        </View>
+      ) : actions.continue || actions.cancel ? (
+        <View style={[styles.actions, { marginTop: 2 }]}>
+          {actions.continue ? (
+            <Button compact icon="play" title="Continue" disabled={!online} onPress={() => setOpen(true)} />
+          ) : null}
+          {actions.cancel ? (
+            <Button
+              compact
+              kind="danger"
+              title="Cancel"
+              disabled={!online}
+              onPress={() =>
+                Alert.alert(
+                  `Cancel run ${run.id}?`,
+                  'Its workers are stopped and no step starts again. What its steps committed stays.',
+                  [
+                    { text: 'Keep it', style: 'cancel' },
+                    { text: 'Cancel the run', style: 'destructive', onPress: onCancel },
+                  ],
+                )
+              }
+            />
+          ) : null}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+/** A field for a task of the board by its id, and what starts a run of it. */
+export function StartRun({ online, onStart }: { online: boolean; onStart(task: string): Promise<boolean> }) {
+  const [task, setTask] = useState('');
+  const [sending, setSending] = useState(false);
+  return (
+    <View style={[styles.actions, { alignItems: 'center' }]}>
+      <View style={{ flex: 1 }}>
+        <Line label="Task to run, by its id" value={task} onChangeText={setTask} placeholder="Task id" mono />
+      </View>
+      <Button
+        compact
+        title="Start a run"
+        busy={sending}
+        disabled={!online || task.trim().length === 0}
+        onPress={() => {
+          setSending(true);
+          void onStart(task).then((done) => {
+            setSending(false);
+            if (done) setTask('');
+          });
+        }}
+      />
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
+  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  line: {
+    minHeight: metrics.touch,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    borderWidth: metrics.hairline,
+    borderRadius: metrics.radius,
+    fontSize: metrics.textSmall,
+    lineHeight: 19,
+  },
   prompt: {
     marginHorizontal: metrics.pad,
     marginTop: 18,
