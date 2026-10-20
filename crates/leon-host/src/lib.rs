@@ -34,6 +34,7 @@ pub mod exec;
 mod host;
 #[cfg(unix)]
 pub mod keeper;
+pub mod king;
 pub mod ptys;
 pub mod ring;
 mod session;
@@ -43,4 +44,5 @@ pub use host::{
     running_as_root, Approval, ApprovalRequest, Backoff, Host, HostConfig, HostStatus, PairingInfo,
     RelayState, Shared,
 };
+pub use king::{King, KingDoor, KingPipe};
 pub use share::ShareSource;

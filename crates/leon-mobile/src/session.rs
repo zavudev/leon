@@ -195,6 +195,9 @@ pub struct SharedState {
     /// Whether it has a Den to show ([`HostSession::den`]). A Leon that does
     /// not say has none, and must not be asked.
     pub den: bool,
+    /// Whether its King Leon can be spoken to ([`HostSession::king_ask`]).
+    /// A Leon that does not say has none, and must not be asked.
+    pub king: bool,
 }
 
 /// One lion of the other Leon's Den: a live agent session there, or a
@@ -321,6 +324,11 @@ impl HostSession {
         })
     }
 
+    /// The connection, for the parts of the session kept elsewhere.
+    pub(crate) fn client(&self) -> &Client {
+        &self.client
+    }
+
     /// Replaces how turns are started. For tests.
     pub fn set_spawn_overrides(&self, overrides: SpawnOverrides) {
         if let Ok(mut spawn) = self.spawn.lock() {
@@ -385,6 +393,7 @@ impl HostSession {
                 truncated: shared.truncated,
                 pinned: shared.pinned.into_iter().map(history_session).collect(),
                 den: shared.den,
+                king: shared.king,
             })
         })
         .await

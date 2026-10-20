@@ -455,7 +455,9 @@ conversation; changing its model or effort keeps the same one.
 
 ## Not built yet
 
-* King on the phone, through the paired host.
+* King's screen in the phone application. The way there is built: a
+  paired device speaks King's protocol through the host (`King` lines,
+  `docs/REMOTE.md`), and `leon-mobile` offers `king_ask` and `king_watch`.
 * Workers on SSH and relay machines, and agents that only run in a terminal
   (Kimi, ZCode, Antigravity) as workers.
 * Showing the tokens in the window's own conversations and on the phone:

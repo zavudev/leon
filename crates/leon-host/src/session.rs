@@ -13,6 +13,7 @@ use tokio::sync::{mpsc, Notify};
 
 use crate::exec;
 use crate::host::{Inner, Shared};
+use crate::king::KingLine;
 use crate::ptys::{Outbox, PtyTable};
 use crate::share::{ShareSource, TRANSCRIPT_BUDGET_BYTES};
 
@@ -89,13 +90,16 @@ pub(crate) async fn serve(inner: Arc<Inner>, mut channel: SecureChannel) {
         lagged: lagged.clone(),
     };
     let execs = Arc::new(AtomicUsize::new(0));
+    let mut king = KingLine::new(inner.cfg.king.clone(), out_tx.clone());
     let mut recheck = inner.recheck.subscribe();
 
     'session: loop {
         tokio::select! {
             incoming = channel.recv() => match incoming {
                 Ok(Some(message)) => {
-                    if !handle(&inner, message, &outbox, &out_tx, &execs) {
+                    if let Message::King { line } = message {
+                        king.send(line);
+                    } else if !handle(&inner, message, &outbox, &out_tx, &execs) {
                         break 'session;
                     }
                 }
@@ -166,35 +170,40 @@ fn handle(
             });
             true
         }
-        Message::ShareState { id } => share_request(
-            inner.cfg.share.clone(),
-            id,
-            out_tx.clone(),
-            move |share| {
-                let projects: Vec<SharedProject> = share.projects();
-                let mut sessions: Vec<SharedSession> = share.sessions();
-                let truncated = sessions.len() > SHARE_SESSIONS_LIMIT;
-                sessions.truncate(SHARE_SESSIONS_LIMIT);
-                let mut pinned: Vec<SharedSession> = share.pinned();
-                pinned.truncate(SHARE_PINNED_LIMIT);
-                Message::ShareStateData {
-                    id,
-                    projects,
-                    sessions,
-                    truncated,
-                    pinned,
-                    den: share.has_den(),
-                }
-            },
-            move || Message::ShareStateData {
+        Message::ShareState { id } => {
+            let king = inner.cfg.king.is_some();
+            share_request(
+                inner.cfg.share.clone(),
                 id,
-                projects: Vec::new(),
-                sessions: Vec::new(),
-                truncated: false,
-                pinned: Vec::new(),
-                den: false,
-            },
-        ),
+                out_tx.clone(),
+                move |share| {
+                    let projects: Vec<SharedProject> = share.projects();
+                    let mut sessions: Vec<SharedSession> = share.sessions();
+                    let truncated = sessions.len() > SHARE_SESSIONS_LIMIT;
+                    sessions.truncate(SHARE_SESSIONS_LIMIT);
+                    let mut pinned: Vec<SharedSession> = share.pinned();
+                    pinned.truncate(SHARE_PINNED_LIMIT);
+                    Message::ShareStateData {
+                        id,
+                        projects,
+                        sessions,
+                        truncated,
+                        pinned,
+                        den: share.has_den(),
+                        king,
+                    }
+                },
+                move || Message::ShareStateData {
+                    id,
+                    projects: Vec::new(),
+                    sessions: Vec::new(),
+                    truncated: false,
+                    pinned: Vec::new(),
+                    den: false,
+                    king,
+                },
+            )
+        }
         Message::ShareDen { id } => share_request(
             inner.cfg.share.clone(),
             id,

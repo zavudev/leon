@@ -111,6 +111,12 @@ fn main() {
         std::process::exit(leon_host::cli::run(
             arguments[1..].to_vec(),
             product::data_dir(),
+            &|data_dir| {
+                #[cfg(unix)]
+                return Some(king::door::door(data_dir));
+                #[cfg(not(unix))]
+                return None;
+            },
         ));
     }
 

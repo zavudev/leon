@@ -14,6 +14,8 @@
 //!   a pull request's CI;
 //! * [`client`]: one connection to the service, and starting the service
 //!   when nothing answers;
+//! * [`door`]: the host's way to the service, for a paired device's lines
+//!   to King;
 //! * [`link`]: the window's line to the service;
 //! * this file: where everything lives, and `leon king …` itself.
 //!
@@ -23,6 +25,8 @@
 pub mod checks;
 #[cfg(unix)]
 pub mod client;
+#[cfg(unix)]
+pub mod door;
 #[cfg(unix)]
 pub mod linger;
 pub mod link;

@@ -39,7 +39,7 @@ pub use id::{base32, HostId, IdError};
 pub use message::{
     ErrorCode, ExecOutput, ExecSpec, Exit, Grid, Message, PtyInfo, SharedCub, SharedEntry,
     SharedProject, SharedSession, SharedTranscript, SpawnSpec, WireError, MAX_EXEC_INPUT,
-    MAX_EXEC_OUTPUT, MAX_PTY_CHUNK, MIN_CLIENT_PROTOCOL, PROTOCOL_VERSION, REPLAY_BUFFER_BYTES,
-    SHARE_DEN_LIMIT, SHARE_PINNED_LIMIT, SHARE_SESSIONS_LIMIT,
+    MAX_EXEC_OUTPUT, MAX_KING_LINE, MAX_PTY_CHUNK, MIN_CLIENT_PROTOCOL, PROTOCOL_VERSION,
+    REPLAY_BUFFER_BYTES, SHARE_DEN_LIMIT, SHARE_PINNED_LIMIT, SHARE_SESSIONS_LIMIT,
 };
 pub use relay::{RelayError, RelayErrorCode, RelayLimits};

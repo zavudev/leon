@@ -96,6 +96,12 @@ impl Client {
         self.reader.read()
     }
 
+    /// The connection itself, for what speaks the protocol on its own (the
+    /// host passes a paired device's lines through it).
+    pub fn into_stream(self) -> UnixStream {
+        self.reader.stream.into_inner()
+    }
+
     /// The two halves, for a reader on a thread of its own.
     pub fn split(self) -> (Writer, Reader) {
         (self.writer, self.reader)
