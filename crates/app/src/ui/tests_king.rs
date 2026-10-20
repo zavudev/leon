@@ -777,6 +777,38 @@ fn a_terminal_king_asks_for_opens_here_once_this_window_took_it(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
+fn a_worker_of_an_agent_that_only_runs_in_a_terminal_opens_that_agent_here(
+    cx: &mut TestAppContext,
+) {
+    let (h, end) = with_conversation(cx, json!([]));
+    let folder = tempfile::tempdir().unwrap();
+    let ask = json!({
+        "id": 3, "cwd": folder.path().to_str().unwrap(), "command": "Add the billing schema",
+        "agent": "kimi", "title": "Billing schema", "since_ms": 0,
+    });
+    let mut told = status(Some(2), json!([]));
+    told["terminals"] = json!([ask.clone()]);
+    end.tell
+        .send(Heard::Notice(
+            serde_json::from_value::<Notice>(json!({"notice": "changed", "status": told})).unwrap(),
+        ))
+        .unwrap();
+    serve(&h, &end, cx, |request| match request {
+        Request::TerminalTaken { terminal: 3 } => ask.clone(),
+        _ => Value::Null,
+    });
+    super::live::wait_until(&h, cx, "the agent's terminal", |h, cx| {
+        h.shell(cx, |shell| shell.live.all().len() == 1)
+    });
+    let (cwd, agent) = h.shell(cx, |shell| {
+        let session = &shell.live.all()[0];
+        (session.cwd.clone(), session.agent)
+    });
+    assert_eq!(cwd, folder.path().to_str().unwrap());
+    assert_eq!(agent, Some(leon_core::AgentId::KIMI));
+}
+
+#[gpui_kit::test]
 fn kings_workers_are_lions_of_the_den_and_a_lion_opens_its_card(cx: &mut TestAppContext) {
     let (h, _end) = with_conversation(cx, json!([worker(2, "working", None)]));
     h.press_chord("cmd-alt-shift-l", "ctrl-alt-shift-l", cx);

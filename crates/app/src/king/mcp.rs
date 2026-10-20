@@ -292,7 +292,14 @@ pub fn tool_list() -> Value {
                 "cwd": { "type": "string", "description": "An existing worktree to work in instead." },
                 "machine": { "type": "string", "description": "The machine `cwd` is on, by name, when it is not this computer. A project's worker works on the project's machine by itself." },
                 "tier": { "type": "string", "description": "cheap, standard, premium, or one king.toml names." },
-                "agent": { "type": "string", "enum": ["claude", "codex", "opencode", "grok", "cursor"] },
+                "agent": {
+                    "type": "string",
+                    "description": "claude, codex, opencode, grok or cursor, which Leon drives and \
+                                    hears. Or an agent that only runs in a terminal (kimi, zcode, \
+                                    antigravity…, by Leon's tag): it opens in a terminal of the \
+                                    window, where the person sees it; Leon cannot tell it more nor \
+                                    hear when it is done, and gives it no model.",
+                },
                 "model": { "type": "string" },
                 "effort": { "type": "string" },
                 "mode": { "type": "string", "description": "The agent's permission mode." },

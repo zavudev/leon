@@ -86,6 +86,24 @@ const LINGER_AFTER: Duration = Duration::from_secs(4);
 const MAX_TERMINALS: usize = 20;
 /// The longest command a terminal King asks for is given.
 const MAX_TERMINAL_COMMAND: usize = 4096;
+/// The longest prompt typed into the terminal of an agent that only runs
+/// in one.
+const MAX_TERMINAL_PROMPT: usize = 16 * 1024;
+
+/// The agent named for a worker, when it is one that only runs in a
+/// terminal: in Leon's catalogue, with no way to drive it on a pipe.
+fn terminal_agent(agent: Option<&str>) -> Result<Option<String>, String> {
+    let Some(agent) = agent else {
+        return Ok(None);
+    };
+    if leon_turn::adapter(agent).is_some() {
+        return Ok(None);
+    }
+    match leon_core::AgentId::parse(agent).and_then(leon_core::AgentId::spec) {
+        Some(spec) => Ok(Some(spec.id.as_str().to_owned())),
+        None => Err(format!("Leon knows no agent {agent:?}")),
+    }
+}
 
 /// A terminal King asks for, once what it runs is checked: a folder that is
 /// there on `place`, and a command of one line, typed into the terminal's
@@ -119,6 +137,7 @@ fn terminal_ask(
         id,
         cwd: cwd.to_owned(),
         machine: place.id(),
+        agent: None,
         command: command.to_owned(),
         title,
         since_ms: now,
@@ -795,7 +814,19 @@ impl Service {
             }
             Request::StartWorker(asked) => {
                 let spec = self.worker_spec(*asked, now)?;
+                let opened = spec.terminal.then(|| leon_king::protocol::TerminalAsk {
+                    id: self.next_terminal,
+                    cwd: spec.cwd.clone(),
+                    machine: spec.machine.clone(),
+                    command: spec.prompt.clone(),
+                    agent: Some(spec.choice.agent.clone()),
+                    title: spec.title.clone(),
+                    since_ms: now,
+                });
                 let (id, effects) = self.coordinator.start_worker(spec, now)?;
+                if let Some(ask) = opened {
+                    self.ask_window(ask);
+                }
                 let worker = self.coordinator.worker(id).ok_or("the worker went")?;
                 let mut answer = json!({
                     "worker": id,
@@ -822,7 +853,14 @@ impl Service {
                 if !passed_over.is_empty() {
                     answer["passed_over"] = json!(passed_over);
                 }
-                if worker.conversation.model.is_none() {
+                if worker.terminal {
+                    answer["terminal"] = json!(
+                        "It runs in a terminal of Leon's window, where the person sees it: it \
+                         opens now when a window is open, else when one opens. Leon cannot tell \
+                         it more nor hear when it is done: read its work with worktree_diff, \
+                         check it with worktree_check, and ask the person how it went."
+                    );
+                } else if worker.conversation.model.is_none() {
                     answer["model_note"] = json!(
                         "No model was named, so the worker runs on its agent's default. Its \
                          first turn says which: king_status shows it within seconds, and the \
@@ -898,12 +936,7 @@ impl Service {
                 };
                 let place = self.place(machine.as_deref())?;
                 let ask = terminal_ask(self.next_terminal, &place, &cwd, &command, title, now)?;
-                self.next_terminal += 1;
-                self.terminals.push(ask.clone());
-                // The oldest go first when King asks for more than anybody
-                // opens.
-                let excess = self.terminals.len().saturating_sub(MAX_TERMINALS);
-                self.terminals.drain(..excess);
+                self.ask_window(ask.clone());
                 Ok((
                     json!({
                         "terminal": ask.id,
@@ -1304,14 +1337,38 @@ impl Service {
             effort: asked.effort.clone(),
             job: asked.job.as_str().to_owned(),
         };
-        let standings = self.standings(now);
-        let choice = route::route(
-            self.coordinator.config(),
-            &ask,
-            &standings,
-            &self.coordinator.record(),
-            self.coordinator.spent_today(now),
-        )?;
+        let terminal = terminal_agent(asked.agent.as_deref())?;
+        let choice = match &terminal {
+            Some(agent) => {
+                if asked.model.is_some() || asked.effort.is_some() {
+                    return Err(format!(
+                        "{agent} runs in a terminal; Leon gives it no model nor effort"
+                    ));
+                }
+                Choice {
+                    agent: agent.clone(),
+                    model: None,
+                    effort: None,
+                    tier: None,
+                }
+            }
+            None => {
+                let standings = self.standings(now);
+                route::route(
+                    self.coordinator.config(),
+                    &ask,
+                    &standings,
+                    &self.coordinator.record(),
+                    self.coordinator.spent_today(now),
+                )?
+            }
+        };
+        if terminal.is_some() && asked.prompt.len() > MAX_TERMINAL_PROMPT {
+            return Err(format!(
+                "a prompt typed into a terminal is at most {MAX_TERMINAL_PROMPT} bytes; say it \
+                 shorter"
+            ));
+        }
         let projects = self.projects();
         let (cwd, project, machine) = match (&asked.cwd, &asked.project) {
             (Some(cwd), _) => {
@@ -1372,6 +1429,7 @@ impl Service {
             prompt: asked.prompt,
             cwd,
             machine,
+            terminal: terminal.is_some(),
             project,
             job: asked.job,
             choice,
@@ -1381,6 +1439,16 @@ impl Service {
 }
 
 impl Service {
+    /// Keeps a terminal for a window to open, the oldest going first when
+    /// King asks for more than anybody opens.
+    fn ask_window(&mut self, mut ask: leon_king::protocol::TerminalAsk) {
+        ask.id = self.next_terminal;
+        self.next_terminal += 1;
+        self.terminals.push(ask);
+        let excess = self.terminals.len().saturating_sub(MAX_TERMINALS);
+        self.terminals.drain(..excess);
+    }
+
     /// A machine by Leon's id of it, with what reaching it takes; this
     /// computer when `None`.
     fn place(&self, machine: Option<&str>) -> Result<Place, String> {
@@ -1771,6 +1839,18 @@ mod tests {
         assert!(terminal_ask(6, &here, cwd, "make\nrm -rf x", None, 9).is_err());
         assert!(terminal_ask(6, &here, "relative/dir", "ls", None, 9).is_err());
         assert!(terminal_ask(6, &here, "/no/such/folder/here", "ls", None, 9).is_err());
+    }
+
+    #[test]
+    fn an_agent_leon_cannot_drive_works_in_a_terminal() {
+        assert_eq!(terminal_agent(None), Ok(None));
+        assert_eq!(terminal_agent(Some("codex")), Ok(None), "Leon drives it");
+        assert_eq!(terminal_agent(Some("kimi")), Ok(Some("kimi".to_owned())));
+        assert_eq!(
+            terminal_agent(Some("antigravity")),
+            Ok(Some("antigravity".to_owned()))
+        );
+        assert!(terminal_agent(Some("vim")).is_err());
     }
 
     #[test]

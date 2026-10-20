@@ -909,18 +909,65 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let machine = ask
+            .machine
+            .clone()
+            .map(MachineId::from_string)
+            .unwrap_or_else(MachineId::local);
+        let agent = ask.agent.as_deref().and_then(leon_core::AgentId::parse);
+        let Some(kind) = agent else {
+            self.engine.report(
+                StatusKind::Info,
+                format!("King opened a terminal: {}", ask.title),
+            );
+            self.start_live_first(
+                &ask.command,
+                crate::launch::First::Script,
+                Some(ask.title),
+                Launch::Shell,
+                &machine,
+                &ask.cwd,
+                Place::Session,
+                window,
+                cx,
+            );
+            return;
+        };
+        // A worker of an agent that only runs in a terminal: the agent is
+        // started on its prompt when it takes one on its command line, else
+        // the prompt is shown above it, for the person to give it.
         self.engine.report(
             StatusKind::Info,
-            format!("King opened a terminal: {}", ask.title),
+            format!(
+                "King started {} in a terminal: {}",
+                kind.as_str(),
+                ask.title
+            ),
+        );
+        let account = super::terminals::default_account(kind, cx);
+        if kind.spec().is_some_and(|spec| spec.prompt.is_some()) {
+            let launch = Launch::Prompted {
+                kind,
+                prompt: ask.command,
+                account,
+            };
+            self.start_live(launch, &machine, &ask.cwd, Place::Session, None, window, cx);
+            return;
+        }
+        let shown = format!(
+            "printf '%s\\n\\n' {}",
+            leon_remote::sh_quote_typed(&format!("King's task:\n\n{}", ask.command))
         );
         self.start_live_first(
-            &ask.command,
+            &shown,
             crate::launch::First::Script,
             Some(ask.title),
-            Launch::Shell,
-            &ask.machine
-                .map(MachineId::from_string)
-                .unwrap_or_else(MachineId::local),
+            Launch::Agent {
+                kind,
+                resume: None,
+                account,
+            },
+            &machine,
             &ask.cwd,
             Place::Session,
             window,
@@ -1584,6 +1631,7 @@ mod tests {
                     project: None,
                     cwd: "/tmp".into(),
                     machine: None,
+                    terminal: false,
                     job: Default::default(),
                     tier: None,
                     state: leon_king::coordinator::WorkerState::Working,

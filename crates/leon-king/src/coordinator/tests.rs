@@ -39,6 +39,7 @@ fn spec(title: &str) -> WorkerSpec {
         prompt: format!("do {title}"),
         cwd: format!("/work/{title}"),
         machine: None,
+        terminal: false,
         project: Some("leon".into()),
         job: Job::Code,
         choice: Choice {
@@ -1035,4 +1036,37 @@ fn a_workers_checks_and_failures_go_on_its_models_record() {
     let saved = serde_json::to_string(king.state()).unwrap();
     let state: State = serde_json::from_str(&saved).unwrap();
     assert_eq!(state.record.len(), 2);
+}
+
+#[test]
+fn a_worker_in_a_terminal_gets_no_turn_and_cannot_be_told_more() {
+    let mut king = Coordinator::new(config());
+    let kimi = WorkerSpec {
+        terminal: true,
+        choice: Choice {
+            agent: "kimi".into(),
+            model: None,
+            effort: None,
+            tier: None,
+        },
+        ..spec("schema")
+    };
+    let (id, effects) = king.start_worker(kimi, 0).unwrap();
+    assert!(starts(&effects).is_empty(), "Leon runs no turn of it");
+    let worker = king.worker(id).unwrap();
+    assert!(worker.terminal && worker.state == WorkerState::Working);
+    let asked = worker.conversation.transcript.since(None, 10);
+    assert_eq!(
+        (asked.len(), asked[0].text.as_str()),
+        (1, "do schema"),
+        "what it was asked is in its transcript"
+    );
+    assert_eq!(king.working(), 0, "it takes no place of a worker Leon runs");
+    let refused = king.tell_worker(id, "and a test", 1_000).unwrap_err();
+    assert!(refused.contains("terminal"), "{refused}");
+    king.check_started(id, "cargo test", "0123456789", false, 2_000)
+        .unwrap();
+    king.check_finished(id, true, "ok", 3_000);
+    let record = king.record();
+    assert_eq!((record[0].did_well, record[0].cost_usd), (1, None));
 }

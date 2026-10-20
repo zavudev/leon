@@ -2054,7 +2054,11 @@ impl Shell {
         status
             .workers
             .iter()
-            .filter(|worker| !matches!(worker.state, WorkerState::Stopped | WorkerState::Released))
+            // A worker in a terminal is that terminal's lion already.
+            .filter(|worker| {
+                !worker.terminal
+                    && !matches!(worker.state, WorkerState::Stopped | WorkerState::Released)
+            })
             .map(|worker| {
                 let conversation = &worker.conversation;
                 let agent = leon_core::AgentId::parse(&conversation.agent);

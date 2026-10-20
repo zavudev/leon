@@ -162,7 +162,8 @@ impl FakeSystem {
 
 impl System for FakeSystem {
     fn find_program(&self, name: &str) -> Option<std::path::PathBuf> {
-        ((matches!(name, "claude" | "codex" | "opencode") || self.extra.contains(&name))
+        // Kimi stands for the agents Leon only runs in a terminal.
+        ((matches!(name, "claude" | "codex" | "opencode" | "kimi") || self.extra.contains(&name))
             && !self.missing.contains(&name))
         .then(|| self.dir.path().join(name))
     }

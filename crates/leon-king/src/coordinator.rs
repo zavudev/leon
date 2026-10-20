@@ -289,6 +289,11 @@ pub struct Worker {
     /// absent.
     #[serde(default)]
     pub machine: Option<String>,
+    /// It is an agent that only runs in a terminal, opened in Leon's window
+    /// where the person sees it: Leon has no turns of it, cannot tell it
+    /// more, and does not hear when it is done.
+    #[serde(default)]
+    pub terminal: bool,
     /// The project's name, when it belongs to one Leon knows.
     pub project: Option<String>,
     /// What kind of job it has.
@@ -339,6 +344,8 @@ pub struct WorkerSpec {
     pub cwd: String,
     /// The machine it works on; this computer when absent.
     pub machine: Option<String>,
+    /// It runs in a terminal of the window ([`Worker::terminal`]).
+    pub terminal: bool,
     /// The project's name, when known.
     pub project: Option<String>,
     /// What kind of job.
@@ -785,6 +792,7 @@ impl Coordinator {
                     project: worker.project.clone(),
                     cwd: worker.cwd.clone(),
                     machine: worker.machine.clone(),
+                    terminal: worker.terminal,
                     job: worker.job,
                     tier: worker.tier.clone(),
                     state: worker.state,
@@ -888,12 +896,21 @@ impl Coordinator {
             .clone()
             .or_else(|| self.config.mode_of(&spec.choice.agent).map(str::to_owned));
         let mut conversation = Conversation::new(&spec.choice, mode);
-        conversation.queue.push_back(spec.prompt);
+        if spec.terminal {
+            // What it was asked stays in its transcript; it reads it in its
+            // terminal.
+            conversation
+                .transcript
+                .push(Kind::Prompt, spec.prompt.trim().to_owned(), now_ms);
+        } else {
+            conversation.queue.push_back(spec.prompt);
+        }
         let worker = Worker {
             id,
             title: transcript::cut(spec.title.trim(), 80),
             cwd: spec.cwd,
             machine: spec.machine,
+            terminal: spec.terminal,
             project: spec.project,
             job: spec.job,
             tier: spec.choice.tier.clone(),
@@ -905,9 +922,14 @@ impl Coordinator {
             check: None,
             pull_request: None,
         };
+        let terminal = worker.terminal;
         self.state.workers.insert(id, worker);
         let mut effects = vec![Effect::Changed];
-        effects.extend(self.next_turn(Target::Worker(id), now_ms));
+        if terminal {
+            self.note(id, now_ms, |outcome| outcome.priced = false);
+        } else {
+            effects.extend(self.next_turn(Target::Worker(id), now_ms));
+        }
         Ok((id, effects))
     }
 
@@ -917,6 +939,13 @@ impl Coordinator {
         let worker = self.owned(id)?;
         if text.trim().is_empty() {
             return Err("there is nothing to say".to_owned());
+        }
+        if worker.terminal {
+            return Err(
+                "it works in a terminal of Leon's window, where the person sees it: it cannot \
+                 be told more from here; ask the person, or stop it and start another"
+                    .to_owned(),
+            );
         }
         worker.conversation.queue.push_back(text.trim().to_owned());
         if worker.state == WorkerState::Stopped {

@@ -192,6 +192,7 @@ impl Service {
             prompt: run::step_prompt(&run, index, merged.as_deref()),
             cwd: path,
             machine,
+            terminal: false,
             project: Some(project.name.clone()),
             job: step.job,
             choice,

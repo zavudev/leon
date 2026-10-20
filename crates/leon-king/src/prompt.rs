@@ -64,6 +64,12 @@ pub fn king(config: &Config, now: &Now<'_>) -> String {
            `worktree_diff`, `worktree_check`, `pr_open` and `project_status` run there. \
            For a folder of another machine, name the machine (`machine`) in `worker_start` \
            and `open_terminal`.\n\
+         * **Agents that only run in a terminal** (Kimi, ZCode, Antigravity…) can work too: \
+           `worker_start` with that `agent` opens it in a terminal of Leon's window, in the \
+           worker's worktree, on its prompt. You hear nothing from it and cannot tell it more; \
+           its work is read with `worktree_diff` and `worktree_check`, and the person tells \
+           you when it is done. Use one when the person asks for it, or when its plan is the \
+           one with room.\n\
          * You are woken with news of your workers when they finish, fail or ask something: \
            do not wait or poll for them. Answer their questions with `worker_answer`, tell \
            them more with `worker_send`, read what they did with `worker_transcript`. \

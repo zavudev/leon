@@ -58,6 +58,10 @@ pub struct Outcome {
     /// What it cost so far, in US dollars.
     #[serde(default)]
     pub cost_usd: f64,
+    /// Whether its agent says what it costs: one that only runs in a
+    /// terminal does not, and its cost is not known.
+    #[serde(default = "priced")]
+    pub priced: bool,
     /// How long it worked so far: from its start to the last thing that
     /// happened to it, in milliseconds.
     #[serde(default)]
@@ -87,6 +91,7 @@ impl Outcome {
             ci: None,
             failed: false,
             cost_usd: 0.0,
+            priced: true,
             took_ms: 0,
         }
     }
@@ -107,6 +112,10 @@ impl Outcome {
     pub fn did_well(&self) -> bool {
         self.judged() && !self.failed && self.last_check != Some(false) && self.ci != Some(false)
     }
+}
+
+fn priced() -> bool {
+    true
 }
 
 /// What the outcomes say of one model for one kind of job.
@@ -134,7 +143,8 @@ pub struct Summary {
     pub ci_passed: u32,
     /// How many had a turn fail.
     pub failed: u32,
-    /// What a worker that did well cost, on average, in US dollars.
+    /// What a worker that did well cost, on average, in US dollars, when
+    /// the agent says.
     pub cost_usd: Option<f64>,
     /// How long a worker that did well took, on average, in minutes.
     pub minutes: Option<f64>,
@@ -167,8 +177,12 @@ impl Summary {
         if self.failed > 0 {
             parts.push(format!("{} failed", self.failed));
         }
-        if let (Some(cost), Some(minutes)) = (self.cost_usd, self.minutes) {
-            parts.push(format!("${cost:.2} and {minutes:.0} min each"));
+        match (self.cost_usd, self.minutes) {
+            (Some(cost), Some(minutes)) => {
+                parts.push(format!("${cost:.2} and {minutes:.0} min each"));
+            }
+            (None, Some(minutes)) => parts.push(format!("cost not known, {minutes:.0} min each")),
+            _ => {}
         }
         parts.join(", ")
     }
@@ -178,7 +192,9 @@ impl Summary {
 /// first seen.
 pub fn summarize(outcomes: &[Outcome]) -> Vec<Summary> {
     let mut out: Vec<Summary> = Vec::new();
-    let mut spent: Vec<(f64, u64)> = Vec::new();
+    // What the workers that did well cost (of those whose agent says, and
+    // how many) and took.
+    let mut spent: Vec<(f64, u32, u64)> = Vec::new();
     for outcome in outcomes {
         let at = match out.iter().position(|summary| {
             summary.agent == outcome.agent
@@ -202,7 +218,7 @@ pub fn summarize(outcomes: &[Outcome]) -> Vec<Summary> {
                     cost_usd: None,
                     minutes: None,
                 });
-                spent.push((0.0, 0));
+                spent.push((0.0, 0, 0));
                 out.len() - 1
             }
         };
@@ -216,14 +232,17 @@ pub fn summarize(outcomes: &[Outcome]) -> Vec<Summary> {
         summary.failed += u32::from(outcome.failed);
         if outcome.did_well() {
             summary.did_well += 1;
-            spent[at].0 += outcome.cost_usd;
-            spent[at].1 += outcome.took_ms;
+            if outcome.priced {
+                spent[at].0 += outcome.cost_usd;
+                spent[at].1 += 1;
+            }
+            spent[at].2 += outcome.took_ms;
         }
     }
-    for (summary, (cost, took)) in out.iter_mut().zip(spent) {
+    for (summary, (cost, priced, took)) in out.iter_mut().zip(spent) {
         if summary.did_well > 0 {
             let well = f64::from(summary.did_well);
-            summary.cost_usd = Some(cost / well);
+            summary.cost_usd = (priced > 0).then(|| cost / f64::from(priced));
             summary.minutes = Some(took as f64 / 60_000.0 / well);
         }
     }
@@ -312,5 +331,25 @@ mod tests {
         assert!(line.contains("1 of 2 passed their first check"), "{line}");
         assert!(of(&summaries, "opencode", Some("glm"), "code").is_some());
         assert!(of(&summaries, "opencode", None, "code").is_none());
+    }
+
+    #[test]
+    fn an_agent_that_says_no_cost_is_not_counted_as_free() {
+        let mut terminal = Outcome::new(1, "kimi", None, "code", None, 0);
+        terminal.priced = false;
+        terminal.checked(true);
+        terminal.took_ms = 6 * 60_000;
+        let summaries = summarize(&[terminal]);
+        let kimi = of(&summaries, "kimi", None, "code").unwrap();
+        assert_eq!((kimi.cost_usd, kimi.minutes), (None, Some(6.0)));
+        assert!(
+            kimi.line().contains("cost not known, 6 min each"),
+            "{}",
+            kimi.line()
+        );
+        let old: Outcome =
+            serde_json::from_str(r#"{"worker":1,"agent":"codex","job":"code","started_ms":0}"#)
+                .unwrap();
+        assert!(old.priced, "an outcome kept before was priced");
     }
 }

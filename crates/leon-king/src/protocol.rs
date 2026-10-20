@@ -372,8 +372,12 @@ pub struct TerminalAsk {
     /// absent.
     #[serde(default)]
     pub machine: Option<String>,
-    /// The command.
+    /// The command; the agent's first prompt when `agent` is set.
     pub command: String,
+    /// The agent the terminal starts, by its tag, for a worker of an agent
+    /// that only runs in a terminal; a shell running `command` when absent.
+    #[serde(default)]
+    pub agent: Option<String>,
     /// What it is called.
     pub title: String,
     /// When King asked for it, in milliseconds since the epoch.
@@ -436,6 +440,9 @@ pub struct WorkerStatus {
     /// Its machine, by Leon's id of it; this computer when absent.
     #[serde(default)]
     pub machine: Option<String>,
+    /// It works in a terminal of the window ([`crate::coordinator::Worker::terminal`]).
+    #[serde(default)]
+    pub terminal: bool,
     /// Its kind of job.
     pub job: Job,
     /// The tier it came from.

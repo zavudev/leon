@@ -277,6 +277,22 @@ installed here, so a missing agent is a worker that fails to start, and King
 hears why. A check that runs past its time limit over SSH loses its
 connection, and may go on running on the other machine.
 
+### Agents that only run in a terminal
+
+Leon drives Claude Code, Codex, opencode, Grok and Cursor on a pipe: it hears
+each turn, answers their questions and wakes King when they end. An agent of
+Leon's catalogue that only runs in a terminal (Kimi, ZCode, Antigravity and
+the others) can be a worker too, when King names it in `worker_start`
+(`agent = "kimi"`). Its worktree is made as for any worker, and the next
+window that opens takes it: it starts the agent in a terminal there, as the
+account the settings name for it. The prompt goes on the agent's command line
+when the catalogue says how it takes one; otherwise it is printed in the
+terminal above the agent, for you to give it. Leon runs no turn of it: King
+cannot tell it more, does not hear when it is done, and knows no cost of it
+(the record says "cost not known"). King reads its work with `worktree_diff`,
+checks it with `worktree_check` and opens its pull request as for any worker.
+In the Den it is the terminal's lion.
+
 King is never asked to poll. When a worker finishes, fails or asks something,
 Leon gathers the news for a few seconds and then wakes King with it. If you
 speak first, the news comes with your message. King answers a worker's
@@ -517,6 +533,8 @@ protocol and its answer) and `king_watch` (King's notices).
   reads King, its workers and its runs, and says things to King.
 * King's notices on the phone while the application is closed: they come
   only while a King screen is open.
-* Agents that only run in a terminal (Kimi, ZCode, Antigravity) as workers.
+* Hearing from a worker that runs in a terminal: Leon does not read its
+  screen, so King learns from the person, or from its worktree, that it is
+  done.
 * Showing the tokens in the window's own conversations and on the phone:
   the event is read, and only King uses it so far.
