@@ -168,6 +168,45 @@ fn the_view_shows_kings_conversation_as_the_service_tells_it(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
+fn only_the_newest_report_draws_the_usage_windows(cx: &mut TestAppContext) {
+    let (h, end) = with_conversation(cx, json!([]));
+    end.tell
+        .send(Heard::Notice(
+            serde_json::from_value::<Notice>(json!({
+                "notice": "changed", "status": status(Some(6), json!([])),
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let report = |tokens: u64| {
+        json!({
+            "turn": {"input": tokens, "cached_input": 0, "output": 0, "duration_ms": 0,
+                     "cost_usd": null},
+            "workers_today": {"input": 0, "cached_input": 0, "output": 0},
+            "king_today": {"input": 0, "cached_input": 0, "output": 0},
+            "spent_today_usd": 1.5,
+            "budget_usd": null,
+            "usage": [{"agent": "claude",
+                       "windows": [{"label": "5h", "used": 0.1, "resets_in_secs": 60}]}],
+        })
+    };
+    let entry = |seq: u64, kind: &str, report: Option<Value>| json!({"seq": seq, "at_ms": 0, "kind": kind, "text": "", "report": report});
+    serve(&h, &end, cx, |_| {
+        json!([
+            entry(3, "report", Some(report(1_000))),
+            entry(4, "report", Some(report(0))),
+            entry(5, "agent", None),
+            entry(6, "report", Some(report(2_000))),
+        ])
+    });
+    assert!(h.shows_dynamic("king-report-brain-3".into(), cx));
+    assert!(!h.shows_dynamic("king-report-windows-brain-3".into(), cx));
+    assert!(!h.shows_dynamic("king-report-brain-4".into(), cx));
+    assert!(h.shows_dynamic("king-report-brain-6".into(), cx));
+    assert!(h.shows_dynamic("king-report-windows-brain-6".into(), cx));
+}
+
+#[gpui_kit::test]
 fn what_is_written_is_said_to_king_and_escape_closes_the_view(cx: &mut TestAppContext) {
     let (h, end) = with_conversation(cx, json!([]));
     h.type_text("Review the open pull requests", cx);

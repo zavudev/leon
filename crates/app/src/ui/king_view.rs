@@ -488,12 +488,21 @@ impl Shell {
         if entries.is_empty() && !busy {
             list = list.child(self.king_empty(worker, c, cx));
         }
+        // Only the newest report draws the usage windows; the older ones are a
+        // line of numbers.
+        let newest_report = entries
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == Kind::Report && entry.report.is_some())
+            .map(|entry| entry.seq);
         for piece in pieces(entries) {
             list = list.child(match piece {
                 Piece::One(entry) if entry.kind == Kind::News => {
                     self.king_news(target, entry, c, cx)
                 }
-                Piece::One(entry) => king_entry(target, entry, agent, c),
+                Piece::One(entry) => {
+                    king_entry(target, entry, agent, newest_report == Some(entry.seq), c)
+                }
                 Piece::Tools(run) => self.king_tools(target, run, c, cx),
             });
         }
@@ -1961,10 +1970,22 @@ fn left_colour(left: f64, c: &Palette) -> gpui_kit::Hsla {
 }
 
 /// Leon's report under an answer, drawn: the turn's numbers on one line,
-/// the day's beside them, and under them a bar for each usage window with
-/// what is left of it and when it resets.
-fn report_strip(target: Target, seq: u64, report: &Report, c: &Palette) -> AnyElement {
+/// the day's beside them, and, under the newest report only, a bar for each
+/// usage window with what is left of it and when it resets. An older report
+/// is its line of numbers alone, and one of a turn that used no tokens is
+/// left out.
+fn report_strip(
+    target: Target,
+    seq: u64,
+    report: &Report,
+    newest: bool,
+    c: &Palette,
+) -> AnyElement {
     let key = key_of(target);
+    let worked = report.turn.is_some_and(|turn| turn.total() > 0);
+    if !newest && !worked {
+        return div().into_any_element();
+    }
     let mut numbers = div()
         .w_full()
         .min_w_0()
@@ -1973,7 +1994,7 @@ fn report_strip(target: Target, seq: u64, report: &Report, c: &Palette) -> AnyEl
         .items_center()
         .gap_x(px(14.))
         .gap_y(px(4.));
-    if let Some(turn) = report.turn {
+    if let Some(turn) = report.turn.filter(|_| worked) {
         numbers = numbers
             .child(stat(count(turn.total()), "TOKENS", c))
             .child(stat(count(turn.cached_input), "CACHED", c))
@@ -1987,6 +2008,15 @@ fn report_strip(target: Target, seq: u64, report: &Report, c: &Palette) -> AnyEl
         if let Some(cost) = turn.cost_usd {
             numbers = numbers.child(mono(format!("${cost:.3}")).text_color(c.text));
         }
+    }
+    if !newest {
+        return div()
+            .debug_selector(move || format!("king-report-{key}-{seq}"))
+            .w_full()
+            .min_w_0()
+            .px(px(10.))
+            .child(numbers)
+            .into_any_element();
     }
     let today = match report.budget_usd {
         Some(budget) => format!("${:.2} OF ${budget:.2}", report.spent_today_usd),
@@ -2008,7 +2038,9 @@ fn report_strip(target: Target, seq: u64, report: &Report, c: &Palette) -> AnyEl
                 .text_color(c.text_faint),
             ),
     );
+    let windows_key = key.clone();
     let mut windows = div()
+        .debug_selector(move || format!("king-report-windows-{windows_key}-{seq}"))
         .w_full()
         .min_w_0()
         .flex()
@@ -2083,7 +2115,13 @@ fn report_strip(target: Target, seq: u64, report: &Report, c: &Palette) -> AnyEl
 }
 
 /// One entry that is not a tool.
-fn king_entry(target: Target, entry: &Entry, agent: Option<AgentId>, c: &Palette) -> AnyElement {
+fn king_entry(
+    target: Target,
+    entry: &Entry,
+    agent: Option<AgentId>,
+    newest_report: bool,
+    c: &Palette,
+) -> AnyElement {
     let key = key_of(target);
     let seq = entry.seq;
     let selector = move |kind: &'static str| {
@@ -2187,6 +2225,7 @@ fn king_entry(target: Target, entry: &Entry, agent: Option<AgentId>, c: &Palette
             target,
             seq,
             entry.report.as_ref().unwrap_or(&Report::default()),
+            newest_report,
             c,
         ),
         Kind::Report => div()
