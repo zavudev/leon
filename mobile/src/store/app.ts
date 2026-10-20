@@ -29,6 +29,13 @@ type AppState = {
   chats: Record<string, ChatRecord>;
   /** The options last used with each agent of each computer: what a new chat starts with. */
   lastOptions: Record<string, TurnOptions>;
+  /** King's notices while the app is closed, through Expo's push service: off unless turned on. */
+  kingPush: boolean;
+  /** This phone's Expo push token, once it was asked for one. */
+  pushToken?: string;
+  /** The computers still to be told to forget the token, since the setting was turned off. */
+  pushForget: string[];
+  setPush(change: Partial<Pick<AppState, 'kingPush' | 'pushToken' | 'pushForget'>>): void;
   rememberOptions(hostId: string, agent: string, options: TurnOptions): void;
   setDeviceName(name: string): void;
   setRelayUrl(url: string): void;
@@ -60,6 +67,9 @@ export const useApp = create<AppState>()(
       hosts: [],
       chats: {},
       lastOptions: {},
+      kingPush: false,
+      pushForget: [],
+      setPush: (change) => set(change),
       rememberOptions: (hostId, agent, options) =>
         set((state) => ({
           lastOptions: { ...state.lastOptions, [optionsKey(hostId, agent)]: options },
@@ -102,7 +112,7 @@ export const useApp = create<AppState>()(
     {
       name: 'leon.app.v1',
       storage: persistStorage,
-      partialize: ({ deviceName, relayUrl, appearance, sessionOrder, hosts, chats, lastOptions }) => ({
+      partialize: ({
         deviceName,
         relayUrl,
         appearance,
@@ -110,6 +120,20 @@ export const useApp = create<AppState>()(
         hosts,
         chats,
         lastOptions,
+        kingPush,
+        pushToken,
+        pushForget,
+      }) => ({
+        deviceName,
+        relayUrl,
+        appearance,
+        sessionOrder,
+        hosts,
+        chats,
+        lastOptions,
+        kingPush,
+        pushToken,
+        pushForget,
       }),
     },
   ),

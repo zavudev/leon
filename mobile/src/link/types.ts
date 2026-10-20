@@ -109,7 +109,10 @@ export type KingRequest =
   | { op: 'stop_worker'; worker: number }
   | { op: 'run_start'; task: string; max_parallel?: number; budget_usd?: number }
   | { op: 'run_continue'; run: number; text?: string; budget_usd?: number }
-  | { op: 'run_cancel'; run: number };
+  | { op: 'run_cancel'; run: number }
+  /** King's notices reach this phone through Expo's push service while no client shows King. */
+  | { op: 'push_register'; token: string; name: string }
+  | { op: 'push_forget'; token: string };
 
 /** A watch on King's notices; `stop` ends it. */
 export type KingWatch = { stop(): void };

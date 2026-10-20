@@ -1,5 +1,6 @@
-// The root: fonts, the keyboard provider, the navigation stack, and the two
-// moments the connections are woken (start, and coming back to the front).
+// The root: fonts, the keyboard provider, the navigation stack, the two
+// moments the connections are woken (start, and coming back to the front),
+// and King's notices while closed (given to the computers, opened when pressed).
 import { Inter_400Regular } from '@expo-google-fonts/inter/400Regular';
 import { Inter_500Medium } from '@expo-google-fonts/inter/500Medium';
 import { Inter_600SemiBold } from '@expo-google-fonts/inter/600SemiBold';
@@ -16,6 +17,7 @@ import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { keepHearing } from '@/store/background';
+import { followKingPush } from '@/store/push';
 import { connectAll, wake } from '@/store/runtime';
 import { useIsDark, useMotion, useTheme } from '@/theme/useTheme';
 import { Toast } from '@/ui/Toast';
@@ -47,9 +49,11 @@ export default function RootLayout() {
       if (state === 'active') wake();
     });
     const hearing = keepHearing();
+    const push = followKingPush();
     return () => {
       subscription.remove();
       hearing();
+      push();
     };
   }, [ready]);
 

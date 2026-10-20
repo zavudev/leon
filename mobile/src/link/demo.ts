@@ -612,6 +612,14 @@ function demoKing() {
           });
           return null;
         }
+        case 'push_register':
+          if (!/^Expo(nent)?PushToken\[.*\]$/.test(request.token)) refuse('that is not an Expo push token');
+          return {
+            phones: 1,
+            note: "King's notices reach it through Expo's push service while no client shows King.",
+          };
+        case 'push_forget':
+          return { forgotten: true };
         case 'run_cancel': {
           const run = going(request.run);
           run.state = 'canceled';
