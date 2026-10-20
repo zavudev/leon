@@ -523,18 +523,18 @@ computer's host (`King` lines, `docs/REMOTE.md`): the host of the window and
 `leon host` both pass them on. The computer's screen in the phone shows a
 King row when its host says it can; it opens King's conversation, a field
 to say something, and King's workers and runs, followed live while the
-screen is open. `leon-mobile` offers it as `king_ask` (one request of King's
-protocol and its answer) and `king_watch` (King's notices).
+screen is open. From there you answer the questions King and its workers
+wait on (allow, always or deny a permission; approve or reject a plan; pick
+an option or write), tell a worker more, interrupt or stop it, and start a
+run of a task, go on with a blocked one or cancel one. `leon-mobile` offers
+it as `king_ask` (one request of King's protocol and its answer) and
+`king_watch` (King's notices).
 
 ## Not built yet
 
-* From the phone: answering King's or a worker's questions, telling a
-  worker more, stopping it, and starting or going on with runs. The phone
-  reads King, its workers and its runs, and says things to King.
 * King's notices on the phone while the application is closed: they come
-  only while a King screen is open.
+  only while a King screen is open. Reaching a closed application needs a
+  push service, which the relay does not have.
 * Hearing from a worker that runs in a terminal: Leon does not read its
   screen, so King learns from the person, or from its worktree, that it is
   done.
-* Showing the tokens in the window's own conversations and on the phone:
-  the event is read, and only King uses it so far.
