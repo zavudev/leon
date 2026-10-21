@@ -978,3 +978,58 @@ fn the_language_of_dictation_is_the_setting_before_the_systems(cx: &mut TestAppC
     language(cx, "auto");
     assert_eq!(dictate(cx), Some(("small".into(), None)));
 }
+
+#[gpui_kit::test]
+fn the_pull_request_of_a_conversations_branch_is_in_its_foot_and_opens(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    assert!(!h.shows("chat-pr-1", cx), "nothing known, nothing said");
+    let worktree = h
+        .store
+        .all_worktrees()
+        .unwrap()
+        .into_iter()
+        .find(|worktree| worktree.path == path)
+        .expect("the worktree of the test");
+    h.store
+        .update_worktree_status(&worktree.id, |status| {
+            status.pull_request = Some(leon_core::PullRequest {
+                number: 565,
+                url: "https://github.com/zavudev/zavu/pull/565".into(),
+                draft: false,
+                review: leon_core::Review::None,
+                checks: leon_core::Checks::Passing,
+            });
+        })
+        .unwrap();
+    h.settle(cx);
+    assert!(h.shows("chat-pr-1", cx));
+    h.mouse_on("chat-pr-1".into(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(
+        *h.urls.borrow(),
+        ["https://github.com/zavudev/zavu/pull/565".to_owned()]
+    );
+}
+
+#[gpui_kit::test]
+fn a_turn_that_ends_asks_github_for_its_branchs_pull_request_at_once(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "open the pull request");
+    let before = h.runner.calls().len();
+    prints(&h, cx, &[INIT, SAID, RESULT]);
+    exits(&h, cx, 0);
+    h.settle(cx);
+    let asked: Vec<_> = h.runner.calls()[before..]
+        .iter()
+        .map(|call| format!("{} {}", call.program, call.args.join(" ")))
+        .collect();
+    assert!(
+        asked.iter().any(|call| call.contains("remote") && call.contains("origin")),
+        "where its origin is, for GitHub: {asked:?}"
+    );
+}

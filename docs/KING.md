@@ -338,7 +338,10 @@ reports it done:
 Each worker's card shows the evidence. The check line reads `✓ CHECKED
 abc1234 · 4m14s`, `✗ CHECK FAILED`, or `CHECKING` while it runs. The pull
 request line reads `PR #62 · CI ✓`, `CI ✗ clippy`, `CI RUNNING`, `NO CI` or
-`MERGED`. Click the pull request line to open it.
+`MERGED`. Click the pull request line to open it. A pull request King did
+not open (the worker opened it itself, or you did) still shows: it is the one
+GitHub has for the worker's branch, as the worktree screen says it
+(`PR #62 · APPROVED · CHECKS PASSING`).
 
 ## Runs: a task carried out as its steps
 

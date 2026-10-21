@@ -855,3 +855,39 @@ fn kings_workers_are_lions_of_the_den_and_a_lion_opens_its_card(cx: &mut TestApp
     assert_eq!(h.main_kind(cx), "king");
     assert_eq!(h.shell(cx, |shell| shell.king_ui.open), Some(2));
 }
+
+#[gpui_kit::test]
+fn a_pull_request_king_did_not_open_is_the_one_of_the_workers_branch(cx: &mut TestAppContext) {
+    let (h, end) = with_conversation(cx, json!([worker(1, "done", None)]));
+    assert!(!h.shows_dynamic("king-pr-1".into(), cx));
+    let linked = worktree_id(&h, "feature/login");
+    let worktree = h
+        .store
+        .all_worktrees()
+        .unwrap()
+        .into_iter()
+        .find(|worktree| worktree.id == linked)
+        .unwrap();
+    let project = h.store.project(&worktree.project_id).unwrap();
+    h.store
+        .update_worktree_status(&linked, |status| {
+            status.pull_request = Some(open_pull_request(77));
+        })
+        .unwrap();
+    let mut own = worker(1, "done", None);
+    own["cwd"] = json!(worktree.path);
+    own["machine"] = json!(project.machine_id.as_str());
+    tell_status(&end, status(Some(2), json!([own, worker(2, "working", None)])));
+    h.settle(cx);
+    assert!(h.shows_dynamic("king-pr-1".into(), cx), "its branch's");
+    assert!(
+        !h.shows_dynamic("king-pr-2".into(), cx),
+        "a folder GitHub knows nothing of has none"
+    );
+    h.mouse_on("king-pr-1".into(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(
+        *h.urls.borrow(),
+        ["https://github.com/zavudev/leon/pull/77".to_owned()]
+    );
+    assert_eq!(h.main_kind(cx), "king");
+}

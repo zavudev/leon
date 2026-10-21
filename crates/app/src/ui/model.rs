@@ -7,8 +7,8 @@
 //! [`tree::Placement`](super::tree::Placement).
 
 use leon_core::{
-    Machine, MachineId, Project, ProjectIcon, ProjectId, Result, Session, SessionFilter, Store,
-    Worktree, WorktreeId, WorktreeStatus,
+    Machine, MachineId, Project, ProjectIcon, ProjectId, PullRequest, Result, Session,
+    SessionFilter, Store, Worktree, WorktreeId, WorktreeStatus,
 };
 use std::collections::HashMap;
 
@@ -106,6 +106,24 @@ impl Snapshot {
     /// The project with this id.
     pub fn project(&self, id: &ProjectId) -> Option<&ProjectEntry> {
         self.projects.iter().find(|entry| &entry.project.id == id)
+    }
+
+    /// The worktree whose folder is `path` on `machine`: where a
+    /// conversation or a worker of King's works.
+    pub fn worktree_at(&self, machine: &MachineId, path: &str) -> Option<&Worktree> {
+        let key = leon_core::path::key(path);
+        self.projects
+            .iter()
+            .filter(|entry| &entry.project.machine_id == machine)
+            .flat_map(|entry| &entry.worktrees)
+            .find(|worktree| leon_core::path::key(&worktree.path) == key)
+    }
+
+    /// The open pull request of the branch checked out at `path` on
+    /// `machine`, as GitHub last said it.
+    pub fn pull_request_at(&self, machine: &MachineId, path: &str) -> Option<&PullRequest> {
+        let worktree = self.worktree_at(machine, path)?;
+        self.status(&worktree.id)?.pull_request.as_ref()
     }
 }
 
