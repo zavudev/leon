@@ -2,7 +2,7 @@
   "expo": {
     "name": "Leon",
     "slug": "leon",
-    "version": "0.9.0",
+    "version": "0.11.0",
     "scheme": "leon",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
