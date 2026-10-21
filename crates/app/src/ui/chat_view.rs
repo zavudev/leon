@@ -27,7 +27,7 @@ use super::chat::Chat;
 use super::chat_menu::MenuKind;
 use super::live::LiveId;
 use super::shell::Shell;
-use super::widgets::{key_cap, led, mark, mono, with_latest, Lion};
+use super::widgets::{attached_files, key_cap, led, mark, mono, with_latest, Lion};
 use crate::chat::model::{
     blocks, cost_text, duration_text, work_label, Block, Item, Phase, Question, Tone, Tool,
 };
@@ -891,6 +891,21 @@ impl Shell {
             .border_1()
             .border_color(colours.elevated_border)
             .bg(colours.surface)
+            .children(attached_files(
+                &chat.attached,
+                (
+                    format!("chat-attached-{}", id.0),
+                    format!("chat-attached-remove-{}", id.0),
+                ),
+                colours,
+                cx,
+                move |this, gone, window, cx| {
+                    if let Some(chat) = this.chats.get_mut(&id) {
+                        chat.attached.retain(|file| *file != gone);
+                        chat.input.update(cx, |input, cx| input.focus(window, cx));
+                    }
+                },
+            ))
             .child(
                 div()
                     .debug_selector(move || format!("chat-input-{}", id.0))

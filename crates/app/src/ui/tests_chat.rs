@@ -1035,3 +1035,28 @@ fn a_turn_that_ends_asks_github_for_its_branchs_pull_request_at_once(cx: &mut Te
         "where its origin is, for GitHub: {asked:?}"
     );
 }
+
+#[gpui_kit::test]
+fn an_image_pasted_in_a_conversation_is_sent_as_a_file_the_agent_opens(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    *h.clip_image.borrow_mut() = Some(crate::clip_image::ClipImage {
+        bytes: vec![137, 80, 78, 71],
+        extension: "png",
+    });
+    h.type_text("Look at this", cx);
+    h.press_chord("cmd-v", "ctrl-v", cx);
+    // The field keeps the words; the image is shown over it.
+    assert!(h.shows_dynamic("chat-attached-1-0".into(), cx));
+    let image = h.shell(cx, |s| s.chats[&LiveId(1)].attached[0].clone());
+    assert!(image.starts_with(h.attachments.path()), "{image:?}");
+    assert_eq!(std::fs::read(&image).unwrap(), [137, 80, 78, 71]);
+    // Sent with the words, as a path to open; then gone from over the field.
+    h.press("enter", cx);
+    let said = written(&h).join("\n");
+    assert!(said.contains("Look at this"), "{said}");
+    assert!(said.contains(&*image.to_string_lossy()), "{said}");
+    assert!(!h.shows_dynamic("chat-attached-1-0".into(), cx));
+}
