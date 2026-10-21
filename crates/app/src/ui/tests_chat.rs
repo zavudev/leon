@@ -1060,3 +1060,29 @@ fn an_image_pasted_in_a_conversation_is_sent_as_a_file_the_agent_opens(cx: &mut 
     assert!(said.contains(&*image.to_string_lossy()), "{said}");
     assert!(!h.shows_dynamic("chat-attached-1-0".into(), cx));
 }
+
+#[gpui_kit::test]
+fn what_went_wrong_with_dictation_never_covers_the_fields_foot(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    offers(&h, cx);
+    cx.update(|cx| {
+        h.shell.update(cx, |shell, cx| {
+            shell.dictation.problem = Some("Something went wrong with dictation. ".repeat(8));
+            cx.notify();
+        })
+    });
+    h.settle(cx);
+    let foot = h.bounds_of("chat-mode-1".into(), cx).expect("the mode");
+    let problem = h
+        .bounds_of("chat-dictate-problem-1".into(), cx)
+        .expect("the problem");
+    let dictate = h.bounds_of("chat-dictate-1".into(), cx).expect("dictate");
+    assert!(problem.left() >= foot.right(), "{problem:?} over {foot:?}");
+    assert!(
+        problem.right() <= dictate.left(),
+        "{problem:?} over {dictate:?}"
+    );
+}

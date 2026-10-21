@@ -683,8 +683,11 @@ impl Shell {
             PermissionEffect::AllowAlways => Look::Outline,
             PermissionEffect::Deny => Look::Quiet,
         };
+        // A rule can be a whole command: it is cut to fit the card.
         let label = match &choice.scope {
-            Some(scope) if !scope.is_empty() => format!("{} ({scope})", choice.label),
+            Some(scope) if !scope.is_empty() => {
+                format!("{} ({})", choice.label, cut(scope, SCOPE_CHARS))
+            }
             _ => choice.label.clone(),
         };
         let question = question.to_owned();
@@ -918,12 +921,14 @@ impl Shell {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(foot.flex_1())
+                    .child(foot.flex_none())
                     .child(
                         div()
-                            .flex_none()
+                            .flex_1()
+                            .min_w_0()
                             .flex()
                             .items_center()
+                            .justify_end()
                             .gap(px(6.))
                             .child(self.chat_dictate_button(id, colours, cx))
                             .child(key_cap(if running { "ESC" } else { "ENTER" }, colours))
@@ -1200,4 +1205,27 @@ fn chip(
             colours.text_muted
         }))
         .child(icon(IconName::ChevronDown, px(10.), colours.text_faint))
+}
+
+/// How much of an "always allow" rule its button shows.
+const SCOPE_CHARS: usize = 60;
+
+/// `text` cut to `most` characters, with an ellipsis when it was longer.
+fn cut(text: &str, most: usize) -> String {
+    if text.chars().count() <= most {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().take(most.saturating_sub(1)).collect();
+    format!("{}\u{2026}", kept.trim_end())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cut;
+
+    #[test]
+    fn a_long_rule_is_cut_and_a_short_one_kept() {
+        assert_eq!(cut("git add *", 60), "git add *");
+        assert_eq!(cut("abcdef", 4), "abc\u{2026}");
+    }
 }

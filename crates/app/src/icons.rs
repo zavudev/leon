@@ -37,6 +37,7 @@ icon_assets!(
         Info,
         Keyboard,
         Laptop,
+        Mic,
         Moon,
         PanelLeft,
         PanelLeftClose,

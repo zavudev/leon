@@ -30,6 +30,7 @@ use super::live::LiveId;
 use super::shell::Shell;
 use super::widgets::{led, mono};
 use crate::chat::complete::{self, Voices};
+use crate::icons::{icon, IconName};
 use crate::schema;
 use crate::settings;
 use crate::theme::{metrics, px, Palette};
@@ -416,15 +417,18 @@ impl Shell {
                 ),
                 None,
             ),
-            _ => ("DICTATE".to_owned(), None),
+            // At rest it is a microphone, to keep the room for the field's foot.
+            _ => (String::new(), None),
         };
         let listening = light.is_some();
+        let resting = words.is_empty();
         let button = div()
             .id(SharedString::from(name.clone()))
             .debug_selector(move || name.clone())
             .flex_none()
             .h(px(26.))
-            .px(px(10.))
+            .when(resting, |this| this.w(px(26.)).justify_center())
+            .when(!resting, |this| this.px(px(10.)))
             .flex()
             .items_center()
             .gap(px(6.))
@@ -443,28 +447,34 @@ impl Shell {
             .cursor_pointer()
             .hover(move |style| style.bg(hover))
             .children(light.map(led))
-            .child(mono(words))
+            .when(resting, |this| {
+                this.child(icon(IconName::Mic, px(13.), colours.text_muted))
+            })
+            .when(!resting, |this| this.child(mono(words)))
             .on_click(
                 cx.listener(move |this, _: &ClickEvent, window, cx| match field {
                     Field::Chat(id) => this.chat_dictate(id, window, cx),
                     Field::King(_) => this.dictate(field, window, cx),
                 }),
             );
+        // What went wrong gives way first when the row is short.
         div()
-            .flex_none()
+            .flex_shrink(1.)
+            .min_w_0()
             .flex()
             .items_center()
             .gap(px(8.))
             .children(self.dictation.problem.clone().map(|problem| {
                 div()
                     .debug_selector(move || problem_name.clone())
+                    .min_w_0()
                     .max_w(px(320.))
                     .truncate()
                     .text_size(metrics::TEXT_SMALL())
                     .text_color(colours.warning)
                     .child(problem)
             }))
-            .child(button)
+            .child(button.flex_none())
             .into_any_element()
     }
 }
