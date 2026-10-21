@@ -181,6 +181,7 @@ impl Service {
         let place = self.place(machine.as_deref())?;
         let path = add_worktree_from(
             &place,
+            &self.worktree_location(),
             &project.root,
             &branch,
             &self.coordinator.config().guards.protected_branches,

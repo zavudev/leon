@@ -397,20 +397,15 @@ fn serve_client(stream: UnixStream, inputs: flume::Sender<Input>) {
     });
     let mut reader = BufReader::new(stream);
     loop {
-        let mut bytes = Vec::new();
-        match reader
-            .by_ref()
-            .take(MAX_LINE as u64 + 1)
-            .read_until(b'\n', &mut bytes)
-        {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {}
-        }
-        if bytes.len() > MAX_LINE {
-            let _ =
-                outgoing.send(json!({"id": 0, "ok": false, "error": "line too long"}).to_string());
-            return;
-        }
+        let bytes = match read_line(&mut reader) {
+            Line::End => return,
+            Line::TooLong => {
+                let _ = outgoing
+                    .send(json!({"id": 0, "ok": false, "error": "line too long"}).to_string());
+                return;
+            }
+            Line::Read(bytes) => bytes,
+        };
         let text = String::from_utf8_lossy(&bytes);
         if text.trim().is_empty() {
             continue;
@@ -1402,6 +1397,15 @@ impl Service {
 
     /// What a worker is started with: its folder, made when needed, and
     /// the agent the router chose.
+    /// The setting `worktree_location`, as the settings file has it now.
+    fn worktree_location(&self) -> String {
+        crate::settings::stored(&self.paths.data_dir.join(crate::settings::FILE_NAME))
+            .value("worktree_location")
+            .as_text()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
     fn worker_spec(&mut self, asked: WorkerRequest, now: u64) -> Result<WorkerSpec, String> {
         let ask = Ask {
             tier: asked.tier.clone(),
@@ -1453,23 +1457,17 @@ impl Service {
                     Some(id) => project.machine_id == *id,
                     None => project.local,
                 };
-                let project = projects
-                    .iter()
-                    .filter(on_it)
-                    .find(|project| Path::new(cwd).starts_with(&project.root));
-                if projects
-                    .iter()
-                    .filter(on_it)
-                    .any(|project| project.root == *cwd)
-                {
-                    return Err(
-                        "that is a project's main checkout; a worker works in a worktree"
-                            .to_owned(),
-                    );
-                }
-                if !self.place(machine.as_deref())?.is_folder(cwd) {
+                let place = self.place(machine.as_deref())?;
+                if !place.is_folder(cwd) {
                     return Err(format!("there is no folder {cwd}"));
                 }
+                let roots: Vec<&str> = projects
+                    .iter()
+                    .filter(on_it)
+                    .map(|project| project.root.as_str())
+                    .collect();
+                let project = project_of_folder(&place, cwd, &roots)?
+                    .and_then(|root| projects.iter().filter(on_it).find(|p| p.root == root));
                 (
                     cwd.clone(),
                     project.map(|project| project.name.clone()),
@@ -1489,6 +1487,7 @@ impl Service {
                     .unwrap_or_else(|| branch_for(&asked.title, now));
                 let path = add_worktree(
                     &place,
+                    &self.worktree_location(),
                     &project.root,
                     &branch,
                     &self.coordinator.config().guards.protected_branches,
@@ -1627,6 +1626,96 @@ struct ProjectInfo {
     root: String,
     branches: Vec<String>,
     worktrees: Vec<Value>,
+}
+
+/// One line a client sent.
+#[derive(Debug, PartialEq)]
+enum Line {
+    /// Its words, without the new line that ends them.
+    Read(Vec<u8>),
+    /// More than [`MAX_LINE`] bytes before the new line.
+    TooLong,
+    /// The connection is over.
+    End,
+}
+
+/// Reads the next line of `reader`: at most [`MAX_LINE`] bytes, the new
+/// line that ends it not counted (the host forwards a device's line of
+/// [`leon_wire::MAX_KING_LINE`] bytes with one).
+fn read_line(reader: &mut impl BufRead) -> Line {
+    let mut bytes = Vec::new();
+    match reader
+        .take(MAX_LINE as u64 + 2)
+        .read_until(b'\n', &mut bytes)
+    {
+        Ok(0) | Err(_) => return Line::End,
+        Ok(_) => {}
+    }
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
+    if bytes.len() > MAX_LINE {
+        return Line::TooLong;
+    }
+    Line::Read(bytes)
+}
+
+/// Which of the projects rooted at `roots` the folder `cwd` on `place` is a
+/// worktree of: the one whose main checkout is its repository's (a worktree
+/// anywhere, `{root}-worktrees/…` or `{root}/.worktrees/…`), else the one
+/// it is inside of. A folder in a project's main checkout, the checkout or
+/// a folder of it, is refused: a worker works in a worktree.
+fn project_of_folder<'a>(
+    place: &Place,
+    cwd: &str,
+    roots: &[&'a str],
+) -> Result<Option<&'a str>, String> {
+    let same = |a: &str, b: &str| Path::new(a) == Path::new(b);
+    let repository = place
+        .run(
+            "git",
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-dir",
+                "--git-common-dir",
+            ],
+            cwd,
+        )
+        .ok();
+    let mut lines = repository
+        .as_deref()
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim);
+    if let (Some(dir), Some(common)) = (lines.next(), lines.next()) {
+        // The repository's own `.git` is beside its main checkout.
+        let main = Path::new(common).parent().and_then(Path::to_str);
+        let project = main.and_then(|main| {
+            roots.iter().copied().find(|root| {
+                same(root, main)
+                    || place.is_here()
+                        && std::fs::canonicalize(root).is_ok_and(|real| real == Path::new(main))
+            })
+        });
+        if let Some(root) = project {
+            if same(dir, common) {
+                return Err(format!(
+                    "{cwd} is in {root}, a project's main checkout; a worker works in a worktree"
+                ));
+            }
+            return Ok(Some(root));
+        }
+    }
+    if let Some(root) = roots.iter().copied().find(|root| same(root, cwd)) {
+        return Err(format!(
+            "{root} is a project's main checkout; a worker works in a worktree"
+        ));
+    }
+    Ok(roots
+        .iter()
+        .copied()
+        .find(|root| Path::new(cwd).starts_with(root)))
 }
 
 /// Where each agent stands: installed on this computer (`installed`, in
@@ -1803,21 +1892,24 @@ fn slug(title: &str) -> String {
 }
 
 /// Makes a worktree of `root` on a new branch, `branch`, from what the
-/// project's checkout has, and returns its folder. Never on the default
-/// branch nor on a `protected` one.
+/// project's checkout has, and returns its folder, where the setting
+/// `worktree_location` (`location`, empty for the default) puts it. Never on
+/// the default branch nor on a `protected` one.
 fn add_worktree(
     place: &Place,
+    location: &str,
     root: &str,
     branch: &str,
     protected: &[String],
 ) -> Result<String, String> {
-    add_worktree_from(place, root, branch, protected, None)
+    add_worktree_from(place, location, root, branch, protected, None)
 }
 
 /// [`add_worktree`] whose new branch starts at `from` (a branch), when
 /// given.
 fn add_worktree_from(
     place: &Place,
+    location: &str,
     root: &str,
     branch: &str,
     protected: &[String],
@@ -1835,7 +1927,7 @@ fn add_worktree_from(
              worker needs one of its own"
         ));
     }
-    let path = crate::address::worktree_location("", root, branch)?;
+    let path = crate::address::worktree_location(location, root, branch)?;
     let exists = git(&[
         "rev-parse",
         "--verify",
@@ -1925,6 +2017,89 @@ mod tests {
     }
 
     #[test]
+    fn a_line_as_long_as_the_wire_allows_is_read_and_a_longer_one_is_not() {
+        let longest = "x".repeat(MAX_LINE);
+        assert_eq!(
+            leon_wire::MAX_KING_LINE,
+            MAX_LINE,
+            "the host passes what the wire allows"
+        );
+        let mut sent = std::io::Cursor::new(format!("{longest}\n{{}}\n").into_bytes());
+        assert_eq!(read_line(&mut sent), Line::Read(longest.into_bytes()));
+        assert_eq!(read_line(&mut sent), Line::Read(b"{}".to_vec()));
+        assert_eq!(read_line(&mut sent), Line::End);
+        let mut sent = std::io::Cursor::new(format!("{}\n", "x".repeat(MAX_LINE + 1)));
+        assert_eq!(read_line(&mut sent), Line::TooLong);
+        let mut sent = std::io::Cursor::new("x".repeat(MAX_LINE + 5));
+        assert_eq!(read_line(&mut sent), Line::TooLong);
+    }
+
+    #[test]
+    fn a_worker_folder_is_a_worktree_of_its_project_and_never_its_main_checkout() {
+        let top = tempfile::tempdir().unwrap();
+        let top = std::fs::canonicalize(top.path()).unwrap();
+        let root = top.join("web");
+        let git = |args: &[&str], cwd: &Path| {
+            let done = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(done.status.success(), "{args:?}: {done:?}");
+        };
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        git(&["init", "-q", "-b", "main"], &root);
+        std::fs::write(root.join("src/a.txt"), "a").unwrap();
+        git(&["add", "."], &root);
+        git(&["commit", "-qm", "init"], &root);
+        let beside = top.join("web-worktrees/fix");
+        git(
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "fix",
+                beside.to_str().unwrap(),
+            ],
+            &root,
+        );
+        let within = root.join(".worktrees/feat");
+        git(
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feat",
+                within.to_str().unwrap(),
+            ],
+            &root,
+        );
+        let other = top.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+
+        let here = Place::here();
+        let root_text = root.to_str().unwrap().to_owned();
+        let roots = [root_text.as_str()];
+        let of = |folder: &Path| project_of_folder(&here, folder.to_str().unwrap(), &roots);
+        assert_eq!(of(&beside), Ok(Some(root_text.as_str())));
+        assert_eq!(of(&within), Ok(Some(root_text.as_str())));
+        assert_eq!(of(&within.join("src")), Ok(Some(root_text.as_str())));
+        for main in [
+            root.clone(),
+            root.join("src"),
+            PathBuf::from(format!("{root_text}/")),
+        ] {
+            assert!(of(&main).is_err(), "{main:?} is the main checkout");
+        }
+        assert_eq!(of(&other), Ok(None), "a folder of no project");
+    }
+
+    #[test]
     fn a_terminal_king_asks_for_runs_one_line_in_a_folder_that_is_there() {
         let folder = tempfile::tempdir().unwrap();
         let cwd = folder.path().to_str().unwrap();
@@ -2004,10 +2179,21 @@ mod tests {
         ]);
         let root = root.to_string_lossy().into_owned();
         let protected = ["release".to_owned()];
-        assert!(add_worktree(&Place::here(), &root, "main", &protected).is_err());
-        assert!(add_worktree(&Place::here(), &root, "release", &protected).is_err());
-        let path = add_worktree(&Place::here(), &root, "king/fix", &protected).unwrap();
+        assert!(add_worktree(&Place::here(), "", &root, "main", &protected).is_err());
+        assert!(add_worktree(&Place::here(), "", &root, "release", &protected).is_err());
+        let path = add_worktree(&Place::here(), "", &root, "king/fix", &protected).unwrap();
         assert_eq!(path, format!("{root}-worktrees/king-fix"));
+        assert!(Path::new(&path).join(".git").exists());
+        // Where the setting `worktree_location` says.
+        let path = add_worktree(
+            &Place::here(),
+            "{root}/.worktrees/{branch}",
+            &root,
+            "king/style",
+            &protected,
+        )
+        .unwrap();
+        assert_eq!(path, format!("{root}/.worktrees/king-style"));
         assert!(Path::new(&path).join(".git").exists());
     }
 }
