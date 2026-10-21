@@ -77,18 +77,21 @@ pub enum Nav {
     Home,
     /// The board of tasks.
     Tasks,
+    /// King Leon.
+    King,
     /// The Den.
     Den,
 }
 
 impl Nav {
     /// The rows, top to bottom.
-    pub const ALL: [Nav; 3] = [Nav::Home, Nav::Tasks, Nav::Den];
+    pub const ALL: [Nav; 4] = [Nav::Home, Nav::Tasks, Nav::King, Nav::Den];
 
     /// Its name.
     pub fn label(self) -> &'static str {
         match self {
             Nav::Home => "Home",
+            Nav::King => "The King",
             Nav::Tasks => "Tasks",
             Nav::Den => "The Den",
         }
@@ -98,6 +101,7 @@ impl Nav {
     pub fn command(self) -> Command {
         match self {
             Nav::Home => Command::GoHome,
+            Nav::King => Command::ShowKing,
             Nav::Tasks => Command::ShowTasks,
             Nav::Den => Command::ShowDen,
         }
@@ -110,8 +114,10 @@ impl Nav {
             (Nav::Home, true) => Some(Nav::Home),
             (Nav::Home, false) => Some(Nav::Tasks),
             (Nav::Tasks, true) => Some(Nav::Home),
-            (Nav::Tasks, false) => Some(Nav::Den),
-            (Nav::Den, true) => Some(Nav::Tasks),
+            (Nav::Tasks, false) => Some(Nav::King),
+            (Nav::King, true) => Some(Nav::Tasks),
+            (Nav::King, false) => Some(Nav::Den),
+            (Nav::Den, true) => Some(Nav::King),
             (Nav::Den, false) => None,
         }
     }
@@ -454,6 +460,13 @@ impl Shell {
     pub(super) fn open_nav(&mut self, nav: Nav, window: &mut Window, cx: &mut Context<Self>) {
         match nav {
             Nav::Home => self.go_home(window, cx),
+            Nav::King => {
+                if !self.king_open() {
+                    self.toggle_king(window, cx);
+                }
+                self.home.nav = Some(Nav::King);
+                cx.notify();
+            }
             Nav::Tasks => {
                 // An overlay over whatever is open: the keyboard stays on
                 // its row for when it is closed.
@@ -503,6 +516,7 @@ impl Shell {
         let focused = self.pane == Pane::Sidebar;
         let hover = colours.surface;
         let (lions, waits) = self.den_glance(cx);
+        let king = self.king_glance();
         let mut nav = div()
             .debug_selector(|| "sidebar-nav".into())
             .flex_none()
@@ -516,6 +530,7 @@ impl Shell {
             let on = self.home.nav == Some(row);
             let (selector, glyph) = match row {
                 Nav::Home => ("sidebar-home", IconName::House),
+                Nav::King => ("sidebar-king", IconName::Crown),
                 Nav::Tasks => ("sidebar-tasks", IconName::SquareKanban),
                 Nav::Den => ("sidebar-den", IconName::PawPrint),
             };
@@ -572,6 +587,23 @@ impl Shell {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(row.label()),
                     )
+                    .when(row == Nav::King, |this| {
+                        this.children(king.map(|(activity, workers)| {
+                            div()
+                                .debug_selector(|| "sidebar-king-glance".into())
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .when(activity != Activity::Idle, |this| {
+                                    this.child(activity_dot(activity, colours))
+                                })
+                                .when(workers > 0, |this| {
+                                    this.child(
+                                        mono(workers.to_string()).text_color(colours.text_faint),
+                                    )
+                                })
+                        }))
+                    })
                     .when(row == Nav::Den && waits, |this| {
                         this.child(
                             div()

@@ -1446,6 +1446,12 @@ impl Shell {
                     format!("{} was removed from your agents.", agent.name()),
                 );
             }
+            Action::KingBrain {
+                agent,
+                model,
+                effort,
+                mode,
+            } => self.king_set_brain(agent, model, effort, mode, cx),
             Action::SetScale(step) => {
                 crate::settings::update(cx, |settings| settings.interface_scale = step)
             }

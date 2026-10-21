@@ -24,6 +24,7 @@ import {
   refreshRows,
   transcriptRows,
 } from '@/chat/transcript';
+import { tokensLine } from '@/chat/tokens';
 import { createDemoLink, DEMO_HOST, isDemo } from '@/link/demo';
 import { explain } from '@/link/errors';
 import {
@@ -59,6 +60,8 @@ type RuntimeState = {
   /** The shared transcript of a chat that began on the other computer. */
   transcripts: Record<string, Message[]>;
   turns: Record<string, TurnState>;
+  /** The tokens of each chat's last turn that ended here, in a few words (`tokensLine`). */
+  lastTokens: Record<string, string>;
   /** How each shared session is moving on its computer, per chat. */
   activity: Record<string, Activity>;
   /** What each agent offers on each computer (`optionsKey`), once it was asked. */
@@ -74,6 +77,7 @@ export const useRuntime = create<RuntimeState>(() => ({
   messages: {},
   transcripts: {},
   turns: {},
+  lastTokens: {},
   activity: {},
   options: {},
 }));
@@ -175,6 +179,7 @@ export function forgetHost(hostId: string): void {
       messages: drop(s.messages, gone),
       transcripts: drop(s.transcripts, gone),
       turns: drop(s.turns, gone),
+      lastTokens: drop(s.lastTokens, gone),
       activity: drop(s.activity, gone),
       options: Object.fromEntries(
         Object.entries(s.options).filter(([key]) => !key.startsWith(`${hostId}/`)),
@@ -594,6 +599,11 @@ function apply(chatId: string, turnId: string, events: TurnEvent[]): void {
   }
 
   if (isOver(turn)) {
+    const line = tokensLine(turn.tokens, turn.durationMs);
+    useRuntime.setState((st) => {
+      const { [chatId]: _was, ...rest } = st.lastTokens;
+      return { lastTokens: line ? { ...rest, [chatId]: line } : rest };
+    });
     endTurn(chatId, turn.items);
   } else {
     setTurn(chatId, turn);
@@ -844,7 +854,8 @@ export function forgetChat(chatId: string): void {
     const { [chatId]: _m, ...messages } = s.messages;
     const { [chatId]: _t, ...transcripts } = s.transcripts;
     const { [chatId]: _u, ...turns } = s.turns;
+    const { [chatId]: _l, ...lastTokens } = s.lastTokens;
     const { [chatId]: _a, ...activity } = s.activity;
-    return { messages, transcripts, turns, activity };
+    return { messages, transcripts, turns, lastTokens, activity };
   });
 }

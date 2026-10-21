@@ -301,6 +301,11 @@ impl Backend for DurableBackend {
 #[cfg(unix)]
 pub use local::LocalKeeper;
 
+/// Detaches a command from this process (see the keeper's start); King's
+/// service is started the same way.
+#[cfg(unix)]
+pub(crate) use local::detach;
+
 /// The real keeper, on this computer's socket.
 #[cfg(unix)]
 mod local {
@@ -376,7 +381,7 @@ mod local {
     /// neither in the window's process group nor hung up with its terminal),
     /// nothing on its standard streams, no directory of ours, and no
     /// descriptor of ours.
-    fn detach(command: &mut std::process::Command) {
+    pub(crate) fn detach(command: &mut std::process::Command) {
         use std::os::unix::process::CommandExt;
         use std::process::Stdio;
         command

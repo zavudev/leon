@@ -541,7 +541,7 @@ impl Shell {
             model: chat.model.as_deref(),
             effort: chat.effort.as_deref(),
             cwd: Some(&chat.cwd),
-            add_dirs: &[],
+            ..TurnSpec::default()
         };
         let start = Start {
             machine,

@@ -78,8 +78,36 @@ fn a_turn_is_the_server_whatever_is_asked_of_it() {
         effort: Some("high"),
         add_dirs: &[],
         cwd: None,
+        mcp_servers: &[],
+        instructions: None,
     };
     assert_eq!(argv(&turn), ["/opt/codex", "app-server"]);
+}
+
+#[test]
+fn its_thread_is_given_the_servers_of_tools_and_the_instructions() {
+    let mut session = fresh();
+    let servers = [crate::agents::McpServer {
+        name: "leon-king".into(),
+        command: "/bin/leon".into(),
+        args: vec!["king".into(), "mcp".into()],
+        env: vec![("LEON_DATA_DIR".into(), "/data".into())],
+    }];
+    let turn = TurnSpec {
+        mcp_servers: &servers,
+        instructions: Some("You coordinate."),
+        ..spec("hi")
+    };
+    let thread = value(&session.first(&turn)[2]);
+    assert_eq!(thread["params"]["developerInstructions"], "You coordinate.");
+    assert_eq!(
+        thread["params"]["config"],
+        json!({ "mcp_servers": { "leon-king": {
+            "command": "/bin/leon",
+            "args": ["king", "mcp"],
+            "env": { "LEON_DATA_DIR": "/data" },
+        } } })
+    );
 }
 
 #[test]
@@ -1170,4 +1198,54 @@ fn a_compaction_has_no_turn_in_its_answer_and_ends_like_any_turn() {
         .iter()
         .any(|event| matches!(event, TurnEvent::Finished { ok: true, .. })));
     assert!(session.idle());
+}
+
+#[test]
+fn the_turns_tokens_are_what_the_thread_added_since_it_began() {
+    let mut session = fresh();
+    session.first(&spec("hi"));
+    let update = |total: (u64, u64, u64, u64), last: (u64, u64, u64, u64)| {
+        let breakdown = |(input, cached, output, reasoning): (u64, u64, u64, u64)| {
+            json!({
+                "inputTokens": input, "cachedInputTokens": cached,
+                "outputTokens": output, "reasoningOutputTokens": reasoning,
+                "totalTokens": input + output,
+            })
+        };
+        json!({
+            "method": "thread/tokenUsage/updated",
+            "params": { "threadId": "t", "turnId": "u", "tokenUsage": {
+                "total": breakdown(total), "last": breakdown(last), "modelContextWindow": 400000,
+            } },
+        })
+        .to_string()
+    };
+    // A thread resumed with 1000 in and 100 out from before.
+    let first = read(
+        session.as_mut(),
+        &update((1500, 800, 150, 20), (500, 300, 50, 20)),
+    );
+    assert_eq!(
+        first.events,
+        [TurnEvent::Usage {
+            tokens: Tokens {
+                input: 500,
+                cached_input: 300,
+                output: 50,
+                reasoning: 20,
+                context_window: Some(400_000),
+            }
+        }]
+    );
+    let second = read(
+        session.as_mut(),
+        &update((2100, 1200, 210, 30), (600, 400, 60, 10)),
+    );
+    let [TurnEvent::Usage { tokens }] = &second.events[..] else {
+        panic!("{:?}", second.events);
+    };
+    assert_eq!(
+        (tokens.input, tokens.output, tokens.reasoning),
+        (1100, 110, 30)
+    );
 }

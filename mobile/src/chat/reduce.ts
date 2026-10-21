@@ -1,6 +1,6 @@
 // Turn events to chat rows: a pure function, so a turn that is replayed from
 // its beginning (after the app was closed) rebuilds exactly the same rows.
-import type { Answer, TurnEvent } from '@/link/types';
+import type { Answer, TurnEvent, TurnTokens } from '@/link/types';
 
 import {
   answerLine,
@@ -34,6 +34,8 @@ export type TurnState = {
   ok?: boolean;
   costUsd?: number;
   durationMs?: number;
+  /** The tokens it used, as the agent last said. */
+  tokens?: TurnTokens;
   /** The connection dropped; the turn goes on over there. */
   disconnected: boolean;
 };
@@ -264,6 +266,9 @@ export function reduceTurn(before: TurnState, event: TurnEvent, now: number): Tu
       }
       return next;
     }
+
+    case 'usage':
+      return { ...state, tokens: event.tokens };
 
     case 'disconnected':
       return { ...state, disconnected: true };

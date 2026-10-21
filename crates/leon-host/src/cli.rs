@@ -221,6 +221,7 @@ pub async fn serve(
     relay: String,
     name: String,
     print_code: bool,
+    king: Option<crate::King>,
     stop: impl std::future::Future<Output = ()>,
 ) -> Result<(), String> {
     let identity = Arc::new(
@@ -229,6 +230,7 @@ pub async fn serve(
     );
     let mut config = HostConfig::new(relay.clone(), name.clone());
     config.registry_poll = Duration::from_millis(500);
+    config.king = king;
     let host = Host::start(config, identity.clone(), Some(paths.devices()))
         .map_err(|e| format!("cannot open the device list: {e}"))?;
     println!("{SAFETY}\n");
@@ -376,7 +378,15 @@ fn ago(unix: u64) -> String {
 }
 
 /// Runs the command line. Returns the process exit code.
-pub fn run(args: Vec<String>, default_data_dir: PathBuf) -> i32 {
+///
+/// `king` gives the door to King's service of a data folder, when this
+/// installation has one; the host passes paired devices' lines to King
+/// through it.
+pub fn run(
+    args: Vec<String>,
+    default_data_dir: PathBuf,
+    king: &dyn Fn(&Path) -> Option<crate::King>,
+) -> i32 {
     let options = match parse(args) {
         Ok(options) => options,
         Err(message) => {
@@ -384,7 +394,8 @@ pub fn run(args: Vec<String>, default_data_dir: PathBuf) -> i32 {
             return 2;
         }
     };
-    let paths = Paths::new(&options.data_dir.clone().unwrap_or(default_data_dir));
+    let data_dir = options.data_dir.clone().unwrap_or(default_data_dir);
+    let paths = Paths::new(&data_dir);
     match options.action {
         Action::Help => {
             println!("{}", usage());
@@ -520,7 +531,14 @@ pub fn run(args: Vec<String>, default_data_dir: PathBuf) -> i32 {
                     return 1;
                 }
             };
-            let result = runtime.block_on(serve(&paths, relay, name, pair, shutdown_signal()));
+            let result = runtime.block_on(serve(
+                &paths,
+                relay,
+                name,
+                pair,
+                king(&data_dir),
+                shutdown_signal(),
+            ));
             match result {
                 Ok(()) => 0,
                 Err(error) => {
@@ -713,7 +731,8 @@ mod tests {
                     "--data-dir".into(),
                     dir.path().display().to_string()
                 ],
-                PathBuf::new()
+                PathBuf::new(),
+                &|_| None
             ),
             0
         );
@@ -726,7 +745,8 @@ mod tests {
                     "--data-dir".into(),
                     dir.path().display().to_string()
                 ],
-                PathBuf::new()
+                PathBuf::new(),
+                &|_| None
             ),
             0
         );
@@ -744,7 +764,7 @@ mod tests {
             let paths = paths.clone();
             let url = relay.url();
             tokio::spawn(async move {
-                serve(&paths, url, "box".into(), false, async {
+                serve(&paths, url, "box".into(), false, None, async {
                     let _ = stop_rx.await;
                 })
                 .await
@@ -772,7 +792,7 @@ mod tests {
             "--data-dir".to_owned(),
             dir.path().display().to_string(),
         ];
-        let code = tokio::task::spawn_blocking(move || run(args, PathBuf::new()))
+        let code = tokio::task::spawn_blocking(move || run(args, PathBuf::new(), &|_| None))
             .await
             .unwrap();
         assert_eq!(code, 0);

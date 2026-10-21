@@ -19,9 +19,9 @@ use leon_host::{Backoff, Host, HostConfig, RelayState};
 use leon_link::test_support::TestRelay;
 use leon_link::Identity;
 use leon_mobile::{
-    Answer, ConnectionListener, ConnectionState, HostSession, LeonMobile, LogoFormat, MobileError,
-    PermissionEffect, ProjectLogo, QuestionKind, SpawnOverrides, TurnEvent, TurnListener,
-    TurnRequest, Worktree,
+    Answer, ConnectionListener, ConnectionState, HostSession, KingListener, LeonMobile, LogoFormat,
+    MobileError, PermissionEffect, ProjectLogo, QuestionKind, SpawnOverrides, TurnEvent,
+    TurnListener, TurnRequest, Worktree,
 };
 
 const WAIT: Duration = Duration::from_secs(30);
@@ -331,6 +331,7 @@ async fn host_on(url: &str, dir: &Path) -> Host {
         initial: Duration::from_millis(20),
         max: Duration::from_millis(200),
     };
+    config.king = Some(leon_host::King(Arc::new(FakeKing)));
     let host = Host::start(config, identity, Some(dir.join("devices.json"))).unwrap();
     let mut state = host.watch_relay();
     while *state.borrow_and_update() != RelayState::Online {
@@ -1335,4 +1336,94 @@ async fn a_closed_session_says_so_and_a_revoked_phone_is_told() {
     let _ = &world.mobile;
     world.host.stop();
     world.relay.unwrap().stop().await;
+}
+
+/// King's service as far as a phone sees it: answers `status`, refuses what
+/// it does not know, tells a subscriber a notice, and hangs up on `bye`.
+struct FakeKing;
+
+impl leon_host::KingDoor for FakeKing {
+    fn open(&self) -> Result<leon_host::KingPipe, String> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+        let (ours, theirs) = UnixStream::pair().map_err(|error| error.to_string())?;
+        std::thread::spawn(move || {
+            let mut answer = theirs.try_clone().unwrap();
+            for line in BufReader::new(theirs).lines() {
+                let Ok(line) = line else { break };
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let id = request["id"].as_u64().unwrap();
+                let reply = match request["op"].as_str() {
+                    Some("bye") => break,
+                    Some("status") => serde_json::json!({"id": id, "ok": true,
+                        "result": {"brain": {"busy": false}}}),
+                    Some("subscribe") => serde_json::json!({"id": id, "ok": true}),
+                    _ => serde_json::json!({"id": id, "ok": false, "error": "unknown request"}),
+                };
+                writeln!(answer, "{reply}").unwrap();
+                if request["op"] == "subscribe" {
+                    writeln!(answer, r#"{{"notice":"notify","title":"PR opened"}}"#).unwrap();
+                }
+            }
+        });
+        let closer = ours.try_clone().unwrap();
+        Ok(leon_host::KingPipe {
+            write: Box::new(ours.try_clone().unwrap()),
+            read: Box::new(BufReader::new(ours)),
+            close: Box::new(move || {
+                let _ = closer.shutdown(std::net::Shutdown::Both);
+            }),
+        })
+    }
+}
+
+/// What a watch was told.
+#[derive(Debug, PartialEq)]
+enum Told {
+    Notice(String),
+    Closed,
+}
+
+struct Watching(Mutex<Sender<Told>>);
+
+impl KingListener for Watching {
+    fn on_notice(&self, notice: String) {
+        let _ = self.0.lock().unwrap().send(Told::Notice(notice));
+    }
+
+    fn on_closed(&self, _reason: String) {
+        let _ = self.0.lock().unwrap().send(Told::Closed);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_phone_asks_king_and_hears_its_notices_again_after_the_line_closed() {
+    let world = paired().await;
+    assert!(world.session.share_state().await.unwrap().king);
+    let status = world
+        .session
+        .king_ask(r#"{"op":"status"}"#.into())
+        .await
+        .unwrap();
+    assert_eq!(status, r#"{"brain":{"busy":false}}"#);
+    assert_eq!(
+        world.session.king_ask(r#"{"op":"dance"}"#.into()).await,
+        Err(MobileError::Host {
+            message: "unknown request".into()
+        })
+    );
+
+    let (tx, told) = channel();
+    let watch = world.session.king_watch(Box::new(Watching(Mutex::new(tx))));
+    let notice = Told::Notice(r#"{"notice":"notify","title":"PR opened"}"#.into());
+    assert_eq!(told.recv_timeout(WAIT).unwrap(), notice);
+    // King's service goes away: the watch says so and subscribes again.
+    assert!(world
+        .session
+        .king_ask(r#"{"op":"bye"}"#.into())
+        .await
+        .is_err());
+    assert_eq!(told.recv_timeout(WAIT).unwrap(), Told::Closed);
+    assert_eq!(told.recv_timeout(WAIT).unwrap(), notice);
+    watch.stop();
 }

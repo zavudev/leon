@@ -65,6 +65,57 @@ pub struct Where {
     pub cwd: String,
 }
 
+/// King Leon as the questions about it need it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KingInfo {
+    /// The agent King runs on, by tag.
+    pub agent: String,
+    /// Its model; the agent's own when absent.
+    pub model: Option<String>,
+    /// Its effort; the agent's own when absent.
+    pub effort: Option<String>,
+    /// Its permission mode; the agent's own when absent.
+    pub mode: Option<String>,
+    /// The models the agents of this computer offer, as King's service
+    /// found them.
+    pub models: Vec<KingModel>,
+    /// The permission modes they offer.
+    pub modes: Vec<KingMode>,
+}
+
+/// One permission mode an agent offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KingMode {
+    /// The agent's tag.
+    pub agent: String,
+    /// The mode's id.
+    pub id: String,
+    /// Its name.
+    pub label: String,
+    /// What it means.
+    pub description: String,
+    /// It lets the agent do anything without asking.
+    pub dangerous: bool,
+}
+
+/// One model an agent offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KingModel {
+    /// The agent's tag.
+    pub agent: String,
+    /// The model's id.
+    pub id: String,
+    /// Its name.
+    pub label: String,
+    /// The efforts it can be asked for, the lightest first.
+    pub efforts: Vec<String>,
+    /// How it did here, per kind of job: `code: 4 of 6 judged did well…`.
+    pub record: Vec<String>,
+}
+
+/// The answer that leaves a model or an effort to the agent.
+pub const AGENTS_OWN: &str = "(agent's own)";
+
 /// A live session as the flows need to know it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveInfo {
@@ -335,6 +386,8 @@ pub struct World {
     pub dens: Vec<DenChoice>,
     /// The id of the den in use.
     pub den_id: String,
+    /// King Leon, once the window has heard from its service.
+    pub king: Option<KingInfo>,
     /// What the settings change in the questions.
     pub prefs: Prefs,
     /// Git repositories found on the machines (by the Connect screen), by
@@ -469,6 +522,7 @@ impl World {
             scale,
             dens: Vec::new(),
             den_id: String::new(),
+            king: None,
             prefs: Prefs::default(),
             repositories: Vec::new(),
             installed: Vec::new(),
@@ -530,6 +584,12 @@ impl World {
     pub fn with_dens(mut self, dens: Vec<DenChoice>, current: String) -> Self {
         self.dens = dens;
         self.den_id = current;
+        self
+    }
+
+    /// The same world knowing what King runs on and the models it could.
+    pub fn with_king(mut self, king: Option<KingInfo>) -> Self {
+        self.king = king;
         self
     }
 
@@ -806,6 +866,17 @@ pub struct SessionIntent {
 pub enum Action {
     /// Hand an operation to the engine.
     Engine(Op),
+    /// Run King on another agent, model or effort.
+    KingBrain {
+        /// The agent's tag.
+        agent: String,
+        /// The model; the agent's own when absent.
+        model: Option<String>,
+        /// The effort; the agent's own when absent.
+        effort: Option<String>,
+        /// The permission mode; the agent's own when absent.
+        mode: Option<String>,
+    },
     /// Start an agent session.
     StartSession(SessionIntent),
     /// Give a live terminal a name.
@@ -1054,6 +1125,8 @@ pub fn is_flow(command: Command) -> bool {
             | Command::QuitAndEnd
             | Command::NewThemeFromCurrent
             | Command::ChooseDen
+            | Command::KingBrain
+            | Command::KingMode
             | Command::SaveDenAs
             | Command::NewTask
             | Command::StartTask
@@ -1138,6 +1211,8 @@ pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
             [name, ..] => Outcome::Run(Action::NewTheme(name.clone())),
         },
         Command::ChooseDen => choose_den(answers, world),
+        Command::KingBrain => king_brain(answers, world),
+        Command::KingMode => king_mode(answers, world),
         Command::StartTask => start_task(answers, world),
         Command::NewTask => match answers {
             [] => text("Task title", "What is to be done", Validate::Required),
@@ -3354,6 +3429,152 @@ fn remove_worktree(answers: &[String], world: &World) -> Outcome {
 }
 
 /// Which den: the built-in ones, then the user's, the one in use marked.
+/// What King runs on: the agent, then one of its models, then how hard it
+/// thinks, each with the one in use marked and the agent's own on offer.
+fn king_brain(answers: &[String], world: &World) -> Outcome {
+    let Some(king) = &world.king else {
+        return Outcome::Refuse(
+            "King is not connected: open King's view (Ctrl+Shift+Alt+K) first.".to_owned(),
+        );
+    };
+    let own = |chosen: &str| (chosen != AGENTS_OWN).then(|| chosen.to_owned());
+    // A mode is an agent's own: it stays with the agent, and goes with it.
+    let mode_for = |agent: &str| (agent == king.agent).then(|| king.mode.clone()).flatten();
+    match answers {
+        [] => {
+            let mut agents: Vec<&str> = Vec::new();
+            for tag in std::iter::once(king.agent.as_str())
+                .chain(king.models.iter().map(|model| model.agent.as_str()))
+            {
+                if !agents.contains(&tag) {
+                    agents.push(tag);
+                }
+            }
+            choices(
+                "King runs on",
+                agents
+                    .into_iter()
+                    .map(|tag| {
+                        let count = king.models.iter().filter(|m| m.agent == tag).count();
+                        let mut choice = Choice::new(
+                            AgentId::parse(tag)
+                                .map_or_else(|| tag.to_owned(), |agent| agent.name().to_owned()),
+                            match count {
+                                0 => "its own model".to_owned(),
+                                1 => "1 model".to_owned(),
+                                many => format!("{many} models"),
+                            },
+                            tag,
+                        )
+                        .current(tag == king.agent);
+                        if let Some(agent) = AgentId::parse(tag) {
+                            choice = choice.agent(agent);
+                        }
+                        choice
+                    })
+                    .collect(),
+                Custom::No,
+            )
+        }
+        [agent] => {
+            let same = *agent == king.agent;
+            let mut offered = vec![Choice::new("The agent's own", "", AGENTS_OWN)
+                .current(same && king.model.is_none())];
+            offered.extend(
+                king.models
+                    .iter()
+                    .filter(|model| &model.agent == agent)
+                    .map(|model| {
+                        // What the model did here, when it did anything.
+                        let said = std::iter::once(model.id.clone())
+                            .chain(model.record.iter().cloned())
+                            .collect::<Vec<_>>()
+                            .join(" \u{b7} ");
+                        Choice::new(model.label.clone(), said, model.id.clone())
+                            .current(same && king.model.as_deref() == Some(model.id.as_str()))
+                    }),
+            );
+            choices("Model", offered, Custom::Any)
+        }
+        [agent, model] => {
+            let efforts: Vec<String> = king
+                .models
+                .iter()
+                .find(|known| &known.agent == agent && known.id == *model)
+                .map(|known| known.efforts.clone())
+                .unwrap_or_default();
+            if efforts.is_empty() {
+                return Outcome::Run(Action::KingBrain {
+                    agent: agent.clone(),
+                    model: own(model),
+                    effort: None,
+                    mode: mode_for(agent),
+                });
+            }
+            let same = *agent == king.agent && king.model.as_deref() == own(model).as_deref();
+            let mut offered = vec![Choice::new("The agent's own", "", AGENTS_OWN)
+                .current(same && king.effort.is_none())];
+            offered.extend(efforts.iter().map(|effort| {
+                Choice::new(effort.clone(), "", effort.clone())
+                    .current(same && king.effort.as_deref() == Some(effort.as_str()))
+            }));
+            choices("Effort", offered, Custom::No)
+        }
+        [agent, model, effort, ..] => Outcome::Run(Action::KingBrain {
+            agent: agent.clone(),
+            model: own(model),
+            effort: own(effort),
+            mode: mode_for(agent),
+        }),
+    }
+}
+
+/// How much King asks before it acts: the permission modes of the agent it
+/// runs on, the one in use marked. The rest of what it runs on stays.
+fn king_mode(answers: &[String], world: &World) -> Outcome {
+    let Some(king) = &world.king else {
+        return Outcome::Refuse(
+            "King is not connected: open King's view (Ctrl+Shift+Alt+K) first.".to_owned(),
+        );
+    };
+    let modes: Vec<&KingMode> = king
+        .modes
+        .iter()
+        .filter(|mode| mode.agent == king.agent)
+        .collect();
+    match answers {
+        [] => {
+            let mut offered = vec![Choice::new(
+                "The agent's own",
+                "as the agent is set up on this computer; it asks as it would in a terminal",
+                AGENTS_OWN,
+            )
+            .current(king.mode.is_none())];
+            offered.extend(modes.iter().map(|mode| {
+                let detail = if mode.dangerous {
+                    format!("{} (never asks: King may do anything)", mode.description)
+                } else {
+                    mode.description.clone()
+                };
+                Choice::new(mode.label.clone(), detail, mode.id.clone())
+                    .current(king.mode.as_deref() == Some(mode.id.as_str()))
+            }));
+            choices("King asks", offered, Custom::No)
+        }
+        [chosen, ..] => {
+            if chosen != AGENTS_OWN && !modes.iter().any(|mode| mode.id == *chosen) {
+                return Outcome::Refuse(format!("Unknown mode {chosen:?}."));
+            }
+            Outcome::Run(Action::KingBrain {
+                agent: king.agent.clone(),
+                model: king.model.clone(),
+                effort: king.effort.clone(),
+                mode: (chosen != AGENTS_OWN).then(|| chosen.clone()),
+            })
+        }
+    }
+}
+
 fn choose_den(answers: &[String], world: &World) -> Outcome {
     match answers {
         [] => choices(
@@ -3880,6 +4101,7 @@ mod tests {
             scale: 100,
             dens: Vec::new(),
             den_id: String::new(),
+            king: None,
             prefs: Prefs::default(),
             repositories: Vec::new(),
             installed: Vec::new(),
@@ -5194,6 +5416,150 @@ mod tests {
     }
 
     #[test]
+    fn king_is_given_an_agent_then_a_model_then_an_effort() {
+        let mut world = world();
+        assert!(matches!(
+            advance(Command::KingBrain, &[], &world),
+            Outcome::Refuse(_)
+        ));
+        let model = |agent: &str, id: &str, efforts: &[&str]| KingModel {
+            agent: agent.into(),
+            id: id.into(),
+            label: id.to_uppercase(),
+            efforts: efforts.iter().map(|e| (*e).to_owned()).collect(),
+            record: Vec::new(),
+        };
+        world.king = Some(KingInfo {
+            agent: "claude".into(),
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+            mode: Some("acceptEdits".into()),
+            modes: vec![
+                KingMode {
+                    agent: "claude".into(),
+                    id: "acceptEdits".into(),
+                    label: "Accept edits".into(),
+                    description: "edits without asking".into(),
+                    dangerous: false,
+                },
+                KingMode {
+                    agent: "claude".into(),
+                    id: "bypassPermissions".into(),
+                    label: "Bypass".into(),
+                    description: "everything without asking".into(),
+                    dangerous: true,
+                },
+                KingMode {
+                    agent: "codex".into(),
+                    id: "full-auto".into(),
+                    label: "Full auto".into(),
+                    description: String::new(),
+                    dangerous: false,
+                },
+            ],
+            models: vec![
+                model("claude", "opus", &["low", "high"]),
+                model("claude", "haiku", &[]),
+                model("codex", "gpt-5.5", &["medium", "high"]),
+            ],
+        });
+        let ask = |answers: &[&str]| {
+            let answers: Vec<String> = answers.iter().map(|a| (*a).to_owned()).collect();
+            match advance(Command::KingBrain, &answers, &world) {
+                Outcome::Ask(Step {
+                    kind: StepKind::Choices { choices, .. },
+                    ..
+                }) => choices
+                    .into_iter()
+                    .map(|c| (c.value, c.current))
+                    .collect::<Vec<_>>(),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(ask(&[]), [("claude".into(), true), ("codex".into(), false)]);
+        assert_eq!(
+            ask(&["claude"]),
+            [
+                (AGENTS_OWN.into(), false),
+                ("opus".into(), true),
+                ("haiku".into(), false)
+            ]
+        );
+        assert_eq!(
+            ask(&["claude", "opus"]),
+            [
+                (AGENTS_OWN.into(), false),
+                ("low".into(), false),
+                ("high".into(), true)
+            ]
+        );
+        // A model with no efforts is the last question.
+        let to = |answers: &[&str]| {
+            let answers: Vec<String> = answers.iter().map(|a| (*a).to_owned()).collect();
+            advance(Command::KingBrain, &answers, &world)
+        };
+        assert_eq!(
+            to(&["claude", "haiku"]),
+            Outcome::Run(Action::KingBrain {
+                agent: "claude".into(),
+                model: Some("haiku".into()),
+                effort: None,
+                mode: Some("acceptEdits".into()),
+            })
+        );
+        assert_eq!(
+            to(&["codex", AGENTS_OWN]),
+            Outcome::Run(Action::KingBrain {
+                agent: "codex".into(),
+                model: None,
+                effort: None,
+                mode: None,
+            })
+        );
+        assert_eq!(
+            to(&["codex", "gpt-5.5", "high"]),
+            Outcome::Run(Action::KingBrain {
+                agent: "codex".into(),
+                model: Some("gpt-5.5".into()),
+                effort: Some("high".into()),
+                mode: None,
+            })
+        );
+        // How much it asks: the modes of its own agent, the rest kept.
+        let modes = match advance(Command::KingMode, &[], &world) {
+            Outcome::Ask(Step {
+                kind: StepKind::Choices { choices, .. },
+                ..
+            }) => choices
+                .into_iter()
+                .map(|c| (c.value, c.current))
+                .collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            modes,
+            [
+                (AGENTS_OWN.into(), false),
+                ("acceptEdits".into(), true),
+                ("bypassPermissions".into(), false)
+            ]
+        );
+        assert_eq!(
+            advance(Command::KingMode, &["bypassPermissions".into()], &world),
+            Outcome::Run(Action::KingBrain {
+                agent: "claude".into(),
+                model: Some("opus".into()),
+                effort: Some("high".into()),
+                mode: Some("bypassPermissions".into()),
+            })
+        );
+        assert!(matches!(
+            advance(Command::KingMode, &["full-auto".into()], &world),
+            Outcome::Refuse(_)
+        ));
+    }
+
+    #[test]
     fn only_the_commands_with_steps_are_flows() {
         for command in [
             Command::NewSession,
@@ -6469,7 +6835,15 @@ mod tests {
                 .iter()
                 .map(|(value, _)| value.as_str())
                 .collect::<Vec<_>>(),
-            ["claude", "codex", "opencode", "grok", "cursor", "gemini"],
+            [
+                "claude",
+                "codex",
+                "opencode",
+                "grok",
+                "cursor",
+                "antigravity",
+                "gemini"
+            ],
             "only the agents with a verified prompt form, in the catalogue's order"
         );
         assert!(offered.iter().all(|(_, on)| !on));

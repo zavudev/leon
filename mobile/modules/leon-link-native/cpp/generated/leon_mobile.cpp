@@ -95,12 +95,24 @@ typedef struct UniffiForeignFutureResultVoid {
 } UniffiForeignFutureResultVoid;
 typedef void (*UniffiForeignFutureCompleteVoid)(
     uint64_t callback_data, UniffiForeignFutureResultVoid result);
+typedef void (*UniffiCallbackInterfaceKingListenerMethod0)(
+    uint64_t uniffi_handle, RustBuffer notice, void *uniffi_out_return,
+    RustCallStatus *rust_call_status);
+typedef void (*UniffiCallbackInterfaceKingListenerMethod1)(
+    uint64_t uniffi_handle, RustBuffer reason, void *uniffi_out_return,
+    RustCallStatus *rust_call_status);
 typedef void (*UniffiCallbackInterfaceConnectionListenerMethod0)(
     uint64_t uniffi_handle, RustBuffer state, void *uniffi_out_return,
     RustCallStatus *rust_call_status);
 typedef void (*UniffiCallbackInterfaceTurnListenerMethod0)(
     uint64_t uniffi_handle, RustBuffer event, void *uniffi_out_return,
     RustCallStatus *rust_call_status);
+typedef struct UniffiVTableCallbackInterfaceKingListener {
+  UniffiCallbackInterfaceFree uniffi_free;
+  UniffiCallbackInterfaceClone uniffi_clone;
+  UniffiCallbackInterfaceKingListenerMethod0 on_notice;
+  UniffiCallbackInterfaceKingListenerMethod1 on_closed;
+} UniffiVTableCallbackInterfaceKingListener;
 typedef struct UniffiVTableCallbackInterfaceConnectionListener {
   UniffiCallbackInterfaceFree uniffi_free;
   UniffiCallbackInterfaceClone uniffi_clone;
@@ -111,6 +123,12 @@ typedef struct UniffiVTableCallbackInterfaceTurnListener {
   UniffiCallbackInterfaceClone uniffi_clone;
   UniffiCallbackInterfaceTurnListenerMethod0 on_event;
 } UniffiVTableCallbackInterfaceTurnListener;
+/*handle*/ uint64_t uniffi_leon_mobile_fn_clone_kingwatch(
+    /*handle*/ uint64_t handle, RustCallStatus *uniffi_out_err);
+void uniffi_leon_mobile_fn_free_kingwatch(
+    /*handle*/ uint64_t handle, RustCallStatus *uniffi_out_err);
+void uniffi_leon_mobile_fn_method_kingwatch_stop(
+    /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
 /*handle*/ uint64_t uniffi_leon_mobile_fn_clone_leonmobile(
     /*handle*/ uint64_t handle, RustCallStatus *uniffi_out_err);
 void uniffi_leon_mobile_fn_free_leonmobile(
@@ -131,6 +149,10 @@ RustBuffer uniffi_leon_mobile_fn_method_leonmobile_device_name(
     /*handle*/ uint64_t handle, RustCallStatus *uniffi_out_err);
 void uniffi_leon_mobile_fn_free_hostsession(
     /*handle*/ uint64_t handle, RustCallStatus *uniffi_out_err);
+/*handle*/ uint64_t uniffi_leon_mobile_fn_method_hostsession_king_ask(
+    /*handle*/ uint64_t ptr, RustBuffer request);
+/*handle*/ uint64_t uniffi_leon_mobile_fn_method_hostsession_king_watch(
+    /*handle*/ uint64_t ptr, uint64_t listener, RustCallStatus *uniffi_out_err);
 /*handle*/ uint64_t uniffi_leon_mobile_fn_method_hostsession_agent_options(
     /*handle*/ uint64_t ptr, RustBuffer agent);
 /*handle*/ uint64_t uniffi_leon_mobile_fn_method_hostsession_attach_turn(
@@ -188,6 +210,8 @@ void uniffi_leon_mobile_fn_method_turn_set_model(
     /*handle*/ uint64_t ptr, RustBuffer model, RustCallStatus *uniffi_out_err);
 uint32_t uniffi_leon_mobile_fn_method_turn_unsent(
     /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
+void uniffi_leon_mobile_fn_init_callback_vtable_kinglistener(
+    UniffiVTableCallbackInterfaceKingListener *vtable);
 void uniffi_leon_mobile_fn_init_callback_vtable_connectionlistener(
     UniffiVTableCallbackInterfaceConnectionListener *vtable);
 void uniffi_leon_mobile_fn_init_callback_vtable_turnlistener(
@@ -316,10 +340,13 @@ void ffi_leon_mobile_rust_future_complete_void(
     /*handle*/ uint64_t handle, RustCallStatus *uniffi_out_err);
 uint16_t uniffi_leon_mobile_checksum_func_agents();
 uint16_t uniffi_leon_mobile_checksum_func_check_code();
+uint16_t uniffi_leon_mobile_checksum_method_kingwatch_stop();
 uint16_t uniffi_leon_mobile_checksum_method_leonmobile_connect();
 uint16_t uniffi_leon_mobile_checksum_method_leonmobile_device_id();
 uint16_t uniffi_leon_mobile_checksum_method_leonmobile_device_name();
 uint16_t uniffi_leon_mobile_checksum_method_leonmobile_pair();
+uint16_t uniffi_leon_mobile_checksum_method_hostsession_king_ask();
+uint16_t uniffi_leon_mobile_checksum_method_hostsession_king_watch();
 uint16_t uniffi_leon_mobile_checksum_method_hostsession_agent_options();
 uint16_t uniffi_leon_mobile_checksum_method_hostsession_attach_turn();
 uint16_t uniffi_leon_mobile_checksum_method_hostsession_close();
@@ -347,6 +374,8 @@ uint16_t uniffi_leon_mobile_checksum_method_turn_set_mode();
 uint16_t uniffi_leon_mobile_checksum_method_turn_set_model();
 uint16_t uniffi_leon_mobile_checksum_method_turn_unsent();
 uint16_t uniffi_leon_mobile_checksum_constructor_leonmobile_new();
+uint16_t uniffi_leon_mobile_checksum_method_kinglistener_on_notice();
+uint16_t uniffi_leon_mobile_checksum_method_kinglistener_on_closed();
 uint16_t uniffi_leon_mobile_checksum_method_connectionlistener_on_state();
 uint16_t uniffi_leon_mobile_checksum_method_turnlistener_on_event();
 uint32_t ffi_leon_mobile_uniffi_contract_version();
@@ -843,6 +872,118 @@ static void cleanup() {
 }
 } // namespace uniffi::leon_mobile::cb::foreignfuturedroppedcallback
   // Implementation of free callback function CallbackInterfaceFree
+
+// Callback function:
+// uniffi::leon_mobile::st::vtablecallbackinterfacekinglistener::vtablecallbackinterfacekinglistener::free::UniffiCallbackInterfaceFree
+//
+// We have the following constraints:
+// - we need to pass a function pointer to Rust.
+// - we need a jsi::Runtime and jsi::Function to call into JS.
+// - function pointers can't store state, so we can't use a lamda.
+//
+// For this, we store a lambda as a global, as `rsLambda`. The `callback`
+// function calls the lambda, which itself calls the `body` which then calls
+// into JS.
+//
+// We then give the `callback` function pointer to Rust which will call the
+// lambda sometime in the future.
+namespace uniffi::leon_mobile::st::vtablecallbackinterfacekinglistener::
+    vtablecallbackinterfacekinglistener::free {
+using namespace facebook;
+
+// We need to store a lambda in a global so we can call it from
+// a function pointer. The function pointer is passed to Rust.
+static std::function<void(uint64_t)> rsLambda = nullptr;
+
+// This is the main body of the callback. It's called from the lambda,
+// which itself is called from the callback function which is passed to Rust.
+static void body(jsi::Runtime &rt,
+                 std::shared_ptr<uniffi_runtime::UniffiCallInvoker> callInvoker,
+                 std::shared_ptr<jsi::Value> callbackValue,
+                 uint64_t rs_handle) {
+
+  // Convert the arguments from Rust, into jsi::Values.
+  // We'll use the Bridging class to do this…
+  auto js_handle =
+      uniffi_jsi::Bridging<uint64_t>::toJs(rt, callInvoker, rs_handle);
+
+  // Now we are ready to call the callback.
+  // We are already on the JS thread, because this `body` function was
+  // invoked from the CallInvoker.
+  try {
+    // Getting the callback function
+    auto cb = callbackValue->asObject(rt).asFunction(rt);
+    auto uniffiResult = cb.call(rt, js_handle);
+
+  } catch (const jsi::JSError &error) {
+    std::cout << "Error in callback UniffiCallbackInterfaceFree: "
+              << error.what() << std::endl;
+    throw error;
+  }
+}
+
+static void callback(uint64_t rs_handle) {
+  // If the runtime has shutdown, then there is no point in trying to
+  // call into Javascript. BUT how do we tell if the runtime has shutdown?
+  //
+  // Answer: the module destructor calls into callback `cleanup` method,
+  // which nulls out the rsLamda.
+  //
+  // If rsLamda is null, then there is no runtime to call into.
+  if (rsLambda == nullptr) {
+    // This only occurs when destructors are calling into Rust free/drop,
+    // which causes the JS callback to be dropped.
+    return;
+  }
+
+  // The runtime, the actual callback jsi::funtion, and the callInvoker
+  // are all in the lambda.
+  rsLambda(rs_handle);
+}
+
+[[maybe_unused]] static UniffiCallbackInterfaceFree
+makeCallbackFunction( // uniffi::leon_mobile::st::vtablecallbackinterfacekinglistener::vtablecallbackinterfacekinglistener::free
+    jsi::Runtime &rt,
+    std::shared_ptr<uniffi_runtime::UniffiCallInvoker> callInvoker,
+    const jsi::Value &value) {
+  if (rsLambda != nullptr) {
+    // `makeCallbackFunction` is called in two circumstances:
+    //
+    // 1. at startup, when initializing callback interface vtables.
+    // 2. when polling futures. This happens at least once per future that is
+    //    exposed to Javascript. We know that this is always the same function,
+    //    `uniffiFutureContinuationCallback` in `async-rust-calls.ts`.
+    //
+    // We can therefore return the callback function without making anything
+    // new if we've been initialized already.
+    return callback;
+  }
+  auto callbackFunction = value.asObject(rt).asFunction(rt);
+  auto callbackValue = std::make_shared<jsi::Value>(rt, callbackFunction);
+  rsLambda = [&rt, callInvoker, callbackValue](uint64_t rs_handle) {
+    // We immediately make a lambda which will do the work of transforming the
+    // arguments into JSI values and calling the callback.
+    uniffi_runtime::UniffiCallFunc jsLambda =
+        [callInvoker, callbackValue, rs_handle](jsi::Runtime &rt) mutable {
+          body(rt, callInvoker, callbackValue, rs_handle);
+        };
+    // We'll then call that lambda from the callInvoker which will
+    // look after calling it on the correct thread.
+
+    callInvoker->invokeNonBlocking(rt, jsLambda);
+  };
+  return callback;
+}
+
+// This method is called from the destructor of NativeLeonMobile, which only
+// happens when the jsi::Runtime is being destroyed.
+static void cleanup() {
+  // The lambda holds a reference to the the Runtime, so when this is nulled
+  // out, then the pointer will no longer be left dangling.
+  rsLambda = nullptr;
+}
+} // namespace
+  // uniffi::leon_mobile::st::vtablecallbackinterfacekinglistener::vtablecallbackinterfacekinglistener::free
 
 // Callback function:
 // uniffi::leon_mobile::st::vtablecallbackinterfaceconnectionlistener::vtablecallbackinterfaceconnectionlistener::free::UniffiCallbackInterfaceFree
@@ -1902,6 +2043,439 @@ template <> struct Bridging<UniffiForeignFutureCompleteVoid> {
 };
 } // namespace uniffi::leon_mobile
   // Implementation of CallbackInterfaceClone for vtable field uniffi_clone in
+  // VTableCallbackInterfaceKingListener
+
+// Callback function:
+// uniffi::leon_mobile::cb::callbackinterfaceclone::vtablecallbackinterfacekinglistener::UniffiCallbackInterfaceClone
+//
+// We have the following constraints:
+// - we need to pass a function pointer to Rust.
+// - we need a jsi::Runtime and jsi::Function to call into JS.
+// - function pointers can't store state, so we can't use a lamda.
+//
+// For this, we store a lambda as a global, as `rsLambda`. The `callback`
+// function calls the lambda, which itself calls the `body` which then calls
+// into JS.
+//
+// We then give the `callback` function pointer to Rust which will call the
+// lambda sometime in the future.
+namespace uniffi::leon_mobile::cb::callbackinterfaceclone::
+    vtablecallbackinterfacekinglistener {
+using namespace facebook;
+
+// We need to store a lambda in a global so we can call it from
+// a function pointer. The function pointer is passed to Rust.
+static std::function<void(uint64_t, uint64_t *)> rsLambda = nullptr;
+
+// This is the main body of the callback. It's called from the lambda,
+// which itself is called from the callback function which is passed to Rust.
+static void body(jsi::Runtime &rt,
+                 std::shared_ptr<uniffi_runtime::UniffiCallInvoker> callInvoker,
+                 std::shared_ptr<jsi::Value> callbackValue, uint64_t rs_handle,
+                 uint64_t *uniffi_direct_return) {
+
+  // Convert the arguments from Rust, into jsi::Values.
+  // We'll use the Bridging class to do this…
+  auto js_handle =
+      uniffi_jsi::Bridging<uint64_t>::toJs(rt, callInvoker, rs_handle);
+
+  // Now we are ready to call the callback.
+  // We are already on the JS thread, because this `body` function was
+  // invoked from the CallInvoker.
+  try {
+    // Getting the callback function
+    auto cb = callbackValue->asObject(rt).asFunction(rt);
+    auto uniffiResult = cb.call(rt, js_handle);
+
+    // Write the direct return value back to the caller.
+    if (uniffi_direct_return != nullptr) {
+      *uniffi_direct_return =
+          uniffi_jsi::Bridging<uint64_t>::fromJs(rt, callInvoker, uniffiResult);
+    }
+  } catch (const jsi::JSError &error) {
+    std::cout << "Error in callback UniffiCallbackInterfaceClone: "
+              << error.what() << std::endl;
+    throw error;
+  }
+}
+
+static uint64_t callback(uint64_t rs_handle) {
+  // If the runtime has shutdown, then there is no point in trying to
+  // call into Javascript. BUT how do we tell if the runtime has shutdown?
+  //
+  // Answer: the module destructor calls into callback `cleanup` method,
+  // which nulls out the rsLamda.
+  //
+  // If rsLamda is null, then there is no runtime to call into.
+  if (rsLambda == nullptr) {
+    // This only occurs when destructors are calling into Rust free/drop,
+    // which causes the JS callback to be dropped.
+    return 0;
+  }
+  uint64_t uniffi_result = 0;
+
+  // The runtime, the actual callback jsi::funtion, and the callInvoker
+  // are all in the lambda.
+  rsLambda(rs_handle, &uniffi_result);
+  return uniffi_result;
+}
+
+[[maybe_unused]] static UniffiCallbackInterfaceClone
+makeCallbackFunction( // uniffi::leon_mobile::cb::callbackinterfaceclone::vtablecallbackinterfacekinglistener
+    jsi::Runtime &rt,
+    std::shared_ptr<uniffi_runtime::UniffiCallInvoker> callInvoker,
+    const jsi::Value &value) {
+  if (rsLambda != nullptr) {
+    // `makeCallbackFunction` is called in two circumstances:
+    //
+    // 1. at startup, when initializing callback interface vtables.
+    // 2. when polling futures. This happens at least once per future that is
+    //    exposed to Javascript. We know that this is always the same function,
+    //    `uniffiFutureContinuationCallback` in `async-rust-calls.ts`.
+    //
+    // We can therefore return the callback function without making anything
+    // new if we've been initialized already.
+    return callback;
+  }
+  auto callbackFunction = value.asObject(rt).asFunction(rt);
+  auto callbackValue = std::make_shared<jsi::Value>(rt, callbackFunction);
+  rsLambda = [&rt, callInvoker, callbackValue](uint64_t rs_handle,
+                                               uint64_t *uniffi_direct_return) {
+    // We immediately make a lambda which will do the work of transforming the
+    // arguments into JSI values and calling the callback.
+    uniffi_runtime::UniffiCallFunc jsLambda =
+        [callInvoker, callbackValue, rs_handle,
+         uniffi_direct_return](jsi::Runtime &rt) mutable {
+          body(rt, callInvoker, callbackValue, rs_handle, uniffi_direct_return);
+        };
+    // We'll then call that lambda from the callInvoker which will
+    // look after calling it on the correct thread.
+    callInvoker->invokeBlocking(rt, jsLambda);
+  };
+  return callback;
+}
+
+// This method is called from the destructor of NativeLeonMobile, which only
+// happens when the jsi::Runtime is being destroyed.
+static void cleanup() {
+  // The lambda holds a reference to the the Runtime, so when this is nulled
+  // out, then the pointer will no longer be left dangling.
+  rsLambda = nullptr;
+}
+} // namespace
+  // uniffi::leon_mobile::cb::callbackinterfaceclone::vtablecallbackinterfacekinglistener
+  // Implementation of CallbackInterfaceKingListenerMethod0 for vtable field
+  // on_notice in VTableCallbackInterfaceKingListener
+
+// Callback function:
+// uniffi::leon_mobile::cb::callbackinterfacekinglistenermethod0::vtablecallbackinterfacekinglistener::UniffiCallbackInterfaceKingListenerMethod0
+//
+// We have the following constraints:
+// - we need to pass a function pointer to Rust.
+// - we need a jsi::Runtime and jsi::Function to call into JS.
+// - function pointers can't store state, so we can't use a lamda.
+//
+// For this, we store a lambda as a global, as `rsLambda`. The `callback`
+// function calls the lambda, which itself calls the `body` which then calls
+// into JS.
+//
+// We then give the `callback` function pointer to Rust which will call the
+// lambda sometime in the future.
+namespace uniffi::leon_mobile::cb::callbackinterfacekinglistenermethod0::
+    vtablecallbackinterfacekinglistener {
+using namespace facebook;
+
+// We need to store a lambda in a global so we can call it from
+// a function pointer. The function pointer is passed to Rust.
+static std::function<void(uint64_t, RustBuffer, void *, RustCallStatus *)>
+    rsLambda = nullptr;
+
+// This is the main body of the callback. It's called from the lambda,
+// which itself is called from the callback function which is passed to Rust.
+static void body(jsi::Runtime &rt,
+                 std::shared_ptr<uniffi_runtime::UniffiCallInvoker> callInvoker,
+                 std::shared_ptr<jsi::Value> callbackValue,
+                 uint64_t rs_uniffiHandle, RustBuffer rs_notice,
+                 void *rs_uniffiOutReturn, RustCallStatus *uniffi_call_status) {
+
+  // Convert the arguments from Rust, into jsi::Values.
+  // We'll use the Bridging class to do this…
+  auto js_uniffiHandle =
+      uniffi_jsi::Bridging<uint64_t>::toJs(rt, callInvoker, rs_uniffiHandle);
+  auto js_notice = uniffi::leon_mobile::Bridging<RustBuffer>::toJs(
+      rt, callInvoker, rs_notice);
+
+  // Now we are ready to call the callback.
+  // We are already on the JS thread, because this `body` function was
+  // invoked from the CallInvoker.
+  try {
+    // Getting the callback function
+    auto cb = callbackValue->asObject(rt).asFunction(rt);
+    auto uniffiResult = cb.call(rt, js_uniffiHandle, js_notice);
+
+    // Now copy the result back from JS into the RustCallStatus object.
+    uniffi::leon_mobile::Bridging<RustCallStatus>::copyFromJs(
+        rt, callInvoker, uniffiResult, uniffi_call_status);
+
+    if (uniffi_call_status->code != UNIFFI_CALL_STATUS_OK) {
+      // The JS callback finished abnormally, so we cannot retrieve the return
+      // value.
+      return;
+    }
+
+  } catch (const jsi::JSError &error) {
+    std::cout
+        << "Error in callback UniffiCallbackInterfaceKingListenerMethod0: "
+        << error.what() << std::endl;
+    throw error;
+  }
+}
+
+static void callback(uint64_t rs_uniffiHandle, RustBuffer rs_notice,
+                     void *rs_uniffiOutReturn,
+                     RustCallStatus *uniffi_call_status) {
+  // If the runtime has shutdown, then there is no point in trying to
+  // call into Javascript. BUT how do we tell if the runtime has shutdown?
+  //
+  // Answer: the module destructor calls into callback `cleanup` method,
+  // which nulls out the rsLamda.
+  //
+  // If rsLamda is null, then there is no runtime to call into.
+  if (rsLambda == nullptr) {
+    // This only occurs when destructors are calling into Rust free/drop,
+    // which causes the JS callback to be dropped.
+    return;
+  }
+
+  // The runtime, the actual callback jsi::funtion, and the callInvoker
+  // are all in the lambda.
+  rsLambda(rs_uniffiHandle, rs_notice, rs_uniffiOutReturn, uniffi_call_status);
+}
+
+[[maybe_unused]] static UniffiCallbackInterfaceKingListenerMethod0
+makeCallbackFunction( // uniffi::leon_mobile::cb::callbackinterfacekinglistenermethod0::vtablecallbackinterfacekinglistener
+    jsi::Runtime &rt,
+    std::shared_ptr<uniffi_runtime::UniffiCallInvoker> callInvoker,
+    const jsi::Value &value) {
+  if (rsLambda != nullptr) {
+    // `makeCallbackFunction` is called in two circumstances:
+    //
+    // 1. at startup, when initializing callback interface vtables.
+    // 2. when polling futures. This happens at least once per future that is
+    //    exposed to Javascript. We know that this is always the same function,
+    //    `uniffiFutureContinuationCallback` in `async-rust-calls.ts`.
+    //
+    // We can therefore return the callback function without making anything
+    // new if we've been initialized already.
+    return callback;
+  }
+  auto callbackFunction = value.asObject(rt).asFunction(rt);
+  auto callbackValue = std::make_shared<jsi::Value>(rt, callbackFunction);
+  rsLambda = [&rt, callInvoker, callbackValue](
+                 uint64_t rs_uniffiHandle, RustBuffer rs_notice,
+                 void *rs_uniffiOutReturn, RustCallStatus *uniffi_call_status) {
+    // We immediately make a lambda which will do the work of transforming the
+    // arguments into JSI values and calling the callback.
+    uniffi_runtime::UniffiCallFunc jsLambda =
+        [callInvoker, callbackValue, rs_uniffiHandle, rs_notice,
+         rs_uniffiOutReturn, uniffi_call_status](jsi::Runtime &rt) mutable {
+          body(rt, callInvoker, callbackValue, rs_uniffiHandle, rs_notice,
+               rs_uniffiOutReturn, uniffi_call_status);
+        };
+    // We'll then call that lambda from the callInvoker which will
+    // look after calling it on the correct thread.
+    callInvoker->invokeBlocking(rt, jsLambda);
+  };
+  return callback;
+}
+
+// This method is called from the destructor of NativeLeonMobile, which only
+// happens when the jsi::Runtime is being destroyed.
+static void cleanup() {
+  // The lambda holds a reference to the the Runtime, so when this is nulled
+  // out, then the pointer will no longer be left dangling.
+  rsLambda = nullptr;
+}
+} // namespace
+  // uniffi::leon_mobile::cb::callbackinterfacekinglistenermethod0::vtablecallbackinterfacekinglistener
+  // Implementation of CallbackInterfaceKingListenerMethod1 for vtable field
+  // on_closed in VTableCallbackInterfaceKingListener
+
+// Callback function:
+// uniffi::leon_mobile::cb::callbackinterfacekinglistenermethod1::vtablecallbackinterfacekinglistener::UniffiCallbackInterfaceKingListenerMethod1
+//
+// We have the following constraints:
+// - we need to pass a function pointer to Rust.
+// - we need a jsi::Runtime and jsi::Function to call into JS.
+// - function pointers can't store state, so we can't use a lamda.
+//
+// For this, we store a lambda as a global, as `rsLambda`. The `callback`
+// function calls the lambda, which itself calls the `body` which then calls
+// into JS.
+//
+// We then give the `callback` function pointer to Rust which will call the
+// lambda sometime in the future.
+namespace uniffi::leon_mobile::cb::callbackinterfacekinglistenermethod1::
+    vtablecallbackinterfacekinglistener {
+using namespace facebook;
+
+// We need to store a lambda in a global so we can call it from
+// a function pointer. The function pointer is passed to Rust.
+static std::function<void(uint64_t, RustBuffer, void *, RustCallStatus *)>
+    rsLambda = nullptr;
+
+// This is the main body of the callback. It's called from the lambda,
+// which itself is called from the callback function which is passed to Rust.
+static void body(jsi::Runtime &rt,
+                 std::shared_ptr<uniffi_runtime::UniffiCallInvoker> callInvoker,
+                 std::shared_ptr<jsi::Value> callbackValue,
+                 uint64_t rs_uniffiHandle, RustBuffer rs_reason,
+                 void *rs_uniffiOutReturn, RustCallStatus *uniffi_call_status) {
+
+  // Convert the arguments from Rust, into jsi::Values.
+  // We'll use the Bridging class to do this…
+  auto js_uniffiHandle =
+      uniffi_jsi::Bridging<uint64_t>::toJs(rt, callInvoker, rs_uniffiHandle);
+  auto js_reason = uniffi::leon_mobile::Bridging<RustBuffer>::toJs(
+      rt, callInvoker, rs_reason);
+
+  // Now we are ready to call the callback.
+  // We are already on the JS thread, because this `body` function was
+  // invoked from the CallInvoker.
+  try {
+    // Getting the callback function
+    auto cb = callbackValue->asObject(rt).asFunction(rt);
+    auto uniffiResult = cb.call(rt, js_uniffiHandle, js_reason);
+
+    // Now copy the result back from JS into the RustCallStatus object.
+    uniffi::leon_mobile::Bridging<RustCallStatus>::copyFromJs(
+        rt, callInvoker, uniffiResult, uniffi_call_status);
+
+    if (uniffi_call_status->code != UNIFFI_CALL_STATUS_OK) {
+      // The JS callback finished abnormally, so we cannot retrieve the return
+      // value.
+      return;
+    }
+
+  } catch (const jsi::JSError &error) {
+    std::cout
+        << "Error in callback UniffiCallbackInterfaceKingListenerMethod1: "
+        << error.what() << std::endl;
+    throw error;
+  }
+}
+
+static void callback(uint64_t rs_uniffiHandle, RustBuffer rs_reason,
+                     void *rs_uniffiOutReturn,
+                     RustCallStatus *uniffi_call_status) {
+  // If the runtime has shutdown, then there is no point in trying to
+  // call into Javascript. BUT how do we tell if the runtime has shutdown?
+  //
+  // Answer: the module destructor calls into callback `cleanup` method,
+  // which nulls out the rsLamda.
+  //
+  // If rsLamda is null, then there is no runtime to call into.
+  if (rsLambda == nullptr) {
+    // This only occurs when destructors are calling into Rust free/drop,
+    // which causes the JS callback to be dropped.
+    return;
+  }
+
+  // The runtime, the actual callback jsi::funtion, and the callInvoker
+  // are all in the lambda.
+  rsLambda(rs_uniffiHandle, rs_reason, rs_uniffiOutReturn, uniffi_call_status);
+}
+
+[[maybe_unused]] static UniffiCallbackInterfaceKingListenerMethod1
+makeCallbackFunction( // uniffi::leon_mobile::cb::callbackinterfacekinglistenermethod1::vtablecallbackinterfacekinglistener
+    jsi::Runtime &rt,
+    std::shared_ptr<uniffi_runtime::UniffiCallInvoker> callInvoker,
+    const jsi::Value &value) {
+  if (rsLambda != nullptr) {
+    // `makeCallbackFunction` is called in two circumstances:
+    //
+    // 1. at startup, when initializing callback interface vtables.
+    // 2. when polling futures. This happens at least once per future that is
+    //    exposed to Javascript. We know that this is always the same function,
+    //    `uniffiFutureContinuationCallback` in `async-rust-calls.ts`.
+    //
+    // We can therefore return the callback function without making anything
+    // new if we've been initialized already.
+    return callback;
+  }
+  auto callbackFunction = value.asObject(rt).asFunction(rt);
+  auto callbackValue = std::make_shared<jsi::Value>(rt, callbackFunction);
+  rsLambda = [&rt, callInvoker, callbackValue](
+                 uint64_t rs_uniffiHandle, RustBuffer rs_reason,
+                 void *rs_uniffiOutReturn, RustCallStatus *uniffi_call_status) {
+    // We immediately make a lambda which will do the work of transforming the
+    // arguments into JSI values and calling the callback.
+    uniffi_runtime::UniffiCallFunc jsLambda =
+        [callInvoker, callbackValue, rs_uniffiHandle, rs_reason,
+         rs_uniffiOutReturn, uniffi_call_status](jsi::Runtime &rt) mutable {
+          body(rt, callInvoker, callbackValue, rs_uniffiHandle, rs_reason,
+               rs_uniffiOutReturn, uniffi_call_status);
+        };
+    // We'll then call that lambda from the callInvoker which will
+    // look after calling it on the correct thread.
+    callInvoker->invokeBlocking(rt, jsLambda);
+  };
+  return callback;
+}
+
+// This method is called from the destructor of NativeLeonMobile, which only
+// happens when the jsi::Runtime is being destroyed.
+static void cleanup() {
+  // The lambda holds a reference to the the Runtime, so when this is nulled
+  // out, then the pointer will no longer be left dangling.
+  rsLambda = nullptr;
+}
+} // namespace
+  // uniffi::leon_mobile::cb::callbackinterfacekinglistenermethod1::vtablecallbackinterfacekinglistener
+namespace uniffi::leon_mobile {
+using namespace facebook;
+using CallInvoker = uniffi_runtime::UniffiCallInvoker;
+
+template <> struct Bridging<UniffiVTableCallbackInterfaceKingListener> {
+  static UniffiVTableCallbackInterfaceKingListener
+  fromJs(jsi::Runtime &rt, std::shared_ptr<CallInvoker> callInvoker,
+         const jsi::Value &jsValue) {
+    // Check if the input is an object
+    if (!jsValue.isObject()) {
+      throw jsi::JSError(
+          rt,
+          "Expected an object for UniffiVTableCallbackInterfaceKingListener");
+    }
+
+    // Get the object from the jsi::Value
+    auto jsObject = jsValue.getObject(rt);
+
+    // Create the vtable struct
+    UniffiVTableCallbackInterfaceKingListener rsObject;
+
+    // Create the vtable from the js callbacks.
+    rsObject.uniffi_free =
+        uniffi::leon_mobile::st::vtablecallbackinterfacekinglistener::
+            vtablecallbackinterfacekinglistener::free::makeCallbackFunction(
+                rt, callInvoker, jsObject.getProperty(rt, "uniffi_free"));
+    rsObject.uniffi_clone = uniffi::leon_mobile::cb::callbackinterfaceclone::
+        vtablecallbackinterfacekinglistener::makeCallbackFunction(
+            rt, callInvoker, jsObject.getProperty(rt, "uniffi_clone"));
+    rsObject.on_notice =
+        uniffi::leon_mobile::cb::callbackinterfacekinglistenermethod0::
+            vtablecallbackinterfacekinglistener::makeCallbackFunction(
+                rt, callInvoker, jsObject.getProperty(rt, "on_notice"));
+    rsObject.on_closed =
+        uniffi::leon_mobile::cb::callbackinterfacekinglistenermethod1::
+            vtablecallbackinterfacekinglistener::makeCallbackFunction(
+                rt, callInvoker, jsObject.getProperty(rt, "on_closed"));
+
+    return rsObject;
+  }
+};
+
+} // namespace uniffi::leon_mobile
+  // Implementation of CallbackInterfaceClone for vtable field uniffi_clone in
   // VTableCallbackInterfaceConnectionListener
 
 // Callback function:
@@ -2561,6 +3135,39 @@ NativeLeonMobile::NativeLeonMobile(
                 ->cpp_uniffi_internal_fn_func_ffi__read_string_from_buffer(
                     rt, thisVal, args, count);
           });
+  props["ubrn_uniffi_leon_mobile_fn_clone_kingwatch"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_leon_mobile_fn_clone_kingwatch"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_uniffi_leon_mobile_fn_clone_kingwatch(rt, thisVal,
+                                                                   args, count);
+          });
+  props["ubrn_uniffi_leon_mobile_fn_free_kingwatch"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_leon_mobile_fn_free_kingwatch"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_uniffi_leon_mobile_fn_free_kingwatch(rt, thisVal,
+                                                                  args, count);
+          });
+  props["ubrn_uniffi_leon_mobile_fn_method_kingwatch_stop"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_leon_mobile_fn_method_kingwatch_stop"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_uniffi_leon_mobile_fn_method_kingwatch_stop(
+                rt, thisVal, args, count);
+          });
   props["ubrn_uniffi_leon_mobile_fn_clone_leonmobile"] =
       jsi::Function::createFromHostFunction(
           rt,
@@ -2660,6 +3267,29 @@ NativeLeonMobile::NativeLeonMobile(
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this->cpp_uniffi_leon_mobile_fn_free_hostsession(
                 rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_leon_mobile_fn_method_hostsession_king_ask"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_leon_mobile_fn_method_hostsession_king_ask"),
+          2,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_uniffi_leon_mobile_fn_method_hostsession_king_ask(
+                rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_leon_mobile_fn_method_hostsession_king_watch"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_leon_mobile_fn_method_hostsession_king_watch"),
+          2,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_leon_mobile_fn_method_hostsession_king_watch(
+                    rt, thisVal, args, count);
           });
   props["ubrn_uniffi_leon_mobile_fn_method_hostsession_agent_options"] =
       jsi::Function::createFromHostFunction(
@@ -2981,6 +3611,19 @@ NativeLeonMobile::NativeLeonMobile(
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this->cpp_uniffi_leon_mobile_fn_method_turn_unsent(
                 rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_leon_mobile_fn_init_callback_vtable_kinglistener"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt,
+              "ubrn_uniffi_leon_mobile_fn_init_callback_vtable_kinglistener"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_leon_mobile_fn_init_callback_vtable_kinglistener(
+                    rt, thisVal, args, count);
           });
   props["ubrn_uniffi_leon_mobile_fn_init_callback_vtable_connectionlistener"] =
       jsi::Function::createFromHostFunction(
@@ -3579,6 +4222,17 @@ NativeLeonMobile::NativeLeonMobile(
             return this->cpp_uniffi_leon_mobile_checksum_func_check_code(
                 rt, thisVal, args, count);
           });
+  props["ubrn_uniffi_leon_mobile_checksum_method_kingwatch_stop"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_leon_mobile_checksum_method_kingwatch_stop"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_uniffi_leon_mobile_checksum_method_kingwatch_stop(
+                rt, thisVal, args, count);
+          });
   props["ubrn_uniffi_leon_mobile_checksum_method_leonmobile_connect"] =
       jsi::Function::createFromHostFunction(
           rt,
@@ -3627,6 +4281,32 @@ NativeLeonMobile::NativeLeonMobile(
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this->cpp_uniffi_leon_mobile_checksum_method_leonmobile_pair(
                 rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_leon_mobile_checksum_method_hostsession_king_ask"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt,
+              "ubrn_uniffi_leon_mobile_checksum_method_hostsession_king_ask"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_leon_mobile_checksum_method_hostsession_king_ask(
+                    rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_leon_mobile_checksum_method_hostsession_king_watch"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt,
+              "ubrn_uniffi_leon_mobile_checksum_method_hostsession_king_watch"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_leon_mobile_checksum_method_hostsession_king_watch(
+                    rt, thisVal, args, count);
           });
   props["ubrn_uniffi_leon_mobile_checksum_method_hostsession_agent_options"] =
       jsi::Function::createFromHostFunction(
@@ -3951,6 +4631,32 @@ NativeLeonMobile::NativeLeonMobile(
                 ->cpp_uniffi_leon_mobile_checksum_constructor_leonmobile_new(
                     rt, thisVal, args, count);
           });
+  props["ubrn_uniffi_leon_mobile_checksum_method_kinglistener_on_notice"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt,
+              "ubrn_uniffi_leon_mobile_checksum_method_kinglistener_on_notice"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_leon_mobile_checksum_method_kinglistener_on_notice(
+                    rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_leon_mobile_checksum_method_kinglistener_on_closed"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt,
+              "ubrn_uniffi_leon_mobile_checksum_method_kinglistener_on_closed"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_leon_mobile_checksum_method_kinglistener_on_closed(
+                    rt, thisVal, args, count);
+          });
   props["ubrn_uniffi_leon_mobile_checksum_method_connectionlistener_on_state"] =
       jsi::Function::createFromHostFunction(
           rt,
@@ -3986,6 +4692,19 @@ NativeLeonMobile::NativeLeonMobile(
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this->cpp_ffi_leon_mobile_uniffi_contract_version(
                 rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_internal_fn_method_kingwatch_ffi__bless_pointer"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt,
+              "ubrn_uniffi_internal_fn_method_kingwatch_ffi__bless_pointer"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_internal_fn_method_kingwatch_ffi__bless_pointer(
+                    rt, thisVal, args, count);
           });
   props["ubrn_uniffi_internal_fn_method_leonmobile_ffi__bless_pointer"] =
       jsi::Function::createFromHostFunction(
@@ -4164,10 +4883,18 @@ NativeLeonMobile::~NativeLeonMobile() {
   // Cleanup for callback function ForeignFutureDroppedCallback
   uniffi::leon_mobile::cb::foreignfuturedroppedcallback::cleanup();
   // Cleanup for "free" callback function CallbackInterfaceFree
+  uniffi::leon_mobile::st::vtablecallbackinterfacekinglistener::
+      vtablecallbackinterfacekinglistener::free::cleanup();
   uniffi::leon_mobile::st::vtablecallbackinterfaceconnectionlistener::
       vtablecallbackinterfaceconnectionlistener::free::cleanup();
   uniffi::leon_mobile::st::vtablecallbackinterfaceturnlistener::
       vtablecallbackinterfaceturnlistener::free::cleanup();
+  uniffi::leon_mobile::cb::callbackinterfaceclone::
+      vtablecallbackinterfacekinglistener::cleanup();
+  uniffi::leon_mobile::cb::callbackinterfacekinglistenermethod0::
+      vtablecallbackinterfacekinglistener::cleanup();
+  uniffi::leon_mobile::cb::callbackinterfacekinglistenermethod1::
+      vtablecallbackinterfacekinglistener::cleanup();
   uniffi::leon_mobile::cb::callbackinterfaceclone::
       vtablecallbackinterfaceconnectionlistener::cleanup();
   uniffi::leon_mobile::cb::callbackinterfaceconnectionlistenermethod0::
@@ -4205,6 +4932,21 @@ NativeLeonMobile::cpp_uniffi_internal_fn_func_ffi__read_string_from_buffer(
     size_t count) {
   return uniffi_jsi::Bridging<std::string>::read_string_from_buffer(
       rt, args[0], args[1], args[2]);
+}
+jsi::Value
+NativeLeonMobile::cpp_uniffi_internal_fn_method_kingwatch_ffi__bless_pointer(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto pointer =
+      uniffi_jsi::Bridging<uint64_t>::fromJs(rt, callInvoker, args[0]);
+  auto static destructor = [](uint64_t p) {
+    RustCallStatus status = {0};
+    uniffi_leon_mobile_fn_free_kingwatch(p, &status);
+  };
+  auto ptrObj =
+      std::make_shared<uniffi_jsi::DestructibleObject>(pointer, destructor);
+  auto obj = jsi::Object::createFromHostObject(rt, ptrObj);
+  return jsi::Value(rt, obj);
 }
 jsi::Value
 NativeLeonMobile::cpp_uniffi_internal_fn_method_leonmobile_ffi__bless_pointer(
@@ -4253,6 +4995,49 @@ NativeLeonMobile::cpp_uniffi_internal_fn_method_turn_ffi__bless_pointer(
 }
 
 // Methods calling directly into the uniffi generated C API of the Rust crate.
+jsi::Value NativeLeonMobile::cpp_uniffi_leon_mobile_fn_clone_kingwatch(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::leon_mobile::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = uniffi_leon_mobile_fn_clone_kingwatch(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      &status);
+  uniffi::leon_mobile::Bridging<RustCallStatus>::copyIntoJs(
+      rt, callInvoker, status, args[count - 1]);
+
+  return uniffi_jsi::Bridging</*handle*/ uint64_t>::toJs(rt, callInvoker,
+                                                         value);
+}
+jsi::Value NativeLeonMobile::cpp_uniffi_leon_mobile_fn_free_kingwatch(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::leon_mobile::Bridging<RustCallStatus>::rustSuccess(rt);
+  uniffi_leon_mobile_fn_free_kingwatch(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      &status);
+  uniffi::leon_mobile::Bridging<RustCallStatus>::copyIntoJs(
+      rt, callInvoker, status, args[count - 1]);
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeLeonMobile::cpp_uniffi_leon_mobile_fn_method_kingwatch_stop(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::leon_mobile::Bridging<RustCallStatus>::rustSuccess(rt);
+  uniffi_leon_mobile_fn_method_kingwatch_stop(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      &status);
+  uniffi::leon_mobile::Bridging<RustCallStatus>::copyIntoJs(
+      rt, callInvoker, status, args[count - 1]);
+
+  return jsi::Value::undefined();
+}
 jsi::Value NativeLeonMobile::cpp_uniffi_leon_mobile_fn_clone_leonmobile(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
@@ -4393,6 +5178,36 @@ jsi::Value NativeLeonMobile::cpp_uniffi_leon_mobile_fn_free_hostsession(
       rt, callInvoker, status, args[count - 1]);
 
   return jsi::Value::undefined();
+}
+jsi::Value
+NativeLeonMobile::cpp_uniffi_leon_mobile_fn_method_hostsession_king_ask(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto value = uniffi_leon_mobile_fn_method_hostsession_king_ask(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::leon_mobile::Bridging<RustBuffer>::fromJs(rt, callInvoker,
+                                                        args[1]));
+
+  return uniffi_jsi::Bridging</*handle*/ uint64_t>::toJs(rt, callInvoker,
+                                                         value);
+}
+jsi::Value
+NativeLeonMobile::cpp_uniffi_leon_mobile_fn_method_hostsession_king_watch(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::leon_mobile::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = uniffi_leon_mobile_fn_method_hostsession_king_watch(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi_jsi::Bridging<uint64_t>::fromJs(rt, callInvoker, args[1]),
+      &status);
+  uniffi::leon_mobile::Bridging<RustCallStatus>::copyIntoJs(
+      rt, callInvoker, status, args[count - 1]);
+
+  return uniffi_jsi::Bridging</*handle*/ uint64_t>::toJs(rt, callInvoker,
+                                                         value);
 }
 jsi::Value
 NativeLeonMobile::cpp_uniffi_leon_mobile_fn_method_hostsession_agent_options(
@@ -4779,6 +5594,20 @@ jsi::Value NativeLeonMobile::cpp_uniffi_leon_mobile_fn_method_turn_unsent(
       rt, callInvoker, status, args[count - 1]);
 
   return uniffi_jsi::Bridging<uint32_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value
+NativeLeonMobile::cpp_uniffi_leon_mobile_fn_init_callback_vtable_kinglistener(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto vtableInstance = uniffi::leon_mobile::Bridging<
+      UniffiVTableCallbackInterfaceKingListener>::fromJs(rt, callInvoker,
+                                                         args[0]);
+
+  std::lock_guard<std::mutex> lock(uniffi::leon_mobile::registry::vtableMutex);
+  uniffi_leon_mobile_fn_init_callback_vtable_kinglistener(
+      uniffi::leon_mobile::registry::putTable(
+          "UniffiVTableCallbackInterfaceKingListener", vtableInstance));
+  return jsi::Value::undefined();
 }
 jsi::Value NativeLeonMobile::
     cpp_uniffi_leon_mobile_fn_init_callback_vtable_connectionlistener(
@@ -5404,6 +6233,14 @@ jsi::Value NativeLeonMobile::cpp_uniffi_leon_mobile_checksum_func_check_code(
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }
 jsi::Value
+NativeLeonMobile::cpp_uniffi_leon_mobile_checksum_method_kingwatch_stop(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto value = uniffi_leon_mobile_checksum_method_kingwatch_stop();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value
 NativeLeonMobile::cpp_uniffi_leon_mobile_checksum_method_leonmobile_connect(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
@@ -5432,6 +6269,22 @@ NativeLeonMobile::cpp_uniffi_leon_mobile_checksum_method_leonmobile_pair(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
   auto value = uniffi_leon_mobile_checksum_method_leonmobile_pair();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value
+NativeLeonMobile::cpp_uniffi_leon_mobile_checksum_method_hostsession_king_ask(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto value = uniffi_leon_mobile_checksum_method_hostsession_king_ask();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value
+NativeLeonMobile::cpp_uniffi_leon_mobile_checksum_method_hostsession_king_watch(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto value = uniffi_leon_mobile_checksum_method_hostsession_king_watch();
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }
@@ -5644,6 +6497,22 @@ NativeLeonMobile::cpp_uniffi_leon_mobile_checksum_constructor_leonmobile_new(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
   auto value = uniffi_leon_mobile_checksum_constructor_leonmobile_new();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value
+NativeLeonMobile::cpp_uniffi_leon_mobile_checksum_method_kinglistener_on_notice(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto value = uniffi_leon_mobile_checksum_method_kinglistener_on_notice();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value
+NativeLeonMobile::cpp_uniffi_leon_mobile_checksum_method_kinglistener_on_closed(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto value = uniffi_leon_mobile_checksum_method_kinglistener_on_closed();
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }

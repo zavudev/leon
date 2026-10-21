@@ -39,7 +39,7 @@ use leon_wire::{
     PROTOCOL_VERSION,
 };
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::channel::{connect, LinkError, SecureChannel};
 use crate::identity::Identity;
@@ -196,7 +196,23 @@ pub struct Shared {
     /// Whether it answers [`Client::share_den`]; a host that does not say
     /// must not be asked.
     pub den: bool,
+    /// Whether it passes King Leon's lines on ([`Client::king_send`]); a
+    /// host that does not say must not be sent one.
+    pub king: bool,
 }
+
+/// What comes from King Leon through the host ([`Client::king_events`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KingEvent {
+    /// A line of King's control protocol: a reply or a notice.
+    Line(String),
+    /// The line to King closed, or could not be opened; what was sent since
+    /// is lost. The connection to the host dropping closes it too.
+    Closed(String),
+}
+
+/// How many of King's lines wait for a slow listener before the oldest go.
+const KING_BACKLOG: usize = 1024;
 
 /// How the connection is protected.
 pub enum Security {
@@ -420,6 +436,7 @@ impl PtyHandle {
 #[derive(Clone)]
 pub struct Client {
     commands: mpsc::Sender<Command>,
+    king: broadcast::Sender<KingEvent>,
     state: watch::Receiver<ConnState>,
     ids: Arc<AtomicU64>,
     host_name: watch::Receiver<Option<String>>,
@@ -447,9 +464,18 @@ impl Client {
         let (state_tx, state) = watch::channel(ConnState::Connecting);
         let (name_tx, host_name) = watch::channel(None);
         let (protocol_tx, protocol) = watch::channel(None);
-        tokio::spawn(actor(config, command_rx, state_tx, name_tx, protocol_tx));
+        let (king, _) = broadcast::channel(KING_BACKLOG);
+        tokio::spawn(actor(
+            config,
+            command_rx,
+            state_tx,
+            name_tx,
+            protocol_tx,
+            king.clone(),
+        ));
         Self {
             commands,
+            king,
             state,
             ids: Arc::new(AtomicU64::new(1)),
             host_name,
@@ -654,6 +680,7 @@ impl Client {
                 truncated,
                 pinned,
                 den,
+                king,
                 ..
             } => Ok(Shared {
                 projects,
@@ -661,6 +688,7 @@ impl Client {
                 truncated,
                 pinned,
                 den,
+                king,
             }),
             _ => Err(ClientError::Protocol),
         }
@@ -699,6 +727,21 @@ impl Client {
             Message::ShareTranscriptData { transcript, .. } => Ok(transcript),
             _ => Err(ClientError::Protocol),
         }
+    }
+
+    /// Sends a line of King Leon's control protocol to the host, which
+    /// passes it on to King's service there. Only for a host whose
+    /// [`Shared::king`] is set: one that does not know the message drops the
+    /// connection. The answers come through [`Client::king_events`].
+    pub fn king_send(&self, line: String) {
+        let _ = self
+            .commands
+            .try_send(Command::Send(Message::King { line }));
+    }
+
+    /// What comes from King through the host, from now on.
+    pub fn king_events(&self) -> broadcast::Receiver<KingEvent> {
+        self.king.subscribe()
     }
 
     /// Tries again now, skipping any backoff or terminal failure.
@@ -886,6 +929,7 @@ async fn actor(
     state: watch::Sender<ConnState>,
     host_name: watch::Sender<Option<String>>,
     protocol: watch::Sender<Option<u16>>,
+    king: broadcast::Sender<KingEvent>,
 ) {
     let mut ptys: HashMap<u64, LivePty> = HashMap::new();
     // The version that worked last, tried first the next time.
@@ -914,7 +958,12 @@ async fn actor(
                     protocol.send_replace(Some(version));
                     host_name.send_replace(Some(name));
                     state.send_replace(ConnState::Online);
-                    match run_connection(&config, channel, &mut commands, &mut ptys).await {
+                    let ended =
+                        run_connection(&config, channel, &mut commands, &mut ptys, &king).await;
+                    let _ = king.send(KingEvent::Closed(
+                        "the connection to the computer ended".into(),
+                    ));
+                    match ended {
                         Ended::Closed => break,
                         Ended::Dropped(failure, reason) => {
                             attempt += 1;
@@ -978,6 +1027,7 @@ async fn run_connection(
     mut channel: Wire,
     commands: &mut mpsc::Receiver<Command>,
     ptys: &mut HashMap<u64, LivePty>,
+    king: &broadcast::Sender<KingEvent>,
 ) -> Ended {
     let mut pending: HashMap<u64, (Reply, Option<mpsc::UnboundedSender<PtyEvent>>)> =
         HashMap::new();
@@ -1040,7 +1090,7 @@ async fn run_connection(
                     Err(error) => break Ended::Dropped(Failure::Other, error.to_string()),
                 };
                 waiting_pong = false;
-                if let Some(ended) = on_message(message, &mut pending, &mut reattach, ptys) {
+                if let Some(ended) = on_message(message, &mut pending, &mut reattach, ptys, king) {
                     break ended;
                 }
             }
@@ -1069,8 +1119,15 @@ fn on_message(
     pending: &mut HashMap<u64, (Reply, Option<mpsc::UnboundedSender<PtyEvent>>)>,
     reattach: &mut HashMap<u64, u64>,
     ptys: &mut HashMap<u64, LivePty>,
+    king: &broadcast::Sender<KingEvent>,
 ) -> Option<Ended> {
     match message {
+        Message::King { line } => {
+            let _ = king.send(KingEvent::Line(line));
+        }
+        Message::KingClosed { reason } => {
+            let _ = king.send(KingEvent::Closed(reason));
+        }
         Message::PtyData { pty, offset, bytes } => {
             if let Some(live) = ptys.get_mut(&pty) {
                 let end = offset + bytes.len() as u64;
@@ -1204,6 +1261,7 @@ fn on_message(
             truncated,
             pinned,
             den,
+            king,
         } => {
             if let Some((reply, _)) = pending.remove(&id) {
                 let _ = reply.send(Ok(Message::ShareStateData {
@@ -1213,6 +1271,7 @@ fn on_message(
                     truncated,
                     pinned,
                     den,
+                    king,
                 }));
             }
         }

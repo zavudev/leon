@@ -94,6 +94,31 @@ fn a_turn_is_its_server_whatever_is_asked_of_it() {
 }
 
 #[test]
+fn its_session_is_given_the_servers_of_tools() {
+    let mut session = fresh();
+    let servers = [crate::agents::McpServer {
+        name: "leon-king".into(),
+        command: "/bin/leon".into(),
+        args: vec!["king".into(), "mcp".into()],
+        env: vec![("LEON_DATA_DIR".into(), "/data".into())],
+    }];
+    let turn = TurnSpec {
+        mcp_servers: &servers,
+        ..spec("hi")
+    };
+    let new = value(&session.first(&turn)[1]);
+    assert_eq!(
+        new["params"]["mcpServers"],
+        json!([{
+            "name": "leon-king",
+            "command": "/bin/leon",
+            "args": ["king", "mcp"],
+            "env": [{ "name": "LEON_DATA_DIR", "value": "/data" }],
+        }])
+    );
+}
+
+#[test]
 fn it_is_greeted_and_given_a_session_in_the_folder_then_the_prompt_when_the_session_answered() {
     let mut session = fresh();
     let first = session.first(&spec("Reply with exactly: hola"));
@@ -135,6 +160,15 @@ fn it_is_greeted_and_given_a_session_in_the_folder_then_the_prompt_when_the_sess
             },
             TurnEvent::Text {
                 text: "hola".into()
+            },
+            TurnEvent::Usage {
+                tokens: Tokens {
+                    input: 14632,
+                    cached_input: 5215,
+                    output: 4,
+                    reasoning: 0,
+                    context_window: Some(1_000_000),
+                },
             },
             TurnEvent::Finished {
                 ok: true,
@@ -228,6 +262,34 @@ fn the_model_and_the_effort_wait_for_its_providers_and_go_one_after_the_other() 
         }]
     );
     assert_eq!(methods(&step), ["session/prompt"]);
+}
+
+#[test]
+fn a_model_the_sessions_answer_lists_is_set_without_waiting_for_an_update() {
+    // opencode 2.0.32 lists every provider's models in its answer, and
+    // sends no update after it.
+    let mut session = fresh();
+    let turn = TurnSpec {
+        model: Some("opencode-go/deepseek-v4.1-flash"),
+        ..spec("write the poem")
+    };
+    session.first(&turn);
+    let answer = json!({
+        "jsonrpc": "2.0", "id": "leon-session",
+        "result": { "sessionId": SESSION, "configOptions": [{
+            "id": "model", "type": "select", "currentValue": "opencode-go/minimax-m3.1-flash-free",
+            "options": [
+                { "value": "opencode-go/minimax-m3.1-flash-free", "name": "MiniMax" },
+                { "value": "opencode-go/deepseek-v4.1-flash", "name": "DeepSeek" },
+            ],
+        }] },
+    });
+    let step = read(session.as_mut(), &answer.to_string());
+    assert_eq!(methods(&step), ["session/set_config_option"]);
+    assert_eq!(
+        value(&step.send[0])["params"]["value"],
+        "opencode-go/deepseek-v4.1-flash"
+    );
 }
 
 #[test]
@@ -358,6 +420,15 @@ fn a_command_it_may_not_run_by_itself_is_a_question_with_its_own_options() {
             TurnEvent::Text {
                 text: "done".into()
             },
+            TurnEvent::Usage {
+                tokens: Tokens {
+                    input: 32893,
+                    cached_input: 29292,
+                    output: 190,
+                    reasoning: 130,
+                    context_window: Some(1_000_000),
+                },
+            },
             TurnEvent::Finished {
                 ok: true,
                 error: None,
@@ -378,7 +449,7 @@ fn a_refusal_ends_the_turn_as_opencode_ends_it() {
         ..spec("make the file")
     });
     let step = play(session.as_mut(), REJECT, None);
-    let tail = &step.events[step.events.len() - 3..];
+    let tail = &step.events[step.events.len() - 4..];
     assert_eq!(
         tail,
         [
@@ -390,6 +461,15 @@ fn a_refusal_ends_the_turn_as_opencode_ends_it() {
             },
             // Nobody answered it here: the end of the turn closes it.
             TurnEvent::QuestionResolved { id: "0".into() },
+            TurnEvent::Usage {
+                tokens: Tokens {
+                    input: 19854,
+                    cached_input: 18223,
+                    output: 113,
+                    reasoning: 58,
+                    context_window: Some(1_000_000),
+                },
+            },
             TurnEvent::Finished {
                 ok: false,
                 error: None,
@@ -503,6 +583,15 @@ fn stopping_it_cancels_the_session_and_what_it_still_asks() {
                 detail: String::new(),
             },
             TurnEvent::QuestionResolved { id: "0".into() },
+            TurnEvent::Usage {
+                tokens: Tokens {
+                    input: 20211,
+                    cached_input: 18390,
+                    output: 115,
+                    reasoning: 64,
+                    context_window: Some(1_000_000),
+                },
+            },
             TurnEvent::Finished {
                 ok: false,
                 error: None,

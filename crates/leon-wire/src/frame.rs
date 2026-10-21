@@ -640,6 +640,7 @@ mod tests {
                 truncated: false,
                 pinned: vec![],
                 den: false,
+                king: false,
             },
             Message::ShareTranscriptData {
                 id: 7,

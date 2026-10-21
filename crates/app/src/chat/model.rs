@@ -119,6 +119,9 @@ pub struct Conversation {
     pub cost_usd: Option<f64>,
     /// How long the last turn took, when the agent says.
     pub last_duration_ms: Option<u64>,
+    /// The tokens of the last turn, when the agent says: those of the turn
+    /// in flight as they grow.
+    pub last_tokens: Option<leon_turn::Tokens>,
     /// What the person wrote while a turn ran and the agent could not be
     /// told: each becomes a turn of its own, in order.
     pub queued: VecDeque<String>,
@@ -147,6 +150,7 @@ impl Conversation {
             mode: None,
             cost_usd: None,
             last_duration_ms: None,
+            last_tokens: None,
             queued: VecDeque::new(),
             running: false,
             heard: false,
@@ -198,6 +202,7 @@ impl Conversation {
     /// The person said something and a turn was started with it.
     pub fn sent(&mut self, text: &str) {
         self.said(text);
+        self.last_tokens = None;
         self.running = true;
         self.heard = false;
         self.failed = false;
@@ -369,6 +374,7 @@ impl Conversation {
                 self.questions.clear();
                 self.running = false;
             }
+            TurnEvent::Usage { tokens } => self.last_tokens = Some(tokens),
             // A pipe on this computer neither drops nor loses output.
             TurnEvent::Disconnected | TurnEvent::Reconnected | TurnEvent::Gap => {}
         }
@@ -478,6 +484,21 @@ pub fn duration_text(ms: u64) -> String {
     } else {
         format!("{} min {:02} s", seconds / 60, seconds % 60)
     }
+}
+
+/// The tokens of the last turn for the foot of a conversation, with how
+/// fast they were written when the turn's length is known: "48.2k tokens,
+/// 62 tok/s".
+pub fn tokens_text(tokens: &leon_turn::Tokens, duration_ms: Option<u64>) -> Option<String> {
+    if tokens.total() == 0 {
+        return None;
+    }
+    let stats = leon_king::report::TurnStats::of(tokens, duration_ms.unwrap_or(0), None);
+    let mut text = format!("{} tokens", leon_king::report::count(stats.total()));
+    if let Some(speed) = stats.per_second() {
+        text.push_str(&format!(", {speed:.0} tok/s"));
+    }
+    Some(text)
 }
 
 /// A cost for the foot of a conversation: "$0.04", "$1.20".
@@ -700,6 +721,18 @@ mod tests {
         assert_eq!(duration_text(800), "0.8 s");
         assert_eq!(duration_text(42_000), "42 s");
         assert_eq!(duration_text(185_000), "3 min 05 s");
+        let tokens = leon_turn::Tokens {
+            input: 45_100,
+            cached_input: 31_000,
+            output: 3_100,
+            ..leon_turn::Tokens::default()
+        };
+        assert_eq!(
+            tokens_text(&tokens, Some(50_000)).as_deref(),
+            Some("48.2k tokens, 62 tok/s")
+        );
+        assert_eq!(tokens_text(&tokens, None).as_deref(), Some("48.2k tokens"));
+        assert_eq!(tokens_text(&leon_turn::Tokens::default(), Some(1)), None);
         assert_eq!(cost_text(0.004), "<$0.01");
         assert_eq!(cost_text(1.2), "$1.20");
     }

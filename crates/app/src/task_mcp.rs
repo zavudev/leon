@@ -46,12 +46,14 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 
 /// Which board a tool is asked about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reach {
     /// The project the server was started in.
     Project,
     /// The global board.
     Global,
+    /// The project rooted at this folder, named by the agent.
+    Root(String),
 }
 
 /// A task an agent asks to create.
@@ -128,10 +130,27 @@ pub fn tool_list() -> Value {
         "default": "project",
         "description": "\"global\" for a task that is not of this project.",
     });
+    let project = json!({
+        "type": "string",
+        "description": "The root folder of the project whose board it is, as the project list \
+                        gives it. Only for an agent that runs in no project (King Leon); \
+                        others leave it out.",
+    });
     let id = json!({
         "type": "string",
         "minLength": 6,
         "description": "The id shown with the task (the eight characters are enough).",
+    });
+    let needs = json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "The ids of the tasks of the same board this one waits for: a run \
+                        starts it once they are done. Replaces what it waited for.",
+    });
+    let parent = json!({
+        "type": "string",
+        "description": "The id of the task this one is a step of: a run of that task carries \
+                        out its steps.",
     });
     let labels = json!({
         "type": "array",
@@ -171,7 +190,10 @@ pub fn tool_list() -> Value {
                 "priority": { "type": "string", "enum": priorities.clone() },
                 "labels": labels.clone(),
                 "assignee": { "type": "string", "description": "A person or an agent." },
+                "parent": parent.clone(),
+                "needs": needs.clone(),
                 "scope": scope.clone(),
+                "project": project.clone(),
             }),
             &["title"],
         ),
@@ -184,7 +206,12 @@ pub fn tool_list() -> Value {
                 "include_closed": { "type": "boolean", "default": false },
                 "assignee": { "type": "string" },
                 "label": { "type": "string" },
+                "parent": {
+                    "type": "string",
+                    "description": "Only the steps of this task, by its id.",
+                },
                 "scope": scope.clone(),
+                "project": project.clone(),
                 "limit": {
                     "type": "integer", "minimum": 1, "maximum": MOST, "default": DEFAULT_LISTED,
                 },
@@ -199,8 +226,9 @@ pub fn tool_list() -> Value {
         ),
         tool(
             "task_update",
-            "Change a task: its title, body, status, priority, labels or assignee. What is \
-             not given stays. A new status puts the task at the bottom of that column.",
+            "Change a task: its title, body, status, priority, labels, assignee, parent or \
+             needs. What is not given stays. A new status puts the task at the bottom of that \
+             column.",
             json!({
                 "id": id.clone(),
                 "title": { "type": "string", "maxLength": leon_core::store::tasks::MAX_TITLE_CHARS },
@@ -217,6 +245,12 @@ pub fn tool_list() -> Value {
                     "description": "The branch of the worktree this task is worked on in; an \
                                     empty string takes it away.",
                 },
+                "parent": {
+                    "type": "string",
+                    "description": "The task this one is a step of; an empty string makes it \
+                                    a step of nothing.",
+                },
+                "needs": needs,
             }),
             &["id"],
         ),
@@ -242,6 +276,7 @@ pub fn tool_list() -> Value {
             json!({
                 "query": { "type": "string", "minLength": 1 },
                 "scope": scope,
+                "project": project,
                 "limit": {
                     "type": "integer", "minimum": 1, "maximum": MOST, "default": 10,
                 },
@@ -288,10 +323,16 @@ impl Arguments<'_> {
     }
 
     fn reach(&self) -> Result<Reach, Refusal> {
-        match self.text("scope")?.as_deref() {
-            None | Some("project") => Ok(Reach::Project),
-            Some("global") => Ok(Reach::Global),
-            Some(other) => Err(refuse(
+        let project = self.text("project")?.filter(|root| !root.trim().is_empty());
+        match (self.text("scope")?.as_deref(), project) {
+            (Some("global"), Some(_)) => Err(refuse(
+                INVALID_PARAMS,
+                "\"project\" names a project's board; it cannot be given with \"global\"",
+            )),
+            (None | Some("project"), Some(root)) => Ok(Reach::Root(root)),
+            (None | Some("project"), None) => Ok(Reach::Project),
+            (Some("global"), None) => Ok(Reach::Global),
+            (Some(other), _) => Err(refuse(
                 INVALID_PARAMS,
                 format!("\"scope\" must be \"project\" or \"global\", not {other:?}"),
             )),
@@ -313,21 +354,24 @@ impl Arguments<'_> {
     }
 
     fn labels(&self) -> Result<Option<Vec<String>>, Refusal> {
-        match self.0.get("labels") {
+        self.list("labels")
+    }
+
+    fn list(&self, name: &str) -> Result<Option<Vec<String>>, Refusal> {
+        let wrong = || {
+            refuse(
+                INVALID_PARAMS,
+                format!("{name:?} must be a list of strings"),
+            )
+        };
+        match self.0.get(name) {
             None | Some(Value::Null) => Ok(None),
             Some(Value::Array(items)) => items
                 .iter()
-                .map(|item| {
-                    item.as_str().map(str::to_owned).ok_or_else(|| {
-                        refuse(INVALID_PARAMS, "\"labels\" must be a list of strings")
-                    })
-                })
+                .map(|item| item.as_str().map(str::to_owned).ok_or_else(wrong))
                 .collect::<Result<Vec<_>, _>>()
                 .map(Some),
-            Some(_) => Err(refuse(
-                INVALID_PARAMS,
-                "\"labels\" must be a list of strings",
-            )),
+            Some(_) => Err(wrong()),
         }
     }
 
@@ -488,8 +532,14 @@ impl<B: Backend> Server<B> {
         let result = match name {
             "task_create" => {
                 args.known(&[
-                    "title", "body", "status", "priority", "labels", "assignee", "scope",
+                    "title", "body", "status", "priority", "labels", "assignee", "parent", "needs",
+                    "scope", "project",
                 ])?;
+                let plan = TaskPatch {
+                    parent: args.text("parent")?.map(Some),
+                    needs: args.list("needs")?,
+                    ..TaskPatch::default()
+                };
                 let draft = Draft {
                     reach: args.reach()?,
                     title: args.required("title")?,
@@ -500,7 +550,41 @@ impl<B: Backend> Server<B> {
                     assignee: args.text("assignee")?,
                     agent: self.client.clone(),
                 };
-                self.backend.add(draft).map(|saved| {
+                let saved = self.backend.add(draft).and_then(|saved| {
+                    if plan.is_empty() {
+                        return Ok(saved);
+                    }
+                    // An open task of the same title was found instead: it
+                    // becomes this step only when it is no other task's
+                    // step and waits for nothing, and stays as it is when it
+                    // is already a step of the same task.
+                    if let SavedTask::Known(known) = &saved {
+                        if known.parent.is_some() || !known.needs.is_empty() {
+                            let asked = match &plan.parent {
+                                Some(Some(parent)) => Some(self.backend.get(parent)?.id),
+                                _ => None,
+                            };
+                            if asked.is_some() && known.parent == asked {
+                                return Ok(saved);
+                            }
+                            return Err(format!(
+                                "an open task with this title ({}) is already a step of \
+                                 another task, or waits for others; give this step a title \
+                                 of its own",
+                                known.id
+                            ));
+                        }
+                    }
+                    let id = saved.task().id.clone();
+                    let planned = self.backend.update(&id, plan).map_err(|error| {
+                        format!("the task was made ({id}), but not as a step: {error}")
+                    })?;
+                    Ok(match saved {
+                        SavedTask::New(_) => SavedTask::New(planned),
+                        SavedTask::Known(_) => SavedTask::Known(planned),
+                    })
+                });
+                saved.map(|saved| {
                     let created = matches!(saved, SavedTask::New(_));
                     let mut value = json_of(saved.task(), None);
                     if let Some(object) = value.as_object_mut() {
@@ -522,14 +606,24 @@ impl<B: Backend> Server<B> {
                     "include_closed",
                     "assignee",
                     "label",
+                    "parent",
                     "scope",
+                    "project",
                     "limit",
                 ])?;
+                let parent = match args.text("parent")? {
+                    Some(parent) => match self.backend.get(&parent) {
+                        Ok(task) => Some(task.id),
+                        Err(message) => return Ok(tool_error(message)),
+                    },
+                    None => None,
+                };
                 let filter = TaskFilter {
                     status: args.status("status")?,
                     open_only: !args.flag("include_closed")?,
                     assignee: args.text("assignee")?,
                     label: args.text("label")?,
+                    parent,
                 };
                 self.backend
                     .list(args.reach()?, filter, args.limit(DEFAULT_LISTED)?)
@@ -546,6 +640,7 @@ impl<B: Backend> Server<B> {
             "task_update" => {
                 args.known(&[
                     "id", "title", "body", "status", "priority", "labels", "assignee", "branch",
+                    "parent", "needs",
                 ])?;
                 let patch = TaskPatch {
                     title: args.text("title")?,
@@ -559,6 +654,10 @@ impl<B: Backend> Server<B> {
                     branch: args
                         .text("branch")?
                         .map(|branch| Some(branch).filter(|b| !b.trim().is_empty())),
+                    parent: args
+                        .text("parent")?
+                        .map(|parent| Some(parent).filter(|p| !p.trim().is_empty())),
+                    needs: args.list("needs")?,
                 };
                 self.backend
                     .update(&args.required("id")?, patch)
@@ -575,7 +674,7 @@ impl<B: Backend> Server<B> {
                     .map(|task| json_of(&task, None))
             }
             _ => {
-                args.known(&["query", "scope", "limit"])?;
+                args.known(&["query", "scope", "project", "limit"])?;
                 self.backend
                     .search(&args.required("query")?, args.reach()?, args.limit(10)?)
                     .map(|hits| {
@@ -630,6 +729,48 @@ mod tests {
     }
 
     #[test]
+    fn king_names_the_project_of_each_task_and_sees_every_board() {
+        // King's server runs in no project, and sees every board.
+        let service = Service::new(Store::open_in_memory().unwrap(), "/data/king".to_owned())
+            .at(|| 1_000)
+            .anywhere(true);
+        let mut server = Server::new(service, "0.0.0-test");
+        ask(
+            &mut server,
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "clientInfo": { "name": "Claude Code" } },
+            }),
+        );
+        let (created, failed) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Fix the login", "project": "/srv/web" }),
+        ));
+        assert!(!failed, "{created}");
+        assert_eq!(created["scope"], "project");
+        assert_eq!(created["project"], "/srv/web");
+        let id = created["id"].as_str().unwrap().to_owned();
+        let (found, failed) = payload(&call(&mut server, "task_get", json!({ "id": id })));
+        assert!(!failed, "a task of another project is King's too: {found}");
+        let (listed, _) = payload(&call(
+            &mut server,
+            "task_list",
+            json!({ "project": "/srv/web" }),
+        ));
+        assert_eq!(listed.as_array().map(Vec::len), Some(1));
+        let both = call(
+            &mut server,
+            "task_create",
+            json!({ "title": "x", "project": "/srv/web", "scope": "global" }),
+        );
+        assert_eq!(
+            both["error"]["code"], INVALID_PARAMS,
+            "a project and the global board at once is refused"
+        );
+    }
+
+    #[test]
     fn the_server_introduces_itself_and_lists_its_tools() {
         let mut server = server();
         let hello = ask(
@@ -658,6 +799,153 @@ mod tests {
             server.handle(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#),
             None
         );
+    }
+
+    #[test]
+    fn a_task_is_made_a_step_of_another_with_what_it_needs() {
+        let mut server = server();
+        let id = |value: &Value| value["id"].as_str().unwrap().to_owned();
+        let (goal, _) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Ship billing" }),
+        ));
+        let (schema, _) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Billing schema", "parent": id(&goal) }),
+        ));
+        assert_eq!(schema["parent"], goal["id"]);
+        let (api, failed) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Billing API", "parent": id(&goal), "needs": [id(&schema)] }),
+        ));
+        assert!(!failed, "{api}");
+        assert_eq!(api["needs"], json!([id(&schema)]));
+        let (steps, _) = payload(&call(
+            &mut server,
+            "task_list",
+            json!({ "parent": goal["short_id"] }),
+        ));
+        assert_eq!(steps.as_array().map(Vec::len), Some(2));
+        // Needs never go round.
+        let (refused, failed) = payload(&call(
+            &mut server,
+            "task_update",
+            json!({ "id": id(&schema), "needs": [id(&api)] }),
+        ));
+        assert!(failed, "{refused}");
+    }
+
+    #[test]
+    fn a_step_of_the_same_title_as_another_goals_is_not_taken_from_it() {
+        let mut server = server();
+        let id = |value: &Value| value["id"].as_str().unwrap().to_owned();
+        let (a, _) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Goal A" }),
+        ));
+        let (b, _) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Goal B" }),
+        ));
+        let (first, _) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Prep" }),
+        ));
+        let (step, _) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Write tests", "parent": id(&a), "needs": [id(&first)] }),
+        ));
+        // The same title under goal B: A's step is left as it was.
+        let (refused, failed) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Write tests", "parent": id(&b) }),
+        ));
+        assert!(failed, "{refused}");
+        let (kept, _) = payload(&call(&mut server, "task_get", json!({ "id": id(&step) })));
+        assert_eq!(kept["parent"], a["id"]);
+        assert_eq!(kept["needs"], json!([id(&first)]));
+        // Under the same goal again it is the same step, untouched.
+        let (again, failed) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Write tests", "parent": a["short_id"] }),
+        ));
+        assert!(!failed, "{again}");
+        assert_eq!(again["created"], false);
+        assert_eq!(again["needs"], json!([id(&first)]));
+        // A task that is nobody's step becomes one.
+        let (loose, _) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Docs" }),
+        ));
+        let (made, failed) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Docs", "parent": id(&b) }),
+        ));
+        assert!(!failed, "{made}");
+        assert_eq!(made["id"], loose["id"]);
+        assert_eq!(made["parent"], b["id"]);
+    }
+
+    #[test]
+    fn a_projects_server_reaches_no_other_projects_board() {
+        let mut server = server();
+        for (tool, arguments) in [
+            (
+                "task_create",
+                json!({ "title": "x", "project": "/srv/web" }),
+            ),
+            ("task_list", json!({ "project": "/srv/web" })),
+            (
+                "task_search",
+                json!({ "query": "x", "project": "/srv/web" }),
+            ),
+        ] {
+            let (refused, failed) = payload(&call(&mut server, tool, arguments));
+            assert!(failed, "{tool}: {refused}");
+        }
+        // Its own project named by its root is its own board.
+        let (own, failed) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Mine", "project": "/srv/api/" }),
+        ));
+        assert!(!failed, "{own}");
+        assert_eq!(own["project"], "/srv/api");
+    }
+
+    #[test]
+    fn king_names_a_board_by_its_root_without_a_trailing_slash() {
+        let service = Service::new(Store::open_in_memory().unwrap(), "/data/king".to_owned())
+            .at(|| 1_000)
+            .anywhere(true);
+        let mut server = Server::new(service, "0.0.0-test");
+        payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "One", "project": "/srv/web/" }),
+        ));
+        payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Two", "project": "/srv/web" }),
+        ));
+        let (listed, _) = payload(&call(
+            &mut server,
+            "task_list",
+            json!({ "project": "/srv/web" }),
+        ));
+        assert_eq!(listed.as_array().map(Vec::len), Some(2), "{listed}");
     }
 
     #[test]

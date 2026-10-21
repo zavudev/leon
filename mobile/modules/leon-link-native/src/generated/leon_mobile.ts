@@ -9,6 +9,7 @@ import {
   type UniffiForeignFutureDroppedCallback,
   type UniffiForeignFutureDroppedCallbackStruct,
   type UniffiVTableCallbackInterfaceLeonMobileConnectionListener,
+  type UniffiVTableCallbackInterfaceLeonMobileKingListener,
   type UniffiVTableCallbackInterfaceLeonMobileTurnListener,
 } from "./leon_mobile-ffi";
 import {
@@ -1401,6 +1402,11 @@ export type SharedState = {
    * not say has none, and must not be asked.
    */
   den: boolean;
+  /**
+   * Whether its King Leon can be spoken to ([`HostSession::king_ask`]).
+   * A Leon that does not say has none, and must not be asked.
+   */
+  king: boolean;
 };
 
 /**
@@ -1430,6 +1436,7 @@ const FfiConverterTypeSharedState = (() => {
         truncated: FfiConverterBool.readFromCursor(c),
         pinned: FfiConverterSequenceTypeHistorySession.readFromCursor(c),
         den: FfiConverterBool.readFromCursor(c),
+        king: FfiConverterBool.readFromCursor(c),
       };
     }
     writeIntoCursor(value: TypeName, c: Cursor): void {
@@ -1438,6 +1445,7 @@ const FfiConverterTypeSharedState = (() => {
       FfiConverterBool.writeIntoCursor(value.truncated, c);
       FfiConverterSequenceTypeHistorySession.writeIntoCursor(value.pinned, c);
       FfiConverterBool.writeIntoCursor(value.den, c);
+      FfiConverterBool.writeIntoCursor(value.king, c);
     }
     allocationSize(value: TypeName): number {
       return (
@@ -1445,7 +1453,8 @@ const FfiConverterTypeSharedState = (() => {
         FfiConverterSequenceTypeHistorySession.allocationSize(value.sessions) +
         FfiConverterBool.allocationSize(value.truncated) +
         FfiConverterSequenceTypeHistorySession.allocationSize(value.pinned) +
-        FfiConverterBool.allocationSize(value.den)
+        FfiConverterBool.allocationSize(value.den) +
+        FfiConverterBool.allocationSize(value.king)
       );
     }
   }
@@ -3819,6 +3828,7 @@ export enum TurnEvent_Tags {
   Thought = "Thought",
   ToolUse = "ToolUse",
   ToolResult = "ToolResult",
+  Usage = "Usage",
   Finished = "Finished",
   Question = "Question",
   QuestionResolved = "QuestionResolved",
@@ -4049,6 +4059,60 @@ export const TurnEvent = (() => {
 
     static instanceOf(obj: any): obj is ToolResult_ {
       return obj.tag === TurnEvent_Tags.ToolResult;
+    }
+  }
+
+  type Usage__interface = {
+    tag: TurnEvent_Tags.Usage;
+    inner: Readonly<{
+      input: bigint;
+      cachedInput: bigint;
+      output: bigint;
+      reasoning: bigint;
+      contextWindow?: bigint;
+    }>;
+  };
+  /**
+   * The tokens the turn used so far, as the agent counts them: each one
+   * replaces the one before, and the last is the turn's.
+   */
+  class Usage_ extends UniffiEnum implements Usage__interface {
+    /**
+     * @private
+     * This field is private and should not be used, use `tag` instead.
+     */
+    readonly [uniffiTypeNameSymbol] = "TurnEvent";
+    readonly tag = TurnEvent_Tags.Usage;
+    readonly inner: Readonly<{
+      input: bigint;
+      cachedInput: bigint;
+      output: bigint;
+      reasoning: bigint;
+      contextWindow?: bigint;
+    }>;
+    constructor(inner: {
+      input: bigint;
+      cachedInput: bigint;
+      output: bigint;
+      reasoning: bigint;
+      contextWindow?: bigint;
+    }) {
+      super("TurnEvent", "Usage");
+
+      this.inner = Object.freeze(inner);
+    }
+    static new(inner: {
+      input: bigint;
+      cachedInput: bigint;
+      output: bigint;
+      reasoning: bigint;
+      contextWindow?: bigint;
+    }): Usage_ {
+      return new Usage_(inner);
+    }
+
+    static instanceOf(obj: any): obj is Usage_ {
+      return obj.tag === TurnEvent_Tags.Usage;
     }
   }
 
@@ -4350,6 +4414,7 @@ export const TurnEvent = (() => {
     Thought: Thought_,
     ToolUse: ToolUse_,
     ToolResult: ToolResult_,
+    Usage: Usage_,
     Finished: Finished_,
     Question: Question_,
     QuestionResolved: QuestionResolved_,
@@ -4372,6 +4437,7 @@ export type TurnEvent = InstanceType<
     | "Thought"
     | "ToolUse"
     | "ToolResult"
+    | "Usage"
     | "Finished"
     | "Question"
     | "QuestionResolved"
@@ -4421,6 +4487,14 @@ const FfiConverterTypeTurnEvent = (() => {
             detail: FfiConverterString.readFromCursor(c),
           });
         case 7:
+          return new TurnEvent.Usage({
+            input: FfiConverterUInt64.readFromCursor(c),
+            cachedInput: FfiConverterUInt64.readFromCursor(c),
+            output: FfiConverterUInt64.readFromCursor(c),
+            reasoning: FfiConverterUInt64.readFromCursor(c),
+            contextWindow: FfiConverterOptionalUInt64.readFromCursor(c),
+          });
+        case 8:
           return new TurnEvent.Finished({
             ok: FfiConverterBool.readFromCursor(c),
             error: FfiConverterOptionalString.readFromCursor(c),
@@ -4429,30 +4503,30 @@ const FfiConverterTypeTurnEvent = (() => {
             deniedTools: FfiConverterSequenceString.readFromCursor(c),
             interrupted: FfiConverterBool.readFromCursor(c),
           });
-        case 8:
+        case 9:
           return new TurnEvent.Question({
             id: FfiConverterString.readFromCursor(c),
             kind: FfiConverterTypeQuestionKind.readFromCursor(c),
           });
-        case 9:
+        case 10:
           return new TurnEvent.QuestionResolved({
             id: FfiConverterString.readFromCursor(c),
           });
-        case 10:
+        case 11:
           return new TurnEvent.ModeChanged({
             mode: FfiConverterString.readFromCursor(c),
           });
-        case 11:
-          return new TurnEvent.Disconnected();
         case 12:
-          return new TurnEvent.Reconnected();
+          return new TurnEvent.Disconnected();
         case 13:
-          return new TurnEvent.Gap();
+          return new TurnEvent.Reconnected();
         case 14:
+          return new TurnEvent.Gap();
+        case 15:
           return new TurnEvent.Exited({
             code: FfiConverterUInt32.readFromCursor(c),
           });
-        case 15:
+        case 16:
           return new TurnEvent.Gone();
         default:
           throw new UniffiInternalError.UnexpectedEnumCase();
@@ -4503,8 +4577,18 @@ const FfiConverterTypeTurnEvent = (() => {
           FfiConverterString.writeIntoCursor(inner.detail, c);
           return;
         }
-        case TurnEvent_Tags.Finished: {
+        case TurnEvent_Tags.Usage: {
           c.writeI32(7);
+          const inner = value.inner;
+          FfiConverterUInt64.writeIntoCursor(inner.input, c);
+          FfiConverterUInt64.writeIntoCursor(inner.cachedInput, c);
+          FfiConverterUInt64.writeIntoCursor(inner.output, c);
+          FfiConverterUInt64.writeIntoCursor(inner.reasoning, c);
+          FfiConverterOptionalUInt64.writeIntoCursor(inner.contextWindow, c);
+          return;
+        }
+        case TurnEvent_Tags.Finished: {
+          c.writeI32(8);
           const inner = value.inner;
           FfiConverterBool.writeIntoCursor(inner.ok, c);
           FfiConverterOptionalString.writeIntoCursor(inner.error, c);
@@ -4515,44 +4599,44 @@ const FfiConverterTypeTurnEvent = (() => {
           return;
         }
         case TurnEvent_Tags.Question: {
-          c.writeI32(8);
+          c.writeI32(9);
           const inner = value.inner;
           FfiConverterString.writeIntoCursor(inner.id, c);
           FfiConverterTypeQuestionKind.writeIntoCursor(inner.kind, c);
           return;
         }
         case TurnEvent_Tags.QuestionResolved: {
-          c.writeI32(9);
+          c.writeI32(10);
           const inner = value.inner;
           FfiConverterString.writeIntoCursor(inner.id, c);
           return;
         }
         case TurnEvent_Tags.ModeChanged: {
-          c.writeI32(10);
+          c.writeI32(11);
           const inner = value.inner;
           FfiConverterString.writeIntoCursor(inner.mode, c);
           return;
         }
         case TurnEvent_Tags.Disconnected: {
-          c.writeI32(11);
-          return;
-        }
-        case TurnEvent_Tags.Reconnected: {
           c.writeI32(12);
           return;
         }
-        case TurnEvent_Tags.Gap: {
+        case TurnEvent_Tags.Reconnected: {
           c.writeI32(13);
           return;
         }
-        case TurnEvent_Tags.Exited: {
+        case TurnEvent_Tags.Gap: {
           c.writeI32(14);
+          return;
+        }
+        case TurnEvent_Tags.Exited: {
+          c.writeI32(15);
           const inner = value.inner;
           FfiConverterUInt32.writeIntoCursor(inner.code, c);
           return;
         }
         case TurnEvent_Tags.Gone: {
-          c.writeI32(15);
+          c.writeI32(16);
           return;
         }
         default:
@@ -4603,6 +4687,18 @@ const FfiConverterTypeTurnEvent = (() => {
           size += FfiConverterBool.allocationSize(inner.ok);
           size += FfiConverterString.allocationSize(inner.summary);
           size += FfiConverterString.allocationSize(inner.detail);
+          return size;
+        }
+        case TurnEvent_Tags.Usage: {
+          const inner = value.inner;
+          let size = 4;
+          size += FfiConverterUInt64.allocationSize(inner.input);
+          size += FfiConverterUInt64.allocationSize(inner.cachedInput);
+          size += FfiConverterUInt64.allocationSize(inner.output);
+          size += FfiConverterUInt64.allocationSize(inner.reasoning);
+          size += FfiConverterOptionalUInt64.allocationSize(
+            inner.contextWindow,
+          );
           return size;
         }
         case TurnEvent_Tags.Finished: {
@@ -5023,6 +5119,214 @@ const FfiConverterTypeTurn = new FfiConverterObject(
 );
 
 /**
+ * Told what King's service says of itself while a watch lasts.
+ */
+export interface KingListener {
+  /**
+   * A notice of King's service, as its JSON: `{"notice":"changed",…}`
+   * when King's state changed (its status rides along), or
+   * `{"notice":"notify",…}` when King has something to tell the person.
+   */
+  onNotice(notice: string): void;
+  /**
+   * The line to King closed: what it said since is not known. The watch
+   * subscribes again by itself; ask for the status to catch up.
+   */
+  onClosed(reason: string): void;
+}
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+const uniffiCallbackInterfaceKingListener: {
+  vtable: any;
+  register: () => void;
+} = {
+  // Create the VTable using a series of closures.
+  // ts automatically converts these into C callback functions.
+  vtable: {
+    on_notice: (uniffiHandle: bigint, notice: Uint8Array) => {
+      const uniffiMakeCall = (): void => {
+        const jsCallback = FfiConverterTypeKingListener.lift(uniffiHandle);
+        return jsCallback.onNotice(FfiConverterString.lift(notice));
+      };
+      const uniffiResult = UniffiResult.ready<void>();
+      const uniffiHandleSuccess = (obj: any) => {};
+      const uniffiHandleError = (code: number, errBuf: UniffiByteArray) => {
+        UniffiResult.writeError(uniffiResult, code, errBuf);
+      };
+      uniffiTraitInterfaceCall(
+        /*makeCall:*/ uniffiMakeCall,
+        /*handleSuccess:*/ uniffiHandleSuccess,
+        /*handleError:*/ uniffiHandleError,
+        /*lowerString:*/ FfiConverterString.lower.bind(FfiConverterString),
+        /*alloc:*/ nativeModule().rustbuffer_alloc,
+      );
+      return uniffiResult;
+    },
+    on_closed: (uniffiHandle: bigint, reason: Uint8Array) => {
+      const uniffiMakeCall = (): void => {
+        const jsCallback = FfiConverterTypeKingListener.lift(uniffiHandle);
+        return jsCallback.onClosed(FfiConverterString.lift(reason));
+      };
+      const uniffiResult = UniffiResult.ready<void>();
+      const uniffiHandleSuccess = (obj: any) => {};
+      const uniffiHandleError = (code: number, errBuf: UniffiByteArray) => {
+        UniffiResult.writeError(uniffiResult, code, errBuf);
+      };
+      uniffiTraitInterfaceCall(
+        /*makeCall:*/ uniffiMakeCall,
+        /*handleSuccess:*/ uniffiHandleSuccess,
+        /*handleError:*/ uniffiHandleError,
+        /*lowerString:*/ FfiConverterString.lower.bind(FfiConverterString),
+        /*alloc:*/ nativeModule().rustbuffer_alloc,
+      );
+      return uniffiResult;
+    },
+    uniffi_free: (uniffiHandle: UniffiHandle): void => {
+      // this will throw a stale handle error if the handle isn't found.
+      FfiConverterTypeKingListener.drop(uniffiHandle);
+    },
+    uniffi_clone: (uniffiHandle: UniffiHandle): UniffiHandle => {
+      return FfiConverterTypeKingListener.clone(uniffiHandle);
+    },
+  },
+  register: () => {
+    nativeModule().ubrn_uniffi_leon_mobile_fn_init_callback_vtable_kinglistener(
+      uniffiCallbackInterfaceKingListener.vtable,
+    );
+  },
+};
+
+// FfiConverter protocol for callback interfaces
+const FfiConverterTypeKingListener = new FfiConverterCallback<KingListener>();
+
+/**
+ * A watch on King's notices ([`HostSession::king_watch`]).
+ */
+export interface KingWatchLike {
+  /**
+   * Ends the watch: no notice is told after this returns.
+   */
+  stop(): void;
+}
+/**
+ * @deprecated Use `KingWatchLike` instead.
+ */
+export type KingWatchInterface = KingWatchLike;
+
+/**
+ * A watch on King's notices ([`HostSession::king_watch`]).
+ */
+export class KingWatch extends UniffiAbstractObject implements KingWatchLike {
+  readonly [uniffiTypeNameSymbol] = "KingWatch";
+  readonly [destructorGuardSymbol]: UniffiGcObject;
+  readonly [pointerLiteralSymbol]: UniffiHandle;
+  // No primary constructor declared for this class.
+  private constructor(pointer: UniffiHandle) {
+    super();
+    this[pointerLiteralSymbol] = pointer;
+    this[destructorGuardSymbol] =
+      uniffiTypeKingWatchObjectFactory.bless(pointer);
+  }
+
+  /**
+   * Ends the watch: no notice is told after this returns.
+   */
+  stop(): void {
+    uniffiCaller.rustCall(
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_leon_mobile_fn_method_kingwatch_stop(
+          uniffiTypeKingWatchObjectFactory.clonePointer(this),
+          callStatus,
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    );
+  }
+
+  uniffiDestroy(): void {
+    const ptr = (this as any)[destructorGuardSymbol];
+    if (ptr !== undefined) {
+      const pointer = uniffiTypeKingWatchObjectFactory.pointer(this);
+      uniffiTypeKingWatchObjectFactory.freePointer(pointer);
+      uniffiTypeKingWatchObjectFactory.unbless(ptr);
+      delete (this as any)[destructorGuardSymbol];
+    }
+  }
+
+  static instanceOf(obj_: any): obj_ is KingWatch {
+    return uniffiTypeKingWatchObjectFactory.isConcreteType(obj_);
+  }
+}
+
+const uniffiTypeKingWatchObjectFactory: UniffiObjectFactory<KingWatchLike> =
+  (() => {
+    return {
+      create(pointer: UniffiHandle): KingWatchLike {
+        const instance = Object.create(KingWatch.prototype);
+        instance[pointerLiteralSymbol] = pointer;
+        instance[destructorGuardSymbol] = this.bless(pointer);
+        instance[uniffiTypeNameSymbol] = "KingWatch";
+        return instance;
+      },
+
+      bless(p: UniffiHandle): UniffiGcObject {
+        return uniffiCaller.rustCall(
+          /*caller:*/ (status) =>
+            nativeModule().ubrn_uniffi_internal_fn_method_kingwatch_ffi__bless_pointer(
+              p,
+              status,
+            ),
+          /*liftString:*/ FfiConverterString.lift,
+        );
+      },
+
+      unbless(ptr_: UniffiGcObject) {
+        ptr_.markDestroyed();
+      },
+
+      pointer(obj_: KingWatchLike): UniffiHandle {
+        if ((obj_ as any)[destructorGuardSymbol] === undefined) {
+          throw new UniffiInternalError.UnexpectedNullPointer();
+        }
+        return (obj_ as any)[pointerLiteralSymbol];
+      },
+
+      clonePointer(obj_: KingWatchLike): UniffiHandle {
+        const pointer = this.pointer(obj_);
+        return uniffiCaller.rustCall(
+          /*caller:*/ (callStatus) =>
+            nativeModule().ubrn_uniffi_leon_mobile_fn_clone_kingwatch(
+              pointer,
+              callStatus,
+            ),
+          /*liftString:*/ FfiConverterString.lift,
+        );
+      },
+
+      freePointer(pointer: UniffiHandle): void {
+        uniffiCaller.rustCall(
+          /*caller:*/ (callStatus) =>
+            nativeModule().ubrn_uniffi_leon_mobile_fn_free_kingwatch(
+              pointer,
+              callStatus,
+            ),
+          /*liftString:*/ FfiConverterString.lift,
+        );
+      },
+
+      isConcreteType(obj_: any): obj_ is KingWatchLike {
+        return (
+          obj_[destructorGuardSymbol] &&
+          obj_[uniffiTypeNameSymbol] === "KingWatch"
+        );
+      },
+    };
+  })();
+const FfiConverterTypeKingWatch = new FfiConverterObject(
+  uniffiTypeKingWatchObjectFactory,
+);
+
+/**
  * The connection to one paired computer.
  */
 export interface HostSessionLike {
@@ -5078,6 +5382,23 @@ export interface HostSessionLike {
   installedAgents(asyncOpts_?: {
     signal: AbortSignal;
   }) /*throws*/ : Promise<Array<string>>;
+  /**
+   * Asks King's service on the other computer and returns its answer.
+   * `request` is one request of King's protocol as JSON, with its `op`:
+   * `{"op":"status"}`, `{"op":"say","text":"…"}`,
+   * `{"op":"transcript","target":"brain","since":12}`. The answer is the
+   * reply's `result`, as JSON; a refusal is [`MobileError::Host`] with
+   * King's sentence.
+   */
+  kingAsk(
+    request: string,
+    asyncOpts_?: { signal: AbortSignal },
+  ) /*throws*/ : Promise<string>;
+  /**
+   * Tells `listener` every notice of King's service from now on, until
+   * [`KingWatch::stop`].
+   */
+  kingWatch(listener: KingListener): KingWatchLike;
   /**
    * What stands for the project rooted at `root`: the logo the desktop
    * would show for it, looked for on the other computer in one command, two
@@ -5493,6 +5814,87 @@ export class HostSession
       }
       throw __error;
     }
+  }
+
+  /**
+   * Asks King's service on the other computer and returns its answer.
+   * `request` is one request of King's protocol as JSON, with its `op`:
+   * `{"op":"status"}`, `{"op":"say","text":"…"}`,
+   * `{"op":"transcript","target":"brain","since":12}`. The answer is the
+   * reply's `result`, as JSON; a refusal is [`MobileError::Host`] with
+   * King's sentence.
+   */
+  async kingAsk(
+    request: string,
+    asyncOpts_?: { signal: AbortSignal },
+  ): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+      return await uniffiRustCallAsync(
+        /*rustCaller:*/ uniffiCaller,
+        /*rustFutureFunc:*/ () => {
+          return nativeModule().ubrn_uniffi_leon_mobile_fn_method_hostsession_king_ask(
+            uniffiTypeHostSessionObjectFactory.clonePointer(this),
+            FfiConverterString.lower(request, nativeModule().rustbuffer_alloc),
+          );
+        },
+        /*pollFunc:*/ nativeModule()
+          .ubrn_ffi_leon_mobile_rust_future_poll_rust_buffer,
+        /*cancelFunc:*/ nativeModule()
+          .ubrn_ffi_leon_mobile_rust_future_cancel_rust_buffer,
+        /*completeFunc:*/ nativeModule()
+          .ubrn_ffi_leon_mobile_rust_future_complete_rust_buffer,
+        /*freeFunc:*/ nativeModule()
+          .ubrn_ffi_leon_mobile_rust_future_free_rust_buffer,
+        // Async returns always go through the JS-side converter: the
+        // FFI symbol returns the future handle (u64), and the user-level
+        // RustBuffer comes back via the shared `rust_future_complete_*`
+        // export. The bytes the runtime hands back must be deserialized
+        // here using the per-callable return-type converter.
+        // Borrowed view over foreign memory: the call site owns the free,
+        // as on the sync paths. Unconditional — a no-op where buffers are
+        // already JS-owned.
+        /*liftFunc:*/ (__rb) => {
+          try {
+            return FfiConverterString.lift(__rb);
+          } finally {
+            nativeModule().rustbuffer_free(__rb);
+          }
+        },
+        /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+        /*asyncOpts:*/ asyncOpts_,
+        /*errorHandler:*/ FfiConverterTypeMobileError.lift.bind(
+          FfiConverterTypeMobileError,
+        ),
+      );
+    } catch (__error: any) {
+      if (uniffiIsDebug && __error instanceof Error) {
+        __error.stack = __stack;
+      }
+      throw __error;
+    }
+  }
+
+  /**
+   * Tells `listener` every notice of King's service from now on, until
+   * [`KingWatch::stop`].
+   */
+  kingWatch(listener: KingListener): KingWatchLike {
+    return FfiConverterTypeKingWatch.lift(
+      uniffiCaller.rustCall(
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_leon_mobile_fn_method_hostsession_king_watch(
+            uniffiTypeHostSessionObjectFactory.clonePointer(this),
+            FfiConverterTypeKingListener.lower(
+              listener,
+              nativeModule().rustbuffer_alloc,
+            ),
+            callStatus,
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+      ),
+    );
   }
 
   /**
@@ -6559,7 +6961,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_leon_mobile_checksum_method_hostsession_agent_options() !==
-    65464
+    8978
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       "uniffi_leon_mobile_checksum_method_hostsession_agent_options",
@@ -6611,6 +7013,22 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       "uniffi_leon_mobile_checksum_method_hostsession_installed_agents",
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_leon_mobile_checksum_method_hostsession_king_ask() !==
+    2887
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      "uniffi_leon_mobile_checksum_method_hostsession_king_ask",
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_leon_mobile_checksum_method_hostsession_king_watch() !==
+    17392
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      "uniffi_leon_mobile_checksum_method_hostsession_king_watch",
     );
   }
   if (
@@ -6699,6 +7117,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       "uniffi_leon_mobile_checksum_method_hostsession_worktrees",
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_leon_mobile_checksum_method_kingwatch_stop() !==
+    21356
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      "uniffi_leon_mobile_checksum_method_kingwatch_stop",
     );
   }
   if (
@@ -6806,6 +7232,7 @@ function uniffiEnsureInitialized() {
   }
 
   uniffiCallbackInterfaceTurnListener.register();
+  uniffiCallbackInterfaceKingListener.register();
   uniffiCallbackInterfaceConnectionListener.register();
 }
 
@@ -6825,6 +7252,7 @@ export default Object.freeze({
     FfiConverterTypeDenCub,
     FfiConverterTypeHistorySession,
     FfiConverterTypeHostSession,
+    FfiConverterTypeKingWatch,
     FfiConverterTypeLeonMobile,
     FfiConverterTypeLogoFormat,
     FfiConverterTypeLogoImage,

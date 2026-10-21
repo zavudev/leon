@@ -29,6 +29,8 @@
 //!   the application;
 //! * [`session`] is the connection: shared state, transcripts, turns that
 //!   can be found again and re-attached after the app was closed;
+//! * [`king`] speaks to King Leon, the other computer's coordinator,
+//!   through its host;
 //! * [`logo`] finds a project's logo on the other computer with the
 //!   desktop's own detection;
 //! * [`mobile`] is the entry point: identity, pairing, connecting.
@@ -42,6 +44,7 @@ pub mod agents;
 mod bridge;
 pub mod error;
 pub mod events;
+pub mod king;
 pub mod logo;
 pub mod mobile;
 pub mod options;
@@ -55,6 +58,7 @@ pub use events::{
     Answer, ChoiceAnswer, ChoiceOption, ChoiceQuestion, PermissionChoice, PermissionEffect,
     QuestionKind, TurnEvent,
 };
+pub use king::{KingListener, KingWatch};
 pub use logo::{LogoFormat, LogoImage, ProjectLogo};
 pub use mobile::{check_code, CodeCheck, LeonMobile, PairedHost};
 pub use options::{AgentMode, AgentModel, AgentOptions};

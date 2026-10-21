@@ -826,3 +826,27 @@ fn a_click_on_a_card_opens_its_details_with_every_action(cx: &mut TestAppContext
     assert!(!h.shows("tasks-drawer", cx));
     assert_eq!(h.main_kind(cx), "tasks");
 }
+
+#[gpui_kit::test]
+fn a_card_is_given_to_the_king_who_is_told_what_and_where(cx: &mut TestAppContext) {
+    use leon_king::protocol::Request;
+    let h = on_api(cx);
+    open_board(&h, cx);
+    written_elsewhere(&h, "Fix the login", 1, cx);
+    h.press("a", cx);
+    assert_eq!(h.main_kind(cx), "king", "King's view opens on it");
+    let end = h.king.take().pop().expect("a line to King's service");
+    h.settle(cx);
+    let said: Vec<String> = end
+        .drain()
+        .into_iter()
+        .filter_map(|(_, request)| match request {
+            Request::Say { text } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(said[0].starts_with("Task "), "{}", said[0]);
+    assert!(said[0].contains("of api"), "{}", said[0]);
+    assert!(said[0].contains("Fix the login"), "{}", said[0]);
+}

@@ -37,6 +37,15 @@ exactly as the [shared memory](MEMORY.md#entries-and-scopes) resolves it), or
 the **global** one (`--global`), which belongs to no project. A task of
 another project is not found by its id from this one.
 
+A task can be a **step** of another: it names its **parent**, and the steps
+of the same task it **needs** done before it can start. Neither crosses a
+board; a task is never its own parent or step, and needs never go round in a
+circle. Deleting a task leaves its steps steps of nothing and drops it from
+what others need. King carries a task out as its steps in that order: a
+[run](KING.md#runs-a-task-carried-out-as-its-steps), started from the card
+(`r`, or **Run its steps** in its drawer, which lists the steps and how the
+run goes).
+
 Cards are ordered inside a column by a position: a new task goes to the bottom
 of its column, `move --before <id>` places it above another card.
 
@@ -81,6 +90,7 @@ nothing. Dropping a card where it already is changes nothing.
 | `e` | Open the card's details beside the columns, or close them |
 | `n` | Open the panel for a new task, in the cursor's column, with the title ready to type |
 | `s` | Sync with GitHub now, or ask to turn it on |
+| `a` | Give the card to the King (also a button of the details): King's view opens, and King is told the task, its project and its id, and works it (see [KING.md](KING.md)) |
 | `d` | Finish the card |
 | `p` | Raise its priority: none, low, medium, high, urgent, none |
 | `g` | Switch between the project's board and the global one |
@@ -242,7 +252,8 @@ leon task board [--global]
 leon task show <id> [--json]
 leon task edit <id> [--title T] [--body B | --body -] [--status S] [--priority P]
                [--label L]... | --no-labels] [--assignee A | --no-assignee]
-               [--branch B | --no-branch]
+               [--branch B | --no-branch] [--parent P | --no-parent]
+               [--need N]... | --no-needs]
 leon task move <id> <status> [--before <id>]
 leon task done <id>
 leon task rm <id>
@@ -256,7 +267,7 @@ leon task mcp
 | `list` | The board's tasks in the order of the board. Done and canceled ones are left out unless `--all` or `--status` asks for them. |
 | `board` | The columns, each with its tasks. |
 | `show` | One task in full (`--json`: every field). |
-| `edit` | Changes what is named; what is not stays. `--label` replaces the labels, `--no-labels` clears them. |
+| `edit` | Changes what is named; what is not stays. `--label` replaces the labels, `--no-labels` clears them. `--parent` makes it a step of another task; `--need` (repeated) replaces what it waits for, `--no-needs` clears it. |
 | `move`, `done` | Moves a task to a column, to the bottom of it or above `--before`. `done` is `move <id> done`. |
 | `rm` | Removes a task for good. |
 | `search` | Full-text search of titles and bodies, of the project's board and the global one together. |
@@ -277,19 +288,24 @@ agent was started in (`CLAUDE_PROJECT_DIR` when the client sets it).
 
 | Tool | What it does |
 | --- | --- |
-| `task_create` | Adds a task, or answers the open one with the same title (`created: false`). |
-| `task_list` | The open tasks in the order of the board; `include_closed`, `status`, `assignee`, `label`, `scope`, `limit`. |
+| `task_create` | Adds a task, or answers the open one with the same title (`created: false`); `parent` and `needs` make it a step. |
+| `task_list` | The open tasks in the order of the board; `include_closed`, `status`, `assignee`, `label`, `parent` (only its steps), `scope`, `limit`. |
 | `task_get` | One task in full. |
-| `task_update` | Changes title, body, status, priority, labels, assignee or the branch of its worktree. |
+| `task_update` | Changes title, body, status, priority, labels, assignee, the branch of its worktree, its `parent` or its `needs`. |
 | `task_move` | Moves a task to a column, to the bottom or above another task. |
 | `task_search` | Searches titles and bodies of this project's board and the global one. |
 
 No tool deletes a task: an agent that no longer wants one cancels it, and
 removing for good is `leon task rm`, the person's.
 
+`leon task mcp --anywhere` is the server King Leon is given: King runs in no
+project, so every board is its own, and `task_create`, `task_list` and
+`task_search` take `project`, the root folder of the project whose board it
+is. Every task's JSON names its board's `project`.
+
 ## Where it is stored
 
-In `leon.db`, table `task` (migrations 20 and 21) with a full-text index over the
+In `leon.db`, table `task` (migrations 20, 21 and 23) with a full-text index over the
 titles and bodies, scoped like the memory's entries by the identity of the
 project's root folder, so removing a project and adding it again loses nothing.
 The store announces each write (`StoreChange::Tasks`) so a window reading it

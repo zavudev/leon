@@ -43,6 +43,13 @@
       "expo-sqlite",
       "expo-font",
       [
+        "expo-notifications",
+        {
+          "icon": "./assets/adaptive-monochrome.png",
+          "color": "#0A0A0A"
+        }
+      ],
+      [
         "expo-camera",
         {
           "cameraPermission": "Leon uses the camera to scan the pairing code shown on your computer.",

@@ -40,6 +40,8 @@ mod history_sync;
 mod history_view;
 mod home;
 mod keeping;
+mod king;
+mod king_view;
 mod lines;
 mod lion;
 mod live;

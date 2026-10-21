@@ -70,6 +70,26 @@
 //! guess by folder (`likely`) does not: the Den would be reading aloud a
 //! transcript that may be another session's.
 //!
+//! # King's workers
+//!
+//! A worker King runs is a lion too ([`king_cubs`]), with an id of its own
+//! ([`king_id`]). Its agent runs under King's service, not in a terminal of
+//! the window, so what King's status says comes first and the transcript
+//! only says what the worker does while it works:
+//!
+//! | What King says | State | The plain truth shown |
+//! | --- | --- | --- |
+//! | stopped, or taken over by the person | **no lion** (a taken-over one is a session of the window) | |
+//! | it failed | `Fainted` | that it failed |
+//! | it asks, for a permission | `NeedsPermission` | what it asks |
+//! | it asks something else | `WaitingForUser` | what it asks |
+//! | it works, a tool call without a result | by the tool's kind | the tool's name and its subject |
+//! | it works, nothing more known | `Thinking` | |
+//! | its turn is over (King reads it), or it waits | `Idle`, or `Asleep` after [`ASLEEP_AFTER`] | |
+//!
+//! It answers King, not the person, so a worker whose turn is over is idle,
+//! never waiting for the user.
+//!
 //! # The permission prompt is inferred
 //!
 //! A transcript does not say that a permission question is on screen: the
@@ -819,6 +839,98 @@ pub fn away_cubs(away: &Away, reading: &Reading) -> Vec<Cub> {
     out
 }
 
+/// The id of the lion of King's worker `worker`: no live session of this
+/// window (small numbers), no session that runs elsewhere (bit 62) and no
+/// little one (the top bit) has it.
+pub fn king_id(worker: u32) -> u64 {
+    1 << 61 | u64::from(worker)
+}
+
+/// The worker whose lion this is, for a lion of King's.
+pub fn king_worker(id: u64) -> Option<u32> {
+    (id >> 61 == 1).then(|| u32::try_from(id & u64::from(u32::MAX)).ok())?
+}
+
+/// One of King's workers, as King's status says it.
+#[derive(Debug, Clone)]
+pub struct KingLion {
+    /// Its number.
+    pub worker: u32,
+    /// What King called its work.
+    pub name: String,
+    /// Its agent's colour.
+    pub tint: Hsla,
+    /// Where it is.
+    pub state: leon_king::coordinator::WorkerState,
+    /// What it asks, and whether that is a permission.
+    pub asks: Option<(String, bool)>,
+    /// Its agent and model, in a few words.
+    pub runs_on: String,
+    /// Since when nothing happened to it.
+    pub quiet_for: Option<Duration>,
+}
+
+/// The lion of one of King's workers and its little ones: the table under
+/// "King's workers" above. A worker that is no longer King's has none.
+pub fn king_cubs(lion: &KingLion, reading: Option<&Reading>) -> Vec<Cub> {
+    use leon_king::coordinator::WorkerState;
+    let pulse = reading.map(|reading| &reading.pulse);
+    let (state, detail) = match lion.state {
+        WorkerState::Stopped | WorkerState::Released => return Vec::new(),
+        WorkerState::Failed => (CubState::Fainted, "Failed".to_owned()),
+        WorkerState::Asking => match &lion.asks {
+            Some((what, true)) => (CubState::NeedsPermission, format!("Asks: {what}")),
+            Some((what, false)) => (CubState::WaitingForUser, format!("Asks: {what}")),
+            None => (CubState::WaitingForUser, "Asks something".to_owned()),
+        },
+        WorkerState::Working => match pulse
+            .filter(|pulse| !pulse.turn_over())
+            .and_then(|pulse| pulse.tools().last())
+        {
+            Some(tool) if !asks(tool) => (working_state(tool.kind), tool_line(tool)),
+            _ => (CubState::Thinking, "Works".to_owned()),
+        },
+        WorkerState::Done | WorkerState::Paused => {
+            let what = if lion.state == WorkerState::Done {
+                "Its turn is over; King reads it"
+            } else {
+                "Waits for King"
+            };
+            match quiet_words(lion.quiet_for) {
+                Some(quiet) if lion.quiet_for.is_some_and(|quiet| quiet >= ASLEEP_AFTER) => {
+                    (CubState::Asleep, format!("{what} \u{b7} {quiet}"))
+                }
+                _ => (CubState::Idle, what.to_owned()),
+            }
+        }
+    };
+    let id = king_id(lion.worker);
+    let mut out = vec![Cub {
+        id,
+        name: lion.name.clone(),
+        species: Species {
+            tint: lion.tint,
+            seed: hash(&lion.name) ^ id,
+        },
+        state,
+        level: pulse.map_or(0, level),
+        detail: Some(format!(
+            "{detail} \u{b7} King's worker #{} \u{b7} {}",
+            lion.worker, lion.runs_on
+        )),
+        parent: None,
+        mystery: false,
+    }];
+    if lion.state == WorkerState::Working {
+        if let Some(reading) = reading {
+            for sub in reading.pulse.subagents() {
+                out.push(little(id, lion.tint, sub, reading.subs.get(&sub.tool)));
+            }
+        }
+    }
+    out
+}
+
 fn level(pulse: &Pulse) -> u32 {
     u32::try_from(pulse.tool_calls()).unwrap_or(u32::MAX)
 }
@@ -1037,6 +1149,60 @@ pub fn changes(
         }
     }
     told
+}
+
+#[cfg(test)]
+mod king_tests {
+    use super::*;
+    use gpui_kit::rgb;
+    use leon_king::coordinator::WorkerState;
+
+    fn lion(state: WorkerState) -> KingLion {
+        KingLion {
+            worker: 3,
+            name: "Fix the login".to_owned(),
+            tint: rgb(0xd97757).into(),
+            state,
+            asks: None,
+            runs_on: "codex gpt-5.6".to_owned(),
+            quiet_for: Some(Duration::from_secs(60)),
+        }
+    }
+
+    #[test]
+    fn a_workers_lion_has_an_id_no_other_lion_has() {
+        let id = king_id(3);
+        assert_eq!(king_worker(id), Some(3));
+        assert!(!is_away(id));
+        assert_eq!(king_worker(away_id("claude", "x")), None);
+        assert_eq!(king_worker(7), None);
+        assert_eq!(king_worker(id | 1 << 63), None);
+    }
+
+    #[test]
+    fn what_king_says_of_a_worker_is_its_state() {
+        let state = |lion: KingLion| king_cubs(&lion, None).first().map(|cub| cub.state);
+        assert_eq!(state(lion(WorkerState::Stopped)), None);
+        assert_eq!(state(lion(WorkerState::Released)), None);
+        assert_eq!(state(lion(WorkerState::Failed)), Some(CubState::Fainted));
+        assert_eq!(state(lion(WorkerState::Working)), Some(CubState::Thinking));
+        assert_eq!(state(lion(WorkerState::Done)), Some(CubState::Idle));
+        let asks = |permission| KingLion {
+            asks: Some(("Run make test?".to_owned(), permission)),
+            ..lion(WorkerState::Asking)
+        };
+        assert_eq!(state(asks(true)), Some(CubState::NeedsPermission));
+        assert_eq!(state(asks(false)), Some(CubState::WaitingForUser));
+        let long_ago = KingLion {
+            quiet_for: Some(ASLEEP_AFTER),
+            ..lion(WorkerState::Done)
+        };
+        assert_eq!(state(long_ago), Some(CubState::Asleep));
+        let cub = &king_cubs(&lion(WorkerState::Working), None)[0];
+        let detail = cub.detail.as_deref().unwrap_or_default();
+        assert!(detail.contains("King's worker #3"), "{detail}");
+        assert!(detail.contains("codex gpt-5.6"), "{detail}");
+    }
 }
 
 #[cfg(test)]

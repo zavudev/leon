@@ -639,7 +639,7 @@ impl Shell {
                 self.open_live(id, window, cx);
                 self.pane = pane;
             }
-            Main::Live(_) | Main::Den | Main::Tasks => {
+            Main::Live(_) | Main::Den | Main::Tasks | Main::King => {
                 self.main = Main::Empty;
                 self.pane = Pane::Sidebar;
             }
@@ -677,7 +677,7 @@ impl Shell {
 
     /// Opens the terminal of a lion: the session's own, or its parent's for
     /// a little one.
-    fn den_open_lion(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn den_open_lion(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let session = self
             .den
             .cubs
@@ -707,6 +707,16 @@ impl Shell {
                     ),
                 ),
             }
+            return;
+        }
+        // One of King's workers: its card in King's view.
+        if let Some(worker) = session.and_then(den::king_worker) {
+            self.den_stop_watching();
+            self.den.back = None;
+            if !self.king_open() {
+                self.toggle_king(window, cx);
+            }
+            self.king_open_worker(worker, window, cx);
             return;
         }
         let Some(live) = session
@@ -1936,6 +1946,13 @@ impl Shell {
         let Some(report) = self.engine.elsewhere(&local) else {
             return Vec::new();
         };
+        // This window's sessions, and King's workers: each is a lion already.
+        let workers = self.king_ui.status.iter().flat_map(|status| {
+            status
+                .workers
+                .iter()
+                .filter_map(|worker| worker.conversation.session_id.as_deref())
+        });
         let own: Vec<&str> = self
             .live
             .all()
@@ -1947,6 +1964,7 @@ impl Shell {
                     .map(|(id, _)| id.as_str())
                     .or(session.resumed.as_deref())
             })
+            .chain(workers)
             .collect();
         let mut out: Vec<AwaySession> = Vec::new();
         for found in crate::elsewhere::foreign(&report.found, true, &self.own_terminals(&local)) {
@@ -2020,7 +2038,76 @@ impl Shell {
             cwd: away.cwd,
             session: away.external,
         }));
+        wanted.extend(self.den_king_wanted());
         wanted
+    }
+
+    /// King's workers that are lions: those that are still King's, with what
+    /// King's status says of each.
+    fn den_king(&self, cx: &gpui_kit::App) -> Vec<den::KingLion> {
+        use leon_king::coordinator::{Form, WorkerState};
+        let Some(status) = &self.king_ui.status else {
+            return Vec::new();
+        };
+        let colours = crate::theme::palette(cx);
+        let now = self.now().timestamp_millis().max(0) as u64;
+        status
+            .workers
+            .iter()
+            // A worker in a terminal is that terminal's lion already.
+            .filter(|worker| {
+                !worker.terminal
+                    && !matches!(worker.state, WorkerState::Stopped | WorkerState::Released)
+            })
+            .map(|worker| {
+                let conversation = &worker.conversation;
+                let agent = leon_core::AgentId::parse(&conversation.agent);
+                den::KingLion {
+                    worker: worker.id,
+                    name: worker.title.clone(),
+                    tint: agent.map_or(colours.text_muted, |agent| colours.agent(agent)),
+                    state: worker.state,
+                    asks: conversation.questions.first().map(|open| {
+                        (
+                            open.text.clone(),
+                            matches!(open.form, Form::Permission { .. }),
+                        )
+                    }),
+                    runs_on: match &conversation.model {
+                        Some(model) => format!("{} {model}", conversation.agent),
+                        None => conversation.agent.clone(),
+                    },
+                    quiet_for: Some(std::time::Duration::from_millis(
+                        now.saturating_sub(worker.updated_ms),
+                    )),
+                }
+            })
+            .collect()
+    }
+
+    /// The transcripts of King's workers to follow.
+    fn den_king_wanted(&self) -> Vec<Wanted> {
+        let Some(status) = &self.king_ui.status else {
+            return Vec::new();
+        };
+        status
+            .workers
+            .iter()
+            .filter_map(|worker| {
+                let conversation = &worker.conversation;
+                let agent = leon_core::AgentId::parse(&conversation.agent)
+                    .filter(|agent| Format::of(*agent).is_some())?;
+                let session = conversation.session_id.clone()?;
+                let id = den::king_id(worker.id);
+                Some(Wanted {
+                    live: id,
+                    agent,
+                    subagents: self.den_subagents(id, &session),
+                    cwd: worker.cwd.clone(),
+                    session,
+                })
+            })
+            .collect()
     }
 
     /// The sessions whose transcript can be followed: on this computer, an
@@ -2309,6 +2396,22 @@ impl Shell {
                 reading,
             ));
         }
+        // King's workers, with what their transcript says while they work.
+        let king_wanted = self.den_king_wanted();
+        for lion in self.den_king(cx) {
+            let id = den::king_id(lion.worker);
+            let reading = self
+                .den
+                .readings
+                .get(&id)
+                .filter(|(session, _)| {
+                    king_wanted
+                        .iter()
+                        .any(|wanted| wanted.live == id && wanted.session == *session)
+                })
+                .map(|(_, reading)| reading);
+            cubs.extend(den::king_cubs(&lion, reading));
+        }
         // The made-up lions of a development run.
         if self.options.den_cast > 0 {
             cubs.extend(den::made_up(
@@ -2401,6 +2504,18 @@ impl Shell {
                 session.id.0,
                 (agent.as_str().to_owned(), external, session.cwd.clone()),
             );
+        }
+        if let Some(status) = &self.king_ui.status {
+            for worker in &status.workers {
+                whose.insert(
+                    den::king_id(worker.id),
+                    (
+                        worker.conversation.agent.clone(),
+                        worker.conversation.session_id.clone(),
+                        worker.cwd.clone(),
+                    ),
+                );
+            }
         }
         for away in self.den_away(cx) {
             whose.insert(

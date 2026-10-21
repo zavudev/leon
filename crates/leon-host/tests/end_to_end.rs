@@ -99,11 +99,17 @@ async fn paired() -> World {
 
 /// [`paired`] on a relay that is already running, at `url`.
 async fn paired_on(relay: TestRelay, url: String) -> World {
+    let config = host_config(&url);
+    paired_with(relay, url, config).await
+}
+
+/// [`paired_on`] with a host of this configuration.
+async fn paired_with(relay: TestRelay, url: String, config: HostConfig) -> World {
     let dir = tempfile::tempdir().unwrap();
     let host_identity = Arc::new(Identity::load_or_create(&dir.path().join("host")).unwrap());
     let client_identity = Arc::new(Identity::generate());
     let host = Host::start(
-        host_config(&url),
+        config,
         host_identity.clone(),
         Some(dir.path().join("devices.json")),
     )
@@ -657,7 +663,9 @@ async fn a_paired_client_sees_what_the_host_shares_of_itself() {
         truncated,
         pinned,
         den,
+        king,
     } = client.share_state().await.unwrap();
+    assert!(!king, "this host has no King");
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0].root, "/srv/api");
     assert!(client
@@ -700,4 +708,79 @@ async fn a_host_that_shares_nothing_answers_the_share_requests_with_nothing() {
         .await
         .unwrap()
         .is_none());
+}
+
+/// A King that answers each line with `{"reply":<line>}` and says once that
+/// it is there; a line `bye` hangs up.
+struct EchoKing;
+
+impl leon_host::KingDoor for EchoKing {
+    fn open(&self) -> Result<leon_host::KingPipe, String> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+        let (ours, theirs) = UnixStream::pair().map_err(|error| error.to_string())?;
+        std::thread::spawn(move || {
+            let mut answer = theirs.try_clone().unwrap();
+            writeln!(answer, r#"{{"notice":"hello"}}"#).unwrap();
+            for line in BufReader::new(theirs).lines() {
+                let Ok(line) = line else { break };
+                if line == "bye" {
+                    break;
+                }
+                writeln!(answer, r#"{{"reply":{line}}}"#).unwrap();
+            }
+        });
+        let closer = ours.try_clone().unwrap();
+        Ok(leon_host::KingPipe {
+            write: Box::new(ours.try_clone().unwrap()),
+            read: Box::new(BufReader::new(ours)),
+            close: Box::new(move || {
+                let _ = closer.shutdown(std::net::Shutdown::Both);
+            }),
+        })
+    }
+}
+
+async fn next(
+    heard: &mut tokio::sync::broadcast::Receiver<leon_link::client::KingEvent>,
+) -> leon_link::client::KingEvent {
+    tokio::time::timeout(WAIT, heard.recv())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+/// A paired client speaks to King through the host: the host says it can,
+/// the lines go through the relay both ways, a King that hangs up is said,
+/// and the next line opens the way again.
+#[tokio::test]
+async fn a_paired_client_speaks_to_king_through_the_host() {
+    use leon_link::client::KingEvent;
+    let relay = TestRelay::start().await;
+    let url = relay.url();
+    let mut config = host_config(&url);
+    config.king = Some(leon_host::King(Arc::new(EchoKing)));
+    let world = paired_with(relay, url, config).await;
+    assert!(world.client.share_state().await.unwrap().king);
+    let mut heard = world.client.king_events();
+    world.client.king_send("1".into());
+    assert_eq!(
+        next(&mut heard).await,
+        KingEvent::Line(r#"{"notice":"hello"}"#.into())
+    );
+    assert_eq!(
+        next(&mut heard).await,
+        KingEvent::Line(r#"{"reply":1}"#.into())
+    );
+    world.client.king_send("bye".into());
+    assert!(matches!(next(&mut heard).await, KingEvent::Closed(_)));
+    world.client.king_send("2".into());
+    assert_eq!(
+        next(&mut heard).await,
+        KingEvent::Line(r#"{"notice":"hello"}"#.into())
+    );
+    assert_eq!(
+        next(&mut heard).await,
+        KingEvent::Line(r#"{"reply":2}"#.into())
+    );
 }

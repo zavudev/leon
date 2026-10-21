@@ -44,12 +44,13 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use serde_json::{json, Value};
 
-use crate::agents::{Action, AgentSession, Outgoing, Step, TurnSpec};
+use crate::agents::{Action, AgentSession, McpServer, Outgoing, Step, TurnSpec};
 use crate::claude::AgentCommand;
 use crate::error::TurnError;
 use crate::events::{
     blocks, cap_detail, clip, edit_detail, first_line, input_detail, input_summary, text_detail,
-    text_of, written_detail, Answer, PermissionChoice, PermissionEffect, QuestionKind, TurnEvent,
+    text_of, written_detail, Answer, PermissionChoice, PermissionEffect, QuestionKind, Tokens,
+    TurnEvent,
 };
 use crate::tag::{id_tag, tag_id};
 
@@ -91,10 +92,11 @@ pub struct Dialect {
     /// option of the session. `None`: it has no modes to set, and the only
     /// ones are this library's (asking, and never asking).
     pub auto_agent: Option<&'static str>,
-    /// The models of every provider are only known a moment after the
+    /// The models of every provider may only be known a moment after the
     /// session answered: the first `config_option_update` says so, and a
     /// model or an effort waits for it (set before, the session would be
-    /// tied to a model it may not be able to use).
+    /// tied to a model it may not be able to use), unless the answer lists
+    /// the model asked for already.
     pub models_come_late: bool,
     /// A refusal ends the turn, which the choice then says.
     pub refusal_ends_turn: bool,
@@ -140,6 +142,7 @@ pub fn session(unique: u64, dialect: &'static Dialect) -> Box<dyn AgentSession> 
         mode: None,
         model: None,
         cost: None,
+        context_window: None,
         noise: VecDeque::new(),
     })
 }
@@ -243,7 +246,35 @@ struct AcpSession {
     model: Option<String>,
     /// What the conversation has cost, as last said.
     cost: Option<f64>,
+    /// How many tokens the model can hold, as last said.
+    context_window: Option<u64>,
     noise: VecDeque<String>,
+}
+
+/// The tokens of a turn, from the `usage` of the prompt's answer: what was
+/// read is the fresh input and both caches, what was written the answer and
+/// the thoughts.
+fn acp_tokens(usage: &Value, context_window: Option<u64>) -> Option<Tokens> {
+    if !usage.is_object() {
+        return None;
+    }
+    let count = |keys: &[&str]| -> u64 {
+        keys.iter()
+            .filter_map(|key| usage[*key].as_u64())
+            .next()
+            .unwrap_or(0)
+    };
+    let cached = count(&["cachedReadTokens"]);
+    let reasoning = count(&["thoughtTokens", "reasoningTokens"]);
+    Some(Tokens {
+        input: count(&["inputTokens"])
+            + cached
+            + count(&["cachedWriteTokens", "cacheCreationTokens"]),
+        cached_input: cached,
+        output: count(&["outputTokens"]) + reasoning,
+        reasoning,
+        context_window,
+    })
 }
 
 impl AcpSession {
@@ -314,6 +345,23 @@ impl AcpSession {
                 mode: mode.to_owned(),
             });
         }
+    }
+
+    /// Whether the session's options list the model this turn asks for.
+    fn lists_wanted_model(&self, options: &Value) -> bool {
+        let Some(wanted) = self
+            .todo
+            .iter()
+            .find(|setting| setting.option == "model")
+            .map(|setting| setting.value.as_str())
+        else {
+            return false;
+        };
+        blocks(options)
+            .iter()
+            .filter(|option| option["id"] == "model")
+            .flat_map(|option| blocks(&option["options"]))
+            .any(|choice| choice["value"].as_str() == Some(wanted))
     }
 
     fn set(&self, id: &str, option: &str, value: &str) -> Option<String> {
@@ -477,6 +525,12 @@ impl AcpSession {
                     None => {}
                 }
                 self.options_are(&result["configOptions"], step);
+                // An agent that lists the model asked for in its answer
+                // knows it already: no update may follow (opencode 2.0.32
+                // sends none).
+                if self.lists_wanted_model(&result["configOptions"]) {
+                    self.models_known = true;
+                }
                 self.ready = true;
                 self.advance(step);
             }
@@ -508,6 +562,9 @@ impl AcpSession {
                     "refusal" => "The model declined to go on.".to_owned(),
                     other => format!("The turn stopped: {other}"),
                 });
+                if let Some(tokens) = acp_tokens(&value["result"]["usage"], self.context_window) {
+                    step.events.push(TurnEvent::Usage { tokens });
+                }
                 step.events.push(TurnEvent::Finished {
                     ok,
                     error,
@@ -805,6 +862,7 @@ impl AcpSession {
                 }
             }
             "usage_update" => {
+                self.context_window = update["size"].as_u64().or(self.context_window);
                 if update["cost"]["currency"] == "USD" {
                     self.cost = update["cost"]["amount"].as_f64().or(self.cost);
                 }
@@ -928,6 +986,7 @@ impl AgentSession for AcpSession {
             }
         }
         let folder = turn.cwd.filter(|cwd| !cwd.is_empty()).unwrap_or("/");
+        let servers: Vec<Value> = turn.mcp_servers.iter().map(McpServer::acp).collect();
         let session = match wanted(turn.resume) {
             Some(id) => {
                 self.resumed = true;
@@ -936,13 +995,13 @@ impl AgentSession for AcpSession {
                 request(
                     ID_SESSION,
                     self.dialect.resume,
-                    json!({ "sessionId": id, "cwd": folder, "mcpServers": [] }),
+                    json!({ "sessionId": id, "cwd": folder, "mcpServers": servers }),
                 )
             }
             None => request(
                 ID_SESSION,
                 "session/new",
-                json!({ "cwd": folder, "mcpServers": [] }),
+                json!({ "cwd": folder, "mcpServers": servers }),
             ),
         };
         let hello = Outgoing {

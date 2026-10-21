@@ -1,0 +1,95 @@
+# What Leon knows of model families before anyone measured anything.
+#
+# Talents run from 1 (poor) to 5 (the best there is), and are Leon's starting
+# estimate, nothing more: King replaces them with what it finds out, in
+# king-models.toml in Leon's data folder (the tool model_note), and so can you.
+# No benchmark is written here: a score is only kept with its source and date.
+#
+# A card matches a model when its `match` is a part of the model's id or name
+# (in lower case); the longest match wins.
+
+[[model]]
+match = "opus"
+name = "Claude Opus"
+talents = { planning = 5, architecture = 5, coding = 5, review = 5, research = 5, speed = 2, economy = 1 }
+notes = "The one to plan with and to judge others' work. Too dear for routine changes."
+
+[[model]]
+match = "sonnet"
+name = "Claude Sonnet"
+talents = { planning = 4, architecture = 4, coding = 5, review = 4, research = 4, speed = 3, economy = 3 }
+notes = "A strong default for code changes that need care."
+
+[[model]]
+match = "haiku"
+name = "Claude Haiku"
+talents = { planning = 2, architecture = 2, coding = 3, review = 3, research = 3, speed = 5, economy = 5 }
+notes = "Quick and cheap: reading, summarising, small and clear changes."
+
+[[model]]
+match = "gpt-5"
+name = "GPT-5 (Codex)"
+talents = { planning = 5, architecture = 5, coding = 5, review = 5, research = 4, speed = 3, economy = 3 }
+notes = "Strong at long changes and at reasoning about a codebase; effort high for plans."
+
+[[model]]
+match = "codex-mini"
+name = "Codex mini"
+talents = { planning = 2, architecture = 2, coding = 3, review = 3, research = 3, speed = 5, economy = 5 }
+notes = "Small, well-described changes."
+
+[[model]]
+match = "grok"
+name = "Grok"
+talents = { planning = 4, architecture = 3, coding = 4, review = 3, research = 4, speed = 4, economy = 3 }
+
+[[model]]
+match = "gemini"
+name = "Gemini"
+talents = { planning = 4, architecture = 4, coding = 4, review = 4, research = 5, speed = 4, economy = 3 }
+notes = "Very long context: reading a whole codebase at once."
+
+[[model]]
+match = "deepseek"
+name = "DeepSeek"
+talents = { planning = 3, architecture = 3, coding = 4, review = 3, research = 3, speed = 3, economy = 5 }
+notes = "Cheap and capable for well-specified code."
+
+[[model]]
+match = "kimi"
+name = "Kimi"
+talents = { planning = 3, architecture = 3, coding = 4, review = 3, research = 4, speed = 3, economy = 4 }
+
+[[model]]
+match = "glm"
+name = "GLM"
+talents = { planning = 3, architecture = 3, coding = 4, review = 3, research = 3, speed = 3, economy = 5 }
+
+[[model]]
+match = "qwen"
+name = "Qwen"
+talents = { planning = 3, architecture = 3, coding = 4, review = 3, research = 3, speed = 4, economy = 5 }
+
+[[model]]
+match = "free"
+name = "A free model"
+talents = { planning = 1, architecture = 1, coding = 2, review = 2, research = 2, speed = 3, economy = 5 }
+notes = "Costs nothing; only for reading and reporting, never for changes that matter."
+
+[[model]]
+match = "fable"
+name = "Claude Fable"
+talents = { planning = 5, architecture = 5, coding = 5, review = 5, research = 5, speed = 2, economy = 1 }
+notes = "Anthropic's newest top family: for plans and hard problems. Measure it against Opus before choosing it by habit."
+
+[[model]]
+match = "gpt-6"
+name = "GPT-6 (Codex)"
+talents = { planning = 5, architecture = 5, coding = 5, review = 5, research = 5, speed = 3, economy = 2 }
+notes = "OpenAI's newest family: for plans and long changes, effort high."
+
+[[model]]
+match = "ollama/"
+name = "A local model (Ollama)"
+talents = { planning = 1, architecture = 1, coding = 2, review = 2, research = 2, speed = 2, economy = 5 }
+notes = "Runs on this computer: no cost and no data leaves it, but slow and weak. Reading and summarising only."

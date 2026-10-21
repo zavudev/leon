@@ -22,6 +22,9 @@ pub struct Service {
     store: Arc<Store>,
     root: String,
     now: fn() -> i64,
+    /// Every board is this service's, not only its project's and the
+    /// global one: King Leon's.
+    anywhere: bool,
 }
 
 impl Service {
@@ -31,6 +34,38 @@ impl Service {
             store,
             root,
             now: crate::memory::now_millis,
+            anywhere: false,
+        }
+    }
+
+    /// The same, seeing every board when `anywhere`.
+    pub fn anywhere(mut self, anywhere: bool) -> Self {
+        self.anywhere = anywhere;
+        self
+    }
+
+    /// The board a call of the tools means. Another project's only for a
+    /// service that sees every board, and by its root as written without
+    /// the separators at its end (`/srv/web/` is `/srv/web`).
+    fn board_of(&self, reach: &Reach) -> Result<MemoryScope, String> {
+        match reach {
+            Reach::Global => Ok(MemoryScope::Global),
+            Reach::Project => Ok(self.scope(false)),
+            Reach::Root(root) if leon_core::path::key(root) == leon_core::path::key(&self.root) => {
+                Ok(self.scope(false))
+            }
+            Reach::Root(root) if self.anywhere => {
+                let trimmed = root.trim_end_matches(['/', '\\']);
+                Ok(MemoryScope::project(if trimmed.is_empty() {
+                    root.clone()
+                } else {
+                    trimmed.to_owned()
+                }))
+            }
+            Reach::Root(root) => Err(format!(
+                "this board is {}'s; another project's ({root}) is not reachable from here",
+                self.root
+            )),
         }
     }
 
@@ -85,6 +120,7 @@ impl Service {
     pub fn get(&self, id: &str) -> Result<Task, StoreError> {
         let task = self.store.task(id)?;
         let here = match &task.scope {
+            _ if self.anywhere => true,
             MemoryScope::Global => true,
             MemoryScope::Project(root) => {
                 leon_core::path::key(root) == leon_core::path::key(&self.root)
@@ -161,6 +197,11 @@ pub fn json_of(task: &Task, snippet: Option<&str>) -> Value {
             MemoryScope::Global => "global",
             MemoryScope::Project(_) => "project",
         },
+        // Whose board: what an agent that sees every board names it by.
+        "project": match &task.scope {
+            MemoryScope::Global => None,
+            MemoryScope::Project(root) => Some(root.clone()),
+        },
         "title": task.title,
         "body": task.body,
         "status": task.status.as_str(),
@@ -173,6 +214,8 @@ pub fn json_of(task: &Task, snippet: Option<&str>) -> Value {
         "updated_at": task.updated_at,
         "closed_at": task.closed_at,
         "branch": task.branch,
+        "parent": task.parent,
+        "needs": task.needs,
     });
     if let (Some(snippet), Some(object)) = (snippet, value.as_object_mut()) {
         let plain: String = snippet
@@ -197,6 +240,14 @@ pub fn line(task: &Task) -> String {
     for label in &task.labels {
         line.push_str(&format!("  #{}", label.replace(' ', "-")));
     }
+    if !task.needs.is_empty() {
+        let needs: Vec<&str> = task
+            .needs
+            .iter()
+            .map(|need| leon_core::store::memory::short_id(need))
+            .collect();
+        line.push_str(&format!("  needs {}", needs.join(",")));
+    }
     line
 }
 
@@ -212,6 +263,12 @@ pub fn detail(task: &Task) -> String {
     }
     if !task.labels.is_empty() {
         field("labels", task.labels.join(", "));
+    }
+    if let Some(parent) = &task.parent {
+        field("step of", parent.clone());
+    }
+    if !task.needs.is_empty() {
+        field("needs", task.needs.join(", "));
     }
     if let Some(agent) = &task.agent {
         field("created by", agent.clone());
@@ -251,7 +308,7 @@ pub fn board(tasks: &[Task]) -> String {
 impl Backend for Service {
     fn add(&mut self, draft: Draft) -> Result<SavedTask, String> {
         let new = NewTask {
-            scope: self.scope(draft.reach == Reach::Global),
+            scope: self.board_of(&draft.reach)?,
             title: draft.title,
             body: draft.body,
             status: draft.status,
@@ -269,7 +326,9 @@ impl Backend for Service {
         filter: TaskFilter,
         limit: usize,
     ) -> Result<Vec<Task>, String> {
-        Service::list(self, reach == Reach::Global, &filter, limit).map_err(|e| sentence(&e))
+        self.store
+            .tasks(&self.board_of(&reach)?, &filter, limit)
+            .map_err(|e| sentence(&e))
     }
 
     fn get(&mut self, id: &str) -> Result<Task, String> {
@@ -292,7 +351,9 @@ impl Backend for Service {
     }
 
     fn search(&mut self, words: &str, reach: Reach, limit: usize) -> Result<Vec<TaskHit>, String> {
-        Service::search(self, reach == Reach::Global, words, limit).map_err(|e| sentence(&e))
+        self.store
+            .search_tasks(&self.board_of(&reach)?, words, limit)
+            .map_err(|e| sentence(&e))
     }
 }
 

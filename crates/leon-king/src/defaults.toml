@@ -1,0 +1,119 @@
+# King Leon's defaults. Your king.toml (in Leon's data folder) is read over
+# this file key by key: write only what you want different. A table you name
+# changes only the keys you write in it; a tier you name replaces that tier
+# alone, and a tier set to [] is removed. `leon king config` prints the result.
+
+# The agent King runs on. Its model and effort are the agent's own when left
+# out; `leon king brain <agent> [model] [effort]` changes them without
+# editing this file.
+[brain]
+agent = "claude"
+# model = "opus"
+# effort = "high"
+# How much King asks before it acts. "auto": Claude Code decides what is safe
+# without asking (reading, git, the projects' checks); "" is the agent's own
+# mode, which asks before every command.
+mode = "auto"
+
+[limits]
+max_workers = 6           # workers working at the same time
+# daily_budget_usd = 20.0 # what workers and King may cost a day; no ceiling when absent
+limit_threshold = 0.85    # share of a usage window past which an agent gets no new work
+wake_delay_secs = 5       # how long news of the workers is gathered before King is woken
+# A turn of King's that read this many tokens or more puts the conversation
+# away (to HISTORY) and King goes on in a new one, told where it left off:
+# every turn reads the whole conversation again. 0 never does.
+compact_at_tokens = 600000
+check_timeout_secs = 1800 # how long a project's check may run in a worktree
+ci_poll_secs = 60         # how often an open pull request's CI is looked at
+run_parallel = 2          # steps of one run working at the same time
+run_fixes = 1             # times a step's worker mends a failed check before King is told
+# A tier passes over a model whose record for a kind of job is poor: of at
+# least `learn_after` workers judged (a check, CI, a failure), fewer than
+# `learn_below` did well. Only while another candidate has room. 0 never does.
+learn_after = 5
+learn_below = 0.5
+
+# Tiers of workers: each an ordered list of candidates, the first one installed
+# and with room in its usage windows is taken. A model is named as its agent
+# lists it (`leon king` tools: models_list); left out, it is the agent's own.
+[tiers]
+cheap = [{ agent = "opencode" }, { agent = "cursor" }]
+standard = [{ agent = "codex" }, { agent = "claude" }]
+premium = [{ agent = "claude", model = "opus", effort = "high" }]
+planning = [
+    { agent = "claude", model = "opus", effort = "high" },
+    { agent = "codex", effort = "high" },
+]
+
+# Which tier each kind of job goes to when King names none. With
+# `strict = true` the job only ever runs on that tier's models, whatever King
+# asks for: plans always go to the best models.
+[jobs]
+code = { tier = "standard" }
+research = { tier = "cheap" }
+plan = { tier = "planning", strict = true }
+
+# The questions of the workers Leon answers itself, without waking King: an
+# edit of a file in the worker's own worktree, a command that only reads, and
+# the programs below run in the worktree. Anything else (a push, a write out
+# of the worktree, a command Leon cannot read for sure) still goes to King.
+# Every question King answers costs one of its turns.
+[permissions]
+routine = true
+# Programs that only read: allowed on any path. `sed` without -i, `find`
+# without -delete or -exec, and git's reading forms count as reading too.
+read_only = [
+    "ls", "cat", "head", "tail", "wc", "rg", "grep", "find", "stat", "file", "diff",
+    "jq", "echo", "printf", "pwd", "which", "sort", "uniq", "cut", "tr", "sed", "tree",
+    "du", "realpath", "basename", "dirname", "date", "true", "test", "sleep",
+]
+# Programs allowed when run in the worktree: tests, builds, servers, and a
+# browser to look at what was built.
+in_worktree = [
+    "python", "python3", "pytest", "node", "npm", "npx", "pnpm", "yarn", "bun", "deno",
+    "make", "cargo", "go", "uv", "ruff", "mypy", "tsc", "eslint", "prettier", "just",
+    "chrome-devtools-axi",
+]
+# The tools of MCP servers (Ahrefs, a database, a browser…) are allowed when
+# their names only read: a tool whose name has one of these words (split at
+# `-` and `_`) still goes to King.
+mcp_reading = true
+mcp_writes = [
+    "create", "update", "delete", "remove", "edit", "write", "set", "add", "put", "post",
+    "patch", "insert", "upsert", "drop", "truncate", "send", "reply", "forward", "invite",
+    "share", "publish", "deploy", "merge", "push", "commit", "close", "cancel", "archive",
+    "trash", "move", "rename", "upload", "import", "pay", "payment", "charge", "refund",
+    "transfer", "buy", "purchase", "subscribe", "generate", "execute", "exec", "run", "eval",
+    "call", "click", "fill", "type", "submit", "approve", "revoke", "grant", "reset",
+    "restore", "kill", "stop", "start", "trigger", "schedule",
+]
+
+# Branches nothing is ever pushed to from King's tools, besides each project's
+# own default branch, which is always protected.
+[guards]
+protected_branches = ["main", "master"]
+# A pull request is opened only for a branch whose last commit passed its
+# project's check (worktree_check), unless King says why it cannot be checked.
+# The pull request's description says what was run, on which commit.
+verify_before_pr = true
+
+# The command that checks each project, by its name in Leon, run in a worker's
+# worktree. A project left out is checked as its files say: scripts/check.sh,
+# `make check`, `cargo test`, the package's `check` or `test` script,
+# `go test ./...` or `pytest`.
+[checks]
+# leon = "scripts/check.sh"
+
+# The permission mode each agent's workers start in, by agent; an agent left
+# out starts in its own default mode and asks. A worker works in a worktree of
+# its own, so by default it edits there without asking: every question it
+# asks costs one of King's turns to answer.
+#   codex  "auto": edits and runs commands in its folder, asks to go beyond it
+#          ("read-only", "untrusted" and "full-access" are the others)
+#   claude "acceptEdits": edits without asking, asks before commands
+#          ("default", "auto", "plan", "bypassPermissions"…)
+# Set an agent to "" to have its workers start in its own default mode.
+[modes]
+codex = "auto"
+claude = "acceptEdits"

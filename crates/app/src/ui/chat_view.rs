@@ -934,6 +934,11 @@ fn chat_foot(id: LiveId, chat: &Chat, colours: &Palette) -> Div {
     if let Some(ms) = chat.conversation.last_duration_ms {
         parts.push(duration_text(ms).to_uppercase());
     }
+    if let Some(tokens) = chat.conversation.last_tokens.as_ref().and_then(|tokens| {
+        crate::chat::model::tokens_text(tokens, chat.conversation.last_duration_ms)
+    }) {
+        parts.push(tokens.to_uppercase());
+    }
     if let Some(cost) = chat.conversation.cost_usd {
         parts.push(cost_text(cost));
     }

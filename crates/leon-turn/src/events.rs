@@ -97,6 +97,12 @@ pub enum TurnEvent {
         /// false without anything having gone wrong.
         interrupted: bool,
     },
+    /// The tokens the turn used so far, as the agent counts them. Each one
+    /// replaces the one before it in the same turn.
+    Usage {
+        /// The counts.
+        tokens: Tokens,
+    },
     /// The agent asks something and waits for an [`Answer`].
     /// Several may be open at once.
     Question {
@@ -133,6 +139,28 @@ pub enum TurnEvent {
     },
     /// The turn no longer exists on the other computer. The last event.
     Gone,
+}
+
+/// The tokens of a turn, as the agent counts them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Tokens {
+    /// Read by the model, cached reads included.
+    pub input: u64,
+    /// Of those, read from the provider's cache (cheaper, and quicker).
+    pub cached_input: u64,
+    /// Written by the model, its reasoning included.
+    pub output: u64,
+    /// Of those, its reasoning, when the agent says.
+    pub reasoning: u64,
+    /// How many the model can hold at once, when the agent says.
+    pub context_window: Option<u64>,
+}
+
+impl Tokens {
+    /// Read and written.
+    pub fn total(&self) -> u64 {
+        self.input + self.output
+    }
 }
 
 /// What an agent asks the person.
@@ -548,6 +576,9 @@ impl Reader {
                     .map(str::to_owned)
                     .collect();
                 self.finished = true;
+                if let Some(tokens) = claude_tokens(value) {
+                    events.push(TurnEvent::Usage { tokens });
+                }
                 events.push(TurnEvent::Finished {
                     ok,
                     error,
@@ -560,6 +591,29 @@ impl Reader {
             _ => {}
         }
     }
+}
+
+/// The tokens of a Claude Code turn, from its result's `usage` and
+/// `modelUsage`.
+fn claude_tokens(result: &Value) -> Option<Tokens> {
+    let usage = result.get("usage").filter(|usage| usage.is_object())?;
+    let count = |key: &str| usage[key].as_u64().unwrap_or(0);
+    let cached = count("cache_read_input_tokens");
+    let context_window = result["modelUsage"].as_object().and_then(|models| {
+        models
+            .values()
+            .filter_map(|m| m["contextWindow"].as_u64())
+            .max()
+    });
+    Some(Tokens {
+        input: count("input_tokens") + count("cache_creation_input_tokens") + cached,
+        cached_input: cached,
+        output: count("output_tokens"),
+        reasoning: usage["output_tokens_details"]["thinking_tokens"]
+            .as_u64()
+            .unwrap_or(0),
+        context_window,
+    })
 }
 
 /// The elements of a JSON array, or none.
@@ -888,6 +942,26 @@ mod tests {
         }
         events.extend(reader.exited(0));
         events
+    }
+
+    #[test]
+    fn a_claude_result_says_the_turns_tokens_before_it_ends() {
+        // What Claude Code printed in a real run, cut down.
+        let result = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":4613,"session_id":"db48","total_cost_usd":0.0092,"usage":{"input_tokens":4,"cache_creation_input_tokens":43587,"cache_read_input_tokens":35055,"output_tokens":416,"output_tokens_details":{"thinking_tokens":290}},"modelUsage":{"claude-haiku-5-5":{"inputTokens":4,"outputTokens":416,"contextWindow":1000000}},"permission_denials":[]}"#;
+        let events = Reader::new().data(format!("{result}\n").as_bytes());
+        assert_eq!(
+            events[1],
+            TurnEvent::Usage {
+                tokens: Tokens {
+                    input: 4 + 43587 + 35055,
+                    cached_input: 35055,
+                    output: 416,
+                    reasoning: 290,
+                    context_window: Some(1_000_000),
+                }
+            }
+        );
+        assert!(matches!(events[2], TurnEvent::Finished { ok: true, .. }));
     }
 
     #[test]

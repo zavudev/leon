@@ -172,6 +172,14 @@ interface NativeModuleInterface {
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus,
   ): void;
+  ubrn_uniffi_leon_mobile_fn_clone_kingwatch(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): bigint;
+  ubrn_uniffi_leon_mobile_fn_free_kingwatch(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): void;
   ubrn_uniffi_leon_mobile_fn_clone_leonmobile(
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus,
@@ -190,6 +198,9 @@ interface NativeModuleInterface {
   ): void;
   ubrn_uniffi_leon_mobile_fn_init_callback_vtable_connectionlistener(
     vtable: UniffiVTableCallbackInterfaceLeonMobileConnectionListener,
+  ): void;
+  ubrn_uniffi_leon_mobile_fn_init_callback_vtable_kinglistener(
+    vtable: UniffiVTableCallbackInterfaceLeonMobileKingListener,
   ): void;
   ubrn_uniffi_leon_mobile_fn_init_callback_vtable_turnlistener(
     vtable: UniffiVTableCallbackInterfaceLeonMobileTurnListener,
@@ -224,6 +235,15 @@ interface NativeModuleInterface {
   ): Uint8Array;
   ubrn_uniffi_leon_mobile_fn_method_hostsession_installed_agents(
     uniffiSelf: bigint,
+  ): bigint;
+  ubrn_uniffi_leon_mobile_fn_method_hostsession_king_ask(
+    uniffiSelf: bigint,
+    request: Uint8Array,
+  ): bigint;
+  ubrn_uniffi_leon_mobile_fn_method_hostsession_king_watch(
+    uniffiSelf: bigint,
+    listener: bigint,
+    uniffi_out_err: UniffiRustCallStatus,
   ): bigint;
   ubrn_uniffi_leon_mobile_fn_method_hostsession_project_logo(
     uniffiSelf: bigint,
@@ -268,6 +288,10 @@ interface NativeModuleInterface {
     uniffiSelf: bigint,
     roots: Uint8Array,
   ): bigint;
+  ubrn_uniffi_leon_mobile_fn_method_kingwatch_stop(
+    uniffiSelf: bigint,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): void;
   ubrn_uniffi_leon_mobile_fn_constructor_leonmobile_new(
     dataDir: Uint8Array,
     deviceName: Uint8Array,
@@ -339,6 +363,8 @@ interface NativeModuleInterface {
   ubrn_uniffi_leon_mobile_checksum_method_hostsession_home_dir(): number;
   ubrn_uniffi_leon_mobile_checksum_method_hostsession_host_name(): number;
   ubrn_uniffi_leon_mobile_checksum_method_hostsession_installed_agents(): number;
+  ubrn_uniffi_leon_mobile_checksum_method_hostsession_king_ask(): number;
+  ubrn_uniffi_leon_mobile_checksum_method_hostsession_king_watch(): number;
   ubrn_uniffi_leon_mobile_checksum_method_hostsession_project_logo(): number;
   ubrn_uniffi_leon_mobile_checksum_method_hostsession_protocol(): number;
   ubrn_uniffi_leon_mobile_checksum_method_hostsession_reconnect_now(): number;
@@ -350,6 +376,7 @@ interface NativeModuleInterface {
   ubrn_uniffi_leon_mobile_checksum_method_hostsession_subdirs(): number;
   ubrn_uniffi_leon_mobile_checksum_method_hostsession_transcript(): number;
   ubrn_uniffi_leon_mobile_checksum_method_hostsession_worktrees(): number;
+  ubrn_uniffi_leon_mobile_checksum_method_kingwatch_stop(): number;
   ubrn_uniffi_leon_mobile_checksum_constructor_leonmobile_new(): number;
   ubrn_uniffi_leon_mobile_checksum_method_leonmobile_connect(): number;
   ubrn_uniffi_leon_mobile_checksum_method_leonmobile_device_id(): number;
@@ -364,6 +391,10 @@ interface NativeModuleInterface {
   ubrn_uniffi_leon_mobile_checksum_method_turn_set_model(): number;
   ubrn_uniffi_leon_mobile_checksum_method_turn_unsent(): number;
   ubrn_uniffi_internal_fn_method_turn_ffi__bless_pointer(
+    pointer: bigint,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): UniffiGcObject;
+  ubrn_uniffi_internal_fn_method_kingwatch_ffi__bless_pointer(
     pointer: bigint,
     uniffi_out_err: UniffiRustCallStatus,
   ): UniffiGcObject;
@@ -411,6 +442,26 @@ export type UniffiVTableCallbackInterfaceLeonMobileConnectionListener = {
   uniffi_free: UniffiCallbackInterfaceFreeLeonMobileConnectionListener;
   uniffi_clone: UniffiCallbackInterfaceCloneLeonMobileConnectionListener;
   on_state: UniffiCallbackInterfaceLeonMobileConnectionListenerMethod0;
+};
+type UniffiCallbackInterfaceLeonMobileKingListenerMethod0 = (
+  uniffiHandle: bigint,
+  notice: Uint8Array,
+) => UniffiResult<void>;
+type UniffiCallbackInterfaceLeonMobileKingListenerMethod1 = (
+  uniffiHandle: bigint,
+  reason: Uint8Array,
+) => UniffiResult<void>;
+type UniffiCallbackInterfaceCloneLeonMobileKingListener = (
+  handle: bigint,
+) => UniffiResult<void>;
+type UniffiCallbackInterfaceFreeLeonMobileKingListener = (
+  handle: bigint,
+) => void;
+export type UniffiVTableCallbackInterfaceLeonMobileKingListener = {
+  uniffi_free: UniffiCallbackInterfaceFreeLeonMobileKingListener;
+  uniffi_clone: UniffiCallbackInterfaceCloneLeonMobileKingListener;
+  on_notice: UniffiCallbackInterfaceLeonMobileKingListenerMethod0;
+  on_closed: UniffiCallbackInterfaceLeonMobileKingListenerMethod1;
 };
 type UniffiCallbackInterfaceLeonMobileTurnListenerMethod0 = (
   uniffiHandle: bigint,

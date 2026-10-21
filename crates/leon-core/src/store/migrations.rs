@@ -27,7 +27,7 @@ use crate::error::{Result, StoreError};
 /// order (usage, then relay) is the one every database goes through.
 const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22,
+    V22, V23,
 ];
 
 const V1: &str = r#"
@@ -577,6 +577,16 @@ CREATE TABLE task_sync (
     last_ok_at  INTEGER,
     last_error  TEXT
 ) WITHOUT ROWID;
+"#;
+
+/// Version 23: a task as a step of another. `parent` is the id of the task
+/// it is a step of; `needs` the ids of the tasks it waits for, one per line
+/// (as `labels` are). Every task there is is a step of nothing and waits for
+/// nothing.
+const V23: &str = r#"
+ALTER TABLE task ADD COLUMN parent TEXT;
+ALTER TABLE task ADD COLUMN needs TEXT NOT NULL DEFAULT '';
+CREATE INDEX task_by_parent ON task (parent);
 "#;
 
 /// Brings the database up to the latest schema version.

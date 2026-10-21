@@ -28,6 +28,7 @@ use gpui_kit::{
     div, ClickEvent, Context, Div, Entity, Focusable, FontWeight, Hsla, Stateful, Window,
 };
 use leon_core::{Task as Card, TaskPatch, TaskPriority, TaskStatus};
+use leon_king::run::{RunState, StepState};
 
 use super::activity::Activity;
 use super::shell::{Pane, Shell};
@@ -483,6 +484,103 @@ impl Shell {
         cx.notify();
     }
 
+    /// The tasks of the board that are steps of `card`.
+    fn detail_steps<'a>(&'a self, card: &'a Card) -> impl Iterator<Item = &'a Card> + 'a {
+        self.tasks_ui
+            .board
+            .columns()
+            .iter()
+            .flatten()
+            .filter(move |task| task.parent.as_deref() == Some(card.id.as_str()))
+    }
+
+    /// What the drawer says of a task's steps and of its run, or of the
+    /// task it is a step of: a group's title and its content.
+    fn steps_of(&self, card: &Card, c: &Palette) -> Option<(&'static str, Div)> {
+        let title_of = |id: &str| {
+            self.tasks_ui
+                .board
+                .columns()
+                .iter()
+                .flatten()
+                .find(|task| task.id == id)
+                .map_or_else(
+                    || leon_core::store::memory::short_id(id).to_owned(),
+                    |task| task.title.clone(),
+                )
+        };
+        let line = |text: String, tone: Hsla| {
+            div()
+                .text_size(metrics::TEXT_SMALL())
+                .text_color(tone)
+                .child(text)
+        };
+        let steps: Vec<&Card> = self.detail_steps(card).collect();
+        if steps.is_empty() {
+            let parent = card.parent.as_deref()?;
+            let mut content = div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(line(title_of(parent), c.text));
+            if !card.needs.is_empty() {
+                let needs: Vec<String> = card.needs.iter().map(|need| title_of(need)).collect();
+                content = content.child(line(format!("After: {}", needs.join(", ")), c.text_muted));
+            }
+            return Some(("STEP OF", content));
+        }
+        let run = self
+            .king_ui
+            .status
+            .as_ref()
+            .and_then(|status| status.runs.iter().rev().find(|run| run.task == card.id));
+        let mut content = div().flex().flex_col().gap(px(4.));
+        if let Some(run) = run {
+            let (state, tone) = match run.state {
+                RunState::Running => ("RUNNING", c.signal),
+                RunState::Blocked => ("BLOCKED", c.error),
+                RunState::Done => ("DONE", c.success),
+                RunState::Canceled => ("CALLED OFF", c.text_faint),
+            };
+            content = content.child(
+                mono(format!(
+                    "RUN #{} · {state} · {} of {} done",
+                    run.id,
+                    run.done(),
+                    run.steps.len()
+                ))
+                .debug_selector(|| "task-run-state".into())
+                .text_size(metrics::TEXT_SMALL())
+                .text_color(tone),
+            );
+            if let Some(note) = &run.note {
+                content = content.child(line(note.clone(), c.text_muted));
+            }
+        }
+        for step in steps {
+            let ran = run.and_then(|run| run.step(&step.id)).map(|(_, ran)| ran);
+            let (mark, tone) = match ran.map(|ran| ran.state) {
+                Some(StepState::Done) => ("✓", c.success),
+                Some(StepState::Working) => ("●", c.signal),
+                Some(StepState::Checking) => ("◷", c.signal),
+                Some(StepState::Failed) => ("✗", c.error),
+                Some(StepState::Canceled) => ("–", c.text_faint),
+                Some(StepState::Waiting) | None if step.status.is_closed() => ("✓", c.text_faint),
+                Some(StepState::Waiting) | None => ("○", c.text_muted),
+            };
+            let mut text = format!("{mark} {}", step.title);
+            if let Some(worker) = ran.and_then(|ran| ran.worker) {
+                text.push_str(&format!("  · #{worker}"));
+            }
+            if !step.needs.is_empty() {
+                let needs: Vec<String> = step.needs.iter().map(|need| title_of(need)).collect();
+                text.push_str(&format!("  · after {}", needs.join(", ")));
+            }
+            content = content.child(line(text, tone));
+        }
+        Some(("STEPS", content))
+    }
+
     /// The drawer, beside the columns.
     pub(super) fn render_detail(
         &self,
@@ -765,6 +863,10 @@ impl Shell {
                     .child(labels)
                     .child(field(text_input(&detail.label).into_any_element())),
             ))
+            .children(
+                self.steps_of(&card, &c)
+                    .map(|(title, steps)| group(title, steps)),
+            )
             .child(group("WORK", work))
             .child(group("GITHUB", self.github_group(&card, &c, cx)))
             .child(
@@ -799,6 +901,26 @@ impl Shell {
                 cx.notify();
             })),
         );
+        if !finished {
+            actions = actions.child(
+                pill("task-action-king", "Give it to the King  a", &c).on_click(cx.listener(
+                    |this, _, window, cx| {
+                        this.tasks_send_to_king(window, cx);
+                        cx.notify();
+                    },
+                )),
+            );
+        }
+        if !finished && self.detail_steps(&card).next().is_some() {
+            actions = actions.child(
+                pill("task-action-run", "Run its steps  r", &c)
+                    .border_color(c.signal)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.tasks_run(window, cx);
+                        cx.notify();
+                    })),
+            );
+        }
         if sessions > 0 {
             actions = actions.child(pill("task-action-session", "Open session", &c).on_click(
                 cx.listener(|this, _, window, cx| {

@@ -174,6 +174,18 @@ function fromEvent(event: NativeTurnEvent): TurnEvent {
   switch (event.tag) {
     case TurnEvent_Tags.Started:
       return { type: 'started', sessionId: event.inner.sessionId, model: event.inner.model };
+    case TurnEvent_Tags.Usage:
+      return {
+        type: 'usage',
+        tokens: {
+          input: Number(event.inner.input),
+          cachedInput: Number(event.inner.cachedInput),
+          output: Number(event.inner.output),
+          reasoning: Number(event.inner.reasoning),
+          contextWindow:
+            event.inner.contextWindow === undefined ? undefined : Number(event.inner.contextWindow),
+        },
+      };
     case TurnEvent_Tags.TextDelta:
       return { type: 'text-delta', text: event.inner.text };
     case TurnEvent_Tags.Text:
@@ -277,6 +289,7 @@ function wrapSession(session: HostSessionLike): HostLink {
           // An installed build older than the pins has no such field.
           pinned: (shared.pinned ?? []).map(historySession),
           den: shared.den === true,
+          king: shared.king === true,
         };
       }),
     den: () =>
@@ -381,6 +394,32 @@ function wrapSession(session: HostSessionLike): HostLink {
           }),
         ),
       ),
+    kingAsk: (request) =>
+      guard(async (): Promise<unknown> => {
+        // A reply without a result (`say`) comes as `null`.
+        const result = await session.kingAsk(JSON.stringify(request));
+        return result ? JSON.parse(result) : null;
+      }),
+    kingWatch: (onNotice, onClosed) => {
+      try {
+        const watch = session.kingWatch({
+          onNotice: (notice) => {
+            let read: unknown;
+            try {
+              read = JSON.parse(notice);
+            } catch {
+              // Not JSON: nothing this app could read in it.
+              return;
+            }
+            onNotice(read);
+          },
+          onClosed,
+        });
+        return { stop: () => watch.stop() };
+      } catch (error) {
+        throw toLinkError(error);
+      }
+    },
   };
 }
 

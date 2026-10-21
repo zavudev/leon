@@ -4,7 +4,9 @@
 //! Both run the same program that is installing them, as `leon host
 //! --data-dir <dir>` (plus the relay and the name when they were given), so a
 //! service and a foreground `leon host` share one identity, one device list
-//! and one status file. They restart the host when it fails, with a longer
+//! and one status file. King Leon's service ([`Program::King`]) is written
+//! the same way, as `leon --data-dir <dir> king serve`, under a name of its
+//! own. They restart the host when it fails, with a longer
 //! wait each time where the system manager can do that (systemd 254 or newer
 //! through `RestartSteps`; launchd has only a fixed `ThrottleInterval`), and
 //! never ask for more than the user's own rights.
@@ -14,8 +16,45 @@
 
 use std::path::{Path, PathBuf};
 
-/// The systemd user unit's file name.
-pub const UNIT_NAME: &str = "leon-host.service";
+/// Which of Leon's services a definition runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Program {
+    /// `leon host`: this computer for the devices the person paired.
+    Host,
+    /// `leon king serve`: King Leon and its workers, without the window.
+    King,
+}
+
+impl Program {
+    /// The word of Leon's command line: `leon host`, `leon king`.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::King => "king",
+        }
+    }
+
+    /// The command for people: `leon host`, `leon king`.
+    pub fn command(self) -> String {
+        format!("{} {}", crate::product::SLUG, self.word())
+    }
+
+    /// The systemd user unit's file name.
+    pub fn unit_name(self) -> &'static str {
+        match self {
+            Self::Host => "leon-host.service",
+            Self::King => "leon-king.service",
+        }
+    }
+
+    /// What the unit is, for `systemctl status`.
+    fn description(self) -> &'static str {
+        match self {
+            Self::Host => "Leon host: shares this computer with the devices you paired",
+            Self::King => "King Leon: answers for every project and runs its workers",
+        }
+    }
+}
 
 /// Seconds before systemd restarts a host that failed, the first time.
 const RESTART_FIRST_SECONDS: u32 = 5;
@@ -31,6 +70,8 @@ const STOP_TIMEOUT_SECONDS: u32 = 15;
 /// What the service runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Service {
+    /// Which service.
+    pub program: Program,
     /// The program: the file that is installing the service.
     pub exe: PathBuf,
     /// The data directory the host keeps its identity and devices in.
@@ -76,6 +117,14 @@ impl Service {
 
     /// The arguments the program is started with.
     pub fn arguments(&self) -> Vec<String> {
+        if self.program == Program::King {
+            return vec![
+                "--data-dir".to_owned(),
+                self.data_dir.to_string_lossy().into_owned(),
+                "king".to_owned(),
+                "serve".to_owned(),
+            ];
+        }
         let mut arguments = vec![
             "host".to_owned(),
             "--data-dir".to_owned(),
@@ -187,11 +236,13 @@ pub fn systemd_unit(service: &Service) -> String {
             )
         })
         .unwrap_or_default();
+    let word = service.program.word();
+    let description = service.program.description();
     format!(
         "\
-# Written by `leon host service install`; `leon host service uninstall` removes it.
+# Written by `leon {word} service install`; `leon {word} service uninstall` removes it.
 [Unit]
-Description=Leon host: shares this computer with the devices you paired
+Description={description}
 StartLimitIntervalSec=0
 
 [Service]
@@ -211,8 +262,8 @@ WantedBy=default.target
 
 /// The launchd label of the agent, which is also its file name without
 /// `.plist`.
-pub fn launchd_label(app_id: &str) -> String {
-    format!("{app_id}.host")
+pub fn launchd_label(app_id: &str, program: Program) -> String {
+    format!("{app_id}.{}", program.word())
 }
 
 fn xml(text: &str) -> String {
@@ -248,11 +299,12 @@ pub fn launchd_plist(service: &Service, label: &str, log: &Path) -> String {
         })
         .unwrap_or_default();
     let log = xml(&log.to_string_lossy());
+    let word = service.program.word();
     format!(
         "\
 <?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<!-- Written by `leon host service install`; `leon host service uninstall` removes it. -->
+<!-- Written by `leon {word} service install`; `leon {word} service uninstall` removes it. -->
 <plist version=\"1.0\">
 <dict>
     <key>Label</key>
@@ -285,6 +337,7 @@ mod tests {
 
     fn service() -> Service {
         Service {
+            program: Program::Host,
             exe: PathBuf::from("/home/ana/.local/bin/leon"),
             data_dir: PathBuf::from("/home/ana/.local/share/leon"),
             relay: None,
@@ -362,6 +415,7 @@ WantedBy=default.target
     fn the_plist_names_the_label_the_arguments_and_the_restart_rules() {
         let plist = launchd_plist(
             &Service {
+                program: Program::Host,
                 exe: PathBuf::from("/Applications/Leon.app/Contents/MacOS/Leon"),
                 data_dir: PathBuf::from("/Users/ana/Library/Application Support/leon"),
                 relay: None,
@@ -414,7 +468,43 @@ WantedBy=default.target
 
     #[test]
     fn the_label_is_the_application_id_and_host() {
-        assert_eq!(launchd_label("dev.zavu.leon"), "dev.zavu.leon.host");
+        assert_eq!(
+            launchd_label("dev.zavu.leon", Program::Host),
+            "dev.zavu.leon.host"
+        );
+        assert_eq!(
+            launchd_label("dev.zavu.leon", Program::King),
+            "dev.zavu.leon.king"
+        );
+    }
+
+    #[test]
+    fn kings_unit_serves_king_from_the_data_directory_and_carries_the_path() {
+        let expected = "\
+# Written by `leon king service install`; `leon king service uninstall` removes it.
+[Unit]
+Description=King Leon: answers for every project and runs its workers
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=\"/home/ana/.local/bin/leon\" \"--data-dir\" \"/home/ana/.local/share/leon\" \"king\" \"serve\"
+Environment=\"PATH=/home/ana/.local/bin:/usr/bin\"
+Restart=on-failure
+RestartSec=5
+RestartSteps=6
+RestartMaxDelaySec=300
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target
+";
+        let king = Service {
+            program: Program::King,
+            path_env: Some("/home/ana/.local/bin:/usr/bin".into()),
+            ..service()
+        };
+        assert_eq!(systemd_unit(&king), expected);
     }
 
     #[test]

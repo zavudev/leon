@@ -1,10 +1,12 @@
-// Settings: how this device names itself, the relay it offers by default.
+// Settings: how this device names itself, how it looks, whether King's
+// notices reach it while closed, the relay it offers by default.
 import { useMemo, useState } from 'react';
 import { Linking, ScrollView, View } from 'react-native';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 
 import { explain } from '@/link/errors';
 import { DEFAULT_RELAY_URL, useApp, type Appearance } from '@/store/app';
+import { disableKingPush, enableKingPush } from '@/store/push';
 import { link } from '@/store/runtime';
 import { Button, Chip, Field, Label, Panel, Screen, Section, Signature, Txt } from '@/ui/kit';
 import { Mark } from '@/ui/Mark';
@@ -23,6 +25,9 @@ export default function Settings() {
   const deviceName = useApp((s) => s.deviceName);
   const relayUrl = useApp((s) => s.relayUrl);
   const appearance = useApp((s) => s.appearance);
+  const kingPush = useApp((s) => s.kingPush);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushError, setPushError] = useState<string | null>(null);
   const [name, setName] = useState(deviceName);
   const [relay, setRelay] = useState(relayUrl);
   const deviceId = useMemo(() => {
@@ -38,6 +43,19 @@ export default function Settings() {
     const saved = useApp.getState().deviceName;
     setName(saved);
     link().setDeviceName(saved);
+  }
+
+  function setKingPush(on: boolean) {
+    if (on === kingPush || pushBusy) return;
+    setPushError(null);
+    if (!on) {
+      disableKingPush();
+      return;
+    }
+    setPushBusy(true);
+    void enableKingPush()
+      .then((why) => setPushError(why ?? null))
+      .finally(() => setPushBusy(false));
   }
 
   function saveRelay() {
@@ -91,6 +109,28 @@ export default function Settings() {
             <Txt variant="small" tone="faint">
               Leon is dark unless you say otherwise. System follows this phone.
             </Txt>
+          </View>
+
+          <Section title="King's notices while closed" style={PLAIN} />
+          <View style={{ gap: 6 }}>
+            <View accessibilityRole="radiogroup" style={{ flexDirection: 'row', gap: 8 }}>
+              <Chip title="Off" selected={!kingPush} onPress={() => setKingPush(false)} />
+              <Chip
+                title={pushBusy ? 'Turning on…' : 'On'}
+                selected={kingPush}
+                disabled={pushBusy}
+                onPress={() => setKingPush(true)}
+              />
+            </View>
+            <Txt variant="small" tone="faint">
+              When King tells you something and Leon is closed, the title and body of its notice go
+              through Expo&apos;s push service to reach this phone.
+            </Txt>
+            {pushError ? (
+              <Txt variant="small" tone="error">
+                {pushError}
+              </Txt>
+            ) : null}
           </View>
 
           <Section title="Relay" style={PLAIN} />

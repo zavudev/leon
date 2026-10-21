@@ -95,6 +95,10 @@ pub struct HostConfig {
     /// to: its projects and history sessions, so theirs can show them. `None`
     /// means nothing is shared and the share requests answer with nothing.
     pub share: Option<Shared>,
+    /// The way to King Leon's service on this computer, when this
+    /// installation offers one: what [`leon_wire::Message::King`] lines go
+    /// through. `None` answers them with [`leon_wire::Message::KingClosed`].
+    pub king: Option<crate::King>,
 }
 
 /// What a host shares, kept out of [`HostConfig`]'s `Debug` so the machine's
@@ -123,6 +127,7 @@ impl HostConfig {
             max_ptys: 64,
             token: None,
             share: None,
+            king: None,
         }
     }
 }

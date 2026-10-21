@@ -320,12 +320,13 @@ fn computer() -> Scripted {
     })
 }
 
-/// When a new shell is ready for an agent's command line in the tests: at its
-/// first output, looked for every millisecond.
+/// When a new shell is ready for an agent's command line in the tests: at
+/// once, typed on the test's thread. A line typed from a thread of its own
+/// would wake the window's tasks from outside the test's scheduler.
 const READY_NOW: Readiness = Readiness {
     quiet: std::time::Duration::ZERO,
-    timeout: std::time::Duration::from_secs(5),
-    poll: std::time::Duration::from_millis(1),
+    timeout: std::time::Duration::ZERO,
+    poll: std::time::Duration::ZERO,
 };
 
 // Some fields are read only by the Unix-only test modules.
@@ -366,6 +367,17 @@ struct Harness {
     urls: Rc<std::cell::RefCell<Vec<String>>>,
     /// How many times the application was asked to end.
     quits: Rc<std::cell::Cell<usize>>,
+    /// King's service, played by the test.
+    king: crate::king::link::testing::Fake,
+    /// The image the clipboard holds, for a paste into King's field.
+    #[cfg_attr(not(leon_posix_tests), allow(dead_code))]
+    clip_image: Rc<std::cell::RefCell<Option<crate::clip_image::ClipImage>>>,
+    /// What the picker of files answers.
+    #[cfg_attr(not(leon_posix_tests), allow(dead_code))]
+    picked_files: Rc<std::cell::RefCell<Vec<std::path::PathBuf>>>,
+    /// Where pasted images are kept, gone with the harness.
+    #[cfg_attr(not(leon_posix_tests), allow(dead_code))]
+    attachments: tempfile::TempDir,
 }
 
 /// Opens the window over an in-memory store, with nothing waiting on the
@@ -472,6 +484,12 @@ fn open_core(
     let updates = updates(runtime.handle());
     let chat = crate::chat::turn::testing::Scripted::default();
     let voice = crate::voice::testing::Scripted::default();
+    let king = crate::king::link::testing::Fake::default();
+    let clip_image = Rc::new(std::cell::RefCell::new(None));
+    let clip_image_in = clip_image.clone();
+    let picked_files = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let picked_files_in = picked_files.clone();
+    let attachments = tempfile::tempdir().unwrap();
     let options = Options {
         backend: computer.clone(),
         chat_spawner: Arc::new(chat.clone()),
@@ -519,6 +537,10 @@ fn open_core(
         ssh_dir: ssh.clone(),
         remote: None,
         memory: None,
+        king: Some(Arc::new(king.clone())),
+        clipboard_image: Rc::new(move |_| clip_image_in.borrow().clone()),
+        pick_files: Rc::new(move |_| Task::ready(picked_files_in.borrow().clone())),
+        attachments: attachments.path().to_path_buf(),
         updates,
         durable: DURABLE.with(|slot| slot.borrow_mut().take()),
         update_timer: false,
@@ -560,6 +582,10 @@ fn open_core(
         key_answer,
         urls,
         quits,
+        king,
+        clip_image,
+        picked_files,
+        attachments,
     }
 }
 
@@ -842,6 +868,7 @@ impl Harness {
             Main::Session(transcript) => format!("session:{}", transcript.session.title),
             Main::Live(id) => format!("live:{id}"),
             Main::Den => "den".to_owned(),
+            Main::King => "king".to_owned(),
         })
     }
 }
@@ -7970,6 +7997,10 @@ mod tests_usage;
 
 #[path = "tests_tasks.rs"]
 mod tests_tasks;
+
+#[cfg(leon_posix_tests)]
+#[path = "tests_king.rs"]
+mod tests_king;
 
 #[cfg(leon_posix_tests)]
 #[path = "tests_task_work.rs"]

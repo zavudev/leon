@@ -62,6 +62,17 @@ For Leon hosts it adds a third, opt-out-free but read-only primitive:
   the first answer after a while may hold nobody. The message is new, and a
   peer that does not know a message drops the connection: it is only sent to
   a host whose `ShareState` answer said it has a Den.
+* **King Leon** (`King`, `KingClosed`): lines of King's control protocol
+  (`docs/KING.md`), passed through both ways between a device and King's
+  service on that computer. The host reads none of them: a session's first
+  line opens a connection to King's socket (starting the service when
+  nothing answers, as `leon king` does), every line after it goes there, and
+  every line King writes comes back, replies and notices alike. When that
+  connection cannot be opened or closes, the device hears `KingClosed`, and
+  its next line opens a new one. It adds no right, since the device already
+  holds a terminal from which `leon king` says the same. Both the window's
+  host and `leon host` offer it, and say so after the Den in their
+  `ShareState` answer; a device sends no `King` line to a host that did not.
 
 Everything above those (git, probing, agents) is unchanged: a relay machine is
 just another machine.

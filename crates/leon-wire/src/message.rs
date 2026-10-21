@@ -45,6 +45,9 @@ pub const SHARE_SESSIONS_LIMIT: usize = 500;
 pub const SHARE_PINNED_LIMIT: usize = 100;
 /// How many lions a host offers at most in one [`Message::ShareDenData`].
 pub const SHARE_DEN_LIMIT: usize = 200;
+/// The longest line one [`Message::King`] carries: the longest King's
+/// service reads or writes.
+pub const MAX_KING_LINE: usize = 1 << 20;
 
 const MAX_STRING: usize = 64 * 1024;
 /// The longest name of a program a [`Message::PtyProbed`] carries.
@@ -415,6 +418,10 @@ pub enum Message {
         /// a host that says this.
         #[serde(default, deserialize_with = "tail")]
         den: bool,
+        /// Whether this host answers [`Message::King`]. After `den` and read
+        /// the same way: absent, it is `false`, and King is not spoken to.
+        #[serde(default, deserialize_with = "tail")]
+        king: bool,
     },
     /// Asks for one history session's transcript.
     ShareTranscript {
@@ -486,6 +493,22 @@ pub enum Message {
         id: u64,
         /// Who is in the den.
         cubs: Vec<SharedCub>,
+    },
+    /// One line of King Leon's control protocol (`leon_king::protocol`),
+    /// either way: a request from a client, a reply or a notice from King.
+    /// The host passes the lines through to King's service on that
+    /// computer, one connection per session opened by the first line, and
+    /// reads none of them. Only sent to a host whose
+    /// [`Message::ShareStateData`] said `king`.
+    King {
+        /// The line, without its newline.
+        line: String,
+    },
+    /// The line to King is closed, or could not be opened: what a client
+    /// sent since is lost. The next [`Message::King`] opens it again.
+    KingClosed {
+        /// Why, in a sentence.
+        reason: String,
     },
 }
 
@@ -616,6 +639,10 @@ impl Message {
             Message::Error { error, .. } if error.message.len() > MAX_STRING => {
                 Err(FrameError::OverLimit("error text"))
             }
+            Message::King { line } if line.len() > MAX_KING_LINE || line.contains('\n') => {
+                Err(FrameError::OverLimit("King's line"))
+            }
+            Message::KingClosed { reason } => bounded(reason),
             _ => Ok(()),
         }
     }
@@ -814,6 +841,7 @@ mod tests {
                 truncated: false,
                 pinned: vec![],
                 den: false,
+                king: false,
             },
             Message::ShareTranscript {
                 id: 8,
@@ -1044,6 +1072,7 @@ mod tests {
             truncated: false,
             pinned: vec![shared_session()],
             den: false,
+            king: false,
         };
         let bytes = encode_frame(&with_pins).unwrap();
         assert_eq!(decode_frame(&bytes).unwrap().0, with_pins);
@@ -1078,6 +1107,7 @@ mod tests {
                 truncated: false,
                 pinned: vec![],
                 den: false,
+                king: false,
             }
         );
         // What an older client reads of a newer host: everything it knows.
@@ -1093,6 +1123,7 @@ mod tests {
             truncated: false,
             pinned: vec![shared_session(); SHARE_PINNED_LIMIT + 1],
             den: false,
+            king: false,
         };
         assert!(encode_frame(&many).is_err());
     }
@@ -1136,6 +1167,7 @@ mod tests {
             truncated: false,
             pinned: vec![],
             den: true,
+            king: false,
         };
         let mut payload = postcard::to_allocvec(&with).unwrap();
         assert!(matches!(
@@ -1143,9 +1175,51 @@ mod tests {
             Message::ShareStateData { den: true, .. }
         ));
         payload.pop();
+        payload.pop();
         assert!(matches!(
             postcard::from_bytes(&payload).unwrap(),
             Message::ShareStateData { den: false, .. }
+        ));
+    }
+
+    #[test]
+    fn kings_lines_go_through_and_a_host_that_does_not_say_has_no_king() {
+        for message in [
+            Message::King {
+                line: r#"{"id":1,"op":"status"}"#.into(),
+            },
+            Message::KingClosed {
+                reason: "King's service is not running".into(),
+            },
+        ] {
+            let bytes = encode_frame(&message).unwrap();
+            assert_eq!(decode_frame(&bytes).unwrap().0, message);
+        }
+        for line in ["x".repeat(MAX_KING_LINE + 1), "two\nlines".to_owned()] {
+            assert!(encode_frame(&Message::King { line }).is_err());
+        }
+        let with = Message::ShareStateData {
+            id: 1,
+            projects: vec![],
+            sessions: vec![],
+            truncated: false,
+            pinned: vec![],
+            den: true,
+            king: true,
+        };
+        let mut payload = postcard::to_allocvec(&with).unwrap();
+        assert!(matches!(
+            postcard::from_bytes(&payload).unwrap(),
+            Message::ShareStateData { king: true, .. }
+        ));
+        payload.pop();
+        assert!(matches!(
+            postcard::from_bytes(&payload).unwrap(),
+            Message::ShareStateData {
+                den: true,
+                king: false,
+                ..
+            }
         ));
     }
 
@@ -1162,6 +1236,7 @@ mod tests {
             truncated: false,
             pinned: vec![],
             den: false,
+            king: false,
         };
         assert!(encode_frame(&huge).is_err());
         let mut session = shared_session();
@@ -1174,6 +1249,7 @@ mod tests {
             truncated: false,
             pinned: vec![],
             den: false,
+            king: false,
         };
         assert!(encode_frame(&wide).is_err());
     }

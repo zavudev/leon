@@ -48,6 +48,64 @@ pub struct TurnSpec<'a> {
     pub cwd: Option<&'a str>,
     /// More folders it may work in.
     pub add_dirs: &'a [String],
+    /// Servers of tools the agent is given for this turn, beside its own.
+    pub mcp_servers: &'a [McpServer],
+    /// Instructions added to the agent's own, for this turn. An agent of the
+    /// Agent Client Protocol has no way to be told them: it reads the
+    /// instruction files of its folder (`AGENTS.md`) instead.
+    pub instructions: Option<&'a str>,
+}
+
+/// A server of tools (the Model Context Protocol) an agent starts on its own
+/// computer and speaks to on its standard streams.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct McpServer {
+    /// The name the agent knows its tools by.
+    pub name: String,
+    /// The program.
+    pub command: String,
+    /// What follows the program.
+    pub args: Vec<String>,
+    /// Variables added to its environment.
+    pub env: Vec<(String, String)>,
+}
+
+impl McpServer {
+    /// The server as an agent's configuration names one (`.mcp.json`,
+    /// Codex's `mcp_servers`): its command, arguments and environment.
+    pub fn config(&self) -> Value {
+        let env: serde_json::Map<String, Value> = self
+            .env
+            .iter()
+            .map(|(name, value)| (name.clone(), Value::from(value.as_str())))
+            .collect();
+        serde_json::json!({ "command": self.command, "args": self.args, "env": env })
+    }
+
+    /// The servers by name, each as [`Self::config`] says it.
+    pub fn configs(servers: &[Self]) -> Value {
+        Value::Object(
+            servers
+                .iter()
+                .map(|server| (server.name.clone(), server.config()))
+                .collect(),
+        )
+    }
+
+    /// The server as the Agent Client Protocol names one in `session/new`.
+    pub fn acp(&self) -> Value {
+        let env: Vec<Value> = self
+            .env
+            .iter()
+            .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
+            .collect();
+        serde_json::json!({
+            "name": self.name,
+            "command": self.command,
+            "args": self.args,
+            "env": env,
+        })
+    }
 }
 
 /// One line for the agent's input, and the tag its delivery is known by.

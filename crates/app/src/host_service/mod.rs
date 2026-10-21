@@ -26,6 +26,11 @@
 //!
 //! The host itself is `leon_host::cli`; this command only installs and watches
 //! it. Uninstalling leaves the pairings, the identity and the settings alone.
+//!
+//! `leon king service install | uninstall | status | logs` is the same
+//! command for King Leon's service ([`Program::King`]): King and its workers
+//! go on with the window closed, start at login and come back after a
+//! failure. It takes no relay and no name, which are the host's.
 
 mod plan;
 mod status;
@@ -43,6 +48,7 @@ use crate::platform;
 use crate::product;
 use plan::{Action, Layout, Os, Plan};
 use status::{Activity, Devices, Heartbeat, Manager, Report};
+pub use unit::Program;
 use unit::Service;
 
 /// What was asked.
@@ -91,14 +97,49 @@ Running the host as a background service is not supported on this system yet.
 It works on Linux (a systemd user unit) and macOS (a launchd agent).
 Run `leon host` in a terminal instead.";
 
+const KING_UNSUPPORTED: &str = "\
+Running King as a background service is not supported on this system yet.
+It works on Linux (a systemd user unit) and macOS (a launchd agent).";
+
 const NOT_ROOT: &str = "\
 The host service is installed for your own user and never as root: every device
 you pair would otherwise get a root shell. Run this command as yourself.";
+
+const KING_NOT_ROOT: &str = "\
+King's service is installed for your own user and never as root: the agents it
+starts would otherwise work as root. Run this command as yourself.";
 
 const SAFETY: &str = "\
 The service runs as you and gives every device you pair a full terminal as you
 on this computer. Pair only your own devices, and revoke any you lose
 (`leon host revoke`).";
+
+const KING_SAFETY: &str = "\
+The service runs as you: King and the agents it starts work with your rights,
+each worker in a worktree of its own. King never merges, never pushes to a
+default branch and never force-pushes.";
+
+fn king_usage() -> &'static str {
+    "Usage: leon king service install [--linger] [--data-dir <path>]\n       \
+     leon king service uninstall | status\n       \
+     leon king service logs [--lines <n>]\n\n\
+     Runs King Leon in the background of your own session, so that King and its\n\
+     workers go on with the window closed: a systemd user unit on Linux, a\n\
+     launchd agent on macOS. It never needs root.\n\n\
+     Options:\n  \
+     --linger          (install, Linux) keep King running when you are logged out:\n                    \
+     runs `loginctl enable-linger` for your own user\n  \
+     --data-dir <path> The data folder King works from (default: Leon's data folder)\n  \
+     --lines <n>       (logs) how many lines to show (default 100)\n  \
+     -h, --help        Print this help"
+}
+
+fn usage_of(program: Program) -> &'static str {
+    match program {
+        Program::Host => usage(),
+        Program::King => king_usage(),
+    }
+}
 
 fn usage() -> &'static str {
     "Usage: leon host service install [--linger] [--relay <url>] [--name <name>] [--data-dir <path>]\n       \
@@ -117,8 +158,8 @@ fn usage() -> &'static str {
      -h, --help        Print this help"
 }
 
-/// Parses the arguments after `host service`.
-fn parse(args: impl IntoIterator<Item = String>) -> Result<Request, String> {
+/// Parses the arguments after `host service` (or `king service`).
+fn parse(args: impl IntoIterator<Item = String>, program: Program) -> Result<Request, String> {
     let mut request = Request {
         verb: Verb::Help,
         data_dir: None,
@@ -180,6 +221,9 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Request, String> {
         [] => return Err("Say what to do: install, uninstall, status or logs.".into()),
         [other, ..] => return Err(format!("Unknown command {other:?}.")),
     };
+    if program == Program::King && (request.relay.is_some() || request.name.is_some()) {
+        return Err("--relay and --name are the host's; King's service has neither.".into());
+    }
     let installing = matches!(request.verb, Verb::Install { .. });
     if !installing && (request.relay.is_some() || request.name.is_some()) {
         return Err("--relay and --name are written into the service when it is installed; give them to `install`.".into());
@@ -351,7 +395,10 @@ async fn install(
         .data_dir
         .clone()
         .unwrap_or_else(|| environment.data_dir.clone());
+    let program = layout.program;
+    let command = program.command();
     let service = Service {
+        program,
         exe: exe.clone(),
         data_dir: data_dir.clone(),
         relay: request
@@ -374,32 +421,38 @@ async fn install(
         Ok(notes) => notes,
         Err(message) => {
             return Outcome::failed(format!(
-                "{message}\nThe definition is at {}; fix the cause and run install again, or run `leon host service uninstall`.",
+                "{message}\nThe definition is at {}; fix the cause and run install again, or run `{command} service uninstall`.",
                 layout.definition.display()
             ))
         }
     };
-    // Starting only hands the host to the manager; whether it stays up is a
-    // different question, so ask it.
+    // Starting only hands the program to the manager; whether it stays up is
+    // a different question, so ask it.
     if !environment.settle.is_zero() {
         tokio::time::sleep(environment.settle).await;
     }
     match ask_manager(environment, runner).await.activity {
         Activity::Running => {}
         Activity::Unavailable(why) => {
-            notes.push(format!("Could not confirm that the host is running: {why}"));
+            notes.push(format!(
+                "Could not confirm that the service is running: {why}"
+            ));
         }
         down => {
             let notes: String = notes.iter().map(|note| format!("{note}\n")).collect();
             return Outcome::failed(format!(
-                "{notes}Installed, but the service is not running: it is {}.\nSee why with `leon host service logs`. The definition is at {}; fix the cause and run install again.",
+                "{notes}Installed, but the service is not running: it is {}.\nSee why with `{command} service logs`. The definition is at {}; fix the cause and run install again.",
                 down.describe(),
                 layout.definition.display()
             ));
         }
     }
+    let runs = match program {
+        Program::Host => command.clone(),
+        Program::King => format!("{command} serve"),
+    };
     let mut out = format!(
-        "Installed. {} runs `leon host` as you, starts at every login and restarts after a failure.\nDefinition: {}\n",
+        "Installed. {} runs `{runs}` as you, starts at every login and restarts after a failure.\nDefinition: {}\n",
         exe.display(),
         layout.definition.display()
     );
@@ -408,28 +461,35 @@ async fn install(
     }
     if let Some(why) = unit::versioned_install(&exe) {
         out.push_str(&format!(
-            "Note: {why}. The service keeps running this version until you run `leon host service install` again after an update.\n"
+            "Note: {why}. The service keeps running this version until you run `{command} service install` again after an update.\n"
         ));
     }
-    out.push_str(&format!(
-        "Files of the host: {}\n\n{SAFETY}\n",
-        data_dir.display()
-    ));
+    out.push_str(&match program {
+        Program::Host => format!("Files of the host: {}\n\n{SAFETY}\n", data_dir.display()),
+        Program::King => format!(
+            "King's data folder: {}\n\n{KING_SAFETY}\n",
+            data_dir.display()
+        ),
+    });
     if layout.os == Os::Linux {
         let lingering_failed = notes.iter().any(|n| n.contains("logged out"));
         if linger && !lingering_failed {
-            out.push_str("\nLingering is on: the host starts at boot and keeps running when you log out. Uninstalling leaves it on; `loginctl disable-linger` turns it off.\n");
+            out.push_str(&format!("\nLingering is on: `{command}` starts at boot and keeps running when you log out. Uninstalling leaves it on; `loginctl disable-linger` turns it off.\n"));
         } else if !linger {
-            out.push_str("\nWithout lingering, systemd stops your services when you log out of your last session and starts the host again at your next login. To keep it running while you are logged out, run `leon host service install --linger` (it runs `loginctl enable-linger` for your own user; no root).\n");
+            out.push_str(&format!("\nWithout lingering, systemd stops your services when you log out of your last session and starts `{command}` again at your next login. To keep it running while you are logged out, run `{command} service install --linger` (it runs `loginctl enable-linger` for your own user; no root).\n"));
         }
     }
-    out.push_str("\nNext: `leon host pair` prints a code for a device; `leon host service status` shows how it is doing.\n");
+    out.push_str(&match program {
+        Program::Host => "\nNext: `leon host pair` prints a code for a device; `leon host service status` shows how it is doing.\n".to_owned(),
+        Program::King => format!("\nNext: `{command} status` asks King how it is doing; `{command} service status` shows the service.\n"),
+    });
     let err: String = notes.iter().map(|note| format!("{note}\n")).collect();
     Outcome { code: 0, out, err }
 }
 
 async fn uninstall(environment: &Environment, runner: &impl Runner) -> Outcome {
     let layout = &environment.layout;
+    let command = layout.program.command();
     let was_installed = layout.definition.exists();
     let mut notes = Vec::new();
     // The definition goes only when nothing is left running without it: a host
@@ -446,11 +506,11 @@ async fn uninstall(environment: &Environment, runner: &impl Runner) -> Outcome {
             } else if was_installed || !matches!(activity, Activity::Unavailable(_)) {
                 let kept = if was_installed {
                     format!(
-                        "The definition at {} is kept, so that the service is not left running without one. Fix the cause and run `leon host service uninstall` again.",
+                        "The definition at {} is kept, so that the service is not left running without one. Fix the cause and run `{command} service uninstall` again.",
                         layout.definition.display()
                     )
                 } else {
-                    "There is no definition to keep; fix the cause and run `leon host service uninstall` again.".to_owned()
+                    format!("There is no definition to keep; fix the cause and run `{command} service uninstall` again.")
                 };
                 return Outcome::failed(format!(
                     "Could not stop the service: {problem}\nThe system manager says it is {}. {kept}",
@@ -458,7 +518,7 @@ async fn uninstall(environment: &Environment, runner: &impl Runner) -> Outcome {
                 ));
             } else {
                 notes.push(format!(
-                    "Could not tell whether a host is still running: {problem}"
+                    "Could not tell whether `{command}` is still running: {problem}"
                 ));
                 false
             }
@@ -476,11 +536,14 @@ async fn uninstall(environment: &Environment, runner: &impl Runner) -> Outcome {
     } else if stopped {
         "The service was not installed; nothing to remove.\n".to_owned()
     } else {
-        "The service was not installed; nothing to remove, and a host may still be running.\n"
-            .to_owned()
+        format!("The service was not installed; nothing to remove, and `{command}` may still be running.\n")
     };
     out.push_str(&format!(
-        "Your paired devices, the identity and the settings are untouched (in {}).\n",
+        "{} untouched (in {}).\n",
+        match layout.program {
+            Program::Host => "Your paired devices, the identity and the settings are",
+            Program::King => "King's conversations, workers and settings are",
+        },
         environment.data_dir.display()
     ));
     if layout.os == Os::Linux {
@@ -514,14 +577,18 @@ async fn status(request: &Request, environment: &Environment, runner: &impl Runn
         None => None,
     };
     let paths = Paths::new(request.data_dir.as_ref().unwrap_or(&environment.data_dir));
+    let host = layout.program == Program::Host;
     let report = Report {
         os: layout.os,
+        program: layout.program,
         definition: layout.definition.clone(),
         installed: layout.definition.exists(),
         manager,
         linger,
-        heartbeat: running_status(&paths).map(|map| Heartbeat::from_map(&map)),
-        devices: paired_devices(&paths),
+        heartbeat: host
+            .then(|| running_status(&paths).map(|map| Heartbeat::from_map(&map)))
+            .flatten(),
+        devices: host.then(|| paired_devices(&paths)),
         now: environment.now,
     };
     Outcome {
@@ -564,7 +631,10 @@ async fn logs(lines: usize, environment: &Environment, runner: &impl Runner) -> 
             Ok(output) if output.success() => Outcome {
                 code: 0,
                 out: output.stdout,
-                err: "Live: journalctl --user --follow --unit leon-host.service\n".into(),
+                err: format!(
+                    "Live: journalctl --user --follow --unit {}\n",
+                    layout.program.unit_name()
+                ),
             },
             Ok(output) => Outcome::failed(format!(
                 "journalctl failed: {}{}",
@@ -600,7 +670,7 @@ async fn perform(request: &Request, environment: &Environment, runner: &impl Run
         Verb::Logs { lines } => logs(lines, environment, runner).await,
         Verb::Help => Outcome {
             code: 0,
-            out: format!("{}\n", usage()),
+            out: format!("{}\n", usage_of(environment.layout.program)),
             err: String::new(),
         },
     }
@@ -618,25 +688,38 @@ fn current_uid() -> u32 {
     }
 }
 
-/// Runs `leon host service ...`. Returns the process exit code.
-pub fn run(args: Vec<String>, default_data_dir: PathBuf) -> i32 {
-    let request = match parse(args) {
+/// Runs `leon host service ...` (or `leon king service ...`). Returns the
+/// process exit code.
+pub fn run(args: Vec<String>, default_data_dir: PathBuf, program: Program) -> i32 {
+    let request = match parse(args, program) {
         Ok(request) => request,
         Err(message) => {
-            eprintln!("{message}\n\n{}", usage());
+            eprintln!("{message}\n\n{}", usage_of(program));
             return 2;
         }
     };
     if request.verb == Verb::Help {
-        println!("{}", usage());
+        println!("{}", usage_of(program));
         return 0;
     }
     let Some(os) = os_of(platform::is_windows(), platform::is_mac(), cfg!(unix)) else {
-        eprintln!("{UNSUPPORTED}");
+        eprintln!(
+            "{}",
+            match program {
+                Program::Host => UNSUPPORTED,
+                Program::King => KING_UNSUPPORTED,
+            }
+        );
         return 1;
     };
     if leon_host::running_as_root() {
-        eprintln!("{NOT_ROOT}");
+        eprintln!(
+            "{}",
+            match program {
+                Program::Host => NOT_ROOT,
+                Program::King => KING_NOT_ROOT,
+            }
+        );
         return 1;
     }
     let (Some(home), Some(config_dir)) = (dirs::home_dir(), dirs::config_dir()) else {
@@ -648,7 +731,7 @@ pub fn run(args: Vec<String>, default_data_dir: PathBuf) -> i32 {
         return 1;
     };
     let environment = Environment {
-        layout: Layout::new(os, &home, &config_dir, product::APP_ID),
+        layout: Layout::new(os, &home, &config_dir, product::APP_ID, program),
         uid: current_uid(),
         exe,
         data_dir: default_data_dir,
@@ -684,7 +767,7 @@ mod tests {
     use leon_remote::{Output, ScriptedRunner};
 
     fn p(args: &[&str]) -> Result<Request, String> {
-        parse(args.iter().map(|s| s.to_string()))
+        parse(args.iter().map(|s| s.to_string()), Program::Host)
     }
 
     #[test]
@@ -763,7 +846,13 @@ mod tests {
     fn environment(root: &Path, os: Os) -> Environment {
         let home = root.join("home");
         Environment {
-            layout: Layout::new(os, &home, &home.join(".config"), "dev.zavu.leon"),
+            layout: Layout::new(
+                os,
+                &home,
+                &home.join(".config"),
+                "dev.zavu.leon",
+                Program::Host,
+            ),
             uid: 1000,
             exe: PathBuf::from("/usr/bin/leon"),
             data_dir: root.join("data"),
@@ -1126,10 +1215,10 @@ mod tests {
             .reply(Output::ok(""));
         let outcome = perform(&request(&["uninstall"]), &env, &runner).await;
         assert_eq!(outcome.code, 0);
-        assert!(outcome.out.contains("a host may still be running"));
+        assert!(outcome.out.contains("`leon host` may still be running"));
         assert!(outcome
             .err
-            .contains("Could not tell whether a host is still running"));
+            .contains("Could not tell whether `leon host` is still running"));
     }
 
     // Unix paths: absolute there, relative on Windows.
@@ -1180,7 +1269,7 @@ mod tests {
         assert_eq!(outcome.code, 0);
         assert!(outcome
             .err
-            .contains("Could not confirm that the host is running"));
+            .contains("Could not confirm that the service is running"));
     }
 
     // Unix paths: absolute there, relative on Windows.

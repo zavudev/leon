@@ -169,6 +169,28 @@ pub type OpenUrl = Rc<dyn Fn(&mut App, &str)>;
 /// Shows the folder picker and says what was chosen.
 pub type PickFolder = Rc<dyn Fn(&mut App) -> Task<Picked>>;
 
+/// Reads the image on the clipboard: injected so that tests never touch the
+/// real one.
+pub type ReadClipImage = Rc<dyn Fn(&App) -> Option<crate::clip_image::ClipImage>>;
+
+/// Asks the person for files, several at once; none is an empty list.
+pub type PickFiles = Rc<dyn Fn(&mut App) -> Task<Vec<PathBuf>>>;
+
+/// The system's own picker of files, several at once: what is attached to
+/// what is said to King. Nothing chosen is an empty list.
+pub fn system_files_picker(cx: &mut App) -> Task<Vec<PathBuf>> {
+    let paths = cx.prompt_for_paths(PathPromptOptions {
+        files: true,
+        directories: false,
+        multiple: true,
+        prompt: Some("Attach".into()),
+    });
+    cx.spawn(async move |_| match paths.await {
+        Ok(Ok(Some(paths))) => paths,
+        _ => Vec::new(),
+    })
+}
+
 /// The system's own folder picker. Every way of opening a project on this
 /// computer ends here; the log line is how a run shows the call was reached.
 pub fn system_picker(cx: &mut App) -> Task<Picked> {
@@ -307,6 +329,17 @@ pub struct Options {
     /// `None` tells terminals nothing: tests, which must not name this
     /// computer's folders.
     pub memory: Option<crate::memory::Terminals>,
+    /// The line to King Leon's service; absent where there is none (tests
+    /// that do not need it, and Windows).
+    pub king: Option<Arc<dyn crate::king::link::Link>>,
+    /// The image on the clipboard, for a paste into King's field: tests
+    /// answer with their own.
+    pub clipboard_image: ReadClipImage,
+    /// Files chosen to attach to what is said to King: the system's file
+    /// picker, or the tests' answer.
+    pub pick_files: PickFiles,
+    /// Where pasted images are kept for King to read.
+    pub attachments: PathBuf,
 }
 
 /// A `~/.ssh` that is not there: the home folder is unknown.
@@ -376,6 +409,10 @@ impl Default for Options {
             },
             remote: None,
             memory: None,
+            king: None,
+            clipboard_image: Rc::new(crate::clip_image::read),
+            pick_files: Rc::new(system_files_picker),
+            attachments: std::env::temp_dir().join("leon-king-attachments"),
             updates: None,
             durable: None,
             update_timer: true,
@@ -474,6 +511,8 @@ pub enum Main {
     Den,
     /// The board of tasks.
     Tasks,
+    /// King Leon: its conversation and its workers.
+    King,
 }
 
 /// The application window's view.
@@ -522,6 +561,8 @@ pub struct Shell {
     /// The usage bar and view.
     pub(super) usage: super::usage_view::UsageUi,
     pub(super) tasks_ui: super::tasks_view::TasksUi,
+    /// King Leon, as the window has it from King's service.
+    pub(super) king_ui: super::king::KingUi,
     pub(super) den: super::den_view::DenUi,
     /// Following the agents' transcripts for the sessions' lights.
     pub(super) status: super::transcript_watch::StatusUi,
@@ -777,6 +818,7 @@ impl Shell {
             // Back in the window: what runs in other terminals may have changed.
             cx.observe_window_activation(window, |this, window, cx| {
                 this.window_active = window.is_window_active();
+                this.king_watch(cx);
                 if window.is_window_active() {
                     this.request_import(cx);
                     this.scan_elsewhere_now(true, cx);
@@ -896,6 +938,7 @@ impl Shell {
             connect_ui,
             usage: super::usage_view::UsageUi::default(),
             tasks_ui: super::tasks_view::TasksUi::default(),
+            king_ui: super::king::KingUi::default(),
             den: super::den_view::DenUi::default(),
             status: super::transcript_watch::StatusUi::default(),
             home: super::home::HomeUi::default(),
@@ -1016,11 +1059,14 @@ impl Shell {
     }
 
     /// The coarse timer: while the window is focused, this computer is looked
-    /// at every `elsewhere_poll`, the SSH machines every few polls.
+    /// at every `elsewhere_poll`, the SSH machines every few polls. At each
+    /// turn the window also joins King's service when it runs, so that King's
+    /// workers are in the Den and the terminals King asks for open here.
     fn watch_elsewhere(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.options.elsewhere_poll.is_none() {
             return;
         }
+        self.king_join(window, cx);
         self.elsewhere_ticker = Some(cx.spawn_in(window, async move |this, cx| {
             let mut tick = 0u32;
             loop {
@@ -1031,6 +1077,7 @@ impl Shell {
                 cx.background_executor().timer(poll).await;
                 tick = tick.wrapping_add(1);
                 let alive = this.update_in(cx, |this, window, cx| {
+                    this.king_join(window, cx);
                     if window.is_window_active() {
                         this.scan_elsewhere_now(tick % REMOTE_EVERY == 0, cx);
                     }
@@ -1129,7 +1176,7 @@ impl Shell {
                     && !self.changes.contains_key(id)
                     && !self.chats.contains_key(id)
             }
-            Main::Empty | Main::Session(_) | Main::Den | Main::Tasks => false,
+            Main::Empty | Main::Session(_) | Main::Den | Main::Tasks | Main::King => false,
         };
         if gone {
             self.main = Main::Empty;
@@ -1409,6 +1456,7 @@ impl Shell {
         }))
         .with_update_ready(self.ready_update_version())
         .with_dens(self.dens(cx).0, self.dens(cx).1)
+        .with_king(self.king_info())
         .with_installed(self.installed_agents())
         .with_repositories(
             self.connect_ui
@@ -2095,7 +2143,7 @@ impl Shell {
                 .or_else(|| self.files.get(id).map(|doc| doc.machine.clone()))
                 .or_else(|| self.changes.get(id).map(|view| view.target.machine.clone()))
                 .or_else(|| self.chats.get(id).map(|chat| chat.machine.clone())),
-            Main::Empty | Main::Den | Main::Tasks => None,
+            Main::Empty | Main::Den | Main::Tasks | Main::King => None,
         };
         let found = if self.pane == Pane::Sidebar {
             from_row().or_else(from_main)
@@ -2186,7 +2234,7 @@ impl Shell {
                         entry.project.root.clone(),
                     ))
                 }
-                Main::Empty | Main::Den => None,
+                Main::Empty | Main::Den | Main::King => None,
             }
         };
         let (machine, project, cwd) = if self.pane == Pane::Sidebar {
@@ -2804,6 +2852,14 @@ impl Shell {
         {
             return true;
         }
+        // So is King's view.
+        if self.overlay == Overlay::None
+            && self.pane == Pane::Main
+            && self.king_open()
+            && self.king_key(stroke, window, cx)
+        {
+            return true;
+        }
         // The changes tab has its own keys while it has the keyboard and no
         // field of it does.
         if self.overlay == Overlay::None
@@ -2859,6 +2915,7 @@ impl Shell {
             || self.file_has_keyboard()
             || self.changes_typing(window, cx)
             || self.chat_typing(window, cx)
+            || self.king_typing(window, cx)
             || self.tasks_typing(window, cx);
         if self.overlay == Overlay::Palette && self.palette_key(stroke, window, cx) {
             return true;
@@ -3093,7 +3150,9 @@ impl Shell {
             },
             C::Settings => self.open_settings(window, cx),
             C::ShowUsage => self.toggle_usage(window, cx),
+            C::ShowKing => self.toggle_king(window, cx),
             C::CleanUp => self.toggle_sweep(window, cx),
+            C::KingBrain | C::KingMode => self.begin_flow(command, window, cx),
             C::ShowTasks => self.toggle_tasks(window, cx),
             C::NewTask if self.tasks_open() => self.open_create(None, window, cx),
             C::NewTask => self.begin_flow(command, window, cx),
@@ -3119,6 +3178,11 @@ impl Shell {
             C::Dictate => {
                 if let Some(id) = self.focused_chat() {
                     self.chat_dictate(id, window, cx);
+                } else if self.king_open() {
+                    // Into the open worker's field when it has the keyboard,
+                    // else King's.
+                    let target = self.king_dictation_target(window, cx);
+                    self.dictate(super::chat_voice::Field::King(target), window, cx);
                 }
             }
             C::WhyMissing => self.open_history_report(window, cx),

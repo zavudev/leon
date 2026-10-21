@@ -473,8 +473,10 @@ const ESCAPE: &str = "\u{1b}";
 /// read in the `--help` of the installed programs: `claude [prompt]`,
 /// `codex [PROMPT]`, `grok [PROMPT]` ("Initial prompt for the interactive
 /// session"), `cursor-agent [prompt...]` ("Initial prompt for the agent"),
-/// `opencode --prompt` and `gemini -i/--prompt-interactive` ("Execute the
-/// provided prompt and continue in interactive mode"). Every other agent is
+/// `opencode --prompt`, `gemini -i/--prompt-interactive` ("Execute the
+/// provided prompt and continue in interactive mode") and `agy
+/// --prompt-interactive` ("Run an initial prompt interactively and continue
+/// the session"). Every other agent is
 /// left without one until its form is verified. The commands are Orca's
 /// (`src/shared/tui-agent-config.ts`) and the resume forms are those of its
 /// `getAgentResumeArgv`; where Orca has none the agent is launch only. Orca's
@@ -570,6 +572,7 @@ const ROWS: &[Row] = &[
         "https://antigravity.google/docs/cli-overview",
     )
     .resume(&["--conversation", "{id}"])
+    .prompt(&["--prompt-interactive", "{prompt}"])
     .mark("antigravity"),
     row("pi", "Pi", "pi", "https://pi.dev").mark("pi"),
     row("omp", "oh-my-pi", "omp", "https://omp.sh"),
@@ -1495,6 +1498,7 @@ mod tests {
                 ("opencode", vec!["--prompt", "{prompt}"]),
                 ("grok", vec!["{prompt}"]),
                 ("cursor", vec!["{prompt}"]),
+                ("antigravity", vec!["--prompt-interactive", "{prompt}"]),
                 ("gemini", vec!["--prompt-interactive", "{prompt}"]),
             ]
         );

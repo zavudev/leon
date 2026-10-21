@@ -83,7 +83,39 @@ export type SharedState = {
   pinned: HistorySession[];
   /** Whether that computer has a Den to show; one that does not say must not be asked. */
   den: boolean;
+  /** Whether its King can be spoken to; one that does not say must not be asked. */
+  king: boolean;
 };
+
+/** Whose conversation, in King's service: King's own, or one of its workers'. */
+export type KingTarget = 'brain' | { worker: number };
+
+/**
+ * A request of King's control protocol, as its service reads it: its name in
+ * `op`, its fields in snake case. Only what this app asks is listed.
+ */
+export type KingRequest =
+  | { op: 'status' }
+  | { op: 'say'; text: string }
+  | { op: 'transcript'; target: KingTarget; since?: number; limit?: number }
+  /**
+   * The answer's fields sit beside the question's, as the service reads
+   * them: `choice` (a permission's choice id, or an option's label),
+   * `approve` (a plan), `text` (a reason, words of one's own, what to change).
+   */
+  | { op: 'answer'; target: KingTarget; question: string; choice?: string; approve?: boolean; text?: string }
+  | { op: 'tell_worker'; worker: number; text: string }
+  | { op: 'interrupt'; target: KingTarget }
+  | { op: 'stop_worker'; worker: number }
+  | { op: 'run_start'; task: string; max_parallel?: number; budget_usd?: number }
+  | { op: 'run_continue'; run: number; text?: string; budget_usd?: number }
+  | { op: 'run_cancel'; run: number }
+  /** King's notices reach this phone through Expo's push service while no client shows King. */
+  | { op: 'push_register'; token: string; name: string }
+  | { op: 'push_forget'; token: string };
+
+/** A watch on King's notices; `stop` ends it. */
+export type KingWatch = { stop(): void };
 
 /**
  * One lion of a computer's Den: a live agent session there, or a sub-agent of
@@ -187,8 +219,24 @@ export type Answer =
   | { kind: 'choices'; answers: ChoiceAnswer[] }
   | { kind: 'plan'; approve: boolean; feedback?: string };
 
+/** The tokens a turn used, as its agent counts them. */
+export type TurnTokens = {
+  /** Read by the model, cached reads included. */
+  input: number;
+  /** Of those, read from the provider's cache. */
+  cachedInput: number;
+  /** Written by the model, its reasoning included. */
+  output: number;
+  /** Of those, its reasoning, when the agent says. */
+  reasoning: number;
+  /** How many the model can hold at once, when the agent says. */
+  contextWindow?: number;
+};
+
 export type TurnEvent =
   | { type: 'started'; sessionId: string; model?: string }
+  /** The tokens the turn used so far: each replaces the one before, and the last is the turn's. */
+  | { type: 'usage'; tokens: TurnTokens }
   | { type: 'text-delta'; text: string }
   | { type: 'text'; text: string }
   /** More of what the agent thinks before it answers: kept apart, out of sight unless asked for. */
@@ -311,6 +359,18 @@ export interface HostLink {
   startTurn(request: TurnRequest, onEvent: (event: TurnEvent) => void): Promise<TurnHandle>;
   runningTurns(): Promise<RunningTurn[]>;
   attachTurn(pty: string, onEvent: (event: TurnEvent) => void): Promise<TurnHandle>;
+  /**
+   * Asks King's service; the answer is the reply's `result`, parsed but not
+   * checked (see `@/king/model`). A refusal throws a `LinkError` `Host` with
+   * King's sentence. Only when its `SharedState.king` is set.
+   */
+  kingAsk(request: KingRequest): Promise<unknown>;
+  /**
+   * Tells `onNotice` every notice of King's service, parsed, until `stop`.
+   * `onClosed` says the line to King closed: what was said meanwhile is not
+   * known, so the status is to be asked again. It subscribes again by itself.
+   */
+  kingWatch(onNotice: (notice: unknown) => void, onClosed: (reason: string) => void): KingWatch;
 }
 
 /** Everything the application asks of the native module. */

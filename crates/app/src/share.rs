@@ -181,6 +181,8 @@ pub struct ShareService {
     share: Arc<dyn ShareSource>,
     /// The Den as the window last put it, for those devices.
     den: Arc<DenBoard>,
+    /// The way to King's service, for the devices' lines to King.
+    king: Option<leon_host::King>,
     running: Mutex<Option<Running>>,
 }
 
@@ -210,6 +212,10 @@ impl ShareService {
                 den: den.clone(),
             }),
             den,
+            #[cfg(unix)]
+            king: Some(crate::king::door::door(data_dir)),
+            #[cfg(not(unix))]
+            king: None,
             running: Mutex::new(None),
         })
     }
@@ -245,6 +251,7 @@ impl ShareService {
             config.approval = Approval::Ask(tx);
         }
         config.share = Some(leon_host::Shared(self.share.clone()));
+        config.king = self.king.clone();
         let _enter = self.handle.enter();
         let host = Host::start(
             config,

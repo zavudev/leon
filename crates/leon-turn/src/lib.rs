@@ -55,12 +55,12 @@ pub mod shell;
 pub mod tag;
 
 pub use agents::{
-    adapter, agents, Action, Adapter, AgentInfo, AgentSession, Outgoing, Probe, Step, TurnSpec,
-    ADAPTERS,
+    adapter, agents, Action, Adapter, AgentInfo, AgentSession, McpServer, Outgoing, Probe, Step,
+    TurnSpec, ADAPTERS,
 };
 pub use claude::{AgentCommand, AgentMode, AgentModel, AgentOptions};
 pub use error::TurnError;
 pub use events::{
     object_on, Answer, ChoiceAnswer, ChoiceOption, ChoiceQuestion, Lines, PermissionChoice,
-    PermissionEffect, QuestionKind, TurnEvent,
+    PermissionEffect, QuestionKind, Tokens, TurnEvent,
 };
