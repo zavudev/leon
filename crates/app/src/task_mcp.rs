@@ -554,6 +554,27 @@ impl<B: Backend> Server<B> {
                     if plan.is_empty() {
                         return Ok(saved);
                     }
+                    // An open task of the same title was found instead: it
+                    // becomes this step only when it is no other task's
+                    // step and waits for nothing, and stays as it is when it
+                    // is already a step of the same task.
+                    if let SavedTask::Known(known) = &saved {
+                        if known.parent.is_some() || !known.needs.is_empty() {
+                            let asked = match &plan.parent {
+                                Some(Some(parent)) => Some(self.backend.get(parent)?.id),
+                                _ => None,
+                            };
+                            if asked.is_some() && known.parent == asked {
+                                return Ok(saved);
+                            }
+                            return Err(format!(
+                                "an open task with this title ({}) is already a step of \
+                                 another task, or waits for others; give this step a title \
+                                 of its own",
+                                known.id
+                            ));
+                        }
+                    }
                     let id = saved.task().id.clone();
                     let planned = self.backend.update(&id, plan).map_err(|error| {
                         format!("the task was made ({id}), but not as a step: {error}")
@@ -815,6 +836,116 @@ mod tests {
             json!({ "id": id(&schema), "needs": [id(&api)] }),
         ));
         assert!(failed, "{refused}");
+    }
+
+    #[test]
+    fn a_step_of_the_same_title_as_another_goals_is_not_taken_from_it() {
+        let mut server = server();
+        let id = |value: &Value| value["id"].as_str().unwrap().to_owned();
+        let (a, _) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Goal A" }),
+        ));
+        let (b, _) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Goal B" }),
+        ));
+        let (first, _) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Prep" }),
+        ));
+        let (step, _) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Write tests", "parent": id(&a), "needs": [id(&first)] }),
+        ));
+        // The same title under goal B: A's step is left as it was.
+        let (refused, failed) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Write tests", "parent": id(&b) }),
+        ));
+        assert!(failed, "{refused}");
+        let (kept, _) = payload(&call(&mut server, "task_get", json!({ "id": id(&step) })));
+        assert_eq!(kept["parent"], a["id"]);
+        assert_eq!(kept["needs"], json!([id(&first)]));
+        // Under the same goal again it is the same step, untouched.
+        let (again, failed) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Write tests", "parent": a["short_id"] }),
+        ));
+        assert!(!failed, "{again}");
+        assert_eq!(again["created"], false);
+        assert_eq!(again["needs"], json!([id(&first)]));
+        // A task that is nobody's step becomes one.
+        let (loose, _) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Docs" }),
+        ));
+        let (made, failed) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Docs", "parent": id(&b) }),
+        ));
+        assert!(!failed, "{made}");
+        assert_eq!(made["id"], loose["id"]);
+        assert_eq!(made["parent"], b["id"]);
+    }
+
+    #[test]
+    fn a_projects_server_reaches_no_other_projects_board() {
+        let mut server = server();
+        for (tool, arguments) in [
+            (
+                "task_create",
+                json!({ "title": "x", "project": "/srv/web" }),
+            ),
+            ("task_list", json!({ "project": "/srv/web" })),
+            (
+                "task_search",
+                json!({ "query": "x", "project": "/srv/web" }),
+            ),
+        ] {
+            let (refused, failed) = payload(&call(&mut server, tool, arguments));
+            assert!(failed, "{tool}: {refused}");
+        }
+        // Its own project named by its root is its own board.
+        let (own, failed) = payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Mine", "project": "/srv/api/" }),
+        ));
+        assert!(!failed, "{own}");
+        assert_eq!(own["project"], "/srv/api");
+    }
+
+    #[test]
+    fn king_names_a_board_by_its_root_without_a_trailing_slash() {
+        let service = Service::new(Store::open_in_memory().unwrap(), "/data/king".to_owned())
+            .at(|| 1_000)
+            .anywhere(true);
+        let mut server = Server::new(service, "0.0.0-test");
+        payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "One", "project": "/srv/web/" }),
+        ));
+        payload(&call(
+            &mut server,
+            "task_create",
+            json!({ "title": "Two", "project": "/srv/web" }),
+        ));
+        let (listed, _) = payload(&call(
+            &mut server,
+            "task_list",
+            json!({ "project": "/srv/web" }),
+        ));
+        assert_eq!(listed.as_array().map(Vec::len), Some(2), "{listed}");
     }
 
     #[test]

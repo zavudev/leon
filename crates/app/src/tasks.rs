@@ -44,12 +44,28 @@ impl Service {
         self
     }
 
-    /// The board a call of the tools means.
-    fn board_of(&self, reach: &Reach) -> MemoryScope {
+    /// The board a call of the tools means. Another project's only for a
+    /// service that sees every board, and by its root as written without
+    /// the separators at its end (`/srv/web/` is `/srv/web`).
+    fn board_of(&self, reach: &Reach) -> Result<MemoryScope, String> {
         match reach {
-            Reach::Global => MemoryScope::Global,
-            Reach::Project => self.scope(false),
-            Reach::Root(root) => MemoryScope::project(root.clone()),
+            Reach::Global => Ok(MemoryScope::Global),
+            Reach::Project => Ok(self.scope(false)),
+            Reach::Root(root) if leon_core::path::key(root) == leon_core::path::key(&self.root) => {
+                Ok(self.scope(false))
+            }
+            Reach::Root(root) if self.anywhere => {
+                let trimmed = root.trim_end_matches(['/', '\\']);
+                Ok(MemoryScope::project(if trimmed.is_empty() {
+                    root.clone()
+                } else {
+                    trimmed.to_owned()
+                }))
+            }
+            Reach::Root(root) => Err(format!(
+                "this board is {}'s; another project's ({root}) is not reachable from here",
+                self.root
+            )),
         }
     }
 
@@ -292,7 +308,7 @@ pub fn board(tasks: &[Task]) -> String {
 impl Backend for Service {
     fn add(&mut self, draft: Draft) -> Result<SavedTask, String> {
         let new = NewTask {
-            scope: self.board_of(&draft.reach),
+            scope: self.board_of(&draft.reach)?,
             title: draft.title,
             body: draft.body,
             status: draft.status,
@@ -311,7 +327,7 @@ impl Backend for Service {
         limit: usize,
     ) -> Result<Vec<Task>, String> {
         self.store
-            .tasks(&self.board_of(&reach), &filter, limit)
+            .tasks(&self.board_of(&reach)?, &filter, limit)
             .map_err(|e| sentence(&e))
     }
 
@@ -336,7 +352,7 @@ impl Backend for Service {
 
     fn search(&mut self, words: &str, reach: Reach, limit: usize) -> Result<Vec<TaskHit>, String> {
         self.store
-            .search_tasks(&self.board_of(&reach), words, limit)
+            .search_tasks(&self.board_of(&reach)?, words, limit)
             .map_err(|e| sentence(&e))
     }
 }
