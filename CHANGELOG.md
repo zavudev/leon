@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-20
+
 ### Added
 
 * **King Leon**, one agent that answers for every project Leon knows, as a
