@@ -175,27 +175,20 @@ impl Shell {
 
     /// Opens the microphone for a field, closes the one that is open, or,
     /// with no model to dictate with, offers to get one: the list of models
-    /// over a conversation's field, a word under King's (whose field has no
-    /// list; any conversation's `/voice` and the settings have it).
+    /// over the field.
     pub(super) fn dictate(&mut self, into: Field, window: &mut Window, cx: &mut Context<Self>) {
         self.dictation.problem = None;
         match (&self.dictation.now, into) {
             (Now::Listening { .. }, _) => self.dictation_finish(window, cx),
             (Now::Writing { .. }, _) => {}
             (Now::Downloading { .. }, Field::Chat(id)) => self.chat_show_voices(id, window, cx),
-            (Now::Downloading { .. }, Field::King(_)) => {}
+            (Now::Downloading { .. }, Field::King(_)) => self.king_ui.voices = true,
             (Now::Idle, _) => {
                 self.dictation.installed = self.options.voice.installed();
                 match into {
                     _ if self.dictation_model(cx).is_some() => self.dictation_listen(into, cx),
                     Field::Chat(id) => self.chat_show_voices(id, window, cx),
-                    Field::King(_) => {
-                        self.dictation.problem = Some(
-                            "Choose a speech model first: /voice in a conversation, or \
-                             Settings, Dictation."
-                                .to_owned(),
-                        );
-                    }
+                    Field::King(_) => self.king_ui.voices = true,
                 }
             }
         }
@@ -308,11 +301,12 @@ impl Shell {
         });
     }
 
-    /// A speech model was chosen in the list: dictation uses it, after
-    /// downloading it when it is not on this computer.
+    /// A speech model was chosen in a list, a conversation's or King's
+    /// (`None`): dictation uses it, after downloading it when it is not on
+    /// this computer.
     pub(super) fn dictation_choose(
         &mut self,
-        chat: LiveId,
+        chat: Option<LiveId>,
         id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -323,7 +317,11 @@ impl Shell {
         self.dictation.problem = None;
         if self.dictation.installed.iter().any(|have| have == model.id) {
             use_model(model, cx);
-            self.chat_close_menu(chat, window, cx);
+            match chat {
+                Some(chat) => self.chat_close_menu(chat, window, cx),
+                None => self.king_ui.voices = false,
+            }
+            cx.notify();
             return;
         }
         if !matches!(self.dictation.now, Now::Idle) {

@@ -57,16 +57,17 @@ the main pane:
 * **King's conversation** on the left, with the field you speak to King in.
   The tools King used between two answers are one folded line, what Leon
   told King of its workers is a folded "news" line, and Leon's report sits
-  under each answer, drawn as a strip: the turn's tokens, cache, speed,
-  time and cost, the day's spending, and a bar for each agent's usage window
-  with what is left and when it resets. A question King waits on is a
-  framed card with its answers (allow, always, deny; start or not yet for a plan), and any
-  question can be answered with what is written in the field. What a
-  worker asks is framed over the field too, with the worker's number and
-  title, so it is seen and answered without opening the worker (King is
-  told, and may answer it as well: the first answer counts). Alt and the
-  answer's number (written on its button) answer from the keyboard: the
-  open worker's question first, else King's, else the first worker's. Escape stops King's turn, or
+  under each answer as one line: the turn's tokens, cache, speed, time and
+  cost. The foot of the side column has the day's spending and a bar for
+  each agent's usage window with what is left and when it resets. A
+  question King waits on is a framed card with its answers (allow, always,
+  deny; start or not yet for a plan), and any question can be answered
+  with what is written in the field. What a worker asks is King's to
+  answer: it is framed over the field with the worker's number and title
+  and no answers, and **Decide myself** opens the worker, where the person
+  answers it (the first answer counts). Alt and the answer's number
+  (written on its button) answer from the keyboard: the open worker's
+  question first, else King's. Escape stops King's turn, or
   closes the view when King is not working.
 * **Images, files and dictation.** An image pasted into King's field
   (Ctrl+V, ⌘V on macOS) is kept as a file in `king/attachments/` of Leon's
@@ -77,7 +78,8 @@ the main pane:
   images there. The paperclip attaches files the same way: shown
   by name over the field, sent as their paths.
   DICTATE uses the same microphone and speech model as the conversations
-  (choose a model with `/voice` in one of them, or in the settings); Enter
+  (`/voice` in King's field, or DICTATE with none yet, lists the models to
+  choose or download; the settings name one too); Enter
   ends the dictation, Escape drops it, and what was said is written in the
   field, to be read before it is sent.
 * **What King runs on** is the chip under the field. A click, or the

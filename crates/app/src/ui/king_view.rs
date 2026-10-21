@@ -256,18 +256,14 @@ impl Shell {
     /// it runs. `None` before the window has heard from it.
     pub(super) fn king_glance(&self) -> Option<(Activity, usize)> {
         let status = self.king_ui.status.as_ref()?;
-        let asks = !status.brain.questions.is_empty()
-            || status
-                .workers
-                .iter()
-                .any(|worker| worker.state == WorkerState::Asking);
-        let activity = if asks {
+        // What a worker asks is King's to answer, not the person's.
+        let activity = if !status.brain.questions.is_empty() {
             Activity::NeedsYou
         } else if status.brain.busy
             || status
                 .workers
                 .iter()
-                .any(|worker| worker.state == WorkerState::Working)
+                .any(|worker| matches!(worker.state, WorkerState::Working | WorkerState::Asking))
         {
             Activity::Working
         } else {
@@ -317,6 +313,7 @@ impl Shell {
                                     .as_ref()
                                     .map(|(title, body)| note(title, body, c, cx)),
                             )
+                            .children(ui.voices.then(|| self.king_voices(c, cx)))
                             .children(self.king_questions(
                                 Target::Brain,
                                 &status.brain.questions,
@@ -359,16 +356,29 @@ impl Shell {
                     .flex_col()
                     .children(self.king_running(status, c, cx))
                     .child(
-                        match ui
-                            .open
-                            .and_then(|id| status.workers.iter().find(|worker| worker.id == id))
-                        {
-                            Some(worker) => self.king_worker(worker, c, cx),
-                            None => match &ui.history {
-                                Some(list) => self.king_history(status, list, c, cx),
-                                None => self.king_cards(status, c, cx),
+                        div().flex_1().min_h_0().flex().flex_col().child(
+                            match ui
+                                .open
+                                .and_then(|id| status.workers.iter().find(|worker| worker.id == id))
+                            {
+                                Some(worker) => self.king_worker(worker, c, cx),
+                                None => match &ui.history {
+                                    Some(list) => self.king_history(status, list, c, cx),
+                                    None => self.king_cards(status, c, cx),
+                                },
                             },
-                        },
+                        ),
+                    )
+                    // What is left of each agent's usage, as Leon's newest
+                    // report on King's answers has it.
+                    .children(
+                        ui.brain
+                            .entries
+                            .iter()
+                            .rev()
+                            .filter(|entry| entry.kind == Kind::Report)
+                            .find_map(|entry| entry.report.as_ref())
+                            .map(|report| usage_panel(report, c)),
                     ),
             )
             .into_any_element()
@@ -488,21 +498,12 @@ impl Shell {
         if entries.is_empty() && !busy {
             list = list.child(self.king_empty(worker, c, cx));
         }
-        // Only the newest report draws the usage windows; the older ones are a
-        // line of numbers.
-        let newest_report = entries
-            .iter()
-            .rev()
-            .find(|entry| entry.kind == Kind::Report && entry.report.is_some())
-            .map(|entry| entry.seq);
         for piece in pieces(entries) {
             list = list.child(match piece {
                 Piece::One(entry) if entry.kind == Kind::News => {
                     self.king_news(target, entry, c, cx)
                 }
-                Piece::One(entry) => {
-                    king_entry(target, entry, agent, newest_report == Some(entry.seq), c)
-                }
+                Piece::One(entry) => king_entry(target, entry, agent, c),
                 Piece::Tools(run) => self.king_tools(target, run, c, cx),
             });
         }
@@ -770,11 +771,39 @@ impl Shell {
             .iter()
             .map(|open| {
                 let mut answers = div().flex().flex_wrap().items_center().gap(px(6.));
+                // A worker's question is King's to answer: it is shown, and
+                // the person answers it only by opening the worker.
+                let deciding = match target {
+                    Target::Worker(id) => (self.king_ui.open != Some(id)).then_some(id),
+                    Target::Brain => None,
+                };
+                if let Some(id) = deciding {
+                    answers = answers
+                        .child(mono("KING DECIDES").text_color(c.text_faint))
+                        .child(div().flex_1())
+                        .child(
+                            button(
+                                format!("king-decide-{key}"),
+                                "DECIDE MYSELF",
+                                Look::Outline,
+                                c,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _: &ClickEvent, window, cx| {
+                                    this.king_open_worker(id, window, cx);
+                                },
+                            )),
+                        );
+                }
                 // The question the keys answer says which key is which.
                 let keyed = self
                     .king_question_in_view()
                     .is_some_and(|(on, first)| on == target && first.id == open.id);
-                for (place, pickable) in picks(open).into_iter().enumerate() {
+                for (place, pickable) in picks(open)
+                    .into_iter()
+                    .enumerate()
+                    .filter(|_| deciding.is_none())
+                {
                     let n = place + 1;
                     let look = match pickable.tone {
                         Tone::Go => Look::Primary,
@@ -845,6 +874,92 @@ impl Shell {
                     .into_any_element()
             })
             .collect()
+    }
+
+    /// The speech models dictation can use, to choose one or download it.
+    fn king_voices(&self, c: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        let hover = c.surface_2;
+        let mut list = div()
+            .debug_selector(|| "king-voices".into())
+            .w_full()
+            .min_w_0()
+            .px(px(12.))
+            .py(px(8.))
+            .rounded(metrics::RADIUS())
+            .border_1()
+            .border_color(c.border)
+            .bg(c.surface)
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .pb(px(4.))
+                    .child(
+                        mono(self.voices_title(cx))
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(c.text_faint),
+                    )
+                    .child(
+                        div()
+                            .id("king-voices-close")
+                            .debug_selector(|| "king-voices-close".into())
+                            .flex_none()
+                            .size(px(18.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(metrics::RADIUS())
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(hover))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.king_ui.voices = false;
+                                cx.notify();
+                            }))
+                            .child(icon(IconName::X, px(12.), c.text_faint)),
+                    ),
+            );
+        for row in crate::chat::complete::voice_rows("", self.voices(cx)) {
+            let crate::chat::complete::Pick::Voice(model) = row.pick.clone() else {
+                continue;
+            };
+            let name = format!("king-voice-{model}");
+            list = list.child(
+                div()
+                    .id(SharedString::from(name.clone()))
+                    .debug_selector(move || name.clone())
+                    .w_full()
+                    .min_w_0()
+                    .px(px(8.))
+                    .py(px(5.))
+                    .rounded(metrics::RADIUS())
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(hover))
+                    .when(row.current, |this| this.bg(c.surface_2))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.dictation_choose(None, &model, window, cx);
+                    }))
+                    .child(div().flex_none().text_color(c.text).child(row.label))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(metrics::TEXT_SMALL())
+                            .text_color(c.text_muted)
+                            .child(row.detail.unwrap_or_default()),
+                    )
+                    .children(row.note.map(|note| mono(note).text_color(c.text_faint))),
+            );
+        }
+        list.into_any_element()
     }
 
     /// Where the person speaks to King.
@@ -1969,23 +2084,14 @@ fn left_colour(left: f64, c: &Palette) -> gpui_kit::Hsla {
     }
 }
 
-/// Leon's report under an answer, drawn: the turn's numbers on one line,
-/// the day's beside them, and, under the newest report only, a bar for each
-/// usage window with what is left of it and when it resets. An older report
-/// is its line of numbers alone, and one of a turn that used no tokens is
-/// left out.
-fn report_strip(
-    target: Target,
-    seq: u64,
-    report: &Report,
-    newest: bool,
-    c: &Palette,
-) -> AnyElement {
+/// Leon's report under an answer, drawn: the turn's numbers on one line. One
+/// of a turn that used no tokens is left out; what is left of the usage is in
+/// the side column ([`usage_panel`]).
+fn report_strip(target: Target, seq: u64, report: &Report, c: &Palette) -> AnyElement {
     let key = key_of(target);
-    let worked = report.turn.is_some_and(|turn| turn.total() > 0);
-    if !newest && !worked {
+    let Some(turn) = report.turn.filter(|turn| turn.total() > 0) else {
         return div().into_any_element();
-    }
+    };
     let mut numbers = div()
         .w_full()
         .min_w_0()
@@ -1993,61 +2099,64 @@ fn report_strip(
         .flex_wrap()
         .items_center()
         .gap_x(px(14.))
-        .gap_y(px(4.));
-    if let Some(turn) = report.turn.filter(|_| worked) {
-        numbers = numbers
-            .child(stat(count(turn.total()), "TOKENS", c))
-            .child(stat(count(turn.cached_input), "CACHED", c))
-            .child(stat(count(turn.output), "WRITTEN", c));
-        if let Some(rate) = turn.per_second() {
-            numbers = numbers.child(stat(format!("{rate:.0}"), "TOK/S", c));
-        }
-        if turn.duration_ms > 0 {
-            numbers = numbers.child(stat(span((turn.duration_ms / 1000) as i64), "", c));
-        }
-        if let Some(cost) = turn.cost_usd {
-            numbers = numbers.child(mono(format!("${cost:.3}")).text_color(c.text));
-        }
+        .gap_y(px(4.))
+        .child(stat(count(turn.total()), "TOKENS", c))
+        .child(stat(count(turn.cached_input), "CACHED", c))
+        .child(stat(count(turn.output), "WRITTEN", c));
+    if let Some(rate) = turn.per_second() {
+        numbers = numbers.child(stat(format!("{rate:.0}"), "TOK/S", c));
     }
-    if !newest {
-        return div()
-            .debug_selector(move || format!("king-report-{key}-{seq}"))
-            .w_full()
-            .min_w_0()
-            .px(px(10.))
-            .child(numbers)
-            .into_any_element();
+    if turn.duration_ms > 0 {
+        numbers = numbers.child(stat(span((turn.duration_ms / 1000) as i64), "", c));
     }
+    if let Some(cost) = turn.cost_usd {
+        numbers = numbers.child(mono(format!("${cost:.3}")).text_color(c.text));
+    }
+    div()
+        .debug_selector(move || format!("king-report-{key}-{seq}"))
+        .w_full()
+        .min_w_0()
+        .px(px(10.))
+        .child(numbers)
+        .into_any_element()
+}
+
+/// The foot of King's side column, from Leon's newest report: the day's
+/// spending and tokens, and a bar for each usage window with what is left of
+/// it and when it resets.
+fn usage_panel(report: &Report, c: &Palette) -> AnyElement {
     let today = match report.budget_usd {
         Some(budget) => format!("${:.2} OF ${budget:.2}", report.spent_today_usd),
         None => format!("${:.2}", report.spent_today_usd),
     };
-    numbers = numbers.child(div().flex_1()).child(
-        div()
-            .flex_none()
-            .flex()
-            .items_baseline()
-            .gap(px(4.))
-            .child(mono("TODAY").text_color(c.text_faint))
-            .child(mono(today).text_color(c.text_muted))
-            .child(
-                mono(format!(
-                    "{} TOKENS",
-                    count(report.king_today.total() + report.workers_today.total())
-                ))
-                .text_color(c.text_faint),
-            ),
-    );
-    let windows_key = key.clone();
-    let mut windows = div()
-        .debug_selector(move || format!("king-report-windows-{windows_key}-{seq}"))
+    let mut panel = div()
+        .debug_selector(|| "king-usage".into())
+        .flex_none()
         .w_full()
         .min_w_0()
+        .px(px(14.))
+        .py(px(10.))
+        .border_t_1()
+        .border_color(c.border)
         .flex()
-        .flex_wrap()
-        .items_center()
-        .gap_x(px(16.))
-        .gap_y(px(4.));
+        .flex_col()
+        .gap(px(6.))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_baseline()
+                .gap(px(4.))
+                .child(mono("TODAY").text_color(c.text_faint))
+                .child(mono(today).text_color(c.text_muted))
+                .child(
+                    mono(format!(
+                        "{} TOKENS",
+                        count(report.king_today.total() + report.workers_today.total())
+                    ))
+                    .text_color(c.text_faint),
+                ),
+        );
     for agent in report
         .usage
         .iter()
@@ -2056,10 +2165,13 @@ fn report_strip(
         let name = AgentId::parse(&agent.agent)
             .map_or_else(|| agent.agent.to_uppercase(), |id| id.tag().to_uppercase());
         let mut group = div()
-            .flex_none()
+            .w_full()
+            .min_w_0()
             .flex()
+            .flex_wrap()
             .items_center()
-            .gap(px(8.))
+            .gap_x(px(8.))
+            .gap_y(px(2.))
             .child(mono(name).text_color(c.text_muted));
         for window in &agent.windows {
             let left = (1.0 - window.used).clamp(0.0, 1.0);
@@ -2089,39 +2201,13 @@ fn report_strip(
                     })),
             );
         }
-        windows = windows.child(group);
+        panel = panel.child(group);
     }
-    div()
-        .debug_selector(move || format!("king-report-{key}-{seq}"))
-        .w_full()
-        .min_w_0()
-        .px(px(10.))
-        .py(px(7.))
-        .rounded(metrics::RADIUS())
-        .border_1()
-        .border_color(c.border)
-        .flex()
-        .flex_col()
-        .gap(px(6.))
-        .child(numbers)
-        .when(
-            report.usage.iter().any(|agent| !agent.windows.is_empty()),
-            |this| {
-                this.child(div().w_full().h(px(1.)).bg(c.border))
-                    .child(windows)
-            },
-        )
-        .into_any_element()
+    panel.into_any_element()
 }
 
 /// One entry that is not a tool.
-fn king_entry(
-    target: Target,
-    entry: &Entry,
-    agent: Option<AgentId>,
-    newest_report: bool,
-    c: &Palette,
-) -> AnyElement {
+fn king_entry(target: Target, entry: &Entry, agent: Option<AgentId>, c: &Palette) -> AnyElement {
     let key = key_of(target);
     let seq = entry.seq;
     let selector = move |kind: &'static str| {
@@ -2225,7 +2311,6 @@ fn king_entry(
             target,
             seq,
             entry.report.as_ref().unwrap_or(&Report::default()),
-            newest_report,
             c,
         ),
         Kind::Report => div()

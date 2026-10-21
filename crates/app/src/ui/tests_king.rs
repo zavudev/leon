@@ -168,7 +168,7 @@ fn the_view_shows_kings_conversation_as_the_service_tells_it(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
-fn only_the_newest_report_draws_the_usage_windows(cx: &mut TestAppContext) {
+fn the_usage_is_in_the_side_column_and_each_report_is_its_numbers(cx: &mut TestAppContext) {
     let (h, end) = with_conversation(cx, json!([]));
     end.tell
         .send(Heard::Notice(
@@ -200,10 +200,9 @@ fn only_the_newest_report_draws_the_usage_windows(cx: &mut TestAppContext) {
         ])
     });
     assert!(h.shows_dynamic("king-report-brain-3".into(), cx));
-    assert!(!h.shows_dynamic("king-report-windows-brain-3".into(), cx));
     assert!(!h.shows_dynamic("king-report-brain-4".into(), cx));
     assert!(h.shows_dynamic("king-report-brain-6".into(), cx));
-    assert!(h.shows_dynamic("king-report-windows-brain-6".into(), cx));
+    assert!(h.shows_dynamic("king-usage".into(), cx));
 }
 
 #[gpui_kit::test]
@@ -344,7 +343,8 @@ fn the_sidebar_row_opens_king_and_shows_how_it_stands(cx: &mut TestAppContext) {
     assert!(h.shows("sidebar-king-glance", cx));
     assert_eq!(
         h.shell(cx, |s| s.king_glance()),
-        Some((crate::ui::activity::Activity::NeedsYou, 2))
+        // A worker's question is King's to answer, not the person's.
+        Some((crate::ui::activity::Activity::Working, 2))
     );
 }
 
@@ -539,29 +539,39 @@ fn past_conversations_are_listed_read_and_taken_up_again(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
-fn a_workers_question_is_answered_from_kings_view(cx: &mut TestAppContext) {
+fn a_workers_question_is_kings_to_answer_unless_the_person_opens_it(cx: &mut TestAppContext) {
     let mut asking = worker(2, "asking", Some(0));
     asking["conversation"]["questions"] = json!([{
         "id": "d.0", "text": "May it use edit: app.js?",
         "form": {"type": "permission", "choices": [["d.0", "allow"], ["d.1", "always"], ["d.2", "deny"]]},
     }]);
     let (h, end) = with_conversation(cx, json!([asking]));
-    // Seen without opening the worker.
+    // Seen without opening the worker, with nothing to answer it with.
     assert!(h.shows_dynamic("king-question-worker-2-d.0".into(), cx));
-    // King asks nothing: the keys answer the worker.
+    assert!(!h.shows_dynamic("king-answer-worker-2-1".into(), cx));
+    assert!(h.shows_dynamic("king-decide-worker-2".into(), cx));
+    // The keys answer nothing of it.
+    h.press("alt-2", cx);
+    assert!(!serve(&h, &end, cx, |_| Value::Null)
+        .iter()
+        .any(|request| matches!(request, Request::Answer { .. })));
+    // Deciding it opens the worker, where it is answered.
+    h.mouse_on(
+        "king-decide-worker-2".into(),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
+    serve(&h, &end, cx, |_| json!([]));
     h.press("alt-2", cx);
     let asked = serve(&h, &end, cx, |_| Value::Null);
-    assert_eq!(
-        asked,
-        [Request::Answer {
-            target: Target::Worker(2),
-            question: "d.0".into(),
-            reply: leon_king::coordinator::Reply {
-                choice: Some("d.1".into()),
-                ..Default::default()
-            },
-        }]
-    );
+    assert!(asked.contains(&Request::Answer {
+        target: Target::Worker(2),
+        question: "d.0".into(),
+        reply: leon_king::coordinator::Reply {
+            choice: Some("d.1".into()),
+            ..Default::default()
+        },
+    }));
 }
 
 fn king_field(h: &Harness, cx: &mut TestAppContext) -> String {
@@ -650,6 +660,38 @@ fn what_is_dictated_is_written_in_kings_field(cx: &mut TestAppContext) {
             text: "revisa los tests".into()
         }]
     );
+}
+
+#[gpui_kit::test]
+fn with_no_speech_model_king_lists_them_and_voice_is_not_said_to_king(cx: &mut TestAppContext) {
+    let (h, end) = with_conversation(cx, json!([]));
+    // `/voice` is Leon's: it lists them, and King is told nothing.
+    h.type_text("/voice", cx);
+    h.press("enter", cx);
+    assert!(h.shows("king-voices", cx));
+    assert_eq!(king_field(&h, cx), "");
+    assert!(serve(&h, &end, cx, |_| Value::Null).is_empty());
+    h.mouse_on("king-voices-close".into(), gpui_kit::MouseButton::Left, cx);
+    assert!(!h.shows("king-voices", cx));
+    // Dictating with none lists them too.
+    h.mouse_on("king-dictate-brain".into(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(h.voice.0.lock().unwrap().open, 0);
+    assert!(h.shows("king-voices", cx));
+    // One chosen is downloaded, and dictation uses it.
+    // English has models of its own; the rest share the others.
+    let base = ["base.en", "base"]
+        .into_iter()
+        .find(|id| h.shows_dynamic(format!("king-voice-{id}"), cx))
+        .expect("a model is listed");
+    h.mouse_on(
+        format!("king-voice-{base}"),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
+    h.settle(cx);
+    assert_eq!(h.voice.0.lock().unwrap().installed, [base]);
+    h.mouse_on("king-dictate-brain".into(), gpui_kit::MouseButton::Left, cx);
+    assert_eq!(h.voice.0.lock().unwrap().open, 1);
 }
 
 #[gpui_kit::test]
