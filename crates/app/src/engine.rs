@@ -2548,6 +2548,25 @@ impl Engine {
         })
     }
 
+    /// Asks GitHub at once for the open pull requests of `project`, whatever
+    /// the once-a-minute allowance: a turn just ended, and its agent may have
+    /// opened one. The worktrees are read first, for a branch just made.
+    /// Quiet, as [`Engine::check_pull_requests`].
+    pub fn check_open_pull_requests(&self, project: ProjectId) -> JoinHandle<()> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            if let Err(error) = engine.sync_worktrees_if_changed(&project).await {
+                tracing::debug!(%error, "could not check the worktrees");
+            }
+            let Ok(project) = engine.inner.store.project(&project) else {
+                return;
+            };
+            if let Err(error) = engine.probe_open_pull_requests(&project, None).await {
+                tracing::debug!(%error, "could not check the pull requests");
+            }
+        })
+    }
+
     /// Asks git for the branches of `project` (local and remote-tracking),
     /// for a worktree's base to choose from. Quiet on failure: the field
     /// stays free text.

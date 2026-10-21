@@ -94,10 +94,33 @@ impl Shell {
                         .children(questions)
                         .children(self.chat_menu(id, chat, colours, cx))
                         .child(self.chat_composer(id, chat, colours, cx))
-                        .child(chat_foot(id, chat, colours)),
+                        .child(chat_foot(
+                            id,
+                            chat,
+                            self.chat_pull_request(id, chat, colours, cx),
+                            colours,
+                        )),
                 )
                 .into_any_element(),
         )
+    }
+
+    /// The open pull request of the branch a conversation works on, whose
+    /// number opens it; `None` when GitHub knows of none for its folder.
+    fn chat_pull_request(
+        &self,
+        id: LiveId,
+        chat: &Chat,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let pull_request = self.snapshot.pull_request_at(&chat.machine, &chat.cwd)?;
+        Some(pull_request_chip(
+            format!("chat-pr-{}", id.0),
+            pull_request,
+            colours,
+            cx,
+        ))
     }
 
     /// A conversation nothing was said in yet: the lion, and what can be
@@ -924,8 +947,8 @@ fn chat_status(id: LiveId, chat: &Chat, colours: &Palette) -> Option<AnyElement>
 }
 
 /// The line under the field: the agent, the folder, and what the
-/// conversation cost and took so far.
-fn chat_foot(id: LiveId, chat: &Chat, colours: &Palette) -> Div {
+/// conversation cost and took so far, then its branch's pull request.
+fn chat_foot(id: LiveId, chat: &Chat, pull_request: Option<AnyElement>, colours: &Palette) -> Div {
     let mut parts = vec![format::agent_tag(chat.agent).to_owned()];
     if let Some(account) = &chat.account {
         parts.push(format::account_tag(account));
@@ -958,7 +981,45 @@ fn chat_foot(id: LiveId, chat: &Chat, colours: &Palette) -> Div {
                 .text_color(colours.text_faint)
                 .child(parts.join("  \u{b7}  ")),
         )
+        .children(pull_request)
         .child(mono("BETA").text_color(colours.text_faint))
+}
+
+/// A pull request as one mono line, `PR #123 · APPROVED · CHECKS PASSING`,
+/// coloured by its checks; a click opens it. `name` is its selector.
+pub(super) fn pull_request_chip(
+    name: String,
+    pull_request: &leon_core::PullRequest,
+    colours: &Palette,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    let tone = super::checkout::pull_request_tone(pull_request);
+    let colour = super::widgets::checkout_colour(tone, colours);
+    let words = format!(
+        "PR {}",
+        super::checkout::pull_request_words(pull_request).to_uppercase()
+    );
+    let chip = mono(words).min_w_0().truncate().text_color(colour);
+    let Some(url) = super::checkout::openable_url(pull_request) else {
+        return chip.debug_selector(move || name.clone()).into_any_element();
+    };
+    let url = url.to_owned();
+    let tip: SharedString = format!("Open {url}").into();
+    let hover = colours.surface_2;
+    chip.id(SharedString::from(name.clone()))
+        .debug_selector(move || name.clone())
+        .px(px(4.))
+        .rounded(metrics::RADIUS())
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover))
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+        })
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            cx.stop_propagation();
+            (this.options.open_url)(cx, &url);
+        }))
+        .into_any_element()
 }
 
 /// A folder as the foot of a conversation names it: its last two parts, which

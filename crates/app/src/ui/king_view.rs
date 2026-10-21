@@ -1729,7 +1729,9 @@ impl Shell {
     }
 
     /// What shows a worker's work is right: its last check, and its pull
-    /// request's CI, which opens on a click.
+    /// request's CI, which opens on a click. A pull request King did not
+    /// open (the worker did, or the person) is the one GitHub has for the
+    /// worker's branch.
     fn king_evidence(
         &self,
         worker: &WorkerStatus,
@@ -1743,7 +1745,23 @@ impl Shell {
                     .map(|index| (run.id, run.place(index), run.state))
             })
         });
-        if worker.check.is_none() && worker.pull_request.is_none() && step.is_none() {
+        let branch_pull_request = worker
+            .pull_request
+            .is_none()
+            .then(|| {
+                let machine = worker
+                    .machine
+                    .clone()
+                    .map(leon_core::MachineId::from_string)
+                    .unwrap_or_else(leon_core::MachineId::local);
+                self.snapshot.pull_request_at(&machine, &worker.cwd)
+            })
+            .flatten();
+        if worker.check.is_none()
+            && worker.pull_request.is_none()
+            && branch_pull_request.is_none()
+            && step.is_none()
+        {
             return None;
         }
         let now = (self.options.now)().timestamp_millis().max(0) as u64;
@@ -1817,6 +1835,14 @@ impl Shell {
                     }))
                     .child(mono(format!("PR {} · {ci}", pr.name())).text_color(colour)),
             );
+        }
+        if let Some(pull_request) = branch_pull_request {
+            row = row.child(super::chat_view::pull_request_chip(
+                format!("king-pr-{id}"),
+                pull_request,
+                c,
+                cx,
+            ));
         }
         Some(row.into_any_element())
     }

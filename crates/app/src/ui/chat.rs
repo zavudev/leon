@@ -629,12 +629,14 @@ impl Shell {
         };
         let follow = chat.at_end();
         let before = (chat.state(), chat.activity(), chat.label());
+        let mut finished = false;
         for event in events {
             if let TurnEvent::ModeChanged { mode } = &event {
                 chat.mode = Some(mode.clone());
             }
             if matches!(event, TurnEvent::Finished { .. }) {
                 chat.seen = on_screen;
+                finished = true;
             }
             chat.conversation.apply(event);
         }
@@ -643,6 +645,17 @@ impl Shell {
         }
         if before != (chat.state(), chat.activity(), chat.label()) {
             self.rebuild_rows();
+        }
+        // The agent may have opened a pull request: its branch's is asked
+        // for now, not at the next minute, for the foot to show it.
+        let project = self
+            .chats
+            .get(&id)
+            .filter(|_| finished)
+            .and_then(|chat| self.snapshot.worktree_at(&chat.machine, &chat.cwd))
+            .map(|worktree| worktree.project_id.clone());
+        if let Some(project) = project {
+            self.engine.check_open_pull_requests(project);
         }
         cx.notify();
     }
