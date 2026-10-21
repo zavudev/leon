@@ -198,7 +198,8 @@ impl Shell {
                 }
             });
         }
-        if let Some(status) = chat_status(id, chat, colours) {
+        let now = (self.options.now)().timestamp_millis().max(0) as u64;
+        if let Some(status) = chat_status(id, chat, now, colours) {
             list = list.child(status);
         }
         let scrolling = div()
@@ -952,13 +953,21 @@ fn column() -> Div {
 }
 
 /// What the agent is doing, under the last thing it did, while a turn is in
-/// flight.
-fn chat_status(id: LiveId, chat: &Chat, colours: &Palette) -> Option<AnyElement> {
+/// flight: a spinner that turns while it works, as King's does, and how long
+/// the turn has gone on (`now` in milliseconds since the epoch).
+fn chat_status(id: LiveId, chat: &Chat, now: u64, colours: &Palette) -> Option<AnyElement> {
     let (light, words) = match chat.conversation.phase() {
         Phase::Idle => return None,
-        Phase::Starting => (colours.text_faint, "STARTING"),
-        Phase::Working => (colours.success, "WORKING"),
-        Phase::Asking => (colours.warning, "WAITING FOR YOUR ANSWER"),
+        Phase::Starting => (None, "STARTING"),
+        Phase::Working => (None, "WORKING"),
+        Phase::Asking => (Some(colours.warning), "WAITING FOR YOUR ANSWER"),
+    };
+    let sign = match light {
+        Some(light) => led(light).into_any_element(),
+        None => mono(super::king_view::spinner_frame())
+            .debug_selector(move || format!("chat-spinner-{}", id.0))
+            .text_color(colours.signal)
+            .into_any_element(),
     };
     Some(
         div()
@@ -966,8 +975,14 @@ fn chat_status(id: LiveId, chat: &Chat, colours: &Palette) -> Option<AnyElement>
             .flex()
             .items_center()
             .gap(px(8.))
-            .child(led(light))
+            .child(sign)
             .child(mono(words).text_color(colours.text_muted))
+            .children(chat.since.map(|since| {
+                mono(leon_king::report::span(
+                    (now.saturating_sub(since) / 1000) as i64,
+                ))
+                .text_color(colours.text_faint)
+            }))
             .into_any_element(),
     )
 }

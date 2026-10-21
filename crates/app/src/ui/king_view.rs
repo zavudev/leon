@@ -151,7 +151,7 @@ pub(super) const SPIN: std::time::Duration = std::time::Duration::from_millis(10
 
 /// The spinner's frame now: the clock picks it, so every spinner on screen
 /// turns together, and the view only has to be drawn again.
-fn spinner_frame() -> &'static str {
+pub(super) fn spinner_frame() -> &'static str {
     let ticks = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_millis() / SPIN.as_millis());

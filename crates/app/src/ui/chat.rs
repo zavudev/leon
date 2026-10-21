@@ -92,6 +92,10 @@ pub struct Chat {
     turn: Option<Turn>,
     /// Reads what the turn in flight prints.
     reader: Option<Task<()>>,
+    /// When the turn in flight started, in milliseconds since the epoch.
+    pub since: Option<u64>,
+    /// Draws the conversation again while its turn goes on, for its spinner.
+    spin: Option<Task<()>>,
     /// Asks the agent what it offers.
     probe: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -302,6 +306,8 @@ impl Shell {
                 seen: true,
                 turn: None,
                 reader: None,
+                since: None,
+                spin: None,
                 probe: None,
                 _subscriptions: vec![subscription, narrowed],
             },
@@ -562,6 +568,7 @@ impl Shell {
         match started {
             Ok((turn, output, events)) => {
                 chat.conversation.sent(&prompt);
+                chat.since = Some(unique);
                 chat.turn = Some(turn);
                 chat.reader = Some(cx.spawn(async move |this, cx| {
                     while let Ok(said) = output.recv_async().await {
@@ -577,6 +584,7 @@ impl Shell {
                 }));
                 chat.scroll.scroll_to_bottom();
                 self.chat_events(id, events, cx);
+                self.chat_spin(id, cx);
             }
             Err(error) => {
                 chat.conversation.said(&prompt);
@@ -587,6 +595,35 @@ impl Shell {
                 cx.notify();
             }
         }
+    }
+
+    /// Keeps a conversation's spinner turning while its turn goes on: it is
+    /// drawn again every frame, and the loop ends with the turn.
+    fn chat_spin(&mut self, id: LiveId, cx: &mut Context<Self>) {
+        let Some(chat) = self.chats.get_mut(&id) else {
+            return;
+        };
+        if chat.spin.is_some() {
+            return;
+        }
+        chat.spin = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(super::king_view::SPIN).await;
+            let going = this.update(cx, |this, cx| {
+                let Some(chat) = this.chats.get_mut(&id) else {
+                    return false;
+                };
+                let going = chat.conversation.running();
+                if going {
+                    cx.notify();
+                } else {
+                    chat.spin = None;
+                }
+                going
+            });
+            if !going.unwrap_or(false) {
+                return;
+            }
+        }));
     }
 
     /// The process of a conversation's turn said something.
