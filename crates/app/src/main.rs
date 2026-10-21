@@ -117,7 +117,7 @@ fn main() {
                 #[cfg(not(unix))]
                 {
                     let _ = data_dir;
-                    return None;
+                    None
                 }
             },
         ));
