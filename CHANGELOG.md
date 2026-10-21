@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-21
+
+### Added
+
+* In a conversation of Leon's own interface: a **LATEST** button over the
+  foot of a conversation scrolled up, which goes to the newest (in King's
+  too); an image pasted from the clipboard (Ctrl+V, Cmd+V on macOS) is
+  attached as a file the agent opens; the foot shows the open pull request
+  of the branch the conversation works on (`PR #123 · CHECKS PASSING`, a
+  click opens it), asked of GitHub as soon as a turn ends; and a turn at
+  work turns a spinner and says for how long, as King's does.
+* King: what each brain report cost and the agents' usage windows live in
+  the side column, under the history, not in the conversation. A worker's
+  question is King's to answer: it shows as **KING DECIDES**, with **DECIDE
+  MYSELF** to open the worker and answer it yourself. `/voice` and the
+  microphone list the speech models to download when none is installed.
+* King shows the pull request of a worker's branch even when King did not
+  open it (the worker ran `gh` itself).
+* The phone app 0.11.0, with push notifications through Firebase.
+
+### Changed
+
+* King's conversation goes on however long it grows: `compact_at_tokens`
+  is `0` by default, so it is no longer put away for a new one when a turn
+  reads many tokens. Set it in `king.toml` to have it compacted again.
+* Dictation in a conversation's field is a microphone icon instead of the
+  word DICTATE.
+
+### Fixed
+
+* **Bypass permissions** chosen in the middle of a Claude Code conversation
+  takes effect: Claude is started allowing it, and a mode the agent refuses
+  is said in the conversation instead of being silently kept.
+* What went wrong with dictation no longer runs over the foot of the field,
+  and a long permission rule in a question is cut.
+
 ## [0.11.0] - 2026-10-20
 
 ### Added
