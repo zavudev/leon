@@ -5,10 +5,15 @@ use crate::theme::{fonts, metrics, px, Palette};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{Sizable, Size};
 use gpui_kit::prelude::*;
-use gpui_kit::{div, App, Div, FontWeight, Hsla, Pixels, SharedString};
+use gpui_kit::{
+    div, AnyElement, App, ClickEvent, Context, Div, FontWeight, Hsla, Pixels, ScrollHandle,
+    SharedString, Stateful,
+};
 use leon_mark::{AnimatedMark, Mood};
 
 use super::activity::Activity;
+use super::shell::Shell;
+use crate::icons::{icon, IconName};
 
 /// A mono label: the theme's mono font at the label size, semibold as the
 /// brand sets small caps. Callers pass the text already in the case they want.
@@ -205,4 +210,71 @@ pub fn activity_dot(activity: Activity, palette: &Palette) -> Div {
 /// leaves 16 px for the same line and cuts the bottom of the letters.
 pub fn text_input(state: &gpui_kit::Entity<InputState>) -> Input {
     Input::new(state).with_size(Size::Small).appearance(false)
+}
+
+/// Whether what `scroll` shows reaches its end, near enough.
+pub(super) fn at_end(scroll: &ScrollHandle) -> bool {
+    scroll.max_offset().y + scroll.offset().y < px(48.)
+}
+
+/// A conversation's `scrolling` list, with a button over its foot that goes
+/// to the newest of it while it is scrolled up; `name` is the button's
+/// selector.
+pub(super) fn with_latest(
+    scrolling: Stateful<Div>,
+    scroll: &ScrollHandle,
+    name: String,
+    c: &Palette,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    let hover = c.surface_2;
+    let away = !at_end(scroll);
+    let to = scroll.clone();
+    div()
+        .relative()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .flex()
+        .flex_col()
+        // Drawn again as it scrolls, so the button comes and goes.
+        .child(scrolling.on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify())))
+        .when(away, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .bottom(px(12.))
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .id(SharedString::from(name.clone()))
+                            .debug_selector(move || name.clone())
+                            .h(px(26.))
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .rounded(metrics::RADIUS())
+                            .border_1()
+                            .border_color(c.elevated_border)
+                            .bg(c.surface)
+                            .shadow_md()
+                            .text_color(c.text_muted)
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(hover))
+                            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                                // At once, not at the next layout, so the
+                                // button is gone when it is drawn again.
+                                to.set_offset(gpui_kit::point(px(0.), -to.max_offset().y));
+                                cx.notify();
+                            }))
+                            .child(icon(IconName::ChevronDown, px(12.), c.text_muted))
+                            .child(mono("LATEST")),
+                    ),
+            )
+        })
+        .into_any_element()
 }

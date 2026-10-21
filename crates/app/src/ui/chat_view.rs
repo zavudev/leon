@@ -27,7 +27,7 @@ use super::chat::Chat;
 use super::chat_menu::MenuKind;
 use super::live::LiveId;
 use super::shell::Shell;
-use super::widgets::{key_cap, led, mark, mono, Lion};
+use super::widgets::{key_cap, led, mark, mono, with_latest, Lion};
 use crate::chat::model::{
     blocks, cost_text, duration_text, work_label, Block, Item, Phase, Question, Tone, Tool,
 };
@@ -201,7 +201,7 @@ impl Shell {
         if let Some(status) = chat_status(id, chat, colours) {
             list = list.child(status);
         }
-        div()
+        let scrolling = div()
             .id(SharedString::from(format!("chat-scroll-{}", id.0)))
             .debug_selector(move || format!("chat-scroll-{}", id.0))
             .track_scroll(&chat.scroll)
@@ -209,8 +209,14 @@ impl Shell {
             .flex_1()
             .min_h_0()
             .w_full()
-            .child(list)
-            .into_any_element()
+            .child(list);
+        with_latest(
+            scrolling,
+            &chat.scroll,
+            format!("chat-latest-{}", id.0),
+            colours,
+            cx,
+        )
     }
 
     /// A message or a notice.

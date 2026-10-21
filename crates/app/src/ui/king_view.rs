@@ -28,7 +28,7 @@ use super::activity::Activity;
 use super::chat_voice::Field;
 use super::king::{picks, Pick, Tone};
 use super::shell::Shell;
-use super::widgets::{activity_dot, led, mark, mono, Lion};
+use super::widgets::{activity_dot, led, mark, mono, with_latest, Lion};
 use crate::icons::{agent_icon, icon, IconName};
 use crate::theme::{fonts, metrics, px, Palette};
 
@@ -530,7 +530,8 @@ impl Shell {
                     })),
             );
         }
-        div()
+        let latest = format!("king-latest-{key}");
+        let scrolling = div()
             .id(SharedString::from(format!("king-scroll-{key}")))
             .debug_selector(move || format!("king-scroll-{key}"))
             .track_scroll(scroll)
@@ -538,8 +539,8 @@ impl Shell {
             .flex_1()
             .min_h_0()
             .w_full()
-            .child(list)
-            .into_any_element()
+            .child(list);
+        with_latest(scrolling, scroll, latest, c, cx)
     }
 
     /// A conversation nothing was said in yet.
