@@ -877,7 +877,10 @@ fn a_pull_request_king_did_not_open_is_the_one_of_the_workers_branch(cx: &mut Te
     let mut own = worker(1, "done", None);
     own["cwd"] = json!(worktree.path);
     own["machine"] = json!(project.machine_id.as_str());
-    tell_status(&end, status(Some(2), json!([own, worker(2, "working", None)])));
+    tell_status(
+        &end,
+        status(Some(2), json!([own, worker(2, "working", None)])),
+    );
     h.settle(cx);
     assert!(h.shows_dynamic("king-pr-1".into(), cx), "its branch's");
     assert!(

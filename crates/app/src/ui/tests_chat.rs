@@ -1029,7 +1029,9 @@ fn a_turn_that_ends_asks_github_for_its_branchs_pull_request_at_once(cx: &mut Te
         .map(|call| format!("{} {}", call.program, call.args.join(" ")))
         .collect();
     assert!(
-        asked.iter().any(|call| call.contains("remote") && call.contains("origin")),
+        asked
+            .iter()
+            .any(|call| call.contains("remote") && call.contains("origin")),
         "where its origin is, for GitHub: {asked:?}"
     );
 }

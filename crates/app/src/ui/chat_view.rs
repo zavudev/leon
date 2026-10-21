@@ -948,12 +948,7 @@ fn chat_status(id: LiveId, chat: &Chat, colours: &Palette) -> Option<AnyElement>
 
 /// The line under the field: the agent, the folder, and what the
 /// conversation cost and took so far, then its branch's pull request.
-fn chat_foot(
-    id: LiveId,
-    chat: &Chat,
-    pull_request: Option<AnyElement>,
-    colours: &Palette,
-) -> Div {
+fn chat_foot(id: LiveId, chat: &Chat, pull_request: Option<AnyElement>, colours: &Palette) -> Div {
     let mut parts = vec![format::agent_tag(chat.agent).to_owned()];
     if let Some(account) = &chat.account {
         parts.push(format::account_tag(account));
@@ -1004,14 +999,9 @@ pub(super) fn pull_request_chip(
         "PR {}",
         super::checkout::pull_request_words(pull_request).to_uppercase()
     );
-    let chip = mono(words)
-        .min_w_0()
-        .truncate()
-        .text_color(colour);
+    let chip = mono(words).min_w_0().truncate().text_color(colour);
     let Some(url) = super::checkout::openable_url(pull_request) else {
-        return chip
-            .debug_selector(move || name.clone())
-            .into_any_element();
+        return chip.debug_selector(move || name.clone()).into_any_element();
     };
     let url = url.to_owned();
     let tip: SharedString = format!("Open {url}").into();
