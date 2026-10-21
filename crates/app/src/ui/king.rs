@@ -369,6 +369,8 @@ pub struct KingUi {
     pub(super) watching: bool,
     /// The last thing King's service had for the person.
     pub note: Option<(String, String)>,
+    /// The list of speech models is open over King's field.
+    pub voices: bool,
     /// What the main pane showed before, to put back.
     pub back: Option<(Main, Pane)>,
     asked: HashMap<u64, Asked>,
@@ -403,6 +405,7 @@ impl Default for KingUi {
             attached: HashMap::new(),
             watching: false,
             note: None,
+            voices: false,
             back: None,
             asked: HashMap::new(),
             next_tag: 1,
@@ -548,7 +551,8 @@ impl Shell {
         );
     }
 
-    /// The question the keys answer: the open worker's, else King's.
+    /// The question the keys answer: the open worker's, else King's. The
+    /// other workers' questions are King's to answer.
     pub(super) fn king_question_in_view(&self) -> Option<(Target, &Open)> {
         let status = self.king_ui.status.as_ref()?;
         if let Some(id) = self.king_ui.open {
@@ -562,17 +566,6 @@ impl Shell {
             .questions
             .first()
             .map(|open| (Target::Brain, open))
-            .or_else(|| {
-                // Else the first question a worker waits on: they are
-                // drawn under King's, oldest worker first.
-                status.workers.iter().find_map(|worker| {
-                    worker
-                        .conversation
-                        .questions
-                        .first()
-                        .map(|open| (Target::Worker(worker.id), open))
-                })
-            })
     }
 
     /// The fields the person writes in, made the first time the view opens.
@@ -1066,6 +1059,15 @@ impl Shell {
             return;
         };
         let typed = input.read(cx).value().trim().to_owned();
+        // Dictation is Leon's own: its models are listed here, not asked of
+        // King.
+        if typed.eq_ignore_ascii_case("/voice") {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+            self.dictation.installed = self.options.voice.installed();
+            self.king_ui.voices = true;
+            cx.notify();
+            return;
+        }
         let files = self
             .king_ui
             .attached

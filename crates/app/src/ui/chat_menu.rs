@@ -283,7 +283,7 @@ impl Shell {
                 self.dictation.installed = self.options.voice.installed();
                 self.chat_open_menu(id, MenuKind::Voices, window, cx);
             }
-            Pick::Voice(model) => self.dictation_choose(id, &model, window, cx),
+            Pick::Voice(model) => self.dictation_choose(Some(id), &model, window, cx),
             Pick::Modes => {
                 self.chat_write(id, None, window, cx);
                 self.chat_open_menu(id, MenuKind::Modes, window, cx);
