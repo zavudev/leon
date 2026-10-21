@@ -148,8 +148,7 @@ impl Chat {
 
     /// Whether the conversation is scrolled to its end, give or take a line.
     fn at_end(&self) -> bool {
-        let end = self.scroll.max_offset().y;
-        end + self.scroll.offset().y < gpui_kit::px(48.)
+        super::widgets::at_end(&self.scroll)
     }
 }
 

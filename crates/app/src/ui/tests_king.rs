@@ -695,6 +695,51 @@ fn with_no_speech_model_king_lists_them_and_voice_is_not_said_to_king(cx: &mut T
 }
 
 #[gpui_kit::test]
+fn scrolled_up_a_button_goes_to_the_newest(cx: &mut TestAppContext) {
+    let (h, end) = with_conversation(cx, json!([]));
+    end.tell
+        .send(Heard::Notice(
+            serde_json::from_value::<Notice>(json!({
+                "notice": "changed", "status": status(Some(80), json!([])),
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    serve(&h, &end, cx, |_| {
+        Value::Array(
+            (3..=80)
+                .map(|seq| {
+                    json!({"seq": seq, "at_ms": 0, "kind": "agent",
+                                  "text": "A long answer.\n\nWith a second paragraph."})
+                })
+                .collect(),
+        )
+    });
+    let scroll = |to_top: bool, cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            h.shell.update(cx, |shell, cx| {
+                if to_top {
+                    shell
+                        .king_ui
+                        .scroll
+                        .set_offset(gpui_kit::point(px(0.), px(0.)));
+                } else {
+                    shell.king_ui.scroll.scroll_to_bottom();
+                }
+                cx.notify();
+            })
+        });
+        h.settle(cx);
+    };
+    scroll(false, cx);
+    assert!(!h.shows_dynamic("king-latest-brain".into(), cx));
+    scroll(true, cx);
+    assert!(h.shows_dynamic("king-latest-brain".into(), cx));
+    h.mouse_on("king-latest-brain".into(), gpui_kit::MouseButton::Left, cx);
+    assert!(!h.shows_dynamic("king-latest-brain".into(), cx));
+}
+
+#[gpui_kit::test]
 fn what_a_turn_left_running_is_listed_and_stopped(cx: &mut TestAppContext) {
     let (h, end) = with_conversation(cx, json!([]));
     let mut now = status(Some(2), json!([]));
