@@ -402,11 +402,14 @@ mod tests {
         assert_eq!(shell.command, None);
         assert!(!pty.terminate_foreground(), "nobody is in front to ask");
         pty.write(b"cat\n".to_vec());
+        // The shell's child takes the terminal before it becomes `cat`: until
+        // its exec it is still named `sh`, so the name is waited for too.
         wait_for("cat to take the terminal", || {
-            pty.foreground().is_some_and(|f| !f.shell_in_front)
+            pty.foreground().is_some_and(|f| {
+                !f.shell_in_front
+                    && (cfg!(not(target_os = "linux")) || f.command.as_deref() == Some("cat"))
+            })
         });
-        #[cfg(target_os = "linux")]
-        assert_eq!(pty.foreground().unwrap().command.as_deref(), Some("cat"));
         assert!(pty.terminate_foreground(), "SIGTERM reached cat");
         wait_for("the shell to get the terminal back", || {
             pty.foreground().is_some_and(|f| f.shell_in_front)

@@ -1086,3 +1086,23 @@ fn what_went_wrong_with_dictation_never_covers_the_fields_foot(cx: &mut TestAppC
         "{problem:?} over {dictate:?}"
     );
 }
+
+#[gpui_kit::test]
+fn a_turn_at_work_turns_a_spinner_and_says_for_how_long(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "work");
+    assert!(h.shows("chat-spinner-1", cx), "starting turns it");
+    prints(&h, cx, &[INIT, BASH]);
+    assert!(h.shows("chat-spinner-1", cx), "working turns it");
+    h.shell(cx, |shell| assert!(shell.chats[&LiveId(1)].since.is_some()));
+    prints(&h, cx, &[SAID, RESULT]);
+    exits(&h, cx, 0);
+    assert!(
+        !h.shows("chat-status-1", cx),
+        "a turn that ended says nothing"
+    );
+    assert!(!h.shows("chat-spinner-1", cx));
+}
