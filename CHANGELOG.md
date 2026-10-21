@@ -2,6 +2,60 @@
 
 ## [Unreleased]
 
+### Added
+
+* **King Leon**, one agent that answers for every project Leon knows, as a
+  principal engineer would (`docs/KING.md`). King is a conversation with an
+  agent you choose (Claude Code, Codex, opencode, Grok or Cursor's agent) in a
+  service that runs without the window: `leon king say`, `status`, `log`,
+  `start`, `tell`, `stop`, `release`, `answer`, `brain`, and `leon king
+  service install` to keep it going with the window closed, from login on
+  (macOS and Linux). King answers short questions itself and gives long
+  investigations and changes of code to **workers**: other agents, each in a
+  worktree and on a branch of its own, on the agent and model that cost
+  least for the job (tiers in `king.toml`, measured against each agent's
+  usage windows and a daily budget). A plan goes to the best models. Leon
+  wakes King when a worker finishes, fails or asks, and answers the
+  workers' routine questions itself. King never merges, never pushes to a
+  default branch and never forces a push.
+* Evidence before a pull request: King runs the project's own check on the
+  worker's last commit (`worktree_check`), opens the pull request only when
+  it passed (`pr_open`, with what was run in the description), then watches
+  its CI and has the worker fix what fails.
+* **The King** in the window (Ctrl+Shift+Alt+K): King's conversation, with
+  images, files and dictation in its field, the questions of King and its
+  workers as cards to answer, a report under every answer (tokens, speed,
+  cost, the day's spending and each agent's usage window), past
+  conversations, and the workers as cards whose conversation opens live, to
+  write to, stop or take over as a session of the window. King's workers
+  are lions of the Den, and the terminals King opens for you (a dev server,
+  a watcher) open as sessions of the window.
+* **Runs**: a task of the board carried out as its steps. A task's steps
+  are tasks with a parent and the steps they need first (`leon task edit
+  <step> --parent <task> --need <other>`); `leon king run <task>`, **Run its
+  steps** on the board or King starts them, one worker per step, each on
+  the branch of the steps it builds on, each checked before the next.
+* Workers on other machines: a project reached over SSH or on a paired
+  computer gets its workers there, with its worktree, its agent, its check
+  and its pull request on that machine, and Leon's memory in its
+  instructions. Agents that only run in a terminal (Kimi, ZCode,
+  Antigravity…) can be workers too: they open in a terminal of the window,
+  with the task on their command line when they take one.
+* King on the phone: a paired computer's screen has a King row, with King's
+  conversation, its workers and its runs, followed live; questions are
+  answered, workers told more, interrupted or stopped, and runs started,
+  continued or cancelled from there. The setting "King's notices while
+  closed" sends King's notices through Expo's push service while the
+  application is closed (off until you turn it on).
+* A conversation in Leon's own interface, in the window and on the phone,
+  says the tokens of its last turn and how fast they were written.
+* Antigravity takes its first prompt on its launch line
+  (`--prompt-interactive`), so the prompt flow and King start it on its
+  task.
+
+The database moves to version 23 (a task's parent and the steps it needs):
+an earlier Leon does not open it after this one has.
+
 ### Fixed
 
 * opencode's limits are read with the OpenCode Console sign-in too. OpenCode 2

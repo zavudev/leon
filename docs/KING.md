@@ -12,9 +12,9 @@ King is a conversation with a coding agent you choose: Claude Code, Codex,
 opencode, Grok or Cursor's agent. Leon gives that agent King's tools and
 keeps the conversation in a service that runs without the window.
 
-> Status: the service, the command line, King's tools and the window's King
-> view work on macOS and Linux. Workers on other machines and the phone's
-> screen come next (see "Not built yet").
+> Status: the service, the command line, King's tools, the window's King
+> view, workers on other machines and the phone's screen work on macOS and
+> Linux. King's service does not run on Windows yet.
 
 ## Talking to King
 
