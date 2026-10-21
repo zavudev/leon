@@ -328,6 +328,13 @@ impl Conversation {
                 self.questions.retain(|question| question.id != id);
             }
             TurnEvent::ModeChanged { mode } => self.mode = Some(mode),
+            TurnEvent::ModeRefused { mode, reason } => self.items.push(Item::Notice {
+                tone: Tone::Bad,
+                text: format!(
+                    "It kept its mode instead of {mode}: {}. The next message starts in {mode}.",
+                    reason.trim_end_matches('.')
+                ),
+            }),
             TurnEvent::Finished {
                 ok,
                 error,
@@ -659,6 +666,29 @@ mod tests {
             Some(&Item::Notice {
                 tone: Tone::Plain,
                 text: "Stopped.".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_mode_the_agent_refuses_is_said_and_keeps_its_own() {
+        let mut conversation = Conversation::new();
+        conversation.sent("go");
+        conversation.apply(TurnEvent::ModeChanged {
+            mode: "default".into(),
+        });
+        conversation.apply(TurnEvent::ModeRefused {
+            mode: "bypassPermissions".into(),
+            reason: "Not launched for it".into(),
+        });
+        assert_eq!(conversation.mode.as_deref(), Some("default"));
+        assert_eq!(
+            conversation.items.last(),
+            Some(&Item::Notice {
+                tone: Tone::Bad,
+                text: "It kept its mode instead of bypassPermissions: Not launched for it. \
+                       The next message starts in bypassPermissions."
+                    .into()
             })
         );
     }

@@ -6,6 +6,7 @@
 //! ```text
 //! claude -p --input-format stream-json --output-format stream-json --verbose
 //!        --include-partial-messages --permission-prompt-tool stdio
+//!        --allow-dangerously-skip-permissions
 //!        [--resume <id>] [--permission-mode <mode>] [--model <model>]
 //!        [--effort <level>] [--add-dir <dir>…]
 //! ```
@@ -17,6 +18,8 @@
 //! * `{"type":"user","message":{"role":"user","content":[{"type":"text",…}]}}`
 //!   for the prompt, and again to say more while it works (it is queued);
 //! * `control_request`s `interrupt`, `set_permission_mode`, `set_model`;
+//!   it refuses `bypassPermissions` to a process not started with
+//!   `--allow-dangerously-skip-permissions`, which only lets it be chosen;
 //! * `{"type":"control_response","response":{"subtype":"success","request_id":…,
 //!   "response":{…}}}` to answer what the agent asks.
 //!
@@ -69,6 +72,9 @@ pub fn argv(turn: &TurnSpec<'_>) -> Vec<String> {
         "--include-partial-messages",
         "--permission-prompt-tool",
         "stdio",
+        // Lets the person switch to bypassing permissions while it works;
+        // it bypasses nothing by itself.
+        "--allow-dangerously-skip-permissions",
     ]);
     for (flag, value) in [
         ("--resume", turn.resume),
@@ -102,6 +108,7 @@ pub fn session(unique: u64) -> Box<dyn AgentSession> {
         quiet_tools: HashSet::new(),
         unique,
         mode: None,
+        modes_asked: BTreeMap::new(),
         idle: false,
         interrupting: false,
     })
@@ -178,6 +185,8 @@ struct ClaudeSession {
     unique: u64,
     /// The permission mode last heard of.
     mode: Option<String>,
+    /// The modes asked for and not yet taken, by request id.
+    modes_asked: BTreeMap<String, String>,
     /// The last prompt was answered and none is queued.
     idle: bool,
     /// An interrupt was asked for: the next failed result is its doing.
@@ -194,6 +203,20 @@ impl ClaudeSession {
         if self.asked.remove(id).is_some() {
             step.events
                 .push(TurnEvent::QuestionResolved { id: id.to_owned() });
+        }
+    }
+
+    /// The agent's answer to one of this client's requests. A mode it
+    /// refuses is said, since the person chose it.
+    fn answered(&mut self, response: &Value, step: &mut Step) {
+        let Some(mode) = self.modes_asked.remove(&text_of(&response["request_id"])) else {
+            return;
+        };
+        if response["subtype"] == "error" {
+            step.events.push(TurnEvent::ModeRefused {
+                mode,
+                reason: text_of(&response["error"]),
+            });
         }
     }
 
@@ -460,7 +483,10 @@ impl AgentSession for ClaudeSession {
                 self.resolve(&id, step);
                 return;
             }
-            Some("control_response") => return,
+            Some("control_response") => {
+                self.answered(&value["response"], step);
+                return;
+            }
             _ => {}
         }
         if !value["parent_tool_use_id"].is_null() {
@@ -578,6 +604,7 @@ impl AgentSession for ClaudeSession {
             }
             Action::SetMode(mode) => {
                 let id = self.next_id("mode");
+                self.modes_asked.insert(id.clone(), mode.clone());
                 Outgoing {
                     tag: format!("m.{id}"),
                     line: control_request(
@@ -920,6 +947,7 @@ mod tests {
                 "--include-partial-messages",
                 "--permission-prompt-tool",
                 "stdio",
+                "--allow-dangerously-skip-permissions",
                 "--resume",
                 "abc",
                 "--permission-mode",
@@ -936,7 +964,7 @@ mod tests {
             program: "claude",
             ..TurnSpec::default()
         });
-        assert_eq!(plain.len(), 10);
+        assert_eq!(plain.len(), 11);
     }
 
     #[test]
@@ -1387,6 +1415,46 @@ mod tests {
         let model = session.encode(Action::SetModel("opus".into())).unwrap();
         assert_eq!(sent(&model)["request"]["model"], "opus");
         assert_ne!(change[0].tag, model[0].tag);
+    }
+
+    /// What Claude Code 2.1.306 answered to switching to bypassing
+    /// permissions, in a process started without the flag that allows it.
+    const BYPASS_REFUSED: &str = "Cannot set permission mode to bypassPermissions because \
+                                  the session was not launched with --dangerously-skip-permissions";
+
+    #[test]
+    fn a_mode_it_refuses_is_said_and_one_it_takes_is_not() {
+        let mut session = fresh();
+        let taken = session.encode(Action::SetMode("plan".into())).unwrap();
+        let refused = session
+            .encode(Action::SetMode("bypassPermissions".into()))
+            .unwrap();
+        let answer = |request: &[Outgoing], subtype: &str| {
+            json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": subtype,
+                    "request_id": sent(request)["request_id"],
+                    "error": BYPASS_REFUSED,
+                    "error_code": "bypass_not_launched",
+                },
+            })
+            .to_string()
+        };
+        assert!(read(session.as_mut(), &answer(&taken, "success"))
+            .events
+            .is_empty());
+        assert_eq!(
+            read(session.as_mut(), &answer(&refused, "error")).events,
+            [TurnEvent::ModeRefused {
+                mode: "bypassPermissions".into(),
+                reason: BYPASS_REFUSED.into(),
+            }]
+        );
+        // Each answer is read once.
+        assert!(read(session.as_mut(), &answer(&refused, "error"))
+            .events
+            .is_empty());
     }
 
     #[test]

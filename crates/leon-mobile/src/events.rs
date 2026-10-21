@@ -309,6 +309,8 @@ impl TurnEvent {
             },
             T::QuestionResolved { id } => Self::QuestionResolved { id },
             T::ModeChanged { mode } => Self::ModeChanged { mode },
+            // The phone has no notice for it yet.
+            T::ModeRefused { .. } => return None,
             T::Disconnected => Self::Disconnected,
             T::Reconnected => Self::Reconnected,
             T::Gap => Self::Gap,
