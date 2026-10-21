@@ -21,6 +21,9 @@
 //!
 //! See `docs/KING.md`.
 
+// King's service is Unix's: elsewhere, what serves it is not used.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 #[cfg(unix)]
 pub mod checks;
 #[cfg(unix)]

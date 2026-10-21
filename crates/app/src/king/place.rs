@@ -270,7 +270,13 @@ mod tests {
         std::fs::write(folder.path().join("Cargo.toml"), "[package]").unwrap();
         let here = Place::here();
         assert!(here.is_here() && here.id().is_none());
-        assert_eq!(here.run("pwd", &[], cwd).unwrap().trim(), cwd);
+        // macOS's temporary folder is reached through a link (`/var` is
+        // `/private/var`): `pwd` says the folder itself.
+        let real = std::fs::canonicalize(folder.path()).unwrap();
+        assert_eq!(
+            Path::new(here.run("pwd", &[], cwd).unwrap().trim()),
+            real.as_path()
+        );
         assert!(here.exists(cwd, "Cargo.toml") && !here.exists(cwd, "package.json"));
         assert_eq!(here.read(cwd, "Cargo.toml").as_deref(), Some("[package]"));
         assert!(

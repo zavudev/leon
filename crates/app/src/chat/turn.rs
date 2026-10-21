@@ -56,6 +56,7 @@ pub trait Transport: Send {
     /// Ends it now.
     fn kill(&mut self);
     /// Its process id on this computer, when it runs here.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn pid(&self) -> Option<u32> {
         None
     }
@@ -153,6 +154,7 @@ impl Turn {
     }
 
     /// The agent's process id on this computer, when it runs here.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn pid(&self) -> Option<u32> {
         self.transport.pid()
     }

@@ -115,7 +115,10 @@ fn main() {
                 #[cfg(unix)]
                 return Some(king::door::door(data_dir));
                 #[cfg(not(unix))]
-                return None;
+                {
+                    let _ = data_dir;
+                    return None;
+                }
             },
         ));
     }
