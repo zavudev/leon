@@ -4,3 +4,5 @@
 /dist/
 expo-env.d.ts
 .expo/
+# Firebase's file for Android pushes: EAS has it as the file variable GOOGLE_SERVICES_JSON.
+/google-services.json

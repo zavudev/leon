@@ -1,7 +1,7 @@
 {
   "configVersion": 0,
   "apple": {
-    "version": "0.9.0",
+    "version": "0.11.0",
     "copyright": "2026 Zavu",
     "categories": [
       "DEVELOPER_TOOLS",
