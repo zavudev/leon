@@ -59,6 +59,8 @@ pub struct Chat {
     pub reason: Entity<InputState>,
     /// The scroll position of the conversation.
     pub scroll: ScrollHandle,
+    /// Files sent with what is said next: images pasted, as files.
+    pub attached: Vec<std::path::PathBuf>,
     /// The stretches of work opened by hand, by the index of their first item.
     pub open_work: HashSet<usize>,
     /// The tools whose detail is shown, by id.
@@ -285,6 +287,7 @@ impl Shell {
                 input,
                 reason,
                 scroll: ScrollHandle::new(),
+                attached: Vec::new(),
                 open_work: HashSet::new(),
                 open_tools: HashSet::new(),
                 picks: HashMap::new(),
@@ -478,14 +481,17 @@ impl Shell {
         let Some(chat) = self.chats.get(&id) else {
             return;
         };
-        let text = chat.input.read(cx).value().trim().to_owned();
-        if text.is_empty() {
+        let typed = chat.input.read(cx).value().trim().to_owned();
+        let Some(text) = super::king::with_attached(&typed, &chat.attached) else {
             // Nothing to say: Enter is the answer the agent waits for.
             self.chat_accept(id, window, cx);
             return;
-        }
+        };
         chat.input
             .update(cx, |input, cx| input.set_value("", window, cx));
+        if let Some(chat) = self.chats.get_mut(&id) {
+            chat.attached.clear();
+        }
         self.chat_say(id, text, cx);
     }
 
@@ -930,6 +936,17 @@ impl Shell {
                 _ => {}
             }
         }
+        // A paste with an image on the clipboard: the image, as a file.
+        let paste = stroke.key == "v"
+            && !stroke.modifiers.alt
+            && if crate::platform::is_mac() {
+                stroke.modifiers.platform && !stroke.modifiers.control
+            } else {
+                stroke.modifiers.control && !stroke.modifiers.platform
+            };
+        if paste && self.chat_paste_image(id, cx) {
+            return true;
+        }
         let running = self
             .chats
             .get(&id)
@@ -939,6 +956,44 @@ impl Shell {
             return true;
         }
         false
+    }
+
+    /// Pastes the clipboard's image into a conversation's field: it is kept
+    /// in a file and attached to what is said next, which names its path for
+    /// the agent to open. `false` when there is no image, so the field
+    /// pastes text as it does.
+    fn chat_paste_image(&mut self, id: LiveId, cx: &mut Context<Self>) -> bool {
+        let Some(image) = (self.options.clipboard_image)(cx) else {
+            return false;
+        };
+        let local = self
+            .chats
+            .get(&id)
+            .is_some_and(|chat| chat.machine.is_local());
+        if !local {
+            self.engine.report(
+                StatusKind::Info,
+                "Image paste needs the agent to run on this computer; the clipboard is local.",
+            );
+            return true;
+        }
+        let stamp = (self.options.now)().format("%Y%m%d-%H%M%S%3f");
+        let path = self
+            .options
+            .attachments
+            .join(format!("pasted-{stamp}.{}", image.extension));
+        let kept = std::fs::create_dir_all(&self.options.attachments)
+            .and_then(|()| std::fs::write(&path, &image.bytes));
+        match (kept, self.chats.get_mut(&id)) {
+            (Ok(()), Some(chat)) => chat.attached.push(path),
+            (Ok(()), None) => {}
+            (Err(error), _) => self.engine.report(
+                StatusKind::Error,
+                format!("The image could not be kept: {error}."),
+            ),
+        }
+        cx.notify();
+        true
     }
 
     /// Closes a conversation, ending the turn in flight. The pane's sibling

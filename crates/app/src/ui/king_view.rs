@@ -12,9 +12,7 @@
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::prelude::*;
-use gpui_kit::{
-    div, img, AnyElement, ClickEvent, Context, Div, FontWeight, ObjectFit, SharedString, Stateful,
-};
+use gpui_kit::{div, AnyElement, ClickEvent, Context, Div, FontWeight, SharedString, Stateful};
 use leon_core::AgentId;
 use leon_king::coordinator::{Open, Target, WorkerState};
 use leon_king::history::Past;
@@ -28,7 +26,7 @@ use super::activity::Activity;
 use super::chat_voice::Field;
 use super::king::{picks, Pick, Tone};
 use super::shell::Shell;
-use super::widgets::{activity_dot, led, mark, mono, with_latest, Lion};
+use super::widgets::{activity_dot, attached_files, led, mark, mono, with_latest, Lion};
 use crate::icons::{agent_icon, icon, IconName};
 use crate::theme::{fonts, metrics, px, Palette};
 
@@ -1295,108 +1293,23 @@ impl Shell {
         c: &Palette,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let files = self
-            .king_ui
-            .attached
-            .get(&target)
-            .filter(|files| !files.is_empty())?;
+        let files = self.king_ui.attached.get(&target)?;
         let key = key_of(target);
-        let hover = c.surface_2;
-        let mut row = div()
-            .debug_selector({
-                let key = key.clone();
-                move || format!("king-attached-{key}")
-            })
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_wrap()
-            .gap(px(6.));
-        for (place, path) in files.iter().enumerate() {
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string());
-            let image = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| {
-                    ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
-                        .contains(&ext.to_ascii_lowercase().as_str())
-                });
-            let gone = path.clone();
-            row = row.child(
-                div()
-                    .debug_selector({
-                        let key = key.clone();
-                        move || format!("king-attached-{key}-{place}")
-                    })
-                    .flex_none()
-                    .max_w(px(220.))
-                    .h(px(40.))
-                    .pl(px(4.))
-                    .pr(px(2.))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .rounded(metrics::RADIUS())
-                    .border_1()
-                    .border_color(c.border)
-                    .bg(c.background)
-                    .child(if image {
-                        img(path.clone())
-                            .flex_none()
-                            .size(px(32.))
-                            .rounded(px(2.))
-                            .object_fit(ObjectFit::Cover)
-                            .into_any_element()
-                    } else {
-                        div()
-                            .flex_none()
-                            .size(px(32.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon(IconName::File, px(14.), c.text_muted))
-                            .into_any_element()
-                    })
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(metrics::TEXT_SMALL())
-                            .text_color(c.text_muted)
-                            .child(name),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "king-attached-remove-{key}-{place}"
-                            )))
-                            .debug_selector({
-                                let key = key.clone();
-                                move || format!("king-attached-remove-{key}-{place}")
-                            })
-                            .flex_none()
-                            .size(px(20.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(metrics::RADIUS())
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(hover))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                if let Some(files) = this.king_ui.attached.get_mut(&target) {
-                                    files.retain(|file| *file != gone);
-                                }
-                                this.king_focus_field(target, window, cx);
-                                cx.notify();
-                            }))
-                            .child(icon(IconName::X, px(11.), c.text_faint)),
-                    ),
-            );
-        }
-        Some(row.into_any_element())
+        attached_files(
+            files,
+            (
+                format!("king-attached-{key}"),
+                format!("king-attached-remove-{key}"),
+            ),
+            c,
+            cx,
+            move |this, gone, window, cx| {
+                if let Some(files) = this.king_ui.attached.get_mut(&target) {
+                    files.retain(|file| *file != gone);
+                }
+                this.king_focus_field(target, window, cx);
+            },
+        )
     }
 
     /// The button that attaches files to what is said to `target`.

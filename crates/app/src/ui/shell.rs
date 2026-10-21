@@ -338,7 +338,7 @@ pub struct Options {
     /// Files chosen to attach to what is said to King: the system's file
     /// picker, or the tests' answer.
     pub pick_files: PickFiles,
-    /// Where pasted images are kept for King to read.
+    /// Where pasted images are kept for King and the conversations to read.
     pub attachments: PathBuf,
 }
 

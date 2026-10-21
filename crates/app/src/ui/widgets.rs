@@ -6,10 +6,11 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{Sizable, Size};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, AnyElement, App, ClickEvent, Context, Div, FontWeight, Hsla, Pixels, ScrollHandle,
-    SharedString, Stateful,
+    div, img, AnyElement, App, ClickEvent, Context, Div, FontWeight, Hsla, ObjectFit, Pixels,
+    ScrollHandle, SharedString, Stateful, Window,
 };
 use leon_mark::{AnimatedMark, Mood};
+use std::path::PathBuf;
 
 use super::activity::Activity;
 use super::shell::Shell;
@@ -277,4 +278,109 @@ pub(super) fn with_latest(
             )
         })
         .into_any_element()
+}
+
+/// Files attached to what is said next, over the field they go with: an
+/// image as a thumbnail, any other file as its name, each with the button
+/// that takes it off (`remove`). `names` are the selectors of the row and
+/// the start of each button's; `None` with no files.
+pub(super) fn attached_files(
+    files: &[PathBuf],
+    names: (String, String),
+    c: &Palette,
+    cx: &mut Context<Shell>,
+    remove: impl Fn(&mut Shell, PathBuf, &mut Window, &mut Context<Shell>) + Clone + 'static,
+) -> Option<AnyElement> {
+    if files.is_empty() {
+        return None;
+    }
+    let (name, remove_name) = names;
+    let hover = c.surface_2;
+    let mut row = div()
+        .debug_selector({
+            let name = name.clone();
+            move || name.clone()
+        })
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_wrap()
+        .gap(px(6.));
+    for (place, path) in files.iter().enumerate() {
+        let label = path
+            .file_name()
+            .map(|label| label.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let image = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
+                    .contains(&ext.to_ascii_lowercase().as_str())
+            });
+        let gone = path.clone();
+        let remove = remove.clone();
+        let item = format!("{name}-{place}");
+        let button = format!("{remove_name}-{place}");
+        row = row.child(
+            div()
+                .debug_selector(move || item.clone())
+                .flex_none()
+                .max_w(px(220.))
+                .h(px(40.))
+                .pl(px(4.))
+                .pr(px(2.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .rounded(metrics::RADIUS())
+                .border_1()
+                .border_color(c.border)
+                .bg(c.background)
+                .child(if image {
+                    img(path.clone())
+                        .flex_none()
+                        .size(px(32.))
+                        .rounded(px(2.))
+                        .object_fit(ObjectFit::Cover)
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex_none()
+                        .size(px(32.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon(IconName::File, px(14.), c.text_muted))
+                        .into_any_element()
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(metrics::TEXT_SMALL())
+                        .text_color(c.text_muted)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(button.clone()))
+                        .debug_selector(move || button.clone())
+                        .flex_none()
+                        .size(px(20.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(metrics::RADIUS())
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(hover))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            remove(this, gone.clone(), window, cx);
+                            cx.notify();
+                        }))
+                        .child(icon(IconName::X, px(11.), c.text_faint)),
+                ),
+        );
+    }
+    Some(row.into_any_element())
 }
