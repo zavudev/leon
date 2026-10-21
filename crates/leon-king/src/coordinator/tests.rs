@@ -602,6 +602,23 @@ fn a_workers_routine_question_is_answered_by_leon_and_king_hears_nothing() {
 }
 
 #[test]
+fn by_default_kings_conversation_goes_on_however_long_it_grows() {
+    let config = crate::config::Config::default();
+    assert_eq!(config.limits.compact_at_tokens, 0);
+    let mut king = Coordinator::new(config);
+    king.say("Restyle the radar", 0);
+    let usage = TurnEvent::Usage {
+        tokens: leon_turn::Tokens {
+            input: 5_000_000,
+            ..Default::default()
+        },
+    };
+    king.event(Target::Brain, &usage, 1);
+    answer(&mut king, Target::Brain, "Worker #1 does it.", 2);
+    assert!(king.compact_if_long(3).is_none());
+}
+
+#[test]
 fn a_conversation_whose_turn_read_too_much_goes_on_in_a_new_one() {
     let mut config = config();
     config.limits.compact_at_tokens = 1_000;

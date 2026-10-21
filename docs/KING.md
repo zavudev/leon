@@ -237,11 +237,12 @@ both down:
   `mcp_writes` in it (`create`, `delete`, `send`, `pay`, `generate`…) still
   goes to King. The programs and the words are lists in `[permissions]`;
   `routine = false` sends every question to King.
-* **A conversation that grew too long goes on in a new one.** When a turn
-  of King's reads `[limits] compact_at_tokens` or more (600k by default),
-  Leon puts the conversation in HISTORY and King goes on in a new one,
-  told what was asked last and what it answered, so the next turn reads a
-  fraction. NEW does the same by hand.
+* **King's conversation goes on.** It lasts as long as you keep it; its
+  agent compacts its own context when it fills. To keep turns cheaper, set
+  `[limits] compact_at_tokens`: a turn of King's that reads that many
+  tokens or more puts the conversation in HISTORY and King goes on in a
+  new one, told what was asked last and what it answered, so the next turn
+  reads a fraction. NEW does the same by hand.
 
 ## Workers
 
@@ -483,7 +484,7 @@ claude = "auto"
 | Section | What it sets | Default |
 | --- | --- | --- |
 | `[brain]` | The agent, model, effort and mode King runs on; `mode = ""` is the agent's own | Claude Code, its own model, mode `auto` |
-| `[limits]` | `max_workers`, `daily_budget_usd`, `limit_threshold`, `wake_delay_secs`, `compact_at_tokens`, `check_timeout_secs`, `ci_poll_secs`, `run_parallel`, `run_fixes`, `learn_after`, `learn_below` | 6, none, 0.85, 5, 600000, 1800, 60, 2, 1, 5, 0.5 |
+| `[limits]` | `max_workers`, `daily_budget_usd`, `limit_threshold`, `wake_delay_secs`, `compact_at_tokens`, `check_timeout_secs`, `ci_poll_secs`, `run_parallel`, `run_fixes`, `learn_after`, `learn_below` | 6, none, 0.85, 5, 0, 1800, 60, 2, 1, 5, 0.5 |
 | `[tiers]` | Each tier's candidates in order: agent, model, effort | `cheap`, `standard`, `premium`, `planning` |
 | `[jobs]` | The tier each kind of job (`code`, `research`, `plan`) goes to, and whether it is `strict` (only ever that tier) | code: standard, research: cheap, plan: planning (strict) |
 | `[guards]` | Branches nothing is pushed to, besides each project's default branch; `verify_before_pr`: a pull request needs a passed check of its last commit | `main`, `master`; on |
