@@ -124,6 +124,14 @@ pub enum TurnEvent {
         /// The mode, as the agent names it.
         mode: String,
     },
+    /// The agent would not work in the mode the person chose while it
+    /// works; it keeps the one it had, and the next turn starts in the new.
+    ModeRefused {
+        /// The mode asked for, as the agent names it.
+        mode: String,
+        /// Why, in the agent's words.
+        reason: String,
+    },
     /// The connection dropped; the turn keeps running on the other computer.
     Disconnected,
     /// The connection is back and the turn was attached again.
