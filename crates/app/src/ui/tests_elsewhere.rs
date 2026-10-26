@@ -624,10 +624,7 @@ fn the_menu_of_a_session_held_elsewhere_starts_with_the_transcript_and_does_not_
         assert_eq!(labels[1], "Resume here anyway…", "{labels:?}");
     }
     assert!(!labels.contains(&"Resume".to_owned()), "{labels:?}");
-    assert!(
-        labels.contains(&"Remove from history".to_owned()),
-        "{labels:?}"
-    );
+    assert!(labels.contains(&"Delete…".to_owned()), "{labels:?}");
     assert!(!labels.contains(&"Sleep".to_owned()), "{labels:?}");
 }
 
@@ -743,17 +740,18 @@ fn kinds(h: &Harness, cx: &mut TestAppContext) -> Vec<String> {
 }
 
 fn toggle_show_inactive(h: &Harness, cx: &mut TestAppContext) {
-    h.mouse_on(
-        if h.shows("filter-show-inactive-on", cx) {
-            "filter-show-inactive-on"
-        } else {
-            "filter-show-inactive"
-        }
-        .to_owned(),
-        gpui_kit::MouseButton::Left,
-        cx,
-    );
+    h.pick_in_machine_menu(crate::keys::Command::ToggleInactiveSessions, cx);
     h.settle(cx);
+}
+
+/// What the machine's menu offers for the inactive sessions.
+fn inactive_item(h: &Harness, cx: &mut TestAppContext) -> String {
+    let show = h.shell(cx, |s| s.show_inactive);
+    crate::ui::menu::items_for_machine(0, show)
+        .into_iter()
+        .find(|item| item.command == crate::keys::Command::ToggleInactiveSessions)
+        .map(|item| item.label)
+        .unwrap_or_default()
 }
 
 #[gpui_kit::test]
@@ -765,11 +763,11 @@ fn inactive_sessions_are_hidden_by_default_and_the_toggle_shows_them_and_is_reme
     assert!(!cx.update(|cx| crate::settings::flag(cx, "sidebar_show_inactive")));
     assert_eq!(kinds(&h, cx), ["no-active"]);
     assert!(h.shows("tree-no-active", cx));
-    assert!(h.shows("filter-show-inactive", cx));
+    assert_eq!(inactive_item(&h, cx), "Show inactive sessions");
     // On: the whole tree is back.
     toggle_show_inactive(&h, cx);
     assert!(kinds(&h, cx).iter().any(|k| k.starts_with("session:")));
-    assert!(h.shows("filter-show-inactive-on", cx));
+    assert_eq!(inactive_item(&h, cx), "Hide inactive sessions");
     assert!(cx.update(|cx| crate::settings::flag(cx, "sidebar_show_inactive")));
     // Off again: only the active ones.
     toggle_show_inactive(&h, cx);

@@ -711,7 +711,7 @@ const BASE: &[Def] = &[
             "Where a session of Claude Code, Codex, opencode, Grok or Cursor runs: in a terminal, with the agent's own program, or in Leon's own interface, a conversation that looks and works the same for every agent. Leon's own is experimental. It works on every machine: this computer, one reached over SSH and a paired computer. An agent it cannot drive starts in a terminal as before. Takes effect for sessions started after it is changed.",
             "chat conversation unified native interface beta experimental protocol terminal tui messages permissions",
             K::Choice(INTERFACES),
-            D::Text("terminal"),
+            D::Text("chat"),
         ),
         Platform::Unix,
     ),
@@ -807,6 +807,15 @@ const BASE: &[Def] = &[
         "opencode database sqlite path",
         FOLDER,
         D::Text(""),
+    ),
+    def(
+        "sidebar_tree",
+        S::Sessions,
+        "Show worktrees as levels",
+        "Off, the sidebar lists the sessions of each project under its name, with the branch beside the ones not on the main checkout. On, each worktree is a row of its own that folds.",
+        "tree flat worktree branch levels nested sidebar",
+        K::Toggle,
+        D::Bool(false),
     ),
     def(
         "sessions_per_worktree",
@@ -2080,10 +2089,11 @@ pub fn render_docs() -> String {
 
 #[cfg(test)]
 mod tests {
-    /// What is still being tried has a section of its own, is off as it
-    /// comes, and the section is listed only where it holds something.
+    /// What is still being tried has a section of its own, Leon's own
+    /// interface is what a session starts in as it comes, and the section is
+    /// listed only where it holds something.
     #[test]
-    fn what_is_being_tried_is_in_its_own_section_and_off_as_it_comes() {
+    fn what_is_being_tried_is_in_its_own_section_and_leons_own_interface_comes_on() {
         let keys: Vec<&str> = settings()
             .iter()
             .filter(|def| def.section == Section::Experimental)
@@ -2095,7 +2105,7 @@ mod tests {
         );
         assert_eq!(
             find("agent_interface").unwrap().default,
-            Initial::Text("terminal")
+            Initial::Text(crate::chat::UNIFIED)
         );
         let listed = Section::listed_here();
         assert_eq!(

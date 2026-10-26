@@ -230,21 +230,25 @@ impl Shell {
         colours: &Palette,
     ) -> AnyElement {
         match item {
+            // What the person said reads as a command typed at a prompt:
+            // the accent's `>` and a bar of it down the left.
             Item::User { text } => div()
                 .debug_selector(move || format!("chat-user-{}-{at}", id.0))
                 .w_full()
+                .min_w_0()
                 .flex()
-                .justify_end()
+                .gap(px(10.))
+                .py(px(2.))
+                .pl(px(12.))
+                .border_l_2()
+                .border_color(colours.signal)
+                .font_family(fonts::mono())
+                .font_features(fonts::mono_features())
+                .child(div().flex_none().text_color(colours.signal).child(">"))
                 .child(
                     div()
-                        .max_w(gpui_kit::relative(0.86))
+                        .flex_1()
                         .min_w_0()
-                        .px(px(12.))
-                        .py(px(8.))
-                        .rounded(metrics::RADIUS())
-                        .border_1()
-                        .border_color(colours.border)
-                        .bg(colours.surface)
                         .text_color(colours.text)
                         .child(text.clone()),
                 )
@@ -358,14 +362,22 @@ impl Shell {
                         .child(last)
                 }))
             });
+        // Open, the work is a framed block of the drawing: its corners are
+        // marked, in the accent while it happens.
         let mut body = div()
-            .ml(px(11.))
-            .pl(px(12.))
-            .border_l_1()
+            .relative()
+            .px(px(12.))
+            .py(px(8.))
+            .border_1()
             .border_color(colours.border)
             .flex()
             .flex_col()
-            .gap(px(2.));
+            .gap(px(2.))
+            .children(if live {
+                super::lines::focus_ticks("chat-work", colours)
+            } else {
+                super::lines::frame_ticks("chat-work", colours)
+            });
         if open {
             for (offset, item) in items.iter().enumerate() {
                 body = body.child(match item {
@@ -883,6 +895,7 @@ impl Shell {
         };
         div()
             .debug_selector(move || format!("chat-composer-{}", id.0))
+            .relative()
             .w_full()
             .min_w_0()
             .flex()
@@ -891,10 +904,10 @@ impl Shell {
             .px(px(10.))
             .pt(px(8.))
             .pb(px(8.))
-            .rounded(metrics::RADIUS())
             .border_1()
             .border_color(colours.elevated_border)
             .bg(colours.surface)
+            .children(super::lines::focus_ticks("chat-composer", colours))
             .children(attached_files(
                 &chat.attached,
                 (
@@ -912,10 +925,28 @@ impl Shell {
             ))
             .child(
                 div()
-                    .debug_selector(move || format!("chat-input-{}", id.0))
                     .w_full()
                     .min_w_0()
-                    .child(Textarea::new(&chat.input).appearance(false).bordered(false)),
+                    .flex()
+                    .items_start()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .pt(px(6.))
+                            .pl(px(2.))
+                            .font_family(fonts::mono())
+                            .font_features(fonts::mono_features())
+                            .text_color(colours.signal)
+                            .child(">"),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(move || format!("chat-input-{}", id.0))
+                            .flex_1()
+                            .min_w_0()
+                            .child(Textarea::new(&chat.input).appearance(false).bordered(false)),
+                    ),
             )
             .child(
                 div()

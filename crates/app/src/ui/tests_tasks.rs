@@ -101,7 +101,7 @@ fn the_chord_opens_the_board_of_the_project_and_escape_puts_back_what_was_there(
         Which::Project(_)
     ));
     // The sidebar stays beside it.
-    assert!(h.shows("sidebar-nav", cx));
+    assert!(h.shows("sidebar-nav", cx) && h.shows("sidebar-machine", cx));
     h.press("escape", cx);
     assert_eq!(h.main_kind(cx), before);
     // The same chord closes it.
@@ -111,11 +111,11 @@ fn the_chord_opens_the_board_of_the_project_and_escape_puts_back_what_was_there(
 }
 
 #[gpui_kit::test]
-fn the_row_of_the_sidebar_opens_and_closes_the_board(cx: &mut TestAppContext) {
+fn the_machine_menu_opens_and_closes_the_board(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
-    h.mouse_on("sidebar-tasks".to_owned(), gpui_kit::MouseButton::Left, cx);
+    h.pick_in_machine_menu(crate::keys::Command::ShowTasks, cx);
     assert_eq!(h.main_kind(cx), "tasks");
-    h.mouse_on("sidebar-tasks".to_owned(), gpui_kit::MouseButton::Left, cx);
+    h.pick_in_machine_menu(crate::keys::Command::ShowTasks, cx);
     assert_ne!(h.main_kind(cx), "tasks");
 }
 

@@ -26,17 +26,26 @@ switching to one never restarts it.
 └──────────────────┴─────────────────────────────────────┘
 ```
 
-* **Sidebar tree**: machine, project, worktree, session. Live terminals are
-  listed above the history of their worktree with a status light; exited ones
-  show their exit code until you close them. A history session you opened is
-  one row, not two: while its terminal lives that row carries the light.
-  With one machine its header is left out and the projects sit at the top;
-  with two or more each machine has its header. The levels are told apart: a
-  hairline and some room above each project, the rows nested in it told by
-  their indentation, the project's name in bold and the worktree as a branch row.
+* **Sidebar**: King pinned at the top, then each project as a heading in
+  spaced capitals with its sessions listed under it. A session that ran on a
+  branch other than the main checkout has the branch beside its name. Live
+  terminals are listed above the history with a status light; exited ones show
+  their exit code until you close them. A history session you opened is one
+  row, not two: while its terminal lives that row carries the light. With one
+  machine its header is left out and the projects sit at the top; with two or
+  more each machine has its header. Settings ▸ Sessions ▸ *Show worktrees as
+  levels* (`sidebar_tree`) brings back a row for every worktree, which folds.
+  The foot is this machine: its menu holds Home, Tasks, the Den, Connect a
+  machine, Share this machine, the cleaner, the inactive sessions, the
+  appearance, the shortcuts and the settings. When the cleaner would remove
+  worktrees, a note above the foot says how many; a click opens the cleaner
+  and its cross hides the note until more can go.
 * **Main pane**: the terminals of the worktree you select, in tabs of split
   panes, or the stored transcript of a history session, or the detail of a
-  project or worktree.
+  project or worktree. Its header is one line in the middle: what is open,
+  the folder it is in and its state (`Claude Code @ atlas running`); the whole
+  line about it (agent, machine, path) is its tooltip. A project's screen asks
+  what to build in it, over a field that starts a session there.
 * **Local and remote alike**: a remote session is `ssh -t` into the folder, so
   the agent runs on the server and only the terminal travels.
 * **Sessions come back**: Leon remembers which terminals were open (tabs, panes,
@@ -295,7 +304,7 @@ nothing it does not know.
    `claude`, `codex` or `opencode` the best fit in the process's folder is
    marked as likely. Such a session keeps the agent's colour and wears a violet
    mark and a badge in the tree: `ELSEWHERE` when a plain terminal runs it
-   ("Running in another terminal · pid 70645"), `OTHER LEON` when a `leon` (or,
+   ("Running in another terminal · pid 70645"), `OTHER` when a `leon` (or,
    over SSH, `leon-host`) process is above it ("Running in another Leon on
    <machine>"). It is not counted as a live session of Leon and a click (or
    `Enter`) never resumes it: it asks "Running in another terminal. Resume
@@ -326,8 +335,8 @@ laptop) whose projects, worktrees and agent sessions you drive from Leon.
 There are two ways to connect, and **With a code** is the default.
 
 * **With a code (recommended).** Install Leon on the other computer, choose
-  **Share this machine** (File menu, palette, Settings ▸ Machines, or the foot of
-  the sidebar) and it shows a short code. On your computer choose **Connect a
+  **Share this machine** (File menu, palette, Settings ▸ Machines, or the
+  machine's menu at the foot of the sidebar) and it shows a short code. On your computer choose **Connect a
   machine ▸ With a code** and type it. Both computers dial out to a relay
   server operated by Zavu, which pairs them and passes bytes along: no open
   ports, no SSH setup, and it works behind NAT. The connection is end-to-end
@@ -367,8 +376,8 @@ window.
 
 Open the **Connect a machine** screen with `Cmd+Shift+M` (`Ctrl+Shift+M`), File
 ▸ Connect a machine…, the command palette (`remote`, `server`, `code` and
-`connect` find it), Settings ▸ Machines, or the `Connect a machine` row at the
-foot of the sidebar; **SSH (advanced)** in its header switches to the SSH
+`connect` find it), Settings ▸ Machines, or the machine's menu at the foot of
+the sidebar; **SSH (advanced)** in its header switches to the SSH
 screen. Editing an SSH machine opens that screen, filled in. `Esc` closes it and
 gives the keyboard back to where it was.
 
@@ -523,6 +532,7 @@ platform (see below).
 | Reveal in the file manager | palette only | palette only |
 | Open the transcript | `⇧⌘L` | `Ctrl+Shift+L` |
 | Remove from history | palette only | palette only |
+| Delete the session and its worktree | palette only | palette only |
 | **Files** | | |
 | Find in the file… | `⌘F` | `Ctrl+F` |
 | Replace in the file… | `⌥⌘F` | `Ctrl+H` |
@@ -1006,9 +1016,17 @@ typing selects an item. Every item shows the shortcut it has.
 | --- | --- |
 | Machine | Open project…, New shell, Probe, Why is it offline? and Edit machine… (SSH machines), Rename, Connect a machine…, Remove machine (not for this computer) |
 | Project | New worktree…, New agent session ▸ (Claude Code, Codex, opencode and your own agents; the palette lists the whole catalogue), Open shell here, Copy path, Rename, Move up, Move down, Reveal in file manager (this computer), Refresh icon, Choose icon…, Reset icon, Remove project |
-| Worktree | New agent session ▸, Open shell here, Copy path, Copy branch name, Move up, Move down, Reveal in file manager (this computer), Close (not the main one: removes the worktree, its terminals and the sessions that ran in it) |
-| History session | By state. **Running** (it has a terminal): Focus, Rename, Sleep, Close. **Asleep**: Wake (asks first), Close. **History only**: Resume (asks first), Remove from history. Every state also has Rename, Settle (not while it runs) and Snooze…, or Bring back on a shelf. **Running elsewhere** (another terminal or another Leon): Open transcript, Take over…, Resume here anyway…, Reveal the terminal, Remove from history. All of them then: Open transcript, Pin or Unpin, Move up and Move down (only a pinned session), Copy session id |
-| Live terminal | Focus, Split right, Split down, Rename, Sleep, Close |
+| Worktree | New agent session ▸, Open shell here, Copy path, Copy branch name, Move up, Move down, Reveal in file manager (this computer), Delete… (not the main one: removes the worktree, its terminals and the sessions that ran in it, after asking) |
+| History session | By state. **Running** (it has a terminal): Focus, Rename, Sleep, Delete…. **Asleep**: Wake (asks first), Delete…. **History only**: Resume (asks first), Delete…. Every state also has Rename, Settle (not while it runs) and Snooze…, or Bring back on a shelf. **Running elsewhere** (another terminal or another Leon): Open transcript, Take over…, Resume here anyway…, Reveal the terminal, Delete…. All of them then: Open transcript, Pin or Unpin, Move up and Move down (only a pinned session), Copy session id |
+| Live terminal | Focus, Split right, Split down, Rename, Sleep, Delete… (Close for a plain shell) |
+
+**Delete…** is for good. A session that runs in a linked worktree goes with
+its worktree: Leon asks first, naming the branch and how many other sessions
+are in it, then removes the worktree as its own Delete… does (`git worktree
+remove`, asking again before forcing when git refuses it for the changes it
+holds) and every session in it ends and leaves the history. A session on a
+project's main checkout, or in a folder of no project, goes alone: closed when
+it runs, removed from the history when it does not.
 
 A worktree row says two separate things. At its start, what the branch is
 (its tooltip says it in words): a branch icon (stronger for the main worktree,
@@ -1021,6 +1039,8 @@ of the checkout: the open pull request of the branch (`#123`, green when its
 checks pass, amber while they run, red when one fails, grey for a draft), the
 changed files (`~3`, the files the Changes tab lists, untracked ones one by one)
 and the commits ahead of or behind the upstream (`↑2↓1`).
+A session at work, printing or in a turn of its agent, shows a spinner in the
+agent's colour where its logo was; it stands still again when the turn ends.
 Hover a row for the words; the worktree's screen has a **State** card with the
 same plus the review, and `#123` opens the pull request. A sidebar narrower than
 300 px keeps only the first of those. Git is asked for the changes and the
@@ -1851,10 +1871,10 @@ purpose:
 ## The home
 
 The home is where the window starts and a place to act from. It is always one
-step away: the **Home** row at the top of the sidebar, over the filter, with
-**The Den** under it (both stay there whatever is filtered or scrolled; the
-Den's row counts its lions and marks when one waits for you), `⌥⇧⌘H` (`Ctrl+Shift+Alt+H`), **View >
-Go home**, or **Go home** in the palette. Going home closes nothing: the
+step away: **Home** in the machine's menu at the foot of the sidebar (with
+**Tasks** and **The Den**; the machine's button marks when a lion waits for
+you), `⌥⇧⌘H` (`Ctrl+Shift+Alt+H`), **View > Go home**, or **Go home** in the
+palette. Going home closes nothing: the
 terminals go on running and stay in the sidebar.
 
 On it:
@@ -2153,9 +2173,9 @@ the others, a closed sleeping row comes back in its place), and undoing a
 removed when the banner goes or when you quit; if Leon is killed or crashes
 inside those five seconds, the session stays listed as history, nothing is lost.
 Only the last step can be undone, and only a whole session counts (closing one
-pane of several does not offer it). "Remove from history", and "Close" on a
-session that is only asleep in the history, ask first instead and cannot be
-undone. Shelves and snoozes are kept in the local store, so they survive a
+pane of several does not offer it). "Remove from history", and "Delete…" on a
+session that is only asleep in the history or that takes its worktree with it,
+ask first instead and cannot be undone. Shelves and snoozes are kept in the local store, so they survive a
 restart; whether each shelf is open is kept with the rest of the sidebar's
 layout.
 
@@ -2328,8 +2348,9 @@ minute per project, so the banner can come a minute late.
 
 ### Cleaning up worktrees and old sessions
 
-The broom beside the project filter (or **Clean up worktrees and old sessions…**
-in the palette) opens the cleaner. Its **Worktrees** list has every linked
+The machine's menu at the foot of the sidebar, the note above it when there is
+something to remove, or **Clean up worktrees and old sessions…** in the palette
+opens the cleaner. Its **Worktrees** list has every linked
 worktree of every project with what it weighs on disk, how much of that is build
 output (`node_modules`, `target`, `.venv`, `dist` and the like), how many
 sessions ran in it and when the last one did something. The sizes are measured

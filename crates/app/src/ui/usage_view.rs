@@ -34,7 +34,7 @@ use crate::icons::{agent_icon, icon, IconName};
 use crate::keys::{self, Command};
 use crate::schema::Section;
 use crate::settings;
-use crate::theme::{metrics, px, Palette};
+use crate::theme::{fonts, metrics, px, Palette};
 
 /// How many points of history a sparkline draws.
 pub const SPARK_POINTS: usize = 24;
@@ -648,6 +648,16 @@ impl Default for UsageUi {
     }
 }
 
+/// How long a piece of news ("Imported 3 sessions") stays in the status
+/// strip. Work under way and failures stay until something replaces them.
+pub(super) const STATUS_NEWS_FOR: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// Whether the strip shows a line of this kind that has been on show for
+/// `age`.
+pub(super) fn status_shown(kind: StatusKind, age: std::time::Duration) -> bool {
+    kind != StatusKind::Info || age < STATUS_NEWS_FOR
+}
+
 impl Shell {
     // ----- state ----------------------------------------------------------------------------
 
@@ -963,16 +973,24 @@ impl Shell {
 
     // ----- the bar --------------------------------------------------------------------------
 
-    /// The footer under the main pane, level with the sidebar's tools so that
-    /// the two read as one footer across the window: the engine's status line
-    /// and, when the setting is on, each agent's limits and a refresh button.
+    /// The footer under the main pane, level with the sidebar's foot so that
+    /// the two read as one footer across the window: the engine's last word
+    /// (nothing at all while it has none) and, when the setting is on, each
+    /// agent's limits and a refresh button.
     pub(super) fn render_status_bar(&self, colours: &Palette, cx: &mut Context<Self>) -> Div {
-        let status = self.engine.status();
+        let status = self.engine.status().filter(|line| {
+            let age = self
+                .status_seen
+                .as_ref()
+                .filter(|(seen, _)| seen == line)
+                .map_or(std::time::Duration::ZERO, |(_, at)| at.elapsed());
+            status_shown(line.kind, age)
+        });
         let (text, colour) = match &status {
             Some(line) if line.kind == StatusKind::Error => (line.text.clone(), colours.error),
             Some(line) if line.kind == StatusKind::Busy => (line.text.clone(), colours.info),
             Some(line) => (line.text.clone(), colours.text_muted),
-            None => ("Ready.".to_owned(), colours.text_faint),
+            None => (String::new(), colours.text_faint),
         };
         let mut bar = div()
             .debug_selector(|| "status-strip".into())
@@ -986,10 +1004,11 @@ impl Shell {
             .flex()
             .items_center()
             .gap_3()
-            .child(section_label("Status", colours))
             .child(
                 div()
                     .debug_selector(|| "status-line".into())
+                    .font_family(fonts::mono())
+                    .font_features(fonts::mono_features())
                     .flex_1()
                     .min_w_0()
                     .truncate()
@@ -2296,5 +2315,20 @@ mod tests {
             .unwrap()
             .contains("Run the agent once"));
         assert!(rows[0].try_again);
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::{status_shown, StatusKind, STATUS_NEWS_FOR};
+    use std::time::Duration;
+
+    #[test]
+    fn news_leaves_the_strip_and_work_and_failures_stay() {
+        assert!(status_shown(StatusKind::Info, Duration::ZERO));
+        assert!(!status_shown(StatusKind::Info, STATUS_NEWS_FOR));
+        for kind in [StatusKind::Busy, StatusKind::Error] {
+            assert!(status_shown(kind, Duration::from_secs(3600)), "{kind:?}");
+        }
     }
 }

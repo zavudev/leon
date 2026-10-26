@@ -1,4 +1,4 @@
-//! The headers hold their two lines: at every interface scale, in both built-in
+//! The headers hold their line: at every interface scale, in both built-in
 //! themes and for every kind of thing the main pane can show.
 
 use super::live::{open_live, real_worktree, terminal_of, wait_until};
@@ -12,7 +12,8 @@ fn within(
     inner.top() >= outer.top() && inner.bottom() <= outer.bottom()
 }
 
-/// Both lines lie inside the header, above its rule, with the padding to spare.
+/// The header's one line lies inside it, above its rule, and the box that
+/// names what is open sits in the middle of it, its text inside the box.
 fn assert_contained(h: &Harness, cx: &mut TestAppContext, what: &str) {
     let header = h
         .bounds_of("main-header".to_owned(), cx)
@@ -20,31 +21,33 @@ fn assert_contained(h: &Harness, cx: &mut TestAppContext, what: &str) {
     let title = h
         .bounds_of("header-title-row".to_owned(), cx)
         .expect("the title row");
-    let meta = h
-        .bounds_of("header-meta-row".to_owned(), cx)
-        .expect("the metadata row");
+    let crumb = h
+        .bounds_of("header-crumb".to_owned(), cx)
+        .expect("the crumb");
     let rule_top = header.bottom() - crate::theme::hairline();
-    let pad = crate::theme::metrics::HEADER_PAD();
-    assert!(
-        title.top() >= header.top() + pad - px(0.01),
-        "{what}: title row {title:?} in {header:?}"
-    );
-    assert!(
-        meta.bottom() + pad <= rule_top + px(0.01),
-        "{what}: the metadata row ends at {:?}, the rule starts at {rule_top:?}",
-        meta.bottom()
-    );
-    assert!(
-        title.bottom() <= meta.top(),
-        "{what}: the lines do not overlap"
-    );
-    // The text itself fits the row: nothing is sliced by the rule.
-    if let Some(text) = h.bounds_of("header-meta".to_owned(), cx) {
+    for (name, part) in [("title row", title), ("crumb", crumb)] {
         assert!(
-            within(text, meta),
-            "{what}: the text {text:?} in its row {meta:?}"
+            part.top() >= header.top() && part.bottom() <= rule_top + px(0.01),
+            "{what}: the {name} {part:?} in {header:?}, the rule at {rule_top:?}"
         );
     }
+    // Nothing is sliced: the name and the words after it are in the box.
+    for selector in ["main-title", "header-place", "header-state"] {
+        if let Some(text) = h.bounds_of(selector.to_owned(), cx) {
+            assert!(
+                within(text, crumb),
+                "{what}: {selector} {text:?} in the crumb {crumb:?}"
+            );
+        }
+    }
+    // The box is in the middle of the window's main pane.
+    let middle = (crumb.left() + crumb.right()) / 2.;
+    let centre = (header.left() + header.right()) / 2.;
+    assert!(
+        (middle - centre).abs() <= px(1.)
+            || crumb.size.width >= crate::theme::metrics::HEADER_CRUMB_MAX() - px(1.),
+        "{what}: the crumb {crumb:?} is centred in {header:?}"
+    );
     let side = h.bounds_of("sidebar-header".to_owned(), cx);
     if let Some(side) = side {
         assert_eq!(
@@ -151,13 +154,11 @@ fn a_very_long_path_does_not_change_the_height_and_the_state_words_stay(cx: &mut
     let after = h.bounds_of("main-header".to_owned(), cx).unwrap();
     assert_eq!(before.size.height, after.size.height);
     assert_contained(&h, cx, "a very long path");
-    let row = h.bounds_of("header-meta-row".to_owned(), cx).unwrap();
-    let path = h.bounds_of("header-path".to_owned(), cx).unwrap();
-    assert!(
-        path.right() <= row.right(),
-        "the path gives way: {path:?} in {row:?}"
-    );
-    assert!(path.size.width > px(0.));
+    // The long path is the tooltip's; the box says its folder and stays
+    // within its width.
+    let crumb = h.bounds_of("header-crumb".to_owned(), cx).unwrap();
+    assert!(crumb.size.width <= crate::theme::metrics::HEADER_CRUMB_MAX() + px(0.5));
+    assert!(h.shows("header-place", cx) && h.shows("header-state", cx));
     // The state words (RUNNING...) come after the path and stay in the row.
     let meta = cx.update(|cx| h.shell.read(cx).main_heading_for_test(cx));
     assert!(

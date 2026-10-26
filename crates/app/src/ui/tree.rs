@@ -1248,6 +1248,81 @@ pub fn first_child_of(rows: &[Row], at: usize) -> Option<usize> {
     (row.open == Some(true) && next.depth > row.depth).then_some(at + 1)
 }
 
+/// The flat sidebar from the tree's rows: the worktrees are no longer rows,
+/// what was in them moves up a level under its project, and every session
+/// that ran off the main checkout is returned with its worktree's folder
+/// name, by row key, to be drawn beside its name.
+pub fn flatten(rows: Vec<Row>) -> (Vec<Row>, HashMap<String, String>) {
+    let mut kept = Vec::with_capacity(rows.len());
+    let mut branches = HashMap::new();
+    // The worktree being lifted out: its depth, and its folder's name when
+    // it is not the main checkout.
+    let mut lifted: Option<(u8, Option<String>)> = None;
+    for mut row in rows {
+        if let Some((depth, branch)) = &lifted {
+            if row.depth > *depth {
+                row.depth -= 1;
+                if let Some(branch) = branch {
+                    if matches!(row.kind, Kind::Session(_) | Kind::Live(_)) {
+                        branches.insert(row.key(), branch.clone());
+                    }
+                }
+                kept.push(row);
+                continue;
+            }
+            lifted = None;
+        }
+        if let Kind::Worktree { worktree, .. } = &row.kind {
+            let branch = (!worktree.is_main).then(|| folder_name(&worktree.path).to_owned());
+            lifted = Some((row.depth, branch));
+            continue;
+        }
+        kept.push(row);
+    }
+    (kept, branches)
+}
+
+/// Where each pinned session lives, by the key of its row: its project, with
+/// the worktree's folder after it when it is not the main checkout, or its
+/// folder when no project holds it. The Pinned section lifts sessions out of
+/// their projects, so the row says where they came from.
+pub fn pinned_places(snapshot: &Snapshot, placement: &Placement) -> HashMap<String, String> {
+    let pinned = |place: &usize| snapshot.sessions[*place].sort_order.is_some();
+    let key = |place: usize| NodeId::Session(snapshot.sessions[place].id.clone()).key();
+    let mut places = HashMap::new();
+    for entry in &snapshot.projects {
+        let name = &entry.project.name;
+        for worktree in &entry.worktrees {
+            let label = if worktree.is_main {
+                name.clone()
+            } else {
+                format!("{name} · {}", folder_name(&worktree.path))
+            };
+            for place in placement
+                .of_worktree(&worktree.id)
+                .iter()
+                .filter(|p| pinned(p))
+            {
+                places.insert(key(*place), label.clone());
+            }
+        }
+        let loose = placement
+            .in_project
+            .get(&entry.project.id)
+            .into_iter()
+            .flatten();
+        for place in loose.filter(|p| pinned(p)) {
+            places.insert(key(*place), name.clone());
+        }
+    }
+    for folder in placement.unsorted.values().flatten() {
+        for place in folder.sessions.iter().filter(|p| pinned(p)) {
+            places.insert(key(*place), folder_name(&folder.cwd).to_owned());
+        }
+    }
+    places
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1846,6 +1921,55 @@ mod tests {
             .map(|place| snapshot.sessions[*place].title.as_str())
             .collect();
         assert_eq!(titles, ["first", "second"]);
+    }
+
+    #[test]
+    fn the_flat_list_lifts_the_sessions_out_of_their_worktrees_and_names_the_branch() {
+        let snapshot = fixture(vec![
+            session("on-main", "local", "/srv/api", 5),
+            session("on-x", "local", "/srv/api-worktrees/x", 3),
+            session("on-web", "local", "/srv/web", 1),
+        ]);
+        let (rows, branches) = flatten(rows_of(&snapshot, &Expansion::everything()));
+        let lines = outline(&rows);
+        assert!(
+            !lines.iter().any(|line| line.contains("worktree")),
+            "{lines:?}"
+        );
+        // A session sits one level under its project, as it sat under its
+        // worktree's line before.
+        let project = lines.iter().position(|l| l.trim() == "project api (2)");
+        let project = project.unwrap_or_else(|| panic!("{lines:?}"));
+        let indent = |line: &str| line.len() - line.trim_start().len();
+        for name in ["session on-main", "session on-x"] {
+            let line = lines.iter().find(|l| l.trim() == name).unwrap();
+            assert_eq!(indent(line), indent(&lines[project]) + 2, "{lines:?}");
+        }
+        // Only the one off the main checkout carries a branch.
+        assert_eq!(branches.get("session:on-x").map(String::as_str), Some("x"));
+        assert!(!branches.contains_key("session:on-main"));
+        assert!(!branches.contains_key("session:on-web"));
+    }
+
+    #[test]
+    fn a_pinned_session_says_its_project_its_branch_or_its_folder() {
+        let pin = |id: &str, path: &str, order: i64| {
+            let mut pinned = session(id, "local", path, 5);
+            pinned.sort_order = Some(order);
+            pinned
+        };
+        let snapshot = fixture(vec![
+            pin("on-main", "/srv/api", 0),
+            pin("on-x", "/srv/api-worktrees/x", 1),
+            pin("loose", "/home/me/notes", 2),
+            session("plain", "local", "/srv/web", 1),
+        ]);
+        let places = pinned_places(&snapshot, &Placement::compute(&snapshot));
+        let place = |key: &str| places.get(key).map(String::as_str);
+        assert_eq!(place("session:on-main"), Some("api"));
+        assert_eq!(place("session:on-x"), Some("api · x"));
+        assert_eq!(place("session:loose"), Some("notes"));
+        assert_eq!(place("session:plain"), None);
     }
 
     #[test]

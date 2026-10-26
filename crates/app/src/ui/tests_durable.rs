@@ -202,8 +202,8 @@ impl Durable for Fake {
     }
 }
 
-const ON: &str = r#"{"durable_sessions": true, "sidebar_show_inactive": true}"#;
-const OFF: &str = r#"{"durable_sessions": false, "sidebar_show_inactive": true}"#;
+const ON: &str = r#"{"durable_sessions": true, "sidebar_show_inactive": true, "sidebar_tree": true, "agent_interface": "terminal"}"#;
+const OFF: &str = r#"{"durable_sessions": false, "sidebar_show_inactive": true, "sidebar_tree": true, "agent_interface": "terminal"}"#;
 
 /// Whether this system has durable sessions at all: the setting does not exist
 /// on Windows, whatever the file says.
@@ -468,7 +468,7 @@ fn with_the_setting_off_and_nothing_kept_a_restart_asks_as_it_always_did(cx: &mu
     assert!(keeper.opened.lock().unwrap().is_empty());
     // Answered, the agent is a paused session of the window, resumed by its
     // line as before.
-    let always = r#"{"durable_sessions": false, "restore_sessions": "always", "sidebar_show_inactive": true}"#;
+    let always = r#"{"durable_sessions": false, "restore_sessions": "always", "sidebar_show_inactive": true, "sidebar_tree": true, "agent_interface": "terminal"}"#;
     let h = restart_with(cx, &settings, always, &keeper, &state);
     wait_until(&h, cx, "the agent", |h, cx| live_count(h, cx) == 1);
     // Its resume line is typed into a terminal of the window.
@@ -491,7 +491,7 @@ fn turning_the_setting_off_does_not_start_a_second_agent_beside_a_running_one(
     let keeper = Fake::new();
     keeper.held.lock().unwrap().push(held(5, "t1", &cwd));
     let state = saved_held(&cwd, 5, "t1");
-    let json = r#"{"durable_sessions": false, "restore_sessions": "always", "sidebar_show_inactive": true}"#;
+    let json = r#"{"durable_sessions": false, "restore_sessions": "always", "sidebar_show_inactive": true, "sidebar_tree": true, "agent_interface": "terminal"}"#;
     let h = restart_with(cx, &settings, json, &keeper, &state);
     if !possible() {
         return;
@@ -522,7 +522,7 @@ fn a_saved_session_whose_terminal_is_gone_falls_back_to_the_paused_resume_line(
     let keeper = Fake::new();
     keeper.down.store(true, Ordering::SeqCst);
     let state = saved_held(&cwd, 5, "t1");
-    let json = r#"{"durable_sessions": true, "restore_sessions": "always", "sidebar_show_inactive": true}"#;
+    let json = r#"{"durable_sessions": true, "restore_sessions": "always", "sidebar_show_inactive": true, "sidebar_tree": true, "agent_interface": "terminal"}"#;
     let h = restart_with(cx, &settings, json, &keeper, &state);
     wait_until(&h, cx, "the agent", |h, cx| live_count(h, cx) == 1);
     assert!(keeper.attached.lock().unwrap().is_empty());
@@ -565,7 +565,7 @@ fn a_keeper_that_lost_the_terminal_or_reused_its_number_does_not_attach_to_a_str
         .unwrap()
         .push(held(5, "someone-else", &cwd));
     let state = saved_held(&cwd, 5, "t1");
-    let json = r#"{"durable_sessions": true, "restore_sessions": "always", "sidebar_show_inactive": true}"#;
+    let json = r#"{"durable_sessions": true, "restore_sessions": "always", "sidebar_show_inactive": true, "sidebar_tree": true, "agent_interface": "terminal"}"#;
     let h = restart_with(cx, &settings, json, &keeper, &state);
     if !possible() {
         return;
@@ -870,7 +870,7 @@ fn quit_and_end_every_session_is_the_old_behaviour_for_the_held_terminals_too(
 fn the_quit_question_says_that_held_sessions_keep_running(cx: &mut TestAppContext) {
     let settings = tempfile::tempdir().unwrap();
     let keeper = Fake::new();
-    let json = r#"{"durable_sessions": true, "quit_confirmation": "always", "sidebar_show_inactive": true}"#;
+    let json = r#"{"durable_sessions": true, "quit_confirmation": "always", "sidebar_show_inactive": true, "sidebar_tree": true, "agent_interface": "terminal"}"#;
     let h = open_keeper(cx, &settings, json, &keeper, None);
     let (_dir, path) = super::live::real_worktree(&h, cx);
     start_fresh(&h, cx, leon_core::AgentId::CLAUDE, &path);
@@ -917,7 +917,7 @@ fn a_keeper_that_died_is_remembered_so_the_next_start_can_say_so(cx: &mut TestAp
     // The next start finds no keeper: it says so and resumes the usual way.
     let down = Fake::new();
     down.down.store(true, Ordering::SeqCst);
-    let json = r#"{"durable_sessions": true, "restore_sessions": "always", "sidebar_show_inactive": true}"#;
+    let json = r#"{"durable_sessions": true, "restore_sessions": "always", "sidebar_show_inactive": true, "sidebar_tree": true, "agent_interface": "terminal"}"#;
     let h2 = restart_with(cx, &settings, json, &down, &state);
     wait_until(&h2, cx, "the session", |h, cx| live_count(h, cx) == 1);
     assert!(
@@ -1073,7 +1073,7 @@ fn a_session_another_window_is_attached_to_is_left_to_it(cx: &mut TestAppContext
     busy.attached = 1;
     keeper.held.lock().unwrap().push(busy);
     let state = saved_held(&cwd, 5, "t1");
-    let json = r#"{"durable_sessions": true, "restore_sessions": "always", "sidebar_show_inactive": true}"#;
+    let json = r#"{"durable_sessions": true, "restore_sessions": "always", "sidebar_show_inactive": true, "sidebar_tree": true, "agent_interface": "terminal"}"#;
     let h = restart_with(cx, &settings, json, &keeper, &state);
     if !possible() {
         return;

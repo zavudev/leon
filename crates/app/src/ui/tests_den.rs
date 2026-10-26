@@ -231,11 +231,9 @@ fn a_plain_shell_is_no_lion_and_becomes_one_when_an_agent_is_in_it(cx: &mut Test
         h.shell(cx, |shell| shell.live.get(LiveId(2)).is_some())
     });
     toggle(&h, cx);
-    // Two terminals, no agent: nobody is in the den, and its row of the
-    // sidebar counts nobody.
+    // Two terminals, no agent: nobody is in the den.
     assert!(lions(&h, cx).is_empty(), "{:?}", lions(&h, cx));
     assert_eq!(cx.update(|cx| h.shell.read(cx).den_glance(cx)), (0, false));
-    assert!(!h.shows("sidebar-den-count", cx));
     // A shell that is quiet or that rang its bell is nobody waiting.
     cx.update(|cx| {
         h.shell.update(cx, |shell, cx| {
@@ -748,9 +746,7 @@ fn going_home_closes_no_terminal_and_the_home_counts_them_and_opens_the_one_that
     assert!(heading.starts_with("2 sessions here"), "{heading}");
     assert!(!h.shows("home-waiting-0", cx), "nobody waits");
     assert!(!h.shows("sidebar-den-waits", cx));
-    // The Den's row of the sidebar counts them, as a project's row counts
-    // its sessions.
-    assert!(h.shows("sidebar-den-count", cx));
+    // The Den counts them.
     assert_eq!(cx.update(|cx| h.shell.read(cx).den_glance(cx)), (2, false));
 
     // One of them wants the user: the home lists it, and a click opens it.
@@ -767,7 +763,7 @@ fn going_home_closes_no_terminal_and_the_home_counts_them_and_opens_the_one_that
     assert!(!h.shows("home-waiting-1", cx));
     assert!(
         h.shows("sidebar-den-waits", cx),
-        "and its row says that one waits"
+        "and the machine at the foot of the sidebar says that one waits"
     );
     assert_eq!(cx.update(|cx| h.shell.read(cx).den_glance(cx)), (2, true));
     h.mouse_on("home-waiting-0".to_owned(), gpui_kit::MouseButton::Left, cx);
@@ -792,8 +788,8 @@ fn going_home_closes_no_terminal_and_the_home_counts_them_and_opens_the_one_that
     }
     h.press("enter", cx);
     assert_eq!(h.main_kind(cx), "live:2");
-    // The Home row of the sidebar goes home from a terminal too.
-    h.mouse_on("sidebar-home".to_owned(), gpui_kit::MouseButton::Left, cx);
+    // The machine's menu goes home from a terminal too.
+    h.pick_in_machine_menu(crate::keys::Command::GoHome, cx);
     assert_eq!(h.main_kind(cx), "empty");
     assert_eq!(h.shell(cx, |shell| shell.live.all().len()), 2);
 }
@@ -900,7 +896,7 @@ fn the_selected_lion_is_what_the_commands_of_a_session_act_on(cx: &mut TestAppCo
         "den-act-messagelion",
         "den-act-rename",
         "den-act-sendlionhome",
-        "den-act-closesession",
+        "den-act-deletesession",
     ] {
         assert!(h.shows(button, cx), "{button}");
     }
@@ -916,7 +912,7 @@ fn the_selected_lion_is_what_the_commands_of_a_session_act_on(cx: &mut TestAppCo
             "Interrupt",
             "Rename\u{2026}",
             "Send home",
-            "Close"
+            "Delete…"
         ]
     );
     // Rename, from the menu: the lion's session, not the tree's cursor.
@@ -1319,7 +1315,7 @@ fn the_lion_that_needs_the_user_is_one_key_away_and_its_card_says_what_it_asks(
             "Interrupt",
             "Rename\u{2026}",
             "Send home",
-            "Close"
+            "Delete…"
         ]
     );
     // Nothing was typed into the question by any of this.

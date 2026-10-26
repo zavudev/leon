@@ -384,6 +384,10 @@ pub const NOT_IN_MENUS: &[(Command, &str)] = &[
         "palette and the tree's menu: needs a row",
     ),
     (
+        C::DeleteSession,
+        "palette and the tree's menu: needs a session",
+    ),
+    (
         C::MessageLion,
         "palette, the Den's bar and a lion's menu: needs a selected lion",
     ),

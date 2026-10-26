@@ -35,7 +35,7 @@ use super::widgets::{activity_dot, elsewhere_mark, key_cap, mark, mono, section_
 use crate::format;
 use crate::icons::{icon, IconName};
 use crate::keys::{self, Command};
-use crate::theme::{metrics, px, Palette};
+use crate::theme::{fonts, metrics, px, Palette};
 
 /// The actions of the home, in the order they are shown: the Den first.
 pub const ACTIONS: [Command; 10] = [
@@ -84,8 +84,11 @@ pub enum Nav {
 }
 
 impl Nav {
-    /// The rows, top to bottom.
-    pub const ALL: [Nav; 4] = [Nav::Home, Nav::Tasks, Nav::King, Nav::Den];
+    /// The rows over the tree, top to bottom: King alone, pinned. Home, the
+    /// board and the Den are in the machine's menu at the foot of the
+    /// sidebar and in the palette, and the sidebar's keys treat them as
+    /// that row.
+    pub const ALL: [Nav; 1] = [Nav::King];
 
     /// Its name.
     pub fn label(self) -> &'static str {
@@ -108,18 +111,10 @@ impl Nav {
     }
 
     /// The row the cursor goes to from this one: the one above (`up`) or
-    /// below, `None` where the navigation ends (below it is the tree).
+    /// below, `None` where the navigation ends (below it is the tree). With
+    /// King the only row, up is King and down is the tree.
     pub fn step(self, up: bool) -> Option<Nav> {
-        match (self, up) {
-            (Nav::Home, true) => Some(Nav::Home),
-            (Nav::Home, false) => Some(Nav::Tasks),
-            (Nav::Tasks, true) => Some(Nav::Home),
-            (Nav::Tasks, false) => Some(Nav::King),
-            (Nav::King, true) => Some(Nav::Tasks),
-            (Nav::King, false) => Some(Nav::Den),
-            (Nav::Den, true) => Some(Nav::King),
-            (Nav::Den, false) => None,
-        }
+        up.then_some(Nav::King)
     }
 }
 
@@ -507,9 +502,9 @@ impl Shell {
         (live.len() + self.den_away(cx).len(), waits)
     }
 
-    /// The navigation of the sidebar: Home and The Den, between the header
-    /// and the filter and outside the tree's list, so that no scroll and no
-    /// filter takes them away. Each is a row like a project's: the same
+    /// The navigation of the sidebar: King, pinned between the header and the
+    /// filter and outside the tree's list, so that no scroll and no filter
+    /// takes it away. Each is a row like a project's: the same
     /// height, the same columns for the icon and the name, the same hover
     /// and the same cursor.
     pub(super) fn render_nav(&self, colours: &Palette, cx: &mut Context<Self>) -> Div {
@@ -576,7 +571,7 @@ impl Shell {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(icon(glyph, px(14.), colours.text_muted)),
+                            .child(icon(glyph, px(14.), colours.signal)),
                     )
                     .child(
                         div()
@@ -584,8 +579,13 @@ impl Shell {
                             .min_w_0()
                             .pr(px(6.))
                             .truncate()
+                            .font_family(fonts::mono())
+                            .font_features(fonts::mono_features())
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(row.label()),
+                            .text_size(metrics::TEXT_LABEL())
+                            .child(super::sidebar::spaced_capitals(
+                                row.label().trim_start_matches("The "),
+                            )),
                     )
                     .when(row == Nav::King, |this| {
                         this.children(king.map(|(activity, workers)| {
@@ -626,6 +626,13 @@ impl Shell {
         nav
     }
 
+    /// Whether the sidebar's cursor is on a row of the navigation rather
+    /// than in the tree. Home, the board and the Den are places without a
+    /// row: while one is open the tree keeps its cursor.
+    pub(super) fn on_nav_row(&self) -> bool {
+        self.home.nav.is_some_and(|nav| Nav::ALL.contains(&nav))
+    }
+
     /// The home.
     pub(super) fn render_home(&self, colours: &Palette, cx: &mut Context<Self>) -> AnyElement {
         let model = self.home_model();
@@ -635,53 +642,44 @@ impl Shell {
         let on = |item: Item| keyboard && all.get(at) == Some(&item);
         let hover = colours.surface;
 
-        // The actions: buttons that say their chord.
+        // The actions: commands as they would be typed, each with its chord.
         let action = |command: Command, cx: &mut Context<Self>| {
             let item = Item::Action(command);
-            let first = command == Command::ShowDen;
             let lit = on(item);
             div()
                 .id(SharedString::from(format!("home-action-{command:?}")))
                 .debug_selector(move || format!("hint-{command:?}"))
-                // Two to a row where there is room, one where there is not;
-                // the Den has a row of its own.
-                .when(first, |this| this.w_full())
-                .when(!first, |this| {
-                    this.flex_grow(1.)
-                        .flex_shrink(1.)
-                        .flex_basis(px(240.))
-                        .min_w_0()
-                })
-                .h(if first {
-                    metrics::CONTROL() + px(10.)
-                } else {
-                    metrics::CONTROL()
-                })
-                .px(px(12.))
+                .flex_shrink(1.)
+                .min_w_0()
+                .max_w_full()
+                .h(metrics::CONTROL())
+                .px(px(10.))
                 .rounded(metrics::RADIUS())
                 .border_1()
-                .border_color(if lit || first {
-                    colours.signal
-                } else {
-                    colours.elevated_border
-                })
+                .border_color(if lit { colours.signal } else { colours.border })
                 .when(lit, |this| this.bg(colours.surface_2))
                 .when(!lit, |this| this.hover(move |style| style.bg(hover)))
                 .flex()
                 .items_center()
-                .justify_between()
-                .gap(px(12.))
+                .gap(px(10.))
                 .cursor_pointer()
                 .child(
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_color(if first || lit {
+                        .font_family(fonts::mono())
+                        .font_features(fonts::mono_features())
+                        .text_size(metrics::TEXT_SMALL())
+                        .text_color(if lit {
                             colours.text
                         } else {
                             colours.text_muted
                         })
-                        .child(keys::label(command)),
+                        .child(
+                            keys::label(command)
+                                .trim_end_matches('\u{2026}')
+                                .to_lowercase(),
+                        ),
                 )
                 .children(keys::keys_label(command).map(|text| key_cap(text, colours)))
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -693,7 +691,7 @@ impl Shell {
             .flex()
             .flex_wrap()
             .justify_center()
-            .gap(px(12.))
+            .gap(px(8.))
             .w_full();
         for command in ACTIONS {
             actions = actions.child(action(command, cx));
@@ -869,12 +867,35 @@ impl Shell {
                     .justify_center()
                     .gap(px(16.))
                     .child(mark(
-                        px(36.),
+                        metrics::HERO_MARK(),
                         colours,
                         cx,
                         Lion::new("home-mark").mood(self.mark_mood()),
                     ))
-                    .child(section_label("Home", colours))
+                    .child(
+                        div()
+                            .debug_selector(|| "home-question".into())
+                            .font_family(fonts::mono())
+                            .font_features(fonts::mono_features())
+                            .text_size(metrics::TEXT_HERO())
+                            .child("what are we building?"),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .justify_center()
+                            .child(super::main_pane::prompt_field(
+                                "home-prompt",
+                                "go to a project, a worktree or a session",
+                                super::sidebar::tooltip_text(Command::GoTo),
+                                colours,
+                                cx,
+                                |this, window, cx| {
+                                    this.run_command(Command::GoTo, window, cx);
+                                },
+                            )),
+                    )
                     // A column as wide as the pane allows, and no wider than
                     // reads well: what is in it wraps inside it.
                     .child(

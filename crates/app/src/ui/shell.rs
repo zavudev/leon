@@ -47,8 +47,8 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     div, App, Context, Div, Entity, FocusHandle, FontWeight, Keystroke, ListAlignment, ListOffset,
-    ListState, MouseButton, MouseDownEvent, PathPromptOptions, ScrollHandle, ScrollStrategy, Size,
-    Stateful, Subscription, Task, UniformListScrollHandle, Window,
+    ListState, MouseButton, MouseDownEvent, PathPromptOptions, ScrollHandle, Size, Stateful,
+    Subscription, Task, Window,
 };
 use leon_core::{
     AgentId, MachineId, MachineKind, Message, ProjectId, Result as StoreResult, Session, SessionId,
@@ -515,6 +515,15 @@ pub enum Main {
     King,
 }
 
+/// The session a delete is about, and where it runs.
+struct DeleteSubject {
+    machine: MachineId,
+    cwd: String,
+    title: String,
+    history: Option<SessionId>,
+    live: Option<LiveId>,
+}
+
 /// The application window's view.
 pub struct Shell {
     pub(super) engine: Engine,
@@ -530,7 +539,7 @@ pub struct Shell {
     pub(super) cursor: Option<usize>,
     /// Where the keyboard is on the home, and on its row of the sidebar.
     pub(super) home: super::home::HomeUi,
-    pub(super) tree_scroll: UniformListScrollHandle,
+    pub(super) tree_scroll: ListState,
     pub(super) main: Main,
     /// The terminals that are running.
     pub(super) live: Sessions,
@@ -680,6 +689,29 @@ pub struct Shell {
     /// setting `sidebar_show_inactive`, off by default, read when the
     /// settings change).
     pub(super) show_inactive: bool,
+    /// Whether each worktree is a level of the sidebar of its own (the
+    /// setting `sidebar_tree`, off by default). Off, the sessions of a
+    /// project are listed under its name and carry their branch
+    /// ([`tree::flatten`]).
+    pub(super) sidebar_tree: bool,
+    /// The words beside a session row, by row key: in the flat sidebar the
+    /// branch of a session not on the main checkout, and in either sidebar
+    /// where a pinned session lives ([`tree::pinned_places`]).
+    pub(super) row_branches: std::collections::HashMap<String, String>,
+    /// How many worktrees the cleaner would suggest removing, counted when
+    /// the tree is rebuilt: what the note at the foot of the sidebar says.
+    pub(super) sweep_suggested: usize,
+    /// Draws the sidebar again while a session in it works, so its
+    /// spinner turns; it ends when none does.
+    pub(super) sidebar_spin: Option<Task<()>>,
+    /// The count the person dismissed that note at; it comes back when more
+    /// worktrees can go.
+    pub(super) sweep_note_dismissed: usize,
+    /// The engine's last word and when the window first drew it: a piece of
+    /// news leaves the status strip after a while ([`super::usage_view::status_shown`]).
+    pub(super) status_seen: Option<(crate::engine::StatusLine, std::time::Instant)>,
+    /// The timer that draws the strip again when that news has had its time.
+    status_fade: Option<Task<()>>,
     /// The removal of a worktree, while it runs.
     pub(super) removing: Option<Task<()>>,
     /// The removal of the merged worktrees the cleanup ticked, one after the
@@ -923,7 +955,7 @@ impl Shell {
             expansion_file,
             rows,
             cursor,
-            tree_scroll: UniformListScrollHandle::new(),
+            tree_scroll: ListState::new(0, ListAlignment::Top, px(200.)),
             main: Main::Empty,
             live: Sessions::default(),
             files: std::collections::HashMap::new(),
@@ -997,6 +1029,13 @@ impl Shell {
             dormant_file,
             scripts: super::scripts::ScriptsUi::new(settings::sibling(crate::trust::FILE_NAME, cx)),
             show_inactive: settings::flag(cx, "sidebar_show_inactive"),
+            sidebar_tree: settings::flag(cx, "sidebar_tree"),
+            row_branches: std::collections::HashMap::new(),
+            sweep_suggested: 0,
+            sidebar_spin: None,
+            sweep_note_dismissed: 0,
+            status_seen: None,
+            status_fade: None,
             removing: None,
             removing_merged: None,
             merged_busy: false,
@@ -1286,12 +1325,36 @@ impl Shell {
             .collect()
     }
 
+    /// Notes when the engine's last word changed, and has the window drawn
+    /// again once a piece of news has been on show long enough to go.
+    fn watch_status(&mut self, cx: &mut Context<Self>) {
+        let line = self.engine.status();
+        if line.as_ref() == self.status_seen.as_ref().map(|(seen, _)| seen) {
+            return;
+        }
+        self.status_fade = None;
+        self.status_seen = line.map(|line| {
+            if line.kind == crate::engine::StatusKind::Info {
+                self.status_fade = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(super::usage_view::STATUS_NEWS_FOR)
+                        .await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                }));
+            }
+            (line, std::time::Instant::now())
+        });
+    }
+
     /// Flattens the tree again, from what is open. The cursor follows its node.
     pub(super) fn rebuild_rows(&mut self) {
         let key = self
             .cursor
             .and_then(|index| self.rows.get(index))
             .map(Row::key);
+        // Flat, no worktree folds: what is in it is listed under its project.
+        let mut chosen = self.expansion.clone();
+        chosen.set_worktrees_open(!self.sidebar_tree);
         let build = |expansion: &super::expansion::Expansion| {
             build_rows_filtered(
                 &self.snapshot,
@@ -1301,10 +1364,10 @@ impl Shell {
                 self.filter.as_ref(),
             )
         };
-        self.rows = if !self.show_inactive {
+        let rows = if !self.show_inactive {
             // Only the active ones: found in the tree with every node open, so
             // that none hides one, then folded the way the person folded it.
-            let folded: std::collections::HashSet<String> = build(&self.expansion)
+            let folded: std::collections::HashSet<String> = build(&chosen)
                 .iter()
                 .filter(|row| row.open == Some(false))
                 .map(Row::key)
@@ -1312,9 +1375,34 @@ impl Shell {
             let everything = super::expansion::Expansion::everything();
             fold_rows(self.only_active(build(&everything)), &folded)
         } else {
-            build(&self.expansion)
+            build(&chosen)
         };
+        (self.rows, self.row_branches) = if self.sidebar_tree {
+            (rows, std::collections::HashMap::new())
+        } else {
+            tree::flatten(rows)
+        };
+        // A pinned session is out of its project in either list: it says
+        // where it lives instead.
+        self.row_branches
+            .extend(tree::pinned_places(&self.snapshot, &self.placement));
+        // Every row is measured again, and the list stays where it was.
+        let top = self.tree_scroll.logical_scroll_top();
+        self.tree_scroll
+            .splice(0..self.tree_scroll.item_count(), self.rows.len());
+        if top.item_ix < self.rows.len() {
+            self.tree_scroll.scroll_to(top);
+        }
         self.cursor = tree::follow(&self.rows, key.as_deref(), self.cursor.unwrap_or(0));
+        self.sweep_suggested = super::sweep::candidates(
+            &self.snapshot,
+            &self.running_per_worktree(),
+            &self.sweep.sizes,
+            self.now(),
+        )
+        .iter()
+        .filter(|candidate| candidate.recommended())
+        .count();
     }
 
     /// The rows of the tree that are active, and the nodes above them: what a
@@ -1481,6 +1569,7 @@ impl Shell {
                 .map(|session| (session.id, session.title)),
             self.rename_target(cx),
         )
+        .with_doomed(self.doomed_here())
         .with_elsewhere(self.here_session().and_then(|session| {
             let found = self.elsewhere_of(&session)?;
             Some(super::steps::ElsewhereTarget {
@@ -1534,6 +1623,103 @@ impl Shell {
         } else {
             from_main().or_else(from_row)
         }
+    }
+
+    /// The session a delete would delete: the row under the cursor while the
+    /// sidebar has the keyboard (a history session or a live one), else the
+    /// live session on screen or the open transcript; the selected lion in
+    /// the Den. A plain shell is no session: `None`.
+    fn delete_subject(&self) -> Option<DeleteSubject> {
+        let of_live = |id: LiveId| {
+            let entry = self.placement.live.iter().find(|entry| entry.id == id)?;
+            if entry.agent.is_none() && entry.history.is_none() {
+                return None;
+            }
+            let history = entry.history.as_ref().and_then(|history| {
+                self.snapshot
+                    .sessions
+                    .iter()
+                    .find(|session| &session.id == history)
+            });
+            Some(DeleteSubject {
+                machine: entry.machine.clone(),
+                cwd: entry.cwd.clone(),
+                title: history.map_or_else(
+                    || {
+                        self.live
+                            .get(id)
+                            .map_or_else(|| "this session".to_owned(), |live| live.label())
+                    },
+                    |history| history.title.clone(),
+                ),
+                history: entry.history.clone(),
+                live: Some(id),
+            })
+        };
+        let of_history = |session: &Session| DeleteSubject {
+            machine: session.machine_id.clone(),
+            cwd: session.cwd.clone(),
+            title: session.title.clone(),
+            history: Some(session.id.clone()),
+            live: self.running_of_history(&session.id),
+        };
+        if let Some(lion) = self.den_lion_live() {
+            return of_live(lion);
+        }
+        if self.pane == Pane::Sidebar {
+            match &self.rows.get(self.cursor?)?.kind {
+                Kind::Live(entry) => return of_live(entry.id),
+                Kind::Session(session) => return Some(of_history(session)),
+                _ => {}
+            }
+        }
+        match self.here_live() {
+            Some(id) => of_live(id),
+            None => self.here_session().map(|session| of_history(&session)),
+        }
+    }
+
+    /// The linked worktree the session a delete would delete runs in, with
+    /// how many other sessions are in it; `None` on a main checkout or out
+    /// of every project, where only the session goes.
+    pub(super) fn doomed_here(&self) -> Option<super::steps::DoomedWorktree> {
+        let subject = self.delete_subject()?;
+        let root = tree::workspace_root(&self.snapshot, &subject.machine, &subject.cwd);
+        let (project, Some(id)) = tree::detail_of_root(&self.snapshot, &subject.machine, &root)?
+        else {
+            return None;
+        };
+        let worktree = self
+            .snapshot
+            .project(&project)?
+            .worktrees
+            .iter()
+            .find(|worktree| worktree.id == id)?;
+        if worktree.is_main {
+            return None;
+        }
+        // The history sessions in it, and the live ones that have none yet
+        // (a live one that resumed a history session is that session).
+        let others = self
+            .placement
+            .of_worktree(&id)
+            .iter()
+            .filter(|place| Some(&self.snapshot.sessions[**place].id) != subject.history.as_ref())
+            .count()
+            + self
+                .placement
+                .live_of_worktree(&id)
+                .iter()
+                .map(|place| &self.placement.live[*place])
+                .filter(|entry| Some(entry.id) != subject.live && entry.history.is_none())
+                .count();
+        Some(super::steps::DoomedWorktree {
+            title: subject.title,
+            project,
+            worktree: id,
+            branch: tree::worktree_label(worktree),
+            others,
+        })
     }
 
     /// What a rename would rename: the project, the machine or the live
@@ -2256,12 +2442,11 @@ impl Shell {
     pub(super) fn move_cursor_to(&mut self, index: usize) {
         self.cursor = Some(index);
         self.home.nav = None;
-        let strategy = if index == 0 {
-            ScrollStrategy::Top
+        if index == 0 {
+            self.tree_scroll.scroll_to(ListOffset::default());
         } else {
-            ScrollStrategy::Nearest
-        };
-        self.tree_scroll.scroll_to_item(index, strategy);
+            self.tree_scroll.scroll_to_reveal_item(index);
+        }
     }
 
     /// Puts the cursor on `node`, opening what hides it.
@@ -2966,6 +3151,18 @@ impl Shell {
             self.reveal_sidebar(cx);
         }
         match command {
+            // A session in a linked worktree goes with its worktree, after
+            // asking; any other is closed, or removed from the history, alone.
+            C::DeleteSession if self.doomed_here().is_some() => {
+                self.begin_flow(command, window, cx);
+            }
+            C::DeleteSession => {
+                let alone = match self.delete_subject() {
+                    Some(DeleteSubject { live: Some(_), .. }) => C::CloseSession,
+                    _ => C::RemoveFromHistory,
+                };
+                return self.run_command(alone, window, cx);
+            }
             // In the Den the commands of a session are the selected lion's.
             C::ContextMenu if self.den_lion().is_some() => self.den_menu_here(cx),
             C::PinSession | C::UnpinSession if self.den_lion().is_some() => {
@@ -3379,13 +3576,13 @@ impl Shell {
         }
         match self.pane {
             Pane::Files => self.files_move(command),
-            // The navigation is over the tree: Home, then The Den, then the
-            // first row of the tree.
-            Pane::Sidebar if self.home.nav.is_some() => {
-                let nav = self.home.nav.unwrap_or(super::home::Nav::Home);
+            // The navigation is over the tree: King, then the first row of
+            // the tree.
+            Pane::Sidebar if self.on_nav_row() => {
+                let nav = self.home.nav.unwrap_or(super::home::Nav::King);
                 match command {
                     C::Up | C::PageUp => self.home.nav = nav.step(true),
-                    C::Top => self.home.nav = Some(super::home::Nav::Home),
+                    C::Top => self.home.nav = Some(super::home::Nav::King),
                     C::Down | C::PageDown => match nav.step(false) {
                         Some(next) => self.home.nav = Some(next),
                         None => {
@@ -3409,7 +3606,7 @@ impl Shell {
                         .cursor
                         .is_none_or(|at| Some(at) == tree::first(&self.rows)) =>
             {
-                self.home.nav = Some(super::home::Nav::Den);
+                self.home.nav = Some(super::home::Nav::King);
             }
             Pane::Sidebar => {
                 let from = self.cursor.unwrap_or(0);
@@ -3485,8 +3682,8 @@ impl Shell {
             return;
         }
         match (self.pane, &self.main) {
-            (Pane::Sidebar, _) if self.home.nav.is_some() => {
-                let nav = self.home.nav.unwrap_or(super::home::Nav::Home);
+            (Pane::Sidebar, _) if self.on_nav_row() => {
+                let nav = self.home.nav.unwrap_or(super::home::Nav::King);
                 self.open_nav(nav, window, cx);
             }
             (Pane::Main, Main::Empty) => self.home_open(window, cx),
@@ -4304,6 +4501,7 @@ impl Render for Shell {
             self.sync_share(cx);
         }
         self.sync_settings(cx);
+        self.watch_status(cx);
         self.sync_editor_prefs(window, cx);
         // The file tree follows the folder in view.
         self.files_sync(cx);

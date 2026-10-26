@@ -215,6 +215,22 @@ pub struct ResumeTarget {
     pub project: Option<ProjectId>,
 }
 
+/// The session the keyboard is on when it runs in a linked worktree: deleting
+/// it removes the worktree, and every other session in it goes too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoomedWorktree {
+    /// What the session is called.
+    pub title: String,
+    /// The project of the worktree.
+    pub project: ProjectId,
+    /// The worktree.
+    pub worktree: WorktreeId,
+    /// Its branch, or its folder when the head is detached.
+    pub branch: String,
+    /// How many other sessions are in it.
+    pub others: usize,
+}
+
 /// A history session that runs in another terminal, and what is known of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ElsewhereTarget {
@@ -412,6 +428,8 @@ pub struct World {
     /// A new session that waits for its account: when set, the flow of a new
     /// session asks only which account.
     pub account_ask: Option<AccountAsk>,
+    /// The linked worktree the session the keyboard is on runs in.
+    pub doomed: Option<DoomedWorktree>,
 }
 
 /// The scripts of the project the keyboard is in, and where one would run.
@@ -533,6 +551,7 @@ impl World {
             accounts: Vec::new(),
             default_accounts: Vec::new(),
             account_ask: None,
+            doomed: None,
         }
     }
 
@@ -673,6 +692,13 @@ impl World {
     /// The same world knowing which history session "resume in…" is about.
     pub fn with_resume(mut self, resume: Option<ResumeTarget>) -> Self {
         self.resume = resume;
+        self
+    }
+
+    /// The same world knowing the linked worktree the session the keyboard
+    /// is on runs in.
+    pub fn with_doomed(mut self, doomed: Option<DoomedWorktree>) -> Self {
+        self.doomed = doomed;
         self
     }
 
@@ -1184,6 +1210,7 @@ pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
         Command::Rename => rename(answers, world),
         Command::RemoveMachine => remove_machine(answers, world),
         Command::RemoveFromHistory => remove_from_history(answers, world),
+        Command::DeleteSession => delete_session(answers, world),
         Command::ResumeSession => resume_session(answers, world),
         Command::ResumeIn => resume_in(answers, world),
         Command::ResumeAnyway => resume_anyway(answers, world),
@@ -1835,6 +1862,43 @@ fn remove_from_history(answers: &[String], world: &World) -> Outcome {
         [confirmed, ..] if confirmed == "yes" => {
             Outcome::Run(Action::Engine(Op::RemoveSession(id.clone())))
         }
+        _ => Outcome::Run(Action::Nothing),
+    }
+}
+
+/// Deleting a session that runs in a linked worktree removes the worktree
+/// with it, so it always asks, whatever runs in it. The removal is the
+/// worktree's own: git refusing it for the changes it holds asks again before
+/// forcing, and the sessions in it end and leave the history.
+fn delete_session(answers: &[String], world: &World) -> Outcome {
+    let Some(doomed) = &world.doomed else {
+        return Outcome::Refuse("Select a session in a worktree to delete.".to_owned());
+    };
+    let others = match doomed.others {
+        0 => String::new(),
+        1 => ", the other session in it too".to_owned(),
+        n => format!(", the {n} other sessions in it too"),
+    };
+    match answers {
+        [] => choices(
+            "Delete for good?",
+            vec![
+                Choice::new(
+                    format!("Delete \"{}\" and {}", doomed.title, doomed.branch),
+                    format!(
+                        "ends the session and removes its worktree's folder (git worktree remove){others}; it cannot be undone"
+                    ),
+                    "yes",
+                ),
+                Choice::new("Cancel", "keep them", "no"),
+            ],
+            Custom::No,
+        ),
+        [confirmed, ..] if confirmed == "yes" => Outcome::Run(Action::RemoveWorktree {
+            project: doomed.project.clone(),
+            worktree: doomed.worktree.clone(),
+            force: false,
+        }),
         _ => Outcome::Run(Action::Nothing),
     }
 }
@@ -4110,6 +4174,7 @@ mod tests {
             accounts: Vec::new(),
             default_accounts: Vec::new(),
             account_ask: None,
+            doomed: None,
         }
     }
 
@@ -5750,6 +5815,55 @@ mod tests {
         world.machine_row = None;
         assert!(matches!(
             advance(Command::RemoveMachine, &[], &world),
+            Outcome::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn deleting_a_session_in_a_worktree_asks_names_the_branch_and_removes_the_worktree() {
+        let mut world = world();
+        // Asked even when closing a session would not ask.
+        world.prefs.confirm_close = false;
+        world.doomed = Some(DoomedWorktree {
+            title: "fix the bug".into(),
+            project: ProjectId::from_string("api"),
+            worktree: WorktreeId::from_string("a1"),
+            branch: "feature/x".into(),
+            others: 2,
+        });
+        let asked = advance(Command::DeleteSession, &[], &world);
+        assert_eq!(
+            labels(&asked),
+            ["Delete \"fix the bug\" and feature/x", "Cancel"]
+        );
+        let Outcome::Ask(Step {
+            kind: StepKind::Choices { choices, .. },
+            ..
+        }) = &asked
+        else {
+            unreachable!()
+        };
+        assert!(
+            choices[0].detail.contains("the 2 other sessions in it too"),
+            "{}",
+            choices[0].detail
+        );
+        assert!(choices[0].detail.contains("cannot be undone"));
+        assert_eq!(
+            advance(Command::DeleteSession, &strings(&["yes"]), &world),
+            Outcome::Run(Action::RemoveWorktree {
+                project: ProjectId::from_string("api"),
+                worktree: WorktreeId::from_string("a1"),
+                force: false,
+            })
+        );
+        assert_eq!(
+            advance(Command::DeleteSession, &strings(&["no"]), &world),
+            Outcome::Run(Action::Nothing)
+        );
+        world.doomed = None;
+        assert!(matches!(
+            advance(Command::DeleteSession, &[], &world),
             Outcome::Refuse(_)
         ));
     }

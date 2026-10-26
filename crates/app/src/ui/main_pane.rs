@@ -38,10 +38,10 @@ const WORKTREE_SESSIONS: usize = 12;
 impl Shell {
     pub(super) fn render_main_pane(&self, colours: &Palette, cx: &mut Context<Self>) -> Div {
         let focused = self.pane == Pane::Main;
-        let (kind, title, meta) = self.main_heading(cx);
+        let (_, title, meta) = self.main_heading(cx);
         let body = match &self.main {
             Main::Empty => self.render_home(colours, cx),
-            Main::Project(id) => self.render_project(id, colours),
+            Main::Project(id) => self.render_project(id, colours, cx),
             Main::Worktree(project, worktree) => {
                 self.render_worktree(project, worktree, colours, cx)
             }
@@ -58,25 +58,31 @@ impl Shell {
             .h_full()
             .flex()
             .flex_col()
-            .child(
+            .child({
+                // One line: the toggles at the left, and in the middle what is
+                // open as a prompt reads: its icon, its name, where it is and
+                // how it is doing. The whole line about it is the tooltip.
+                let (_, path, tail) = self.meta_parts(meta.clone());
+                let (place, state) = crumb_parts(&path, &tail);
+                // A project named after its folder is not said twice.
+                let place = place.filter(|place| *place != title);
+                let tip: SharedString = meta.into();
                 div()
                     .debug_selector(|| "main-header".into())
                     .relative()
                     .flex_none()
                     .h(metrics::HEADER_HEIGHT())
                     .px_4()
-                    .py(metrics::HEADER_PAD())
                     .border_b_1()
                     .border_color(colours.border)
                     .flex()
-                    .flex_col()
-                    .gap(metrics::HEADER_GAP())
+                    .items_center()
                     .child(
                         div()
                             .debug_selector(|| "header-title-row".into())
-                            .flex_none()
+                            .flex_1()
+                            .min_w_0()
                             .h(metrics::HEADER_TITLE_LINE())
-                            .overflow_hidden()
                             .flex()
                             .items_center()
                             .gap_2()
@@ -92,13 +98,29 @@ impl Shell {
                                         .mood(self.mark_mood())
                                         .hover(),
                                 ))
-                            })
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("header-crumb")
+                            .debug_selector(|| "header-crumb".into())
+                            .flex_none()
+                            .max_w(metrics::HEADER_CRUMB_MAX())
+                            .h(metrics::HEADER_TITLE_LINE() + px(8.))
+                            .px(px(12.))
+                            .border_1()
+                            .border_color(colours.border)
+                            .rounded(metrics::RADIUS())
+                            .overflow_hidden()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                             .children(
                                 self.main_project().map(|id| {
                                     self.logo(&id, metrics::PROJECT_ICON(), "main", colours)
                                 }),
                             )
-                            .child(section_label(kind, colours))
                             .children(agent.map(|agent| {
                                 div()
                                     .debug_selector(|| "main-agent-icon".into())
@@ -113,42 +135,45 @@ impl Shell {
                                     .font_weight(FontWeight::MEDIUM)
                                     .child(title),
                             )
-                            .children(self.header_usage_chip(colours, cx)),
-                    )
-                    .child({
-                        // What it is, where, and how it is doing: the path gives
-                        // way with an ellipsis, the state words stay.
-                        let (head, path, tail) = self.meta_parts(meta);
-                        div()
-                            .debug_selector(|| "header-meta-row".into())
-                            .flex_none()
-                            .h(metrics::HEADER_META_LINE())
-                            .overflow_hidden()
-                            .flex()
-                            .items_center()
-                            .text_color(colours.text_muted)
-                            .child(
-                                mono(head)
-                                    .debug_selector(|| "header-meta".into())
-                                    .line_height(metrics::HEADER_META_LINE())
-                                    .whitespace_nowrap(),
-                            )
-                            .child(
+                            .children(place.map(|place| {
                                 div()
-                                    .debug_selector(|| "header-path".into())
-                                    .flex_1()
+                                    .debug_selector(|| "header-place".into())
+                                    .flex_shrink(1.)
                                     .min_w_0()
                                     .truncate()
-                                    .child(mono(path).line_height(metrics::HEADER_META_LINE())),
-                            )
-                            .child(
-                                mono(tail)
-                                    .line_height(metrics::HEADER_META_LINE())
-                                    .whitespace_nowrap(),
-                            )
-                    })
-                    .when(focused, |this| this.child(focus_rule(colours))),
-            )
+                                    .font_family(fonts::mono())
+                                    .font_features(fonts::mono_features())
+                                    .text_size(metrics::TEXT_SMALL())
+                                    .text_color(colours.text_faint)
+                                    .child(format!("@ {place}"))
+                            }))
+                            .children(state.map(|(word, live)| {
+                                div()
+                                    .debug_selector(|| "header-state".into())
+                                    .flex_none()
+                                    .whitespace_nowrap()
+                                    .font_family(fonts::mono())
+                                    .font_features(fonts::mono_features())
+                                    .text_size(metrics::TEXT_SMALL())
+                                    .text_color(if live {
+                                        colours.signal
+                                    } else {
+                                        colours.text_muted
+                                    })
+                                    .child(word)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .justify_end()
+                            .items_center()
+                            .children(self.header_usage_chip(colours, cx)),
+                    )
+                    .when(focused, |this| this.child(focus_rule(colours)))
+            })
             .child(div().flex_1().min_h_0().flex().flex_col().child(body))
             .child(self.render_status_bar(colours, cx))
     }
@@ -390,7 +415,15 @@ impl Shell {
             )
     }
 
-    fn render_project(&self, id: &leon_core::ProjectId, colours: &Palette) -> AnyElement {
+    /// A project's screen: the question of what to build in it, over a field
+    /// that starts a session there, and the ways to start something else; its
+    /// facts in small print under them.
+    fn render_project(
+        &self,
+        id: &leon_core::ProjectId,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(entry) = self.snapshot.project(id) else {
             return div().into_any_element();
         };
@@ -408,21 +441,171 @@ impl Shell {
                     .child(mono(worktree.path.clone()).text_color(colours.text_faint)),
             );
         }
+        let root = entry.project.root.clone();
+        let on = |machine: &MachineId, cwd: &str| {
+            machine == &entry.project.machine_id && leon_core::path::is_within(cwd, &root)
+        };
+        let sessions = self
+            .snapshot
+            .sessions
+            .iter()
+            .filter(|session| on(&session.machine_id, &session.cwd))
+            .count();
+        let running = self
+            .live
+            .all()
+            .iter()
+            .filter(|live| on(&live.machine, &live.cwd))
+            .count();
+        let name = self.project_label(&entry.project);
+        let project_id = entry.project.id.clone();
+        let hover = colours.surface;
+        let mono_text = |text: String| {
+            div()
+                .font_family(fonts::mono())
+                .font_features(fonts::mono_features())
+                .child(text)
+        };
+        let chip = |id: &'static str,
+                    lead: AnyElement,
+                    text: &'static str,
+                    tip: String,
+                    run: Box<Run>,
+                    cx: &mut Context<Self>| {
+            let tip: SharedString = tip.into();
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .flex_none()
+                .h(metrics::CONTROL())
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .border_1()
+                .border_color(colours.border)
+                .rounded(metrics::RADIUS())
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover))
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                .font_family(fonts::mono())
+                .font_features(fonts::mono_features())
+                .text_size(metrics::TEXT_SMALL())
+                .text_color(colours.text_muted)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.pane = Pane::Main;
+                    run(this, window, cx);
+                }))
+                .child(lead)
+                .child(text)
+        };
+        let new_worktree = project_id.clone();
         div()
             .debug_selector(|| "project-detail".into())
+            .size_full()
             .p_4()
             .flex()
             .flex_col()
+            .items_center()
+            .justify_center()
             .gap_3()
-            .child(Self::field("PATH", entry.project.root.clone(), colours))
-            .child(Self::field("MACHINE", machine, colours))
-            .child(Self::field(
-                "WORKTREES",
-                entry.worktrees.len().to_string(),
+            .child(super::widgets::mark(
+                metrics::HERO_MARK(),
                 colours,
+                cx,
+                super::widgets::Lion::new("project-mark").mood(self.mark_mood()),
             ))
-            .child(div().pt_2().child(section_label("Worktrees", colours)))
-            .child(worktrees)
+            .child(
+                div()
+                    .debug_selector(|| "project-question".into())
+                    .flex()
+                    .items_baseline()
+                    .text_size(metrics::TEXT_HERO())
+                    .child(mono_text("what are we building in ".to_owned()))
+                    .child(mono_text(name).text_color(colours.signal))
+                    .child(mono_text("?".to_owned())),
+            )
+            .child(
+                mono_text(format!(
+                    "{} worktree{} \u{b7} {sessions} session{} \u{b7} {running} running",
+                    entry.worktrees.len(),
+                    if entry.worktrees.len() == 1 { "" } else { "s" },
+                    if sessions == 1 { "" } else { "s" },
+                ))
+                .debug_selector(|| "project-counts".into())
+                .text_size(metrics::TEXT_SMALL())
+                .text_color(colours.text_faint),
+            )
+            .child(prompt_field(
+                "project-prompt",
+                "start a session here",
+                super::sidebar::tooltip_text(Command::NewSession),
+                colours,
+                cx,
+                |this, window, cx| {
+                    // The flow reads its target from what is open.
+                    this.pane = Pane::Main;
+                    this.run_command(Command::NewSession, window, cx);
+                },
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .justify_center()
+                    .gap_2()
+                    .child(chip(
+                        "project-new-worktree",
+                        mono_text("\u{2387}".to_owned()).into_any_element(),
+                        "new worktree",
+                        super::sidebar::tooltip_text(Command::NewWorktree),
+                        Box::new(move |this, window, cx| {
+                            this.open_new_worktree_for(&new_worktree, window, cx)
+                        }),
+                        cx,
+                    ))
+                    .child(chip(
+                        "project-ask-king",
+                        icon(IconName::Crown, px(12.), colours.signal).into_any_element(),
+                        "ask king to plan it",
+                        super::sidebar::tooltip_text(Command::ShowKing),
+                        Box::new(|this, window, cx| {
+                            this.run_command(Command::ShowKing, window, cx);
+                        }),
+                        cx,
+                    ))
+                    .child(chip(
+                        "project-open-shell",
+                        mono_text("$_".to_owned()).into_any_element(),
+                        "open a shell",
+                        super::sidebar::tooltip_text(Command::OpenShell),
+                        Box::new(|this, window, cx| {
+                            this.run_command(Command::OpenShell, window, cx);
+                        }),
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "project-facts".into())
+                    .mt_6()
+                    .w_full()
+                    .max_w(metrics::HEADER_CRUMB_MAX() + px(220.))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .text_size(metrics::TEXT_SMALL())
+                    .text_color(colours.text_muted)
+                    .child(Self::field("PATH", entry.project.root.clone(), colours))
+                    .child(Self::field("MACHINE", machine, colours))
+                    .child(Self::field(
+                        "WORKTREES",
+                        entry.worktrees.len().to_string(),
+                        colours,
+                    ))
+                    .child(div().pt_2().child(section_label("Worktrees", colours)))
+                    .child(worktrees),
+            )
             .into_any_element()
     }
 
@@ -455,68 +638,72 @@ impl Shell {
             .count();
         let local = entry.project.machine_id.is_local();
 
-        // ----- the hero: the project, the branch and how the terminals are.
+        // ----- the hero: what to build on this branch, where it is and how
+        // its terminals are, over the field that starts a session here.
+        let mono_text = |text: String| {
+            div()
+                .font_family(fonts::mono())
+                .font_features(fonts::mono_features())
+                .child(text)
+        };
         let hero = div()
             .debug_selector(|| "worktree-hero".into())
             .flex_none()
             .px_4()
-            .py_3()
-            .border_b_1()
-            .border_color(colours.border)
+            .pt(px(36.))
+            .pb_3()
             .flex()
+            .flex_col()
             .items_center()
-            .gap_3()
-            .child(self.logo(project, px(24.), "worktree", colours))
+            .gap_2()
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
                     .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(self.project_label(&entry.project)),
-                            )
-                            .child(
-                                mono(worktree_label(wt))
-                                    .px(px(6.))
-                                    .py(px(1.))
-                                    .rounded(metrics::RADIUS())
-                                    .border_1()
-                                    .border_color(colours.elevated_border)
-                                    .text_color(colours.text),
-                            )
-                            .child(
-                                mono(if wt.is_main { "MAIN" } else { "LINKED" })
-                                    .text_color(colours.text_faint),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(metrics::TEXT_SMALL())
-                            .text_color(colours.text_faint)
-                            .child(format!("{machine} \u{b7} {}", wt.path)),
-                    ),
+                    .items_baseline()
+                    .text_size(metrics::TEXT_HERO())
+                    .child(mono_text("what are we building on ".to_owned()))
+                    .child(mono_text(worktree_label(wt)).text_color(colours.signal))
+                    .child(mono_text("?".to_owned())),
             )
             .child(
                 div()
-                    .flex_none()
                     .flex()
                     .items_center()
                     .gap_2()
+                    .text_size(metrics::TEXT_SMALL())
+                    .text_color(colours.text_faint)
+                    .child(self.logo(project, metrics::PROJECT_ICON(), "worktree", colours))
+                    .child(mono_text(format!(
+                        "{} \u{b7} {} \u{b7} {}",
+                        self.project_label(&entry.project).to_lowercase(),
+                        if wt.is_main {
+                            "main checkout"
+                        } else {
+                            "linked"
+                        },
+                        machine.to_lowercase(),
+                    )))
                     .child(activity_dot(activity, colours))
-                    .child(mono(activity_word(activity)).text_color(colours.text_faint)),
+                    .child(mono_text(activity_word(activity).to_lowercase())),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .pt_2()
+                    .child(prompt_field(
+                        "worktree-new-session",
+                        "start a session on this branch",
+                        super::sidebar::tooltip_text(Command::NewSession),
+                        colours,
+                        cx,
+                        |this, window, cx| {
+                            // The flow reads its target from what is open.
+                            this.pane = Pane::Main;
+                            this.run_command(Command::NewSession, window, cx);
+                        },
+                    )),
             );
 
         // ----- the actions: one accent call to action, then the rest.
@@ -524,28 +711,14 @@ impl Shell {
             .debug_selector(|| "worktree-actions".into())
             .flex_none()
             .px_4()
-            .py_2()
+            .pb_3()
             .border_b_1()
             .border_color(colours.border)
             .flex()
             .flex_wrap()
+            .justify_center()
             .items_center()
-            .gap_2()
-            .child(worktree_button(
-                "worktree-new-session",
-                super::sidebar::tooltip_text(Command::NewSession),
-                colours,
-                cx,
-                mono("NEW SESSION")
-                    .text_color(colours.on_primary)
-                    .into_any_element(),
-                true,
-                |this, window, cx| {
-                    // The flow reads its target from what is open.
-                    this.pane = Pane::Main;
-                    this.run_command(Command::NewSession, window, cx);
-                },
-            ));
+            .gap_2();
         // The agents this machine has (the catalogue's, not a fixed three);
         // a machine nobody probed yet shows the built-in ones.
         for agent in self.agents_for_buttons(&entry.project.machine_id) {
@@ -578,7 +751,7 @@ impl Shell {
                 super::sidebar::tooltip_text(Command::OpenChanges),
                 colours,
                 cx,
-                mono("CHANGES")
+                action_label("changes")
                     .text_color(colours.text_muted)
                     .into_any_element(),
                 false,
@@ -589,7 +762,7 @@ impl Shell {
                 super::sidebar::tooltip_text(Command::OpenShell),
                 colours,
                 cx,
-                mono("OPEN SHELL")
+                action_label("$_ open a shell")
                     .text_color(colours.text_muted)
                     .into_any_element(),
                 false,
@@ -601,7 +774,7 @@ impl Shell {
                 super::sidebar::tooltip_text(Command::CopyPath),
                 colours,
                 cx,
-                mono("COPY PATH")
+                action_label("copy path")
                     .text_color(colours.text_muted)
                     .into_any_element(),
                 false,
@@ -612,7 +785,7 @@ impl Shell {
                 super::sidebar::tooltip_text(Command::CopyBranch),
                 colours,
                 cx,
-                mono("COPY BRANCH")
+                action_label("copy branch")
                     .text_color(colours.text_muted)
                     .into_any_element(),
                 false,
@@ -624,7 +797,7 @@ impl Shell {
                 super::sidebar::tooltip_text(Command::Reveal),
                 colours,
                 cx,
-                mono("REVEAL")
+                action_label("reveal")
                     .text_color(colours.text_muted)
                     .into_any_element(),
                 false,
@@ -638,7 +811,7 @@ impl Shell {
                 super::sidebar::tooltip_text(Command::NewWorktree),
                 colours,
                 cx,
-                mono("NEW WORKTREE")
+                action_label("new worktree")
                     .text_color(colours.text_muted)
                     .into_any_element(),
                 false,
@@ -650,7 +823,7 @@ impl Shell {
                 super::sidebar::tooltip_text(Command::RemoveMergedWorktrees),
                 colours,
                 cx,
-                mono("REMOVE MERGED")
+                action_label("remove merged")
                     .text_color(colours.success)
                     .into_any_element(),
                 false,
@@ -663,7 +836,7 @@ impl Shell {
                 super::sidebar::tooltip_text(Command::RemoveWorktree),
                 colours,
                 cx,
-                mono("REMOVE WORKTREE")
+                action_label("remove worktree")
                     .text_color(colours.error)
                     .into_any_element(),
                 false,
@@ -1483,4 +1656,114 @@ fn message_row(index: usize, message: &Message, hit: bool, colours: &Palette) ->
                 .child(text),
         )
         .into_any_element()
+}
+
+/// The words of an action of a screen, in lower-case mono as a command is
+/// typed.
+fn action_label(text: &'static str) -> Div {
+    div()
+        .flex_none()
+        .font_family(fonts::mono())
+        .font_features(fonts::mono_features())
+        .text_size(metrics::TEXT_SMALL())
+        .child(text)
+}
+
+/// The field of an empty screen that starts something there, drawn as a
+/// prompt: `> ▌ what it does` with the accent's run button at its end and
+/// the accent's corner ticks. A click runs `run`.
+pub(super) fn prompt_field(
+    id: &'static str,
+    words: &'static str,
+    tip: String,
+    colours: &Palette,
+    cx: &mut Context<Shell>,
+    run: impl Fn(&mut Shell, &mut Window, &mut Context<Shell>) + 'static,
+) -> Stateful<Div> {
+    let tip: SharedString = tip.into();
+    let mono_text = |text: &'static str| {
+        div()
+            .font_family(fonts::mono())
+            .font_features(fonts::mono_features())
+            .child(text)
+    };
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .relative()
+        .w_full()
+        .max_w(metrics::HEADER_CRUMB_MAX() + px(220.))
+        .h(metrics::CONTROL() + px(18.))
+        .px_4()
+        .flex()
+        .items_center()
+        .gap_3()
+        .border_1()
+        .border_color(colours.border)
+        .bg(colours.surface)
+        .cursor_pointer()
+        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+        .on_click(cx.listener(move |this, _, window, cx| run(this, window, cx)))
+        .children(super::lines::focus_ticks(id, colours))
+        .child(mono_text(">").text_color(colours.signal))
+        .child(div().flex_none().w(px(8.)).h(px(16.)).bg(colours.signal))
+        .child(
+            mono_text(words)
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(colours.text_faint),
+        )
+        .child(
+            div()
+                .flex_none()
+                .h(metrics::CONTROL())
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .rounded(metrics::RADIUS())
+                .bg(colours.primary_fill)
+                .child(mono("\u{23ce} RUN").text_color(colours.on_primary)),
+        )
+}
+
+/// What a button of a screen does when it is clicked.
+type Run = dyn Fn(&mut Shell, &mut Window, &mut Context<Shell>);
+
+/// What the header's line says after the name: the folder it is in (`@ atlas`)
+/// and its first state word in lower case, with whether that word is one of
+/// work under way (drawn in the accent). Both come from the metadata split
+/// around its path ([`Shell::meta_parts`]).
+pub(super) fn crumb_parts(path: &str, tail: &str) -> (Option<String>, Option<(String, bool)>) {
+    let place = (!path.is_empty()).then(|| super::tree::folder_name(path).to_owned());
+    let state = tail
+        .split('\u{b7}')
+        .map(str::trim)
+        .find(|word| !word.is_empty())
+        .map(|word| {
+            let word = word.to_lowercase();
+            let live = matches!(word.as_str(), "running" | "starting" | "working");
+            (word, live)
+        });
+    (place, state)
+}
+
+#[cfg(test)]
+mod crumb_tests {
+    use super::crumb_parts;
+
+    #[test]
+    fn the_crumb_says_the_folder_and_the_first_state_word() {
+        let (place, state) = crumb_parts("/home/ada/code/atlas", " \u{b7} RUNNING \u{b7} RESUMED");
+        assert_eq!(place.as_deref(), Some("atlas"));
+        assert_eq!(state, Some(("running".to_owned(), true)));
+    }
+
+    #[test]
+    fn a_finished_state_is_not_drawn_as_work_and_no_path_means_no_place() {
+        let (place, state) = crumb_parts("", " \u{b7} EXITED 1");
+        assert_eq!(place, None);
+        assert_eq!(state, Some(("exited 1".to_owned(), false)));
+        assert_eq!(crumb_parts("/srv/api/", ""), (Some("api".to_owned()), None));
+    }
 }
