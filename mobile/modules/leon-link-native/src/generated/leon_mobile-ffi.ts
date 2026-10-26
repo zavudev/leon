@@ -236,6 +236,12 @@ interface NativeModuleInterface {
   ubrn_uniffi_leon_mobile_fn_method_hostsession_installed_agents(
     uniffiSelf: bigint,
   ): bigint;
+  ubrn_uniffi_leon_mobile_fn_method_hostsession_keep_attachment(
+    uniffiSelf: bigint,
+    chatId: Uint8Array,
+    name: Uint8Array,
+    bytes: Uint8Array,
+  ): bigint;
   ubrn_uniffi_leon_mobile_fn_method_hostsession_king_ask(
     uniffiSelf: bigint,
     request: Uint8Array,
@@ -363,6 +369,7 @@ interface NativeModuleInterface {
   ubrn_uniffi_leon_mobile_checksum_method_hostsession_home_dir(): number;
   ubrn_uniffi_leon_mobile_checksum_method_hostsession_host_name(): number;
   ubrn_uniffi_leon_mobile_checksum_method_hostsession_installed_agents(): number;
+  ubrn_uniffi_leon_mobile_checksum_method_hostsession_keep_attachment(): number;
   ubrn_uniffi_leon_mobile_checksum_method_hostsession_king_ask(): number;
   ubrn_uniffi_leon_mobile_checksum_method_hostsession_king_watch(): number;
   ubrn_uniffi_leon_mobile_checksum_method_hostsession_project_logo(): number;

@@ -24,11 +24,13 @@ import {
   withoutLegacyMode,
   type Message,
 } from '@/chat/model';
+import { withAttached } from '@/chat/attach';
 import { isWaiting, pendingQuestions } from '@/chat/reduce';
 import { activityWord, withoutNotes } from '@/chat/transcript';
 import type { AgentOptions, TurnOptions } from '@/link/types';
 import { chatInFront } from '@/store/alerts';
 import { optionsKey, useApp } from '@/store/app';
+import { takeAttached, useAttachments } from '@/store/attachments';
 import {
   answer,
   combineRows,
@@ -46,6 +48,7 @@ import {
 } from '@/store/runtime';
 import { agentColor, fonts, metrics } from '@/theme/tokens';
 import { useTheme } from '@/theme/useTheme';
+import { AttachedRow, AttachSheet, useClipboardImage } from '@/ui/Attach';
 import { ConnectionBanner } from '@/ui/ConnectionBanner';
 import { Label, Led, Rule, Screen, Txt } from '@/ui/kit';
 import { MessageRow } from '@/ui/MessageRow';
@@ -165,6 +168,11 @@ export default function Chat() {
     [offered, chat?.options, lastUsed],
   );
   const [choosing, setChoosing] = useState(false);
+  const [attaching, setAttaching] = useState(false);
+  // What goes with the next message: each file is on the computer once kept.
+  const attached = useAttachments((s) => s.byChat[chatId]);
+  const keptCount = attached?.filter((a) => a.state === 'kept').length ?? 0;
+  const stillSending = attached?.some((a) => a.state === 'sending') ?? false;
   // The turn that was asked to stop: the next press of the same button kills it.
   const [stopAsked, setStopAsked] = useState<string | null>(null);
   // System notes: hidden until asked for, and each one closed until opened.
@@ -212,6 +220,7 @@ export default function Chat() {
 
   const running = turn !== undefined || chat?.activeTurn !== undefined;
   const readOnly = chat !== undefined && !driver;
+  const [canPaste, pasted] = useClipboardImage(!readOnly && online);
   const questions = useMemo(() => pendingQuestions(turn), [turn]);
   const waiting = isWaiting(turn);
   // Whether it reads more while it works is the agent's to say.
@@ -265,20 +274,22 @@ export default function Chat() {
 
   // While the agent works, a message is added to what it has to answer, if
   // it can be told more. It is kept and sent even when written offline.
-  const canSend = draft.trim().length > 0 && (running ? canSayMore : online);
+  // Files go with it once every one is on the computer.
+  const canSend =
+    (draft.trim().length > 0 || keptCount > 0) && !stillSending && (running ? canSayMore : online);
 
   function submit() {
-    const text = draft;
     if (!canSend) return;
-    if (running) {
+    const go = () => {
+      const text = withAttached(draft, takeAttached(chatId));
       setDraft('');
       void send(chatId, text, options);
+    };
+    if (running) {
+      go();
       return;
     }
-    confirmed(offered, options, () => {
-      setDraft('');
-      void send(chatId, text, options);
-    });
+    confirmed(offered, options, go);
   }
 
   function askToStop() {
@@ -460,7 +471,18 @@ export default function Chat() {
                 ))}
               </ScrollView>
             ) : null}
+            <AttachedRow chatId={chatId} canPaste={canPaste} onPasted={pasted} />
             <View style={styles.inputRow}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Attach a photo or a file"
+                accessibilityState={{ disabled: !online }}
+                disabled={!online}
+                hitSlop={4}
+                onPress={() => setAttaching(true)}
+                style={({ pressed }) => [styles.attach, { backgroundColor: pressed ? t.surface2 : 'transparent' }]}>
+                <Feather name="paperclip" size={18} color={online ? t.textMuted : t.textFaint} />
+              </Pressable>
               <Txt variant="mono" tone={online ? 'signal' : 'faint'} style={styles.prompt}>
                 {'>'}
               </Txt>
@@ -481,7 +503,7 @@ export default function Chat() {
                 multiline
                 style={[styles.input, { color: t.text }]}
               />
-              {!running || (canSayMore && draft.trim().length > 0) ? (
+              {!running || (canSayMore && (draft.trim().length > 0 || keptCount > 0)) ? (
                 <Pressable
                   accessibilityRole="button"
                   accessibilityLabel={running ? 'Tell it more' : 'Send'}
@@ -538,6 +560,13 @@ export default function Chat() {
           </View>
         )}
       </KeyboardAvoidingView>
+      <AttachSheet
+        chatId={chatId}
+        visible={attaching}
+        canPaste={canPaste}
+        onPasted={pasted}
+        onClose={() => setAttaching(false)}
+      />
       <OptionsSheet
         visible={choosing}
         agentName={agentName}
@@ -589,11 +618,18 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: metrics.radius,
   },
+  attach: {
+    width: 36,
+    height: 48,
+    borderRadius: metrics.radius,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   inputRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: 8,
-    paddingLeft: metrics.pad,
+    paddingLeft: 4,
     paddingRight: 8,
     paddingVertical: 8,
   },

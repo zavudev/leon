@@ -167,6 +167,9 @@ RustBuffer uniffi_leon_mobile_fn_method_hostsession_host_name(
     /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
 /*handle*/ uint64_t uniffi_leon_mobile_fn_method_hostsession_installed_agents(
     /*handle*/ uint64_t ptr);
+/*handle*/ uint64_t uniffi_leon_mobile_fn_method_hostsession_keep_attachment(
+    /*handle*/ uint64_t ptr, RustBuffer chat_id, RustBuffer name,
+    RustBuffer bytes);
 /*handle*/ uint64_t uniffi_leon_mobile_fn_method_hostsession_project_logo(
     /*handle*/ uint64_t ptr, RustBuffer root);
 RustBuffer uniffi_leon_mobile_fn_method_hostsession_protocol(
@@ -354,6 +357,7 @@ uint16_t uniffi_leon_mobile_checksum_method_hostsession_den();
 uint16_t uniffi_leon_mobile_checksum_method_hostsession_home_dir();
 uint16_t uniffi_leon_mobile_checksum_method_hostsession_host_name();
 uint16_t uniffi_leon_mobile_checksum_method_hostsession_installed_agents();
+uint16_t uniffi_leon_mobile_checksum_method_hostsession_keep_attachment();
 uint16_t uniffi_leon_mobile_checksum_method_hostsession_project_logo();
 uint16_t uniffi_leon_mobile_checksum_method_hostsession_protocol();
 uint16_t uniffi_leon_mobile_checksum_method_hostsession_reconnect_now();
@@ -3373,6 +3377,19 @@ NativeLeonMobile::NativeLeonMobile(
                 ->cpp_uniffi_leon_mobile_fn_method_hostsession_installed_agents(
                     rt, thisVal, args, count);
           });
+  props["ubrn_uniffi_leon_mobile_fn_method_hostsession_keep_attachment"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt,
+              "ubrn_uniffi_leon_mobile_fn_method_hostsession_keep_attachment"),
+          4,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_leon_mobile_fn_method_hostsession_keep_attachment(
+                    rt, thisVal, args, count);
+          });
   props["ubrn_uniffi_leon_mobile_fn_method_hostsession_project_logo"] =
       jsi::Function::createFromHostFunction(
           rt,
@@ -4393,6 +4410,18 @@ NativeLeonMobile::NativeLeonMobile(
             ->cpp_uniffi_leon_mobile_checksum_method_hostsession_installed_agents(
                 rt, thisVal, args, count);
       });
+  props["ubrn_uniffi_leon_mobile_checksum_method_hostsession_keep_attachment"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt, "ubrn_uniffi_leon_mobile_checksum_"
+                                        "method_hostsession_keep_attachment"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_leon_mobile_checksum_method_hostsession_keep_attachment(
+                    rt, thisVal, args, count);
+          });
   props["ubrn_uniffi_leon_mobile_checksum_method_hostsession_project_logo"] =
       jsi::Function::createFromHostFunction(
           rt,
@@ -5293,6 +5322,23 @@ NativeLeonMobile::cpp_uniffi_leon_mobile_fn_method_hostsession_installed_agents(
   auto value = uniffi_leon_mobile_fn_method_hostsession_installed_agents(
       uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
                                                         args[0]));
+
+  return uniffi_jsi::Bridging</*handle*/ uint64_t>::toJs(rt, callInvoker,
+                                                         value);
+}
+jsi::Value
+NativeLeonMobile::cpp_uniffi_leon_mobile_fn_method_hostsession_keep_attachment(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto value = uniffi_leon_mobile_fn_method_hostsession_keep_attachment(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::leon_mobile::Bridging<RustBuffer>::fromJs(rt, callInvoker,
+                                                        args[1]),
+      uniffi::leon_mobile::Bridging<RustBuffer>::fromJs(rt, callInvoker,
+                                                        args[2]),
+      uniffi::leon_mobile::Bridging<RustBuffer>::fromJs(rt, callInvoker,
+                                                        args[3]));
 
   return uniffi_jsi::Bridging</*handle*/ uint64_t>::toJs(rt, callInvoker,
                                                          value);
@@ -6342,6 +6388,14 @@ jsi::Value NativeLeonMobile::
         size_t count) {
   auto value =
       uniffi_leon_mobile_checksum_method_hostsession_installed_agents();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeLeonMobile::
+    cpp_uniffi_leon_mobile_checksum_method_hostsession_keep_attachment(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value = uniffi_leon_mobile_checksum_method_hostsession_keep_attachment();
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }

@@ -1,10 +1,12 @@
 // One row of a chat: what you asked, what the agent wrote, a tool it used, or
 // a note about the turn.
+import Feather from '@expo/vector-icons/Feather';
 import * as Clipboard from 'expo-clipboard';
 import { memo, useMemo } from 'react';
 import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import Markdown from 'react-native-markdown-display';
 
+import { fileLabel, splitAttached } from '@/chat/attach';
 import { fromCwd, questionLine, type Message } from '@/chat/model';
 import { sizeLabel } from '@/chat/transcript';
 import { tap } from '@/store/alerts';
@@ -113,6 +115,32 @@ type Props = {
   onToggle?(id: string): void;
 };
 
+/** What the person said: the words, and the files that went with them as chips. */
+function UserText({ text }: { text: string }) {
+  const t = useTheme();
+  const said = useMemo(() => splitAttached(text), [text]);
+  return (
+    <>
+      {said.text ? <Txt>{said.text}</Txt> : null}
+      {said.files.length > 0 ? (
+        <View style={styles.files}>
+          {said.files.map((path) => (
+            <View
+              key={path}
+              accessibilityLabel={`Attached ${fileLabel(path)}`}
+              style={[styles.file, { borderColor: t.border, backgroundColor: t.background }]}>
+              <Feather name="paperclip" size={12} color={t.textMuted} />
+              <Label tone="muted" numberOfLines={1} ellipsizeMode="middle" style={styles.fileName}>
+                {fileLabel(path)}
+              </Label>
+            </View>
+          ))}
+        </View>
+      ) : null}
+    </>
+  );
+}
+
 function MessageRowInner({ message, agent, agentName, cwd, open = false, onToggle }: Props) {
   const t = useTheme();
   const md = useMemo(() => markdownStyles(t), [t]);
@@ -132,7 +160,7 @@ function MessageRowInner({ message, agent, agentName, cwd, open = false, onToggl
             </Txt>
             <Label tone="muted">You</Label>
           </View>
-          <Txt>{message.text}</Txt>
+          <UserText text={message.text} />
         </Pressable>
       );
 
@@ -324,6 +352,18 @@ function MessageRowInner({ message, agent, agentName, cwd, open = false, onToggl
 export const MessageRow = memo(MessageRowInner);
 
 const styles = StyleSheet.create({
+  files: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
+  file: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    maxWidth: '100%',
+    minHeight: 28,
+    paddingHorizontal: 8,
+    borderWidth: 1,
+    borderRadius: metrics.radius,
+  },
+  fileName: { flexShrink: 1, textTransform: 'none', letterSpacing: 0 },
   user: {
     marginHorizontal: metrics.pad,
     marginTop: 18,

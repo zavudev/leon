@@ -331,6 +331,7 @@ function wrapSession(session: HostSessionLike): HostLink {
         }
         return avatarUrl ? { kind: 'avatar', url: avatarUrl } : { kind: 'none' };
       }),
+    keepAttachment: (chatId, name, bytes) => guard(() => session.keepAttachment(chatId, name, bytes)),
     installedAgents: () => guard(() => session.installedAgents()),
     agentOptions: (agent) =>
       guard(async () => {

@@ -1427,3 +1427,34 @@ async fn the_phone_asks_king_and_hears_its_notices_again_after_the_line_closed()
     assert_eq!(told.recv_timeout(WAIT).unwrap(), notice);
     watch.stop();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_of_the_phone_is_kept_on_the_computer_whole_for_the_agent() {
+    let world = paired().await;
+    // Larger than one command's input: it goes in pieces.
+    let bytes: Vec<u8> = (0..5 * 1024 * 1024 + 17)
+        .map(|at| (at % 251) as u8)
+        .collect();
+    let path = world
+        .session
+        .keep_attachment("chat/1".into(), "my photo.png".into(), bytes.clone())
+        .await
+        .unwrap();
+    assert!(
+        path.contains("/leon-king-attachments/phone/chat-1/") && path.ends_with("-my-photo.png"),
+        "{path}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    std::fs::remove_file(&path).unwrap();
+
+    // Too large is said before anything is sent.
+    let refused = world
+        .session
+        .keep_attachment("c".into(), "big.bin".into(), vec![0; 21 * 1024 * 1024])
+        .await;
+    assert!(
+        matches!(refused, Err(MobileError::Host { .. })),
+        "{refused:?}"
+    );
+    world.stop().await;
+}

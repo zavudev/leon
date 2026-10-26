@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+* The phone app attaches files to a message: photos and screenshots, a
+  picture from the camera, any file up to 20 MB, or the image on the
+  clipboard (**Paste image** over the field). They are kept on the computer
+  as they are picked, and the message names their paths for the agent, as
+  the desktop does; the message shows them as chips. Needs a new build of
+  the app.
+
 ## [0.13.0] - 2026-10-26
 
 ### Changed

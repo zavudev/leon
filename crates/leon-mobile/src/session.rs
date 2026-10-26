@@ -48,6 +48,9 @@ const TURN_GRID: Grid = Grid {
 const PROBE_TIMEOUT_MS: u32 = 20_000;
 /// How long an agent may take to say what it offers: it starts for it.
 const OPTIONS_TIMEOUT_MS: u32 = 45_000;
+/// How long one piece of an attachment may take to arrive and be written:
+/// four megabytes through the relay on a slow network.
+const ATTACH_TIMEOUT_MS: u32 = 120_000;
 /// How often a turn looks at the clock: to write again what was not
 /// acknowledged, and to notice that a replay has caught up.
 const TURN_TICK: Duration = Duration::from_millis(250);
@@ -556,6 +559,43 @@ exit 0"#;
     pub async fn project_logo(&self, root: String) -> Result<ProjectLogo, MobileError> {
         let client = self.client.clone();
         on_runtime(async move { crate::logo::find(client, &root).await }).await
+    }
+
+    /// Keeps a file of this device on the other computer, for the agent of
+    /// chat `chat_id` to open: its bytes go in pieces as the input of a
+    /// command (see [`crate::attach`]). Answers the path it was kept at,
+    /// which the prompt names.
+    pub async fn keep_attachment(
+        &self,
+        chat_id: String,
+        name: String,
+        bytes: Vec<u8>,
+    ) -> Result<String, MobileError> {
+        if bytes.len() > crate::attach::MAX_ATTACHMENT {
+            return Err(MobileError::Host {
+                message: format!(
+                    "{name} is larger than {} MB",
+                    crate::attach::MAX_ATTACHMENT / (1024 * 1024)
+                ),
+            });
+        }
+        let kept = crate::attach::kept_name(&name, clock_ms());
+        let specs = crate::attach::keep_specs(&chat_id, &kept, &bytes);
+        let client = self.client.clone();
+        on_runtime(async move {
+            let mut path = None;
+            for spec in specs {
+                let output = client.exec(spec, Some(ATTACH_TIMEOUT_MS)).await?;
+                if output.status != Some(0) {
+                    return Err(MobileError::Host {
+                        message: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                    });
+                }
+                path = crate::attach::kept_path(&output.stdout);
+            }
+            path.ok_or(MobileError::Protocol)
+        })
+        .await
     }
 
     /// Which of the agents this library can drive are installed on the other

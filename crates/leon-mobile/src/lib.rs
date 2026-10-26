@@ -33,6 +33,8 @@
 //!   through its host;
 //! * [`logo`] finds a project's logo on the other computer with the
 //!   desktop's own detection;
+//! * [`attach`] keeps files of the phone on the other computer, for an
+//!   agent to open;
 //! * [`mobile`] is the entry point: identity, pairing, connecting.
 //!
 //! The types are exported with UniFFI. Callbacks arrive on threads of this
@@ -41,6 +43,7 @@
 #![warn(missing_docs)]
 
 pub mod agents;
+pub mod attach;
 mod bridge;
 pub mod error;
 pub mod events;
