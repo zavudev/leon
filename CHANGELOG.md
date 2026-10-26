@@ -11,6 +11,16 @@
   the desktop does; the message shows them as chips. Needs a new build of
   the app.
 
+### Changed
+
+* A simpler phone app: sessions and projects are flat rows, as in the
+  desktop's sidebar (a light, the title, the agent and where it lives in
+  mono, and its state or age); the home lists what waits, what works, the
+  recent chats and the computers, without the Den's card (the Den is a tab,
+  with its count) and with **+** to connect another computer; in a chat, the
+  paperclip and the mode are one small bar under the field, and the system
+  notes are shown or hidden from the header.
+
 ## [0.13.0] - 2026-10-26
 
 ### Changed

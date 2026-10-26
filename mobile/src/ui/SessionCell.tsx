@@ -1,6 +1,7 @@
-// One session in a list: a raised cell with the agent's colour on its edge.
-// The things to press are the only ones that sit on a surface.
-import Feather from '@expo/vector-icons/Feather';
+// One session in a list: a flat row, as in the desktop's sidebar. A light in
+// the agent's colour (filled while something goes on), its title, the agent
+// and where it lives in mono under it, and at the end what it is doing or
+// how long ago it changed.
 import { router } from 'expo-router';
 import { Pressable, View } from 'react-native';
 
@@ -61,6 +62,19 @@ export function SessionCell({
 }) {
   const t = useTheme();
   const now = useClock();
+  const tint = agentColor(t, row.agent);
+  // One word at the end, and only when something is going on; otherwise its age.
+  const state = row.waiting
+    ? { word: 'Waiting', color: t.warning, label: 'Waiting for your answer' }
+    : row.running
+      ? { word: 'Live', color: t.signal, label: 'Answering' }
+      : row.session && now - row.updatedAt < MOVING_MS
+        ? // It changed on that computer a moment ago: an agent is at it there.
+          { word: 'Active', color: tint, label: 'Changed just now' }
+        : null;
+  const meta = [row.agent, where ?? (row.session ? `${row.session.messages} msg` : ''), row.canContinue ? '' : 'read only']
+    .filter(Boolean)
+    .join(' · ');
   return (
     <Pressable
       accessibilityRole="button"
@@ -71,56 +85,28 @@ export function SessionCell({
         flexDirection: 'row',
         alignItems: 'center',
         gap: 12,
-        minHeight: 60,
-        marginHorizontal: 12,
-        marginBottom: 6,
-        paddingVertical: 12,
-        paddingLeft: 12,
-        paddingRight: 10,
-        backgroundColor: pressed ? t.surface2 : t.surface,
-        borderWidth: 1,
-        borderColor: pressed ? t.elevatedBorder : t.border,
-        borderLeftWidth: 2,
-        borderLeftColor: agentColor(t, row.agent),
+        minHeight: 56,
+        paddingVertical: 10,
+        paddingLeft: 16,
+        paddingRight: 16,
+        borderBottomWidth: 1,
+        borderBottomColor: t.border,
+        backgroundColor: pressed ? t.surface2 : 'transparent',
       })}>
-      <View style={{ flex: 1, gap: 4 }}>
-        <Txt numberOfLines={2}>{row.title}</Txt>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-          <Led color={agentColor(t, row.agent)} />
-          <Label style={{ color: agentColor(t, row.agent) }}>{row.agent}</Label>
-          <Label numberOfLines={1} style={{ flex: 1, textTransform: where ? 'none' : 'uppercase' }}>
-            {where ? `· ${where}` : row.session ? `· ${row.session.messages} msg` : ''}
-            {row.canContinue ? '' : ' · read only'}
-          </Label>
-        </View>
+      <Led color={state?.color ?? tint} hollow={!state && !row.running} />
+      <View style={{ flex: 1, gap: 3 }}>
+        <Txt numberOfLines={1}>{row.title}</Txt>
+        <Txt variant="mono" tone="faint" numberOfLines={1} style={{ fontSize: 11, lineHeight: 15 }}>
+          {meta}
+        </Txt>
       </View>
-      {row.waiting ? (
-        // Its agent asked something: it does nothing until it is answered.
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-          <Led color={t.warning} />
-          <Label tone="warning" accessibilityLabel="Waiting for your answer">
-            Waiting
-          </Label>
-        </View>
-      ) : row.running ? (
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-          <Led color={t.signal} />
-          <Label tone="signal" accessibilityLabel="Answering">
-            Live
-          </Label>
-        </View>
-      ) : row.session && now - row.updatedAt < MOVING_MS ? (
-        // It changed on that computer a moment ago: an agent is at it there.
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-          <Led color={agentColor(t, row.agent)} />
-          <Label style={{ color: agentColor(t, row.agent) }} accessibilityLabel="Changed just now">
-            Active
-          </Label>
-        </View>
+      {state ? (
+        <Label style={{ color: state.color }} accessibilityLabel={state.label}>
+          {state.word}
+        </Label>
       ) : (
         <Label>{ago(row.updatedAt)}</Label>
       )}
-      <Feather name="chevron-right" size={18} color={t.textMuted} />
     </Pressable>
   );
 }

@@ -50,7 +50,7 @@ import { agentColor, fonts, metrics } from '@/theme/tokens';
 import { useTheme } from '@/theme/useTheme';
 import { AttachedRow, AttachSheet, useClipboardImage } from '@/ui/Attach';
 import { ConnectionBanner } from '@/ui/ConnectionBanner';
-import { Label, Led, Rule, Screen, Txt } from '@/ui/kit';
+import { IconButton, Label, Led, Rule, Screen, Txt } from '@/ui/kit';
 import { MessageRow } from '@/ui/MessageRow';
 import { OptionsSheet } from '@/ui/OptionsSheet';
 import { QuestionPanel } from '@/ui/QuestionPanel';
@@ -322,7 +322,19 @@ export default function Chat() {
       kind={chat.agent}
       title={chat.title || 'New chat'}
       subtitle={chat.cwd ?? 'default folder'}
-      bottomInset={false}>
+      bottomInset={false}
+      right={
+        // What programs wrote into the conversation (task notifications,
+        // reminders, commands): hidden until asked for.
+        noteCount > 0 ? (
+          <IconButton
+            icon={showNotes ? 'eye' : 'eye-off'}
+            label={`${showNotes ? 'Hide' : 'Show'} system notes, ${noteCount} in this chat`}
+            color={showNotes ? t.signal : t.textFaint}
+            onPress={() => setShowNotes((on) => !on)}
+          />
+        ) : undefined
+      }>
       <ConnectionBanner
         hostId={hostId}
         detail={waiting ? 'Waiting for you' : progress.word || modeLabel(offered, shown.mode).toLowerCase()}
@@ -397,25 +409,6 @@ export default function Chat() {
         ) : null}
         </View>
         <Rule />
-        {noteCount > 0 ? (
-          <Pressable
-            accessibilityRole="switch"
-            accessibilityState={{ checked: showNotes }}
-            accessibilityLabel={`Show system notes, ${noteCount} in this chat`}
-            accessibilityHint="Notes are what programs wrote into the conversation: task notifications, reminders, commands."
-            onPress={() => setShowNotes((on) => !on)}
-            style={({ pressed }) => [
-              styles.mode,
-              { borderBottomColor: t.border, backgroundColor: pressed ? t.surface2 : t.surface },
-            ]}>
-            <Label tone="muted">[ System notes ]</Label>
-            <Led color={showNotes ? t.signal : t.textFaint} hollow={!showNotes} />
-            <Label tone={showNotes ? 'text' : 'faint'} style={{ flex: 1 }}>
-              {noteCount} {showNotes ? 'shown' : 'hidden'}
-            </Label>
-            <Label>{showNotes ? 'Hide' : 'Show'}</Label>
-          </Pressable>
-        ) : null}
         {readOnly ? (
           <View style={{ padding: 16, paddingBottom: insets.bottom + 16 }}>
             <Txt variant="small" tone="faint">
@@ -431,24 +424,6 @@ export default function Chat() {
               online={online}
               onAnswer={(questionId, reply) => answer(chatId, questionId, reply)}
             />
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={`Mode, model and effort: ${optionsLine(offered, shown)}`}
-              accessibilityHint="Changes how the agent runs: what it may do without asking, its model, its effort."
-              onPress={() => setChoosing(true)}
-              style={({ pressed }) => [
-                styles.mode,
-                { borderBottomColor: t.border, backgroundColor: pressed ? t.surface2 : 'transparent' },
-              ]}>
-              <Label tone="muted">[ Mode ]</Label>
-              <Led color={dangerous ? t.warning : t.textMuted} hollow={!shown.mode} />
-              <Label tone={dangerous ? 'warning' : 'text'} numberOfLines={1} style={{ flex: 1 }}>
-                {dangerous ? '! ' : ''}
-                {optionsLine(offered, shown)}
-              </Label>
-              <Label>Change</Label>
-              <Feather name="chevron-up" size={14} color={t.textFaint} />
-            </Pressable>
             {!running && online && draft.length === 0 && rows.length > 0 ? (
               <ScrollView
                 horizontal
@@ -473,16 +448,6 @@ export default function Chat() {
             ) : null}
             <AttachedRow chatId={chatId} canPaste={canPaste} onPasted={pasted} />
             <View style={styles.inputRow}>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Attach a photo or a file"
-                accessibilityState={{ disabled: !online }}
-                disabled={!online}
-                hitSlop={4}
-                onPress={() => setAttaching(true)}
-                style={({ pressed }) => [styles.attach, { backgroundColor: pressed ? t.surface2 : 'transparent' }]}>
-                <Feather name="paperclip" size={18} color={online ? t.textMuted : t.textFaint} />
-              </Pressable>
               <Txt variant="mono" tone={online ? 'signal' : 'faint'} style={styles.prompt}>
                 {'>'}
               </Txt>
@@ -557,6 +522,36 @@ export default function Chat() {
                 </Pressable>
               ) : null}
             </View>
+            {/* Under the field, small: what to attach, and how the agent runs. */}
+            <View style={[styles.tools, { borderTopColor: t.border }]}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Attach a photo or a file"
+                accessibilityState={{ disabled: !online }}
+                disabled={!online}
+                hitSlop={4}
+                onPress={() => setAttaching(true)}
+                style={({ pressed }) => [styles.tool, { backgroundColor: pressed ? t.surface2 : 'transparent' }]}>
+                <Feather name="paperclip" size={16} color={online ? t.textMuted : t.textFaint} />
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Mode, model and effort: ${optionsLine(offered, shown)}`}
+                accessibilityHint="Changes how the agent runs: what it may do without asking, its model, its effort."
+                onPress={() => setChoosing(true)}
+                style={({ pressed }) => [
+                  styles.tool,
+                  styles.modeTool,
+                  { backgroundColor: pressed ? t.surface2 : 'transparent' },
+                ]}>
+                <Led color={dangerous ? t.warning : t.textMuted} hollow={!shown.mode} />
+                <Label tone={dangerous ? 'warning' : 'muted'} numberOfLines={1} style={{ flexShrink: 1 }}>
+                  {dangerous ? '! ' : ''}
+                  {optionsLine(offered, shown)}
+                </Label>
+                <Feather name="chevron-up" size={14} color={t.textFaint} />
+              </Pressable>
+            </View>
           </View>
         )}
       </KeyboardAvoidingView>
@@ -582,14 +577,6 @@ export default function Chat() {
 
 const styles = StyleSheet.create({
   foot: { marginHorizontal: metrics.pad, marginTop: 10, textTransform: 'none', letterSpacing: 0 },
-  mode: {
-    minHeight: metrics.touch,
-    paddingHorizontal: metrics.pad,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    borderBottomWidth: 1,
-  },
   more: {
     position: 'absolute',
     alignSelf: 'center',
@@ -618,18 +605,28 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: metrics.radius,
   },
-  attach: {
-    width: 36,
-    height: 48,
+  tools: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderTopWidth: 1,
+  },
+  tool: {
+    minHeight: 40,
+    minWidth: 40,
+    paddingHorizontal: 8,
     borderRadius: metrics.radius,
     alignItems: 'center',
     justifyContent: 'center',
   },
+  modeTool: { flexShrink: 1, flexDirection: 'row', gap: 8 },
   inputRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: 8,
-    paddingLeft: 4,
+    paddingLeft: metrics.pad,
     paddingRight: 8,
     paddingVertical: 8,
   },

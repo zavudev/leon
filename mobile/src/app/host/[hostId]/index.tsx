@@ -340,45 +340,36 @@ export default function HostChats() {
                 flexDirection: 'row',
                 alignItems: 'center',
                 gap: 12,
-                minHeight: 64,
-                marginHorizontal: 12,
-                marginBottom: 6,
-                paddingVertical: 12,
-                paddingLeft: 14,
-                paddingRight: 10,
-                backgroundColor: pressed ? t.surface2 : t.surface,
-                borderWidth: 1,
-                borderColor: pressed ? t.elevatedBorder : t.border,
+                minHeight: 60,
+                paddingVertical: 10,
+                paddingHorizontal: 16,
+                borderBottomWidth: 1,
+                borderBottomColor: t.border,
+                backgroundColor: pressed ? t.surface2 : 'transparent',
               })}>
               <ProjectLogo hostId={hostId} root={project.path} size={28} />
               <View style={{ flex: 1, gap: 3 }}>
                 <Txt variant="strong" numberOfLines={1}>
                   {project.title}
                 </Txt>
-                <Txt variant="mono" tone="faint" numberOfLines={1} ellipsizeMode="head" style={{ fontSize: 11, lineHeight: 15 }}>
-                  {project.path}
+                <Txt variant="mono" tone="faint" numberOfLines={1} style={{ fontSize: 11, lineHeight: 15 }}>
+                  {count} {count === 1 ? 'session' : 'sessions'}
+                  {trees > 1 ? ` · ${trees} worktrees` : ''}
                 </Txt>
               </View>
-              <View style={{ alignItems: 'flex-end', gap: 4 }}>
-                {project.waiting ? (
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                    <Led color={t.warning} />
-                    <Label tone="warning">Waiting</Label>
-                  </View>
-                ) : project.running ? (
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                    <Led color={t.signal} />
-                    <Label tone="signal">Live</Label>
-                  </View>
-                ) : count > 0 ? (
-                  <Label>{ago(project.latest)}</Label>
-                ) : null}
-                <Label tone="faint">
-                  {count} {count === 1 ? 'session' : 'sessions'}
-                  {trees > 1 ? ` · ${trees} trees` : ''}
-                </Label>
-              </View>
-              <Feather name="chevron-right" size={18} color={t.textMuted} />
+              {project.waiting ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Led color={t.warning} />
+                  <Label tone="warning">Waiting</Label>
+                </View>
+              ) : project.running ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Led color={t.signal} />
+                  <Label tone="signal">Live</Label>
+                </View>
+              ) : count > 0 ? (
+                <Label>{ago(project.latest)}</Label>
+              ) : null}
             </Pressable>
           );
         }}

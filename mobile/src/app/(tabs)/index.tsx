@@ -1,10 +1,10 @@
-// The computers this device paired with, and whether each is reachable.
+// The home: what waits for the person, what works, the recent chats, and the
+// computers this device paired with and whether each is reachable.
 import Feather from '@expo/vector-icons/Feather';
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useMemo } from 'react';
-import { Alert, Pressable, ScrollView, View } from 'react-native';
+import { Alert, ScrollView, View } from 'react-native';
 
-import { lionsOf, tally } from '@/chat/den';
 import type { ChatRecord, ChatRow } from '@/chat/list';
 
 import { connectionWord } from '@/link/errors';
@@ -12,8 +12,7 @@ import { useApp, type HostRecord } from '@/store/app';
 import { addDemo, askDens, forgetHost, useRuntime } from '@/store/runtime';
 import { useTheme } from '@/theme/useTheme';
 import { connectionColor } from '@/ui/ConnectionBanner';
-import { Button, Label, Led, Row, Rule, Screen, Section, Signature, Txt } from '@/ui/kit';
-import { Lion } from '@/ui/Lion';
+import { Button, IconButton, Label, Led, Row, Rule, Screen, Section, Signature, Txt } from '@/ui/kit';
 import { Mark, Watermark } from '@/ui/Mark';
 import { SessionCell } from '@/ui/SessionCell';
 
@@ -32,84 +31,16 @@ function confirmRemove(host: HostRecord) {
 const DEN_AGAIN_MS = 4_000;
 
 /**
- * The way into the Den, said with who is in it: a few of its lions, those
- * that wait first, and the count. It is the one place of the home drawn in
- * the accent.
+ * Asks every computer who is in its Den while the home is in front: the bar
+ * at the bottom says how many wait for the person.
  */
-function DenCard() {
-  const t = useTheme();
-  const hosts = useApp((s) => s.hosts);
-  const dens = useRuntime((s) => s.dens);
-  const lions = useMemo(() => lionsOf(hosts, dens), [hosts, dens]);
-  const count = tally(lions);
-  const shown = lions.slice(0, 4);
-
+function useDens() {
   useFocusEffect(
     useCallback(() => {
       void askDens();
       const again = setTimeout(() => void askDens(), DEN_AGAIN_MS);
       return () => clearTimeout(again);
     }, []),
-  );
-
-  const waiting = count.waiting > 0;
-  const edge = waiting ? t.warning : t.signal;
-  const says =
-    count.live === 0
-      ? 'Every agent that is live on your computers, and what it is doing.'
-      : null;
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={
-        count.live === 0
-          ? 'The Den'
-          : `The Den, ${count.live} live, ${count.working} working, ${count.waiting} waiting for you`
-      }
-      accessibilityHint="Shows every agent that is live on your computers."
-      onPress={() => router.push('/den')}
-      style={({ pressed }) => ({
-        marginHorizontal: 12,
-        marginTop: 16,
-        backgroundColor: pressed ? t.surface2 : t.surface,
-        borderWidth: 1,
-        borderColor: edge,
-        borderLeftWidth: 3,
-      })}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingLeft: 14, paddingRight: 10 }}>
-        <View style={{ flex: 1, gap: 6 }}>
-          <Label style={{ color: edge }}>[ The Den ]</Label>
-          {says ? (
-            <Txt variant="small" tone="muted">
-              {says}
-            </Txt>
-          ) : (
-            <View style={{ gap: 3 }}>
-              <Txt variant="strong">
-                {waiting
-                  ? `${count.waiting} waiting for you`
-                  : count.working > 0
-                    ? `${count.working} working`
-                    : `${count.live} resting`}
-              </Txt>
-              <Label tone="faint">
-                {count.live} live · {count.working} working
-              </Label>
-            </View>
-          )}
-        </View>
-        {shown.length > 0 ? (
-          <View style={{ flexDirection: 'row', alignItems: 'flex-end' }}>
-            {shown.map((lion, at) => (
-              <View key={lion.key} style={{ marginLeft: at === 0 ? 0 : -14, opacity: lion.mood === 'quiet' ? 0.55 : 1 }}>
-                <Lion cub={lion.cub} width={40} beat={0} />
-              </View>
-            ))}
-          </View>
-        ) : null}
-        <Feather name="chevron-right" size={18} color={edge} />
-      </View>
-    </Pressable>
   );
 }
 
@@ -162,6 +93,7 @@ function folderName(path: string | undefined): string {
 }
 
 export default function Hosts() {
+  useDens();
   const hosts = useApp((s) => s.hosts);
   const chats = useApp((s) => s.chats);
   // What needs the person comes first, wherever it runs: an agent that asked
@@ -239,15 +171,16 @@ export default function Hosts() {
             {recent.map(cell)}
           </>
         ) : null}
-        <DenCard />
-        <Section title="Computers" right={<Label>{hosts.length}</Label>} />
+        <Section
+          title="Computers"
+          right={
+            <IconButton icon="plus" label="Connect another computer" onPress={() => router.push('/pair')} />
+          }
+        />
         <Rule />
         {hosts.map((host) => (
           <HostRow key={host.hostId} host={host} />
         ))}
-        <View style={{ padding: 16 }}>
-          <Button title="Connect another computer" icon="plus" onPress={() => router.push('/pair')} />
-        </View>
         <View style={{ flex: 1 }} />
         <Signature />
       </ScrollView>
