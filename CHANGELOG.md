@@ -2,13 +2,14 @@
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-26
+
 ### Changed
 
 * A simpler window. The sidebar lists each project's sessions under its name,
-  with their worktree's folder beside the ones off the main checkout, a tag
-  that gives way to the title when the row is short (Settings ▸ Sessions ▸
-  *Show worktrees as levels* brings the worktree rows back). King is pinned at
-  the top; Home, Tasks, the Den, Connect a machine, Share this machine, the
+  with their worktree's folder on a second line under the ones off the main
+  checkout (Settings ▸ Sessions ▸ *Show worktrees as levels* brings the
+  worktree rows back). King is pinned at the top; Home, Tasks, the Den, Connect a machine, Share this machine, the
   cleaner, the inactive sessions, the appearance and the shortcuts are in the
   menu of the machine at the foot, and a note over it says when worktrees can
   go. The main header is one line in the middle (`Claude Code @ atlas
@@ -18,7 +19,7 @@
   home's actions are a row of chips. In a conversation, what you said reads
   as a command (`>` and a bar of the accent), its work is a framed block, and
   the field has its `>`. A pinned session says where it lives, its project
-  and its worktree, beside its title. A session another Leon window runs is
+  and its worktree, under its title. A session another Leon window runs is
   marked `OTHER`.
 * A session at work shows a spinner in the sidebar, in its agent's colour,
   where its logo was: the sessions that work move, the others stand still.
