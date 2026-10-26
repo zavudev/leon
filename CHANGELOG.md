@@ -21,6 +21,13 @@
   paperclip and the mode are one small bar under the field, and the system
   notes are shown or hidden from the header.
 
+### Fixed
+
+* In the phone app, the text of a message can be selected and copied (hold
+  a word, then drag), and a copy button on each message copies all of it;
+  holding a message no longer only copied it whole. An address an agent
+  writes bare (`https://…`) is a link, opened with one tap.
+
 ## [0.13.0] - 2026-10-26
 
 ### Changed
