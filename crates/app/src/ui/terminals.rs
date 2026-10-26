@@ -951,6 +951,9 @@ impl Shell {
         };
         let now = session.read_activity(cx, thresholds);
         let before = std::mem::replace(&mut session.activity, now);
+        if now == Activity::Working {
+            self.spin_sidebar(cx);
+        }
         if now.is_news_after(before) {
             if let Some(event) = notify::Event::of_activity(now) {
                 self.raise(event, id, cx);
@@ -1221,6 +1224,40 @@ impl Shell {
             (None, Some(chat)) => (chat.label(), chat.state()),
             (None, None) => (String::new(), LiveState::Starting),
         }
+    }
+
+    /// Whether any session of this window works: a terminal printing or in
+    /// a turn, or a conversation in a turn.
+    pub(super) fn any_working(&self) -> bool {
+        self.live
+            .ids()
+            .into_iter()
+            .chain(self.chats.keys().copied())
+            .any(|id| self.leaf_activity(id) == Some(Activity::Working))
+    }
+
+    /// Keeps the sidebar's spinners turning while a session works: the
+    /// window is drawn again every frame of the spinner, and the loop ends
+    /// when nothing works.
+    pub(super) fn spin_sidebar(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_spin.is_some() {
+            return;
+        }
+        self.sidebar_spin = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(super::king_view::SPIN).await;
+            let going = this.update(cx, |this, cx| {
+                let going = this.any_working();
+                if going {
+                    cx.notify();
+                } else {
+                    this.sidebar_spin = None;
+                }
+                going
+            });
+            if !going.unwrap_or(false) {
+                return;
+            }
+        }));
     }
 
     /// How a leaf is doing, when it is a session: a terminal's activity as

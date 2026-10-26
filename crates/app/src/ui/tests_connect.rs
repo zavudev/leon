@@ -108,13 +108,8 @@ fn the_chord_opens_the_screen_and_escape_gives_the_keyboard_back(cx: &mut TestAp
 #[gpui_kit::test]
 fn every_way_in_opens_the_same_screen(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
-    // The row after the tree, with its chord.
-    assert!(h.shows("sidebar-connect", cx));
-    h.mouse_on(
-        "sidebar-connect".to_owned(),
-        gpui_kit::MouseButton::Left,
-        cx,
-    );
+    // The machine's menu at the foot of the sidebar.
+    h.pick_in_machine_menu(crate::keys::Command::AddMachine, cx);
     assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Pair);
     h.press("escape", cx);
     // The palette.
@@ -679,8 +674,7 @@ fn pasting_a_pairing_link_fills_the_code_and_names_its_relay(cx: &mut TestAppCon
 #[gpui_kit::test]
 fn share_this_machine_opens_from_the_sidebar_and_states_the_risk(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
-    assert!(h.shows("sidebar-share", cx));
-    h.mouse_on("sidebar-share".to_owned(), gpui_kit::MouseButton::Left, cx);
+    h.pick_in_machine_menu(crate::keys::Command::ShareMachine, cx);
     assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Share);
     for selector in ["share-intro", "share-risk", "share-switch", "share-devices"] {
         assert!(h.shows(selector, cx), "{selector}");

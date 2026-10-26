@@ -200,6 +200,9 @@ fn a_silent_thinking_agent_works_and_a_call_without_a_result_asks_once_the_termi
     assert_eq!(heuristic, Activity::Waiting);
     assert_eq!(activity(&h, cx), Activity::Working, "thinking is work");
     assert!(banners(&h, cx).is_empty(), "nobody is told of work");
+    // The sidebar shows it: a spinner turns where the agent's logo was.
+    h.settle(cx);
+    assert!(h.shows("tree-spinner", cx), "a session at work moves");
 
     // A call with no result while the terminal prints: a tool that runs.
     set_waiting_after(&h, cx, HOUR);
@@ -232,6 +235,8 @@ fn a_silent_thinking_agent_works_and_a_call_without_a_result_asks_once_the_termi
     tick_until(&h, cx, "the end of the turn", |h, cx| {
         activity(h, cx) == Activity::TurnOver
     });
+    h.settle(cx);
+    assert!(!h.shows("tree-spinner", cx), "a turn over stands still");
     let said = banners(&h, cx);
     assert_eq!(said.len(), 1, "the session's banner is refreshed");
     assert_eq!(said[0].kind, Kind::TurnOver);

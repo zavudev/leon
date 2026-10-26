@@ -230,6 +230,11 @@ pub enum Command {
     /// Removes the history session the keyboard is on from the store, after
     /// asking.
     RemoveFromHistory,
+    /// Deletes the session the keyboard is on for good, after asking: when it
+    /// runs in a linked worktree, the worktree goes with it (`git worktree
+    /// remove`, and every other session in it); elsewhere it is closed, or
+    /// removed from the history, as the session alone.
+    DeleteSession,
     /// Opens the context menu of the row the keyboard is on.
     ContextMenu,
     /// Looks for the logo of the project the keyboard is on again.
@@ -1596,6 +1601,14 @@ pub const BINDINGS: &[Binding] = &[
         &[],
         true,
     ),
+    bind(
+        C::DeleteSession,
+        "Delete the session and its worktree",
+        S::Create,
+        W::Anywhere,
+        &[],
+        true,
+    ),
     // Files
     bind(
         C::OpenFile,
@@ -2795,6 +2808,7 @@ mod tests {
             C::Reveal,
             C::OpenTranscript,
             C::RemoveFromHistory,
+            C::DeleteSession,
             C::ContextMenu,
             C::CloseSession,
             C::SleepSession,
@@ -2980,6 +2994,7 @@ mod tests {
                 | C::Reveal
                 | C::OpenTranscript
                 | C::RemoveFromHistory
+                | C::DeleteSession
                 | C::ContextMenu
                 | C::CloseSession
                 | C::SleepSession

@@ -1,5 +1,5 @@
-//! Tests of the home in the window: its row of the sidebar is always there,
-//! the row, the command and the chord go home from anywhere, every action
+//! Tests of the home in the window: King's row of the sidebar is always
+//! there, the machine's menu, the command and the chord go home from anywhere, every action
 //! of the home does what its command does, and the keyboard walks it.
 //!
 //! The terminals that survive a visit to the home are in `tests_den.rs`,
@@ -28,49 +28,35 @@ fn open_project(h: &Harness, cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn the_navigation_is_over_the_filter_whatever_is_filtered_or_scrolled(cx: &mut TestAppContext) {
+fn king_is_pinned_over_the_filter_whatever_is_filtered_or_scrolled(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
-    assert!(
-        h.shows("sidebar-nav", cx)
-            && h.shows("sidebar-home", cx)
-            && h.shows("sidebar-king", cx)
-            && h.shows("sidebar-tasks", cx)
-            && h.shows("sidebar-den", cx)
-    );
-    // Header, navigation (Home, Tasks, The King, The Den), filter, tree.
+    assert!(h.shows("sidebar-nav", cx) && h.shows("sidebar-king", cx));
+    // Home, the board and the Den are in the machine's menu, not rows.
+    for gone in ["sidebar-home", "sidebar-tasks", "sidebar-den"] {
+        assert!(!h.shows(gone, cx), "{gone}");
+    }
+    // Header, King, filter, tree.
     let bounds = |selector: &str, cx: &mut TestAppContext| {
         h.bounds_of(selector.to_owned(), cx)
             .unwrap_or_else(|| panic!("{selector} is drawn"))
     };
-    let (header, home, king, tasks, den, filter, first) = (
+    let (header, king, filter, first) = (
         bounds("sidebar-header", cx),
-        bounds("sidebar-home", cx),
         bounds("sidebar-king", cx),
-        bounds("sidebar-tasks", cx),
-        bounds("sidebar-den", cx),
         bounds("sidebar-filter", cx),
         bounds("tree-row-0", cx),
     );
-    assert!(header.bottom() <= home.top());
-    assert_eq!(home.bottom(), tasks.top());
-    assert_eq!(tasks.bottom(), king.top());
-    assert_eq!(king.bottom(), den.top());
-    assert!(den.bottom() <= filter.top() && filter.bottom() <= first.top());
-    // Its rows are rows of the tree: the same height, the same edges.
-    assert_eq!(home.size.height, first.size.height);
-    assert_eq!((home.left(), home.right()), (first.left(), first.right()));
-    assert_eq!(home.size, den.size);
-    assert_eq!(home.size, tasks.size);
-    assert_eq!(home.size, king.size);
+    assert!(header.bottom() <= king.top());
+    assert!(king.bottom() <= filter.top() && filter.bottom() <= first.top());
+    // Its row is a row of the tree: the same height, the same edges.
+    assert_eq!(king.size.height, first.size.height);
+    assert_eq!((king.left(), king.right()), (first.left(), first.right()));
 
     // A filter that matches nothing leaves it there.
     h.press("/", cx);
     h.type_text("no project is called this", cx);
     assert!(!h.outline(cx).iter().any(|row| row.contains("project:")));
-    assert_eq!(
-        (bounds("sidebar-home", cx), bounds("sidebar-den", cx)),
-        (home, den)
-    );
+    assert_eq!(bounds("sidebar-king", cx), king);
     h.press("escape", cx);
     h.press("escape", cx);
 
@@ -79,17 +65,12 @@ fn the_navigation_is_over_the_filter_whatever_is_filtered_or_scrolled(cx: &mut T
         h.shell.update(cx, |shell, cx| {
             let last = shell.rows.len() - 1;
             shell.move_cursor_to(last);
-            shell
-                .tree_scroll
-                .scroll_to_item(last, gpui_kit::ScrollStrategy::Top);
+            shell.tree_scroll.scroll_to_reveal_item(last);
             cx.notify();
         })
     });
     h.settle(cx);
-    assert_eq!(
-        (bounds("sidebar-home", cx), bounds("sidebar-den", cx)),
-        (home, den)
-    );
+    assert_eq!(bounds("sidebar-king", cx), king);
 
     // No chord is printed in a row: the tooltip says it, as the header's
     // "+" does.
@@ -111,16 +92,10 @@ fn the_cursor_of_the_sidebar_follows_what_the_main_pane_shows(cx: &mut TestAppCo
     let h = open(cx, ScriptedRunner::new());
     let nav = |cx: &mut TestAppContext| h.shell(cx, |shell| shell.home.nav);
     assert_eq!(nav(cx), None, "at the start the cursor is in the tree");
-    // A click on a row goes there and the cursor is on it.
-    click(&h, "sidebar-den", cx);
+    // The machine's menu goes to the places without a row.
+    h.pick_in_machine_menu(Command::ShowDen, cx);
     assert_eq!((h.main_kind(cx).as_str(), nav(cx)), ("den", Some(Nav::Den)));
-    click(&h, "sidebar-den", cx);
-    assert_eq!(
-        h.main_kind(cx),
-        "den",
-        "a second click does not close the Den"
-    );
-    click(&h, "sidebar-home", cx);
+    h.pick_in_machine_menu(Command::GoHome, cx);
     assert_eq!(
         (h.main_kind(cx).as_str(), nav(cx)),
         ("empty", Some(Nav::Home))
@@ -141,7 +116,7 @@ fn the_cursor_of_the_sidebar_follows_what_the_main_pane_shows(cx: &mut TestAppCo
     assert_eq!(nav(cx), Some(Nav::Den));
     h.press("escape", cx);
     assert_eq!((h.main_kind(cx).as_str(), nav(cx)), ("project:api", None));
-    // One cursor at a time: on the navigation, the tree draws none.
+    // At home there is no row to stand on: the tree keeps its cursor.
     go_home(&h, cx);
     cx.update(|cx| {
         h.shell.update(cx, |shell, cx| {
@@ -149,17 +124,25 @@ fn the_cursor_of_the_sidebar_follows_what_the_main_pane_shows(cx: &mut TestAppCo
             cx.notify();
         })
     });
+    assert!(!h.shows("sidebar-nav-cursor", cx) && h.shows("tree-cursor", cx));
+    // One cursor at a time: on King's row, the tree draws none.
+    cx.update(|cx| {
+        h.shell.update(cx, |shell, cx| {
+            shell.home.nav = Some(Nav::King);
+            cx.notify();
+        })
+    });
     assert!(h.shows("sidebar-nav-cursor", cx) && !h.shows("tree-cursor", cx));
-    // An empty den has no count and nobody waits.
-    assert!(!h.shows("sidebar-den-count", cx) && !h.shows("sidebar-den-waits", cx));
+    // An empty den: nobody waits.
+    assert!(!h.shows("sidebar-den-waits", cx));
 }
 
 #[gpui_kit::test]
-fn the_row_the_chord_and_the_command_go_home_from_anywhere(cx: &mut TestAppContext) {
+fn the_menu_the_chord_and_the_command_go_home_from_anywhere(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
-    // A click on the row.
+    // The machine's menu.
     open_project(&h, cx);
-    click(&h, "sidebar-home", cx);
+    h.pick_in_machine_menu(Command::GoHome, cx);
     assert_eq!(h.main_kind(cx), "empty");
     assert!(h.shows("main-empty", cx) && h.shows("home-actions", cx));
     assert_eq!(
@@ -212,7 +195,7 @@ fn the_row_the_chord_and_the_command_go_home_from_anywhere(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
-fn the_navigation_is_the_first_stop_of_the_sidebar(cx: &mut TestAppContext) {
+fn king_is_the_first_stop_of_the_sidebar(cx: &mut TestAppContext) {
     use crate::ui::home::Nav;
     let h = open(cx, ScriptedRunner::new());
     open_project(&h, cx);
@@ -225,10 +208,9 @@ fn the_navigation_is_the_first_stop_of_the_sidebar(cx: &mut TestAppContext) {
     });
     let nav = |cx: &mut TestAppContext| h.shell(cx, |shell| shell.home.nav);
     assert!(!h.shows("sidebar-nav-cursor", cx));
-    // Up from the first row of the tree is The Den, then The King, then
-    // Tasks, then Home; there it stays.
+    // Up from the first row of the tree is King; there it stays.
     h.press("up", cx);
-    assert_eq!(nav(cx), Some(Nav::Den));
+    assert_eq!(nav(cx), Some(Nav::King));
     assert!(h.shows("sidebar-nav-cursor", cx));
     assert!(
         !h.shows("tree-cursor", cx),
@@ -236,47 +218,27 @@ fn the_navigation_is_the_first_stop_of_the_sidebar(cx: &mut TestAppContext) {
     );
     h.press("up", cx);
     assert_eq!(nav(cx), Some(Nav::King));
-    h.press("up", cx);
-    assert_eq!(nav(cx), Some(Nav::Tasks));
-    h.press("up", cx);
-    assert_eq!(nav(cx), Some(Nav::Home));
-    h.press("up", cx);
-    assert_eq!(nav(cx), Some(Nav::Home));
     assert_eq!(
         h.main_kind(cx),
         "project:api",
         "moving the cursor opens nothing"
     );
-    // Down goes through Tasks, The King and The Den back into the tree, at
-    // its first row.
-    h.press("down", cx);
-    assert_eq!(nav(cx), Some(Nav::Tasks));
-    h.press("down", cx);
-    assert_eq!(nav(cx), Some(Nav::King));
-    h.press("down", cx);
-    assert_eq!(nav(cx), Some(Nav::Den));
+    // Down goes back into the tree, at its first row.
     h.press("down", cx);
     assert_eq!(nav(cx), None);
     assert_eq!(h.cursor_row(cx), "machine:This machine");
     assert!(h.shows("tree-cursor", cx));
-    // Enter on a row opens it.
+    // The key that goes to the first row of the tree still does, from
+    // King's row too.
     h.press("up", cx);
-    h.press("enter", cx);
-    assert_eq!(h.main_kind(cx), "den");
-    cx.update(|cx| h.shell.update(cx, |shell, _| shell.pane = Pane::Sidebar));
-    h.press("up", cx);
-    assert_eq!(nav(cx), Some(Nav::King));
-    h.press("up", cx);
-    assert_eq!(nav(cx), Some(Nav::Tasks));
-    h.press("up", cx);
-    h.press("enter", cx);
-    assert_eq!(h.main_kind(cx), "empty");
-    // The key that goes to the first row of the tree still does.
-    cx.update(|cx| h.shell.update(cx, |shell, _| shell.pane = Pane::Sidebar));
     h.press("end", cx);
     h.press("home", cx);
     assert_eq!(h.cursor_row(cx), "machine:This machine");
     assert_eq!(nav(cx), None);
+    // Enter on King's row opens King.
+    h.press("up", cx);
+    h.press("enter", cx);
+    assert_eq!(h.main_kind(cx), "king");
 }
 
 #[gpui_kit::test]
@@ -315,12 +277,16 @@ fn every_action_of_the_home_is_a_button_that_runs_its_command(cx: &mut TestAppCo
         let on = ACTIONS.iter().position(|one| *one == command).unwrap();
         assert_eq!(at(&h, cx), on, "{command:?}");
     }
-    // The Den is first, and wider than the rest.
+    // The Den is first, and every action is a chip of one height, under
+    // the field that goes anywhere.
     go_home(&h, cx);
     let den = h.bounds_of("hint-ShowDen".to_owned(), cx).unwrap();
     let next = h.bounds_of("hint-NewSession".to_owned(), cx).unwrap();
+    let prompt = h.bounds_of("home-prompt".to_owned(), cx).unwrap();
     assert_eq!(den, before);
-    assert!(den.top() < next.top() && den.size.width > next.size.width);
+    assert!(den.left() <= next.left() || den.top() < next.top());
+    assert_eq!(den.size.height, next.size.height);
+    assert!(prompt.bottom() <= den.top());
 }
 
 #[gpui_kit::test]
@@ -434,9 +400,11 @@ fn the_home_fits_a_narrow_pane_and_a_very_wide_one(cx: &mut TestAppContext) {
                 button.left() >= pane.left() && button.right() <= pane.right(),
                 "{command:?} at {width}: {button:?} in {pane:?}"
             );
+            // A chip is as wide as its word and its chord (macOS's chords
+            // are the shortest), never squeezed under them.
             assert!(
-                button.size.width > gpui_kit::px(120.),
-                "{command:?} at {width}"
+                button.size.width > gpui_kit::px(96.),
+                "{command:?} at {width}: {button:?}"
             );
         }
         for block in ["home-sessions", "home-recent", "maker"] {

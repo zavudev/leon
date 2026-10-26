@@ -1,20 +1,16 @@
-//! The cleaner in the window: the broom opens it, the keys move and tick, and
+//! The cleaner in the window: the machine's menu opens it, the keys move and tick, and
 //! a worktree that would lose work cannot be ticked.
 
 use super::*;
 use crate::ui::sweep::Tab;
 
 fn open_sweep(h: &Harness, cx: &mut TestAppContext) {
-    h.mouse_on(
-        "filter-clean-up".to_owned(),
-        gpui_kit::MouseButton::Left,
-        cx,
-    );
+    h.pick_in_machine_menu(crate::keys::Command::CleanUp, cx);
     h.settle(cx);
 }
 
 #[gpui_kit::test]
-fn the_broom_opens_the_cleaner_and_escape_closes_it(cx: &mut TestAppContext) {
+fn the_machine_menu_opens_the_cleaner_and_escape_closes_it(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
     open_sweep(&h, cx);
     assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Cleanup);

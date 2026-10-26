@@ -18,6 +18,7 @@ icon_assets!(
         BrushCleaning,
         Check,
         ChevronDown,
+        ChevronUp,
         ChevronRight,
         Circle,
         CircleAlert,

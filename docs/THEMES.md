@@ -247,7 +247,7 @@ when this copy is out of date. Regenerate it with
 | --- | --- | --- | --- |
 | `radius` | 0 to 24 | its parent's | The corner radius of controls, chips, inputs and floating cards, in pixels at 100 %. |
 | `radius_cell` | 0 to 24 | its parent's | The corner radius of grid cells and terminal panes. |
-| `label_size` | 8 to 16 | its parent's | The size of mono uppercase labels such as `[ STATUS ]`. |
+| `label_size` | 8 to 16 | its parent's | The size of mono uppercase labels such as `[ WORKTREES ]`. |
 | `crosshair` | 5 to 31 | its parent's | The length of a crosshair's arms where two rules meet. |
 
 #### `[lines]`

@@ -260,6 +260,7 @@ impl Shell {
         // The length of the lists of sessions, and whether the inactive
         // ones are listed too.
         self.show_inactive = settings::flag(cx, "sidebar_show_inactive");
+        self.sidebar_tree = settings::flag(cx, "sidebar_tree");
         self.shelves.settle_merged = settings::flag(cx, "sidebar_settle_merged");
         self.settle_merged_now();
         self.rebuild_rows();

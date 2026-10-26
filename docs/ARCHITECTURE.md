@@ -1653,7 +1653,7 @@ the agent's own extra arguments from the settings, and Windows.
 ## The home (`ui/home.rs`)
 
 `Main::Empty` is the home. `Shell::go_home` shows it from anywhere (the
-pinned row of the sidebar, the command `GoHome`, its chord): it closes the
+machine's menu at the foot of the sidebar, the command `GoHome`, its chord): it closes the
 sheet that is open, leaves the Den (`den_leave`: no back-stack is kept, the
 transcripts stop being read) and sets `Main::Empty` with the keyboard in the
 main pane. It never touches `LiveSessions`: a terminal is shown by

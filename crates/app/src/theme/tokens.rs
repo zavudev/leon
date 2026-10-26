@@ -276,7 +276,7 @@ pub static TOKENS: &[Token] = &[
     },
     number!("radius", Shape, 0.0, 24.0, "The corner radius of controls, chips, inputs and floating cards, in pixels at 100 %.", |t: &Theme| t.shape.radius, |t: &mut Theme, n| t.shape.radius = n),
     number!("radius_cell", Shape, 0.0, 24.0, "The corner radius of grid cells and terminal panes.", |t: &Theme| t.shape.radius_cell, |t: &mut Theme, n| t.shape.radius_cell = n),
-    number!("label_size", Shape, 8.0, 16.0, "The size of mono uppercase labels such as `[ STATUS ]`.", |t: &Theme| t.shape.label_size, |t: &mut Theme, n| t.shape.label_size = n),
+    number!("label_size", Shape, 8.0, 16.0, "The size of mono uppercase labels such as `[ WORKTREES ]`.", |t: &Theme| t.shape.label_size, |t: &mut Theme, n| t.shape.label_size = n),
     number!("crosshair", Shape, 5.0, 31.0, "The length of a crosshair's arms where two rules meet.", |t: &Theme| t.shape.crosshair, |t: &mut Theme, n| t.shape.crosshair = n),
     Token {
         key: "crosshairs",

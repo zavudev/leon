@@ -591,6 +591,11 @@ pub mod metrics {
     pub fn HEADER_GAP() -> Pixels {
         token(2.0)
     }
+    /// The widest the main header's line about what is open gets; past it
+    /// the name gives way with an ellipsis.
+    pub fn HEADER_CRUMB_MAX() -> Pixels {
+        token(560.0)
+    }
     /// The space above and below a header's two lines.
     pub fn HEADER_PAD() -> Pixels {
         token(5.0)
@@ -660,6 +665,15 @@ pub mod metrics {
     /// Secondary text.
     pub fn TEXT_SMALL() -> Pixels {
         token(12.0)
+    }
+    /// The one question of an empty screen ("what are we building in
+    /// api?"), in mono.
+    pub fn TEXT_HERO() -> Pixels {
+        token(22.0)
+    }
+    /// The lion over that question.
+    pub fn HERO_MARK() -> Pixels {
+        token(52.0)
     }
     /// Height of the strip of terminal tabs.
     pub fn TAB_BAR_HEIGHT() -> Pixels {

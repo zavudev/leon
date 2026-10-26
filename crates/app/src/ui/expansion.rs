@@ -26,6 +26,10 @@ pub struct Expansion {
     wider: HashSet<String>,
     #[serde(skip)]
     everything: bool,
+    /// Every worktree open whatever was chosen: the flat sidebar, where a
+    /// worktree is not a row that folds.
+    #[serde(skip)]
+    worktrees_open: bool,
 }
 
 impl Expansion {
@@ -60,7 +64,14 @@ impl Expansion {
 
     /// Whether the node is open: what was chosen, else `default`.
     pub fn is_open(&self, key: &str, default: bool) -> bool {
-        self.everything || self.open.get(key).copied().unwrap_or(default)
+        self.everything
+            || (self.worktrees_open && key.starts_with("worktree:"))
+            || self.open.get(key).copied().unwrap_or(default)
+    }
+
+    /// Opens every worktree whatever was chosen for it, or stops doing so.
+    pub fn set_worktrees_open(&mut self, open: bool) {
+        self.worktrees_open = open;
     }
 
     /// Records the choice to open or fold a node. `true` when it changed what

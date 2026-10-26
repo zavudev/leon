@@ -68,26 +68,41 @@ fn prepare(cx: &mut gpui_kit::App, settings_file: Option<std::path::PathBuf>) {
     );
     // The tests that are not about the sidebar's filter look at the whole
     // tree; the ones about it (`tests_elsewhere`) switch this off to see the
-    // default.
+    // default. They look at it as a tree, with a row for every worktree; the
+    // flat list has tests of its own (`tests_flat`).
     if settings_file_is_none {
-        settings::set_value(
-            cx,
-            crate::schema::find("sidebar_show_inactive").unwrap(),
-            crate::schema::Value::Bool(true),
-        );
+        for key in ["sidebar_show_inactive", "sidebar_tree"] {
+            settings::set_value(
+                cx,
+                crate::schema::find(key).unwrap(),
+                crate::schema::Value::Bool(true),
+            );
+        }
+        in_terminals(cx);
     }
 }
 
-/// Shows the sessions that are not active too, for a test that gave its
-/// settings a file (which keeps the default, off).
+/// Starts the sessions of a test in terminals, which most of them are about;
+/// the ones about Leon's own interface (`tests_chat`) switch it back on.
+fn in_terminals(cx: &mut gpui_kit::App) {
+    if let Some(def) = crate::schema::find("agent_interface") {
+        settings::set_value(cx, def, crate::schema::Value::Text("terminal".into()));
+    }
+}
+
+/// Shows the sessions that are not active too, as a tree, for a test that
+/// gave its settings a file (which keeps the defaults, off).
 #[cfg(leon_posix_tests)]
 fn show_inactive(cx: &mut TestAppContext) {
     cx.update(|cx| {
-        settings::set_value(
-            cx,
-            crate::schema::find("sidebar_show_inactive").unwrap(),
-            crate::schema::Value::Bool(true),
-        );
+        for key in ["sidebar_show_inactive", "sidebar_tree"] {
+            settings::set_value(
+                cx,
+                crate::schema::find(key).unwrap(),
+                crate::schema::Value::Bool(true),
+            );
+        }
+        in_terminals(cx);
     });
 }
 
@@ -663,6 +678,25 @@ impl Harness {
         self.settle(cx);
     }
 
+    /// Opens the machine's menu at the foot of the sidebar with the mouse and
+    /// clicks the item that runs `command`.
+    fn pick_in_machine_menu(&self, command: crate::keys::Command, cx: &mut TestAppContext) {
+        self.mouse_on(
+            "sidebar-machine".to_owned(),
+            gpui_kit::MouseButton::Left,
+            cx,
+        );
+        let at = self
+            .shell(cx, |s| {
+                s.menu
+                    .as_ref()
+                    .filter(|menu| menu.machine)
+                    .and_then(|menu| menu.items.iter().position(|item| item.command == command))
+            })
+            .unwrap_or_else(|| panic!("{command:?} is not in the machine's menu"));
+        self.mouse_on(format!("menu-item-0-{at}"), gpui_kit::MouseButton::Left, cx);
+    }
+
     /// Points the mouse at the middle of a drawn element, as a hand reaching
     /// for it.
     fn hover_on(&self, selector: String, cx: &mut TestAppContext) {
@@ -1114,15 +1148,19 @@ fn the_window_opens_on_one_tree_of_machines_projects_worktrees_and_sessions(
 }
 
 #[gpui_kit::test]
-fn the_sidebar_has_the_three_tools_at_its_foot_and_no_rail_is_left(cx: &mut TestAppContext) {
+fn the_sidebar_foot_is_the_machine_and_the_settings_and_no_rail_is_left(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
-    for selector in [
+    for selector in ["sidebar-machine", "tool-settings", "sidebar-tools"] {
+        assert!(h.shows(selector, cx), "{selector}");
+    }
+    // What used to be tools and rows of their own are in its menu.
+    for gone in [
         "tool-theme",
         "tool-shortcuts",
-        "tool-settings",
-        "sidebar-tools",
+        "sidebar-connect",
+        "sidebar-share",
     ] {
-        assert!(h.shows(selector, cx), "{selector}");
+        assert!(!h.shows(gone, cx), "{gone}");
     }
     assert!(!h.shows("rail-machine-0", cx));
     // The local machine is online, the remote one has not been probed.
@@ -3337,13 +3375,20 @@ fn the_sheets_search_filters_the_lines_and_typing_stays_in_its_field(cx: &mut Te
 }
 
 #[gpui_kit::test]
-fn the_sidebar_tools_open_the_sheet(cx: &mut TestAppContext) {
+fn the_machine_menu_opens_the_sheet_and_escape_closes_the_menu(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
-    let mut visual = VisualTestContext::from_window(h.window.into(), cx);
-    let bounds = visual.debug_bounds("tool-shortcuts").unwrap();
-    visual.simulate_click(bounds.center(), gpui_kit::Modifiers::none());
-    visual.run_until_parked();
+    h.pick_in_machine_menu(crate::keys::Command::Shortcuts, cx);
     assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Shortcuts);
+    h.press("escape", cx);
+    h.mouse_on(
+        "sidebar-machine".to_owned(),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::Menu);
+    assert!(h.shows("context-menu", cx));
+    h.press("escape", cx);
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
 }
 
 #[gpui_kit::test]
@@ -5341,7 +5386,7 @@ mod live {
         )));
         put_cursor_on(&h, cx, NodeId::Worktree(worktree));
         h.press("m", cx);
-        h.type_text("close", cx);
+        h.type_text("delete", cx);
         h.press("enter", cx);
         assert_eq!(
             h.palette_titles(cx),
@@ -5355,6 +5400,115 @@ mod live {
         );
         assert!(script.hung_up(), "its program was hung up");
         assert!(!h.outline(cx).contains(&"worktree:feature/x".to_owned()));
+    }
+
+    #[gpui_kit::test]
+    fn deleting_a_session_in_a_linked_worktree_asks_and_removes_the_worktree_with_it(
+        cx: &mut TestAppContext,
+    ) {
+        let h = open_live(cx);
+        let (_main, root) = real_worktree(&h, cx);
+        let linked = tempfile::tempdir().unwrap();
+        let path = linked
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let project = project_id(&h, "real");
+        h.store
+            .replace_worktrees(
+                &project,
+                vec![
+                    NewWorktree {
+                        path: root.clone(),
+                        branch: Some("trunk".into()),
+                        head: None,
+                        is_main: true,
+                    },
+                    NewWorktree {
+                        path: path.clone(),
+                        branch: Some("feature/x".into()),
+                        head: None,
+                        is_main: false,
+                    },
+                ],
+            )
+            .unwrap();
+        let at = chrono::Utc::now();
+        for (title, cwd) in [("first", &path), ("second", &path), ("on trunk", &root)] {
+            h.store
+                .upsert_session(
+                    &NewSession {
+                        agent: AgentId::CLAUDE,
+                        external_id: title.replace(' ', "-"),
+                        machine_id: MachineId::local(),
+                        cwd: cwd.clone(),
+                        title: title.to_owned(),
+                        model: None,
+                        started_at: at,
+                        updated_at: at,
+                    },
+                    &[],
+                )
+                .unwrap();
+        }
+        h.settle(cx);
+        let mut id_of = |title: &str| {
+            h.shell(cx, |s| {
+                s.snapshot
+                    .sessions
+                    .iter()
+                    .find(|session| session.title == title)
+                    .unwrap()
+                    .id
+                    .clone()
+            })
+        };
+        let (first, on_trunk) = (id_of("first"), id_of("on trunk"));
+
+        // In the linked worktree it says the worktree goes, with the other
+        // session in it.
+        put_cursor_on(&h, cx, NodeId::Session(first.clone()));
+        h.press("m", cx);
+        h.type_text("delete", cx);
+        h.press("enter", cx);
+        assert_eq!(
+            h.palette_titles(cx),
+            ["Delete \"first\" and feature/x", "Cancel"].map(str::to_owned)
+        );
+        // git removes the worktree and then lists what is left: its main one.
+        h.runner.queue(Output::ok(""));
+        h.runner.queue(Output::ok(format!(
+            "worktree {root}\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/trunk\n"
+        )));
+        h.press("enter", cx);
+        h.settle(cx);
+        assert!(!h.outline(cx).contains(&"worktree:feature/x".to_owned()));
+        let titles: Vec<String> = h.shell(cx, |s| {
+            s.snapshot
+                .sessions
+                .iter()
+                .map(|session| session.title.clone())
+                .collect()
+        });
+        for gone in ["first", "second"] {
+            assert!(
+                !titles.contains(&gone.to_owned()),
+                "the sessions of the worktree went with it: {titles:?}"
+            );
+        }
+        assert!(titles.contains(&"on trunk".to_owned()), "{titles:?}");
+
+        // On the main checkout only the session goes.
+        put_cursor_on(&h, cx, NodeId::Session(on_trunk));
+        h.press("m", cx);
+        h.type_text("delete", cx);
+        h.press("enter", cx);
+        assert_eq!(
+            h.palette_titles(cx),
+            ["Remove \"on trunk\"", "Cancel"].map(str::to_owned)
+        );
     }
 
     #[gpui_kit::test]
@@ -6061,7 +6215,7 @@ mod live {
         let linked = worktree_id(&h, "feature/login");
         put_cursor_on(&h, cx, NodeId::Worktree(linked));
         h.press("m", cx);
-        assert!(menu_labels(&h, cx).contains(&"Close".to_owned()));
+        assert!(menu_labels(&h, cx).contains(&"Delete…".to_owned()));
         h.type_text("copy b", cx);
         h.press("enter", cx);
         assert_eq!(
@@ -6079,7 +6233,7 @@ mod live {
             .unwrap();
         put_cursor_on(&h, cx, NodeId::Worktree(main.id));
         h.press("m", cx);
-        assert!(!menu_labels(&h, cx).contains(&"Close".to_owned()));
+        assert!(!menu_labels(&h, cx).contains(&"Delete…".to_owned()));
     }
 
     #[gpui_kit::test]
@@ -6167,7 +6321,7 @@ mod live {
                 "Snooze\u{2026}",
                 "Rename",
                 "Copy session id",
-                "Remove from history"
+                "Delete…"
             ]
         );
         h.type_text("copy", cx);
@@ -6196,10 +6350,17 @@ mod live {
         h.press("m", cx);
         assert_eq!(
             menu_labels(&h, cx)[..4],
-            ["Focus", "Rename", "Sleep", "Close"],
+            ["Focus", "Rename", "Sleep", "Delete…"],
             "a running session leads with what a running session does"
         );
-        assert!(!menu_labels(&h, cx).contains(&"Remove from history".to_owned()));
+        assert_eq!(
+            menu_labels(&h, cx)
+                .iter()
+                .filter(|label| *label == "Delete…")
+                .count(),
+            1,
+            "deleting it is offered once, as the running session's"
+        );
         h.type_text("sleep", cx);
         h.press("enter", cx);
         h.settle(cx);
@@ -6225,8 +6386,8 @@ mod live {
         h.press("m", cx);
         let labels = menu_labels(&h, cx);
         assert_eq!(labels[0], "Wake");
-        assert!(labels.contains(&"Close".to_owned()));
-        assert!(!labels.contains(&"Remove from history".to_owned()));
+        assert!(labels.contains(&"Delete…".to_owned()));
+        assert!(!labels.contains(&"Resume".to_owned()));
         h.press("escape", cx);
         // Opened again, then closed: the terminal and its row both go.
         put_cursor_on(&h, cx, NodeId::Session(id.clone()));
@@ -6238,7 +6399,7 @@ mod live {
         });
         put_cursor_on(&h, cx, NodeId::Session(id.clone()));
         h.press("m", cx);
-        h.type_text("close", cx);
+        h.type_text("delete", cx);
         h.press("enter", cx);
         h.settle(cx);
         if h.palette_titles(cx).get(1).is_some_and(|t| t == "Cancel") {
@@ -6324,7 +6485,7 @@ mod live {
                 "Split down",
                 "Rename",
                 "Sleep",
-                "Close"
+                "Delete…"
             ]
         );
         h.type_text("split r", cx);
@@ -6346,7 +6507,7 @@ mod live {
         );
         put_cursor_on(&h, cx, NodeId::Live(LiveId(1)));
         h.press("m", cx);
-        h.type_text("close", cx);
+        h.type_text("delete", cx);
         h.press("enter", cx);
         assert_eq!(
             h.shell(cx, |s| s.overlay),
@@ -7526,7 +7687,7 @@ mod live {
                 "Snooze\u{2026}",
                 "Rename",
                 "Copy session id",
-                "Remove from history"
+                "Delete…"
             ]
         );
         h.press("enter", cx); // Resume
@@ -8025,6 +8186,9 @@ mod tests_shelf;
 
 #[path = "tests_sweep.rs"]
 mod tests_sweep;
+
+#[path = "tests_flat.rs"]
+mod tests_flat;
 
 #[cfg(leon_posix_tests)]
 #[path = "tests_restore.rs"]

@@ -50,7 +50,7 @@ installed it, which King's workers need.
 
 ## In the window
 
-**The King** is a row of the sidebar's navigation, above The Den
+**The King** is the row pinned at the top of the sidebar, over the filter
 (Ctrl+Shift+Alt+K, the palette's "Open the King"). It opens King's view in
 the main pane:
 

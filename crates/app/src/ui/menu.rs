@@ -25,6 +25,11 @@ use crate::theme::{metrics, px, Palette};
 use gpui_kit::prelude::*;
 use gpui_kit::{div, point, Context, Div, MouseButton, Pixels, Point, Window};
 use leon_core::AgentId;
+
+/// The item that deletes a session for good: with its worktree, when it runs
+/// in a linked one (`Command::DeleteSession`), and a linked worktree with
+/// every session in it (`Command::RemoveWorktree`). Both ask first.
+const DELETE: &str = "Delete\u{2026}";
 use std::time::{Duration, Instant};
 
 /// How long a pause ends what was typed to select an item.
@@ -140,7 +145,7 @@ pub fn items_for_held(kind: &Kind, local: bool, held: Option<bool>) -> Vec<Item>
             Some(Item::new("Move up", C::MoveRowUp)),
             Some(Item::new("Move down", C::MoveRowDown)),
             reveal(),
-            (!worktree.is_main).then(|| Item::new("Close", C::RemoveWorktree)),
+            (!worktree.is_main).then(|| Item::new(DELETE, C::RemoveWorktree)),
         ]
         .into_iter()
         .flatten()
@@ -178,22 +183,27 @@ pub fn items_for_held(kind: &Kind, local: bool, held: Option<bool>) -> Vec<Item>
             Some(Item::new("Snooze\u{2026}", C::SnoozeSession)),
             Some(Item::new("Rename", C::Rename)),
             Some(Item::new("Copy session id", C::CopySessionId)),
-            Some(Item::new("Remove from history", C::RemoveFromHistory)),
+            Some(Item::new(DELETE, C::DeleteSession)),
         ]
         .into_iter()
         .flatten()
         .collect(),
         Kind::Live(entry) if entry.asleep.is_some() => vec![
             Item::new("Wake", C::Open),
-            Item::new("Close", C::CloseSession),
+            Item::new(DELETE, C::DeleteSession),
         ],
-        Kind::Live(_) => vec![
+        Kind::Live(entry) => vec![
             Item::new("Focus", C::FocusTerminal),
             Item::new("Split right", C::SplitRight),
             Item::new("Split down", C::SplitDown),
             Item::new("Rename", C::Rename),
             Item::new("Sleep", C::SleepSession),
-            Item::new("Close", C::CloseSession),
+            // A plain shell is no session: it only closes.
+            if entry.agent.is_some() || entry.history.is_some() {
+                Item::new(DELETE, C::DeleteSession)
+            } else {
+                Item::new("Close", C::CloseSession)
+            },
         ],
         Kind::Folder { .. } => [
             Some(Item::new("Open shell here", C::OpenShell)),
@@ -254,11 +264,45 @@ pub fn items_for_lion(lion: LionMenu) -> Vec<Item> {
             }
         }),
         Some(Item::new("Send home", C::SendLionHome)),
-        Some(Item::new("Close", C::CloseSession)),
+        Some(Item::new(DELETE, C::DeleteSession)),
     ]
     .into_iter()
     .flatten()
     .collect()
+}
+
+/// The items of the menu at the foot of the sidebar: the places that are not
+/// rows of it, this computer's ways out, the cleaner (with how many worktrees
+/// it suggests, when any) and the look of the window.
+pub fn items_for_machine(suggested: usize, show_inactive: bool) -> Vec<Item> {
+    use Command as C;
+    let named = |command: Command| Item::new(keys::label(command), command);
+    vec![
+        named(C::GoHome),
+        named(C::ShowTasks),
+        named(C::ShowDen),
+        named(C::AddMachine),
+        named(C::ShareMachine),
+        Item::new(
+            &if suggested > 0 {
+                format!("{} ({suggested})", keys::label(C::CleanUp))
+            } else {
+                keys::label(C::CleanUp).to_owned()
+            },
+            C::CleanUp,
+        ),
+        Item::new(
+            if show_inactive {
+                "Hide inactive sessions"
+            } else {
+                "Show inactive sessions"
+            },
+            C::ToggleInactiveSessions,
+        ),
+        named(C::ToggleAppearance),
+        named(C::Shortcuts),
+        named(C::Settings),
+    ]
 }
 
 /// What choosing the selected item does.
@@ -295,6 +339,9 @@ pub struct Menu {
     pub terminal: bool,
     /// The lion it is the menu of, when it was opened in the Den.
     pub lion: Option<u64>,
+    /// Whether it is the menu of the machine at the foot of the sidebar: its
+    /// items act on nothing in particular.
+    pub machine: bool,
 }
 
 impl Menu {
@@ -310,6 +357,7 @@ impl Menu {
             at,
             terminal: false,
             lion: None,
+            machine: false,
         }
     }
 
@@ -465,13 +513,13 @@ impl Shell {
         // `items_for_held` already is).
         if let Kind::Session(session) = &row.kind {
             if self.running_of_history(&session.id).is_some() {
-                // The terminal's row: it is closed from here as a live row
+                // The terminal's row: it is deleted from here as a live row
                 // is, and removing it from the history would only bring the
                 // terminal back as a live row, so that is not offered.
                 items.retain(|item| {
                     !matches!(
                         item.command,
-                        Command::RemoveFromHistory | Command::ResumeSession | Command::Rename
+                        Command::DeleteSession | Command::ResumeSession | Command::Rename
                     )
                 });
                 items.splice(
@@ -480,15 +528,13 @@ impl Shell {
                         Item::new("Focus", Command::Open),
                         Item::new("Rename", Command::Rename),
                         Item::new("Sleep", Command::SleepSession),
-                        Item::new("Close", Command::CloseSession),
+                        Item::new(DELETE, Command::DeleteSession),
                     ],
                 );
             } else if self.slept.contains(&session.id) {
                 for item in &mut items {
-                    match item.command {
-                        Command::ResumeSession => item.label = "Wake".into(),
-                        Command::RemoveFromHistory => item.label = "Close".into(),
-                        _ => {}
+                    if item.command == Command::ResumeSession {
+                        item.label = "Wake".into();
                     }
                 }
             }
@@ -569,6 +615,36 @@ impl Shell {
         cx.notify();
     }
 
+    /// Opens the menu of the machine at the foot of the sidebar, from its
+    /// button: `at` is the button's top-left corner, and the menu is moved in
+    /// to stay in the window.
+    pub(super) fn open_machine_menu(
+        &mut self,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.overlay == Overlay::Menu {
+            self.close_menu(window, cx);
+            return;
+        }
+        if self.overlay != Overlay::None {
+            self.close_overlay(window, cx);
+        }
+        let items = items_for_machine(self.sweep_suggested, self.show_inactive);
+        let height = px(ITEM) * items.len() as f32 + px(8.);
+        let mut menu = Menu::new(
+            NodeId::Machine(leon_core::MachineId::local()),
+            items,
+            point(at.x, at.y - height),
+        );
+        menu.machine = true;
+        self.overlay = Overlay::Menu;
+        self.menu = Some(menu);
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
     /// Opens the menu of the row the cursor is on (the keyboard's way in).
     pub(super) fn open_menu_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.overlay == Overlay::Menu {
@@ -587,12 +663,7 @@ impl Shell {
     fn row_anchor(&self, index: usize) -> Point<Pixels> {
         let row = &self.rows[index];
         let x = px(12.) + metrics::INDENT() * f32::from(row.depth) + px(24.);
-        let bounds = self
-            .tree_scroll
-            .0
-            .borrow()
-            .base_handle
-            .bounds_for_item(index);
+        let bounds = self.tree_scroll.bounds_for_item(index);
         let y = bounds.map_or(
             metrics::HEADER_HEIGHT() + metrics::ROW_HEIGHT() * (index as f32 + 1.0),
             |bounds| bounds.bottom(),
@@ -674,7 +745,12 @@ impl Shell {
         let node = self.menu.as_ref().map(|menu| menu.node.clone());
         let of_terminal = self.menu.as_ref().is_some_and(|menu| menu.terminal);
         let lion = self.menu.as_ref().and_then(|menu| menu.lion);
+        let of_machine = self.menu.as_ref().is_some_and(|menu| menu.machine);
         self.close_menu(window, cx);
+        if of_machine {
+            self.run_command(item.command, window, cx);
+            return;
+        }
         if let Some(lion) = lion {
             // The lion it was opened on is the selected one: the command
             // does what it does for it.
@@ -927,6 +1003,37 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_machine_menu_holds_the_places_the_ways_out_and_the_cleaner() {
+        let labels = |items: Vec<Item>| -> Vec<Command> {
+            items.into_iter().map(|item| item.command).collect()
+        };
+        let commands = labels(items_for_machine(0, false));
+        for command in [
+            Command::GoHome,
+            Command::ShowTasks,
+            Command::ShowDen,
+            Command::AddMachine,
+            Command::ShareMachine,
+            Command::CleanUp,
+            Command::ToggleInactiveSessions,
+            Command::Settings,
+        ] {
+            assert!(commands.contains(&command), "{command:?} in {commands:?}");
+        }
+        let items = items_for_machine(3, true);
+        let clean = items
+            .iter()
+            .find(|item| item.command == Command::CleanUp)
+            .unwrap();
+        assert!(clean.label.ends_with("(3)"), "{}", clean.label);
+        let inactive = items
+            .iter()
+            .find(|item| item.command == Command::ToggleInactiveSessions)
+            .unwrap();
+        assert_eq!(inactive.label, "Hide inactive sessions");
+    }
     use crate::ui::live::LiveId;
     use crate::ui::tree::LiveEntry;
     use leon_core::{
@@ -952,7 +1059,7 @@ mod tests {
                 "Rename\u{2026}",
                 "Pin",
                 "Send home",
-                "Close"
+                "Delete…"
             ]
         );
         let commands: Vec<Command> = items.iter().map(|item| item.command).collect();
@@ -964,7 +1071,7 @@ mod tests {
                 Command::Rename,
                 Command::PinSession,
                 Command::SendLionHome,
-                Command::CloseSession
+                Command::DeleteSession
             ]
         );
         // A pinned one is unpinned; one the history does not hold has
@@ -981,7 +1088,7 @@ mod tests {
                 "Message\u{2026}",
                 "Rename\u{2026}",
                 "Send home",
-                "Close"
+                "Delete…"
             ]
         );
         // An agent whose interrupt key is known can be interrupted, and
@@ -1001,7 +1108,7 @@ mod tests {
                 "Interrupt",
                 "Rename\u{2026}",
                 "Send home",
-                "Close"
+                "Delete…"
             ]
         );
         assert_eq!(items[2].command, Command::QueuedMessages);
@@ -1163,10 +1270,10 @@ mod tests {
                 "Move up",
                 "Move down",
                 "Reveal in file manager",
-                "Close"
+                "Delete…"
             ]
         );
-        assert!(!labels(&items_for(&worktree(true), true)).contains(&"Close"));
+        assert!(!labels(&items_for(&worktree(true), true)).contains(&"Delete…"));
         assert!(!labels(&items_for(&worktree(false), false)).contains(&"Reveal in file manager"));
     }
 
@@ -1197,7 +1304,7 @@ mod tests {
                 "Snooze\u{2026}",
                 "Rename",
                 "Copy session id",
-                "Remove from history"
+                "Delete…"
             ]
         );
         // A pinned session offers to unpin instead.
@@ -1217,7 +1324,7 @@ mod tests {
                 "Snooze\u{2026}",
                 "Rename",
                 "Copy session id",
-                "Remove from history"
+                "Delete…"
             ]
         );
     }
