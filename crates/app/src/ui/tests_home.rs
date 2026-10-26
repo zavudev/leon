@@ -400,9 +400,11 @@ fn the_home_fits_a_narrow_pane_and_a_very_wide_one(cx: &mut TestAppContext) {
                 button.left() >= pane.left() && button.right() <= pane.right(),
                 "{command:?} at {width}: {button:?} in {pane:?}"
             );
+            // A chip is as wide as its word and its chord (macOS's chords
+            // are the shortest), never squeezed under them.
             assert!(
-                button.size.width > gpui_kit::px(120.),
-                "{command:?} at {width}"
+                button.size.width > gpui_kit::px(96.),
+                "{command:?} at {width}: {button:?}"
             );
         }
         for block in ["home-sessions", "home-recent", "maker"] {
