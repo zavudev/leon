@@ -8,8 +8,18 @@ import * as Clipboard from 'expo-clipboard';
 import * as DocumentPicker from 'expo-document-picker';
 import { File } from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
-import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, AppState, Image, Modal, Pressable, ScrollView, View } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  AppState,
+  Image,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  View,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { bytesOfBase64, mimeOfDataUrl, nameOf } from '@/chat/attach';
@@ -70,6 +80,13 @@ export async function pasteImage(chatId: string): Promise<void> {
 
 type Way = { key: string; icon: IconName; title: string; detail: string; run(): Promise<void> };
 
+/** Runs a way to attach; what went wrong is said over the chat, the sheet being gone. */
+function start(way: Way): void {
+  way.run().catch((error: unknown) =>
+    Alert.alert('Nothing was attached', error instanceof Error ? error.message : String(error)),
+  );
+}
+
 /** The sheet of the ways to attach a file. */
 export function AttachSheet({
   chatId,
@@ -87,7 +104,14 @@ export function AttachSheet({
   const t = useTheme();
   const motion = useMotion();
   const insets = useSafeAreaInsets();
-  const [problem, setProblem] = useState<string | null>(null);
+  // iOS shows one screen over the application at a time: the photos, the
+  // camera or the files open once this sheet is gone, not while it closes.
+  const pending = useRef<Way | null>(null);
+  const choose = (way: Way) => {
+    onClose();
+    if (Platform.OS === 'ios') pending.current = way;
+    else start(way);
+  };
 
   const ways: Way[] = [
     {
@@ -117,8 +141,7 @@ export function AttachSheet({
       async run() {
         const allowed = await ImagePicker.requestCameraPermissionsAsync();
         if (!allowed.granted) {
-          setProblem('Leon may not use the camera: allow it in the settings of this phone.');
-          return;
+          throw new Error('Leon may not use the camera: allow it in the settings of this phone.');
         }
         const result = await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.8 });
         if (result.canceled) return;
@@ -161,7 +184,12 @@ export function AttachSheet({
       visible={visible}
       transparent
       animationType={motion.open === 0 ? 'none' : 'fade'}
-      onRequestClose={onClose}>
+      onRequestClose={onClose}
+      onDismiss={() => {
+        const way = pending.current;
+        pending.current = null;
+        if (way) start(way);
+      }}>
       <Pressable
         accessibilityLabel="Close"
         accessibilityRole="button"
@@ -188,13 +216,7 @@ export function AttachSheet({
             key={way.key}
             accessibilityRole="button"
             accessibilityLabel={`${way.title}. ${way.detail}`}
-            onPress={() => {
-              setProblem(null);
-              onClose();
-              way.run().catch((error: unknown) =>
-                setProblem(error instanceof Error ? error.message : String(error)),
-              );
-            }}
+            onPress={() => choose(way)}
             style={({ pressed }) => ({
               flexDirection: 'row',
               alignItems: 'center',
@@ -214,13 +236,6 @@ export function AttachSheet({
             </View>
           </Pressable>
         ))}
-        {problem ? (
-          <View style={{ padding: 16 }}>
-            <Txt variant="small" tone="error">
-              {problem}
-            </Txt>
-          </View>
-        ) : null}
       </View>
     </Modal>
   );

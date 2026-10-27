@@ -27,6 +27,9 @@
   a word, then drag), and a copy button on each message copies all of it;
   holding a message no longer only copied it whole. An address an agent
   writes bare (`https://…`) is a link, opened with one tap.
+* On iOS, Photos, Camera and File in the phone app's attach sheet open their
+  picker: they waited for nothing and asked while the sheet was closing,
+  which iOS ignores.
 
 ## [0.13.0] - 2026-10-26
 
