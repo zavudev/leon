@@ -3037,6 +3037,14 @@ impl Shell {
         {
             return true;
         }
+        // Text selected in a conversation or in King's is copied by the
+        // usual chord, before the field that has the keyboard sees it.
+        if self.overlay == Overlay::None
+            && self.pane == Pane::Main
+            && self.copy_selection(stroke, window, cx)
+        {
+            return true;
+        }
         // So is King's view.
         if self.overlay == Overlay::None
             && self.pane == Pane::Main
@@ -4524,6 +4532,9 @@ impl Render for Shell {
             .font_family(theme::fonts::sans())
             .font_features(theme::fonts::sans_features())
             .text_size(metrics::TEXT_BODY())
+            // The window's text selection (conversations, King): what keeps
+            // a selection from one frame to the next, drawn before the rest.
+            .child(gpui_kit::base::TextSelectionLayer)
             // A menu item is a command of the registry, run as its chord is.
             .on_action(cx.listener(|this, run: &crate::menus::Run, window, cx| {
                 this.menu_command(run.0, window, cx);

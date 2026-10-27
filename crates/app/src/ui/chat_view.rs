@@ -250,7 +250,11 @@ impl Shell {
                         .flex_1()
                         .min_w_0()
                         .text_color(colours.text)
-                        .child(text.clone()),
+                        // Selected and copied like the agent's answers.
+                        .child(gpui_kit::base::SelectableText::new(
+                            SharedString::from(format!("chat-{}-said-{at}", id.0)),
+                            text.clone(),
+                        )),
                 )
                 .into_any_element(),
             Item::Agent { text, .. } => div()
@@ -893,8 +897,20 @@ impl Shell {
                 }))
                 .into_any_element()
         };
+        let drop_over = colours.surface_2;
         div()
+            .id(SharedString::from(format!("chat-composer-{}", id.0)))
             .debug_selector(move || format!("chat-composer-{}", id.0))
+            // Files dropped on the field go with what is said next.
+            .drag_over::<gpui_kit::ExternalPaths>(move |style, _, _, _| style.bg(drop_over))
+            .on_drop(
+                cx.listener(move |this, paths: &gpui_kit::ExternalPaths, window, cx| {
+                    this.chat_attach_paths(id, paths.paths().to_vec(), cx);
+                    if let Some(chat) = this.chats.get(&id) {
+                        chat.input.update(cx, |input, cx| input.focus(window, cx));
+                    }
+                }),
+            )
             .relative()
             .w_full()
             .min_w_0()
@@ -962,11 +978,46 @@ impl Shell {
                             .items_center()
                             .justify_end()
                             .gap(px(6.))
+                            .child(self.chat_attach_button(id, colours, cx))
                             .child(self.chat_dictate_button(id, colours, cx))
                             .child(key_cap(if running { "ESC" } else { "ENTER" }, colours))
                             .child(action),
                     ),
             )
+            .into_any_element()
+    }
+}
+
+impl Shell {
+    /// The paperclip of a conversation's field: files to attach to what is
+    /// said next.
+    fn chat_attach_button(
+        &self,
+        id: LiveId,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let name = format!("chat-attach-{}", id.0);
+        let hover = colours.surface_2;
+        div()
+            .id(SharedString::from(name.clone()))
+            .debug_selector(move || name.clone())
+            .flex_none()
+            .size(px(26.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(metrics::RADIUS())
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new("Attach files (or paste or drop them)")
+                    .build(window, cx)
+            })
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.chat_attach(id, window, cx);
+            }))
+            .child(icon(IconName::Paperclip, px(13.), colours.text_muted))
             .into_any_element()
     }
 }

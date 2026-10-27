@@ -995,11 +995,94 @@ impl Shell {
         false
     }
 
+    /// Copies the text selected in the conversation or King's view on
+    /// screen, when the chord to copy is pressed and something is selected:
+    /// the window's selection has no owner of its own to copy it. `false`
+    /// otherwise, so the field copies what is selected in it.
+    pub(super) fn copy_selection(
+        &mut self,
+        stroke: &gpui_kit::Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let copy = stroke.key == "c"
+            && !stroke.modifiers.alt
+            && !stroke.modifiers.shift
+            && if crate::platform::is_mac() {
+                stroke.modifiers.platform && !stroke.modifiers.control
+            } else {
+                stroke.modifiers.control && !stroke.modifiers.platform
+            };
+        if !copy || (self.focused_chat().is_none() && !self.king_open()) {
+            return false;
+        }
+        let text = gpui_kit::base::TextSelection::selected_text(window, cx);
+        let text = text.trim();
+        if text.is_empty() {
+            return false;
+        }
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text.to_owned()));
+        true
+    }
+
+    /// Attaches files of this computer to what is said next in a
+    /// conversation: picked, dropped on it or copied in the file manager.
+    /// An agent on another machine cannot open them, which is said instead.
+    /// `true`, the files having been dealt with either way.
+    pub(super) fn chat_attach_paths(
+        &mut self,
+        id: LiveId,
+        paths: Vec<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(chat) = self.chats.get_mut(&id) else {
+            return false;
+        };
+        if !chat.machine.is_local() {
+            self.engine.report(
+                StatusKind::Info,
+                "Attaching files needs the agent to run on this computer; the files are here.",
+            );
+            return true;
+        }
+        for path in paths {
+            if !chat.attached.contains(&path) {
+                chat.attached.push(path);
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    /// Asks for files to attach to what is said next in a conversation.
+    pub(super) fn chat_attach(&mut self, id: LiveId, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = (self.options.pick_files)(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let paths = picked.await;
+            if paths.is_empty() {
+                return;
+            }
+            this.update_in(cx, |this, window, cx| {
+                this.chat_attach_paths(id, paths, cx);
+                if let Some(chat) = this.chats.get(&id) {
+                    chat.input.update(cx, |input, cx| input.focus(window, cx));
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Pastes the clipboard's image into a conversation's field: it is kept
     /// in a file and attached to what is said next, which names its path for
     /// the agent to open. `false` when there is no image, so the field
     /// pastes text as it does.
     fn chat_paste_image(&mut self, id: LiveId, cx: &mut Context<Self>) -> bool {
+        // Files copied in the file manager are attached as they are.
+        let files = crate::clip_image::files(cx);
+        if !files.is_empty() {
+            return self.chat_attach_paths(id, files, cx);
+        }
         let Some(image) = (self.options.clipboard_image)(cx) else {
             return false;
         };
