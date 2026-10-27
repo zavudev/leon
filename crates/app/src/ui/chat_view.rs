@@ -35,8 +35,9 @@ use crate::format;
 use crate::icons::{agent_icon, icon, IconName};
 use crate::theme::{fonts, metrics, px, Palette};
 
-/// The widest the column of a conversation gets.
-const COLUMN: f32 = 820.;
+/// The widest the column of a conversation gets: wide enough that code and
+/// tables keep their lines on a large screen, narrow enough to read.
+const COLUMN: f32 = 1040.;
 
 impl Shell {
     /// The leaf of a conversation, with the accent outline when it is the
@@ -189,7 +190,7 @@ impl Shell {
     ) -> AnyElement {
         let items = &chat.conversation.items;
         let running = chat.conversation.running();
-        let mut list = column().px(px(16.)).pt(px(20.)).pb(px(12.)).gap(px(14.));
+        let mut list = column().px(px(16.)).pt(px(16.)).pb(px(12.)).gap(px(12.));
         for block in blocks(items, running) {
             list = list.child(match block {
                 Block::Single(at) => self.chat_item(id, at, &items[at], chat, colours),
@@ -270,7 +271,7 @@ impl Shell {
                         .items_center()
                         .gap(px(6.))
                         .child(agent_icon(chat.agent, px(12.), colours))
-                        .child(mono(format::agent_tag(chat.agent)).text_color(colours.text_faint)),
+                        .child(mono(answered_by(chat)).text_color(colours.text_faint)),
                 )
                 .child(
                     div().w_full().min_w_0().text_color(colours.text).child(
@@ -1020,6 +1021,14 @@ impl Shell {
             .child(icon(IconName::Paperclip, px(13.), colours.text_muted))
             .into_any_element()
     }
+}
+
+/// Who an answer is from (see [`crate::chat::complete::answered_by`]).
+fn answered_by(chat: &Chat) -> String {
+    crate::chat::complete::answered_by(
+        chat.conversation.model.as_deref(),
+        format::agent_tag(chat.agent),
+    )
 }
 
 /// The column every part of a conversation sits in: as wide as the pane up

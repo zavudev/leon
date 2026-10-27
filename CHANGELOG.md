@@ -9,6 +9,12 @@
   copied in the Finder (or another file manager) are attached when pasted.
   They go with what is said next, as paths the agent opens.
 
+### Changed
+
+* A conversation's answers say the exact model that wrote them
+  (`CLAUDE-OPUS-5-5`) instead of the agent's name, and its column is wider
+  (up to 1040 px), with less room between messages.
+
 ### Fixed
 
 * The text of a conversation can be selected and copied: what you said is
