@@ -693,6 +693,7 @@ export function createDemoLink(onState: (state: ConnState) => void): HostLink {
     },
     worktrees: async (roots) => roots.map((root) => [{ path: root, branch: 'main', main: true }]),
     projectLogo: async () => ({ kind: 'none' }),
+    keepAttachment: async (chatId, name) => `/tmp/leon-king-attachments/phone/${chatId}/${name}`,
     installedAgents: async () => ['claude', 'codex', 'opencode'],
     agentOptions: async (agent) => options(agent),
     startTurn: async (request, onEvent) => runTurn(request.prompt, onEvent),

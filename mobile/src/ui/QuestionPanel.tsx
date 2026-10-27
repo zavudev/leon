@@ -11,7 +11,7 @@ import { fonts, metrics } from '@/theme/tokens';
 import { useTheme } from '@/theme/useTheme';
 
 import { Button, Label, Led, Txt } from './kit';
-import { markdownStyles, openLink } from './MessageRow';
+import { markdownParser, markdownRules, markdownStyles, openLink } from './MessageRow';
 
 type Props = {
   /** The questions still pending, oldest first; the first one is shown. */
@@ -268,7 +268,7 @@ function PlanBody({
     <View style={{ gap: 10 }}>
       <View style={[styles.plan, { borderColor: t.border, backgroundColor: t.background }]}>
         {ask.plan.trim() ? (
-          <Markdown style={md} onLinkPress={openLink}>
+          <Markdown style={md} onLinkPress={openLink} markdownit={markdownParser} rules={markdownRules}>
             {ask.plan}
           </Markdown>
         ) : (

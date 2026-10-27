@@ -353,6 +353,11 @@ export interface HostLink {
   worktrees(roots: string[]): Promise<Worktree[][]>;
   /** The logo of the project rooted at `root`, looked for on the other computer. */
   projectLogo(root: string): Promise<ProjectLogo>;
+  /**
+   * Keeps a file of this device on that computer, for the agent of chat
+   * `chatId` to open; answers the path it was kept at. At most 20 MB.
+   */
+  keepAttachment(chatId: string, name: string, bytes: ArrayBuffer): Promise<string>;
   installedAgents(): Promise<string[]>;
   /** What `agent` offers on that computer: the agent itself is asked where it can be. */
   agentOptions(agent: string): Promise<AgentOptions>;

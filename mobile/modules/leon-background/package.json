@@ -1,6 +1,6 @@
 {
   "name": "leon-background",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Keeps Leon's link alive behind other applications on Android, and posts what an agent needs as system notifications.",
   "license": "Apache-2.0",
   "private": true,

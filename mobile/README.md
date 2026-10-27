@@ -135,6 +135,15 @@ no, with a reason), a question with options, a plan to approve. An answer
 given while offline is kept and sent when the connection is back. A mode that
 lets the agent do anything asks you to confirm.
 
+The paperclip beside the field attaches files to the next message: photos
+and screenshots of the phone, a picture taken with the camera, any file
+(up to 20 MB each), or the image on the clipboard, which the row over the
+field offers as **Paste image** as soon as you copy one. Each file is sent to
+the computer as it is picked (where the desktop keeps pasted images,
+`$TMPDIR/leon-king-attachments/phone/<chat>/`), and the message names the
+paths for the agent to open, in the same words the desktop uses. The message
+is sent once every file has arrived.
+
 The agents are driven this way:
 
 * **Claude Code** through its control protocol. It can be told more while it
@@ -180,6 +189,8 @@ cannot be continued.
   only once its Leon imports it.
 * **Five agents.** Claude Code, Codex, opencode, Grok and Cursor; sessions of
   other agents can be read but not continued.
+* **Attached files stay on the computer** in its temporary folder; nothing
+  removes them but the system's own cleaning of it.
 * **Unix hosts.** A turn starts through the owner's login shell, and browsing
   folders assumes `/` paths.
 * `wss://` uses the Mozilla root certificates bundled with the app

@@ -23,6 +23,7 @@ import {
   AbstractFfiConverterByteArray,
   Cursor,
   FfiConverterArray,
+  FfiConverterArrayBuffer,
   FfiConverterBool,
   FfiConverterCallback,
   FfiConverterFloat64,
@@ -5383,6 +5384,18 @@ export interface HostSessionLike {
     signal: AbortSignal;
   }) /*throws*/ : Promise<Array<string>>;
   /**
+   * Keeps a file of this device on the other computer, for the agent of
+   * chat `chat_id` to open: its bytes go in pieces as the input of a
+   * command (see [`crate::attach`]). Answers the path it was kept at,
+   * which the prompt names.
+   */
+  keepAttachment(
+    chatId: string,
+    name: string,
+    bytes: ArrayBuffer,
+    asyncOpts_?: { signal: AbortSignal },
+  ) /*throws*/ : Promise<string>;
+  /**
    * Asks King's service on the other computer and returns its answer.
    * `request` is one request of King's protocol as JSON, with its `op`:
    * `{"op":"status"}`, `{"op":"say","text":"…"}`,
@@ -5798,6 +5811,70 @@ export class HostSession
         /*liftFunc:*/ (__rb) => {
           try {
             return FfiConverterSequenceString.lift(__rb);
+          } finally {
+            nativeModule().rustbuffer_free(__rb);
+          }
+        },
+        /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+        /*asyncOpts:*/ asyncOpts_,
+        /*errorHandler:*/ FfiConverterTypeMobileError.lift.bind(
+          FfiConverterTypeMobileError,
+        ),
+      );
+    } catch (__error: any) {
+      if (uniffiIsDebug && __error instanceof Error) {
+        __error.stack = __stack;
+      }
+      throw __error;
+    }
+  }
+
+  /**
+   * Keeps a file of this device on the other computer, for the agent of
+   * chat `chat_id` to open: its bytes go in pieces as the input of a
+   * command (see [`crate::attach`]). Answers the path it was kept at,
+   * which the prompt names.
+   */
+  async keepAttachment(
+    chatId: string,
+    name: string,
+    bytes: ArrayBuffer,
+    asyncOpts_?: { signal: AbortSignal },
+  ): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+      return await uniffiRustCallAsync(
+        /*rustCaller:*/ uniffiCaller,
+        /*rustFutureFunc:*/ () => {
+          return nativeModule().ubrn_uniffi_leon_mobile_fn_method_hostsession_keep_attachment(
+            uniffiTypeHostSessionObjectFactory.clonePointer(this),
+            FfiConverterString.lower(chatId, nativeModule().rustbuffer_alloc),
+            FfiConverterString.lower(name, nativeModule().rustbuffer_alloc),
+            FfiConverterArrayBuffer.lower(
+              bytes,
+              nativeModule().rustbuffer_alloc,
+            ),
+          );
+        },
+        /*pollFunc:*/ nativeModule()
+          .ubrn_ffi_leon_mobile_rust_future_poll_rust_buffer,
+        /*cancelFunc:*/ nativeModule()
+          .ubrn_ffi_leon_mobile_rust_future_cancel_rust_buffer,
+        /*completeFunc:*/ nativeModule()
+          .ubrn_ffi_leon_mobile_rust_future_complete_rust_buffer,
+        /*freeFunc:*/ nativeModule()
+          .ubrn_ffi_leon_mobile_rust_future_free_rust_buffer,
+        // Async returns always go through the JS-side converter: the
+        // FFI symbol returns the future handle (u64), and the user-level
+        // RustBuffer comes back via the shared `rust_future_complete_*`
+        // export. The bytes the runtime hands back must be deserialized
+        // here using the per-callable return-type converter.
+        // Borrowed view over foreign memory: the call site owns the free,
+        // as on the sync paths. Unconditional — a no-op where buffers are
+        // already JS-owned.
+        /*liftFunc:*/ (__rb) => {
+          try {
+            return FfiConverterString.lift(__rb);
           } finally {
             nativeModule().rustbuffer_free(__rb);
           }
@@ -7013,6 +7090,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       "uniffi_leon_mobile_checksum_method_hostsession_installed_agents",
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_leon_mobile_checksum_method_hostsession_keep_attachment() !==
+    55969
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      "uniffi_leon_mobile_checksum_method_hostsession_keep_attachment",
     );
   }
   if (

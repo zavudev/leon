@@ -1,6 +1,6 @@
 {
   "name": "leon-link-native",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Leon's relay client for React Native: the leon-mobile Rust crate as a Turbo Module.",
   "license": "Apache-2.0",
   "repository": {

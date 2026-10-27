@@ -24,11 +24,13 @@ import {
   withoutLegacyMode,
   type Message,
 } from '@/chat/model';
+import { withAttached } from '@/chat/attach';
 import { isWaiting, pendingQuestions } from '@/chat/reduce';
 import { activityWord, withoutNotes } from '@/chat/transcript';
 import type { AgentOptions, TurnOptions } from '@/link/types';
 import { chatInFront } from '@/store/alerts';
 import { optionsKey, useApp } from '@/store/app';
+import { takeAttached, useAttachments } from '@/store/attachments';
 import {
   answer,
   combineRows,
@@ -46,8 +48,9 @@ import {
 } from '@/store/runtime';
 import { agentColor, fonts, metrics } from '@/theme/tokens';
 import { useTheme } from '@/theme/useTheme';
+import { AttachedRow, AttachSheet, useClipboardImage } from '@/ui/Attach';
 import { ConnectionBanner } from '@/ui/ConnectionBanner';
-import { Label, Led, Rule, Screen, Txt } from '@/ui/kit';
+import { IconButton, Label, Led, Rule, Screen, Txt } from '@/ui/kit';
 import { MessageRow } from '@/ui/MessageRow';
 import { OptionsSheet } from '@/ui/OptionsSheet';
 import { QuestionPanel } from '@/ui/QuestionPanel';
@@ -165,6 +168,11 @@ export default function Chat() {
     [offered, chat?.options, lastUsed],
   );
   const [choosing, setChoosing] = useState(false);
+  const [attaching, setAttaching] = useState(false);
+  // What goes with the next message: each file is on the computer once kept.
+  const attached = useAttachments((s) => s.byChat[chatId]);
+  const keptCount = attached?.filter((a) => a.state === 'kept').length ?? 0;
+  const stillSending = attached?.some((a) => a.state === 'sending') ?? false;
   // The turn that was asked to stop: the next press of the same button kills it.
   const [stopAsked, setStopAsked] = useState<string | null>(null);
   // System notes: hidden until asked for, and each one closed until opened.
@@ -212,6 +220,7 @@ export default function Chat() {
 
   const running = turn !== undefined || chat?.activeTurn !== undefined;
   const readOnly = chat !== undefined && !driver;
+  const [canPaste, pasted] = useClipboardImage(!readOnly && online);
   const questions = useMemo(() => pendingQuestions(turn), [turn]);
   const waiting = isWaiting(turn);
   // Whether it reads more while it works is the agent's to say.
@@ -265,20 +274,22 @@ export default function Chat() {
 
   // While the agent works, a message is added to what it has to answer, if
   // it can be told more. It is kept and sent even when written offline.
-  const canSend = draft.trim().length > 0 && (running ? canSayMore : online);
+  // Files go with it once every one is on the computer.
+  const canSend =
+    (draft.trim().length > 0 || keptCount > 0) && !stillSending && (running ? canSayMore : online);
 
   function submit() {
-    const text = draft;
     if (!canSend) return;
-    if (running) {
+    const go = () => {
+      const text = withAttached(draft, takeAttached(chatId));
       setDraft('');
       void send(chatId, text, options);
+    };
+    if (running) {
+      go();
       return;
     }
-    confirmed(offered, options, () => {
-      setDraft('');
-      void send(chatId, text, options);
-    });
+    confirmed(offered, options, go);
   }
 
   function askToStop() {
@@ -311,7 +322,19 @@ export default function Chat() {
       kind={chat.agent}
       title={chat.title || 'New chat'}
       subtitle={chat.cwd ?? 'default folder'}
-      bottomInset={false}>
+      bottomInset={false}
+      right={
+        // What programs wrote into the conversation (task notifications,
+        // reminders, commands): hidden until asked for.
+        noteCount > 0 ? (
+          <IconButton
+            icon={showNotes ? 'eye' : 'eye-off'}
+            label={`${showNotes ? 'Hide' : 'Show'} system notes, ${noteCount} in this chat`}
+            color={showNotes ? t.signal : t.textFaint}
+            onPress={() => setShowNotes((on) => !on)}
+          />
+        ) : undefined
+      }>
       <ConnectionBanner
         hostId={hostId}
         detail={waiting ? 'Waiting for you' : progress.word || modeLabel(offered, shown.mode).toLowerCase()}
@@ -386,25 +409,6 @@ export default function Chat() {
         ) : null}
         </View>
         <Rule />
-        {noteCount > 0 ? (
-          <Pressable
-            accessibilityRole="switch"
-            accessibilityState={{ checked: showNotes }}
-            accessibilityLabel={`Show system notes, ${noteCount} in this chat`}
-            accessibilityHint="Notes are what programs wrote into the conversation: task notifications, reminders, commands."
-            onPress={() => setShowNotes((on) => !on)}
-            style={({ pressed }) => [
-              styles.mode,
-              { borderBottomColor: t.border, backgroundColor: pressed ? t.surface2 : t.surface },
-            ]}>
-            <Label tone="muted">[ System notes ]</Label>
-            <Led color={showNotes ? t.signal : t.textFaint} hollow={!showNotes} />
-            <Label tone={showNotes ? 'text' : 'faint'} style={{ flex: 1 }}>
-              {noteCount} {showNotes ? 'shown' : 'hidden'}
-            </Label>
-            <Label>{showNotes ? 'Hide' : 'Show'}</Label>
-          </Pressable>
-        ) : null}
         {readOnly ? (
           <View style={{ padding: 16, paddingBottom: insets.bottom + 16 }}>
             <Txt variant="small" tone="faint">
@@ -420,24 +424,6 @@ export default function Chat() {
               online={online}
               onAnswer={(questionId, reply) => answer(chatId, questionId, reply)}
             />
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={`Mode, model and effort: ${optionsLine(offered, shown)}`}
-              accessibilityHint="Changes how the agent runs: what it may do without asking, its model, its effort."
-              onPress={() => setChoosing(true)}
-              style={({ pressed }) => [
-                styles.mode,
-                { borderBottomColor: t.border, backgroundColor: pressed ? t.surface2 : 'transparent' },
-              ]}>
-              <Label tone="muted">[ Mode ]</Label>
-              <Led color={dangerous ? t.warning : t.textMuted} hollow={!shown.mode} />
-              <Label tone={dangerous ? 'warning' : 'text'} numberOfLines={1} style={{ flex: 1 }}>
-                {dangerous ? '! ' : ''}
-                {optionsLine(offered, shown)}
-              </Label>
-              <Label>Change</Label>
-              <Feather name="chevron-up" size={14} color={t.textFaint} />
-            </Pressable>
             {!running && online && draft.length === 0 && rows.length > 0 ? (
               <ScrollView
                 horizontal
@@ -460,6 +446,7 @@ export default function Chat() {
                 ))}
               </ScrollView>
             ) : null}
+            <AttachedRow chatId={chatId} canPaste={canPaste} onPasted={pasted} />
             <View style={styles.inputRow}>
               <Txt variant="mono" tone={online ? 'signal' : 'faint'} style={styles.prompt}>
                 {'>'}
@@ -481,7 +468,7 @@ export default function Chat() {
                 multiline
                 style={[styles.input, { color: t.text }]}
               />
-              {!running || (canSayMore && draft.trim().length > 0) ? (
+              {!running || (canSayMore && (draft.trim().length > 0 || keptCount > 0)) ? (
                 <Pressable
                   accessibilityRole="button"
                   accessibilityLabel={running ? 'Tell it more' : 'Send'}
@@ -535,9 +522,46 @@ export default function Chat() {
                 </Pressable>
               ) : null}
             </View>
+            {/* Under the field, small: what to attach, and how the agent runs. */}
+            <View style={[styles.tools, { borderTopColor: t.border }]}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Attach a photo or a file"
+                accessibilityState={{ disabled: !online }}
+                disabled={!online}
+                hitSlop={4}
+                onPress={() => setAttaching(true)}
+                style={({ pressed }) => [styles.tool, { backgroundColor: pressed ? t.surface2 : 'transparent' }]}>
+                <Feather name="paperclip" size={16} color={online ? t.textMuted : t.textFaint} />
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Mode, model and effort: ${optionsLine(offered, shown)}`}
+                accessibilityHint="Changes how the agent runs: what it may do without asking, its model, its effort."
+                onPress={() => setChoosing(true)}
+                style={({ pressed }) => [
+                  styles.tool,
+                  styles.modeTool,
+                  { backgroundColor: pressed ? t.surface2 : 'transparent' },
+                ]}>
+                <Led color={dangerous ? t.warning : t.textMuted} hollow={!shown.mode} />
+                <Label tone={dangerous ? 'warning' : 'muted'} numberOfLines={1} style={{ flexShrink: 1 }}>
+                  {dangerous ? '! ' : ''}
+                  {optionsLine(offered, shown)}
+                </Label>
+                <Feather name="chevron-up" size={14} color={t.textFaint} />
+              </Pressable>
+            </View>
           </View>
         )}
       </KeyboardAvoidingView>
+      <AttachSheet
+        chatId={chatId}
+        visible={attaching}
+        canPaste={canPaste}
+        onPasted={pasted}
+        onClose={() => setAttaching(false)}
+      />
       <OptionsSheet
         visible={choosing}
         agentName={agentName}
@@ -553,14 +577,6 @@ export default function Chat() {
 
 const styles = StyleSheet.create({
   foot: { marginHorizontal: metrics.pad, marginTop: 10, textTransform: 'none', letterSpacing: 0 },
-  mode: {
-    minHeight: metrics.touch,
-    paddingHorizontal: metrics.pad,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    borderBottomWidth: 1,
-  },
   more: {
     position: 'absolute',
     alignSelf: 'center',
@@ -589,6 +605,23 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: metrics.radius,
   },
+  tools: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderTopWidth: 1,
+  },
+  tool: {
+    minHeight: 40,
+    minWidth: 40,
+    paddingHorizontal: 8,
+    borderRadius: metrics.radius,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modeTool: { flexShrink: 1, flexDirection: 'row', gap: 8 },
   inputRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',

@@ -1,10 +1,12 @@
 // One row of a chat: what you asked, what the agent wrote, a tool it used, or
 // a note about the turn.
+import Feather from '@expo/vector-icons/Feather';
 import * as Clipboard from 'expo-clipboard';
-import { memo, useMemo } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
-import Markdown from 'react-native-markdown-display';
+import Markdown, { MarkdownIt, type RenderRules } from 'react-native-markdown-display';
 
+import { fileLabel, splitAttached } from '@/chat/attach';
 import { fromCwd, questionLine, type Message } from '@/chat/model';
 import { sizeLabel } from '@/chat/transcript';
 import { tap } from '@/store/alerts';
@@ -62,7 +64,46 @@ export function openLink(url: string): boolean {
   return false;
 }
 
-/** Holding a message copies it: the phone says so with a tap. */
+/**
+ * How an agent's Markdown is read: with bare addresses (`https://…`,
+ * `www.…`) made links, as agents seldom write them as Markdown links.
+ */
+export const markdownParser = MarkdownIt({ typographer: true, linkify: true });
+
+/** Its text can be selected, a word or a passage, as any text of the phone. */
+export const markdownRules: RenderRules = {
+  textgroup: (node, children, _parent, styles) => (
+    <Text key={node.key} selectable style={styles.textgroup}>
+      {children}
+    </Text>
+  ),
+};
+
+/** The button that copies a whole message; it shows a tick for a moment after. */
+export function CopyButton({ text, what }: { text: string; what: string }) {
+  const t = useTheme();
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1_500);
+    return () => clearTimeout(timer);
+  }, [copied]);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={copied ? 'Copied' : `Copy ${what}`}
+      hitSlop={10}
+      onPress={() => {
+        tap();
+        void Clipboard.setStringAsync(text).then(() => setCopied(true), () => undefined);
+      }}
+      style={({ pressed }) => [styles.copy, { opacity: pressed ? 0.6 : 1 }]}>
+      <Feather name={copied ? 'check' : 'copy'} size={14} color={copied ? t.success : t.textFaint} />
+    </Pressable>
+  );
+}
+
+/** Holding a tool's line copies what it holds: the phone says so with a tap. */
 function copy(text: string): void {
   tap();
   void Clipboard.setStringAsync(text).catch(() => undefined);
@@ -113,6 +154,32 @@ type Props = {
   onToggle?(id: string): void;
 };
 
+/** What the person said: the words, and the files that went with them as chips. */
+function UserText({ text }: { text: string }) {
+  const t = useTheme();
+  const said = useMemo(() => splitAttached(text), [text]);
+  return (
+    <>
+      {said.text ? <Txt selectable>{said.text}</Txt> : null}
+      {said.files.length > 0 ? (
+        <View style={styles.files}>
+          {said.files.map((path) => (
+            <View
+              key={path}
+              accessibilityLabel={`Attached ${fileLabel(path)}`}
+              style={[styles.file, { borderColor: t.border, backgroundColor: t.background }]}>
+              <Feather name="paperclip" size={12} color={t.textMuted} />
+              <Label tone="muted" numberOfLines={1} ellipsizeMode="middle" style={styles.fileName}>
+                {fileLabel(path)}
+              </Label>
+            </View>
+          ))}
+        </View>
+      ) : null}
+    </>
+  );
+}
+
 function MessageRowInner({ message, agent, agentName, cwd, open = false, onToggle }: Props) {
   const t = useTheme();
   const md = useMemo(() => markdownStyles(t), [t]);
@@ -120,33 +187,30 @@ function MessageRowInner({ message, agent, agentName, cwd, open = false, onToggl
   switch (message.kind) {
     case 'user':
       return (
-        <Pressable
-          accessible
-          accessibilityLabel={`You asked: ${message.text}`}
-          accessibilityHint="Hold to copy."
-          onLongPress={() => copy(message.text)}
+        <View
           style={[styles.user, { backgroundColor: t.surface, borderColor: t.border, borderLeftColor: t.signal }]}>
           <View style={styles.who}>
             <Txt variant="mono" tone="signal">
               {'>'}
             </Txt>
-            <Label tone="muted">You</Label>
+            <Label tone="muted" style={{ flex: 1 }}>
+              You
+            </Label>
+            <CopyButton text={message.text} what="what you asked" />
           </View>
-          <Txt>{message.text}</Txt>
-        </Pressable>
+          <UserText text={message.text} />
+        </View>
       );
 
     case 'assistant':
       return (
-        <Pressable
-          accessibilityHint="Hold to copy."
-          onLongPress={() => copy(message.text)}
-          style={styles.assistant}>
+        <View style={styles.assistant}>
           <View style={styles.who}>
             <Led color={agentColor(t, agent)} />
-            <Label style={{ color: agentColor(t, agent) }}>{agentName}</Label>
+            <Label style={{ color: agentColor(t, agent), flex: 1 }}>{agentName}</Label>
+            {message.streaming ? null : <CopyButton text={message.text} what="the answer" />}
           </View>
-          <Markdown style={md} onLinkPress={openLink}>
+          <Markdown style={md} onLinkPress={openLink} markdownit={markdownParser} rules={markdownRules}>
             {message.text}
           </Markdown>
           {message.streaming ? (
@@ -155,7 +219,7 @@ function MessageRowInner({ message, agent, agentName, cwd, open = false, onToggl
               style={{ width: 8, height: 16, backgroundColor: t.signal }}
             />
           ) : null}
-        </Pressable>
+        </View>
       );
 
     case 'tool': {
@@ -324,6 +388,18 @@ function MessageRowInner({ message, agent, agentName, cwd, open = false, onToggl
 export const MessageRow = memo(MessageRowInner);
 
 const styles = StyleSheet.create({
+  files: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
+  file: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    maxWidth: '100%',
+    minHeight: 28,
+    paddingHorizontal: 8,
+    borderWidth: 1,
+    borderRadius: metrics.radius,
+  },
+  fileName: { flexShrink: 1, textTransform: 'none', letterSpacing: 0 },
   user: {
     marginHorizontal: metrics.pad,
     marginTop: 18,
@@ -336,6 +412,7 @@ const styles = StyleSheet.create({
     borderRadius: metrics.radiusCell,
   },
   who: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },
+  copy: { paddingHorizontal: 4, paddingVertical: 2 },
   assistant: { paddingHorizontal: metrics.pad, paddingTop: 4 },
   tool: {
     marginHorizontal: metrics.pad,

@@ -95,6 +95,9 @@ protected:
   jsi::Value cpp_uniffi_leon_mobile_fn_method_hostsession_installed_agents(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
+  jsi::Value cpp_uniffi_leon_mobile_fn_method_hostsession_keep_attachment(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
   jsi::Value cpp_uniffi_leon_mobile_fn_method_hostsession_project_logo(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
@@ -387,6 +390,9 @@ protected:
       size_t count);
   jsi::Value
   cpp_uniffi_leon_mobile_checksum_method_hostsession_installed_agents(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value cpp_uniffi_leon_mobile_checksum_method_hostsession_keep_attachment(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_leon_mobile_checksum_method_hostsession_project_logo(

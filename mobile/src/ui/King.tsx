@@ -25,7 +25,7 @@ import { useTheme } from '@/theme/useTheme';
 
 import { useClock } from './clock';
 import { Button, Callout, Label, Led, Txt } from './kit';
-import { markdownStyles, openLink } from './MessageRow';
+import { markdownParser, markdownRules, markdownStyles, openLink } from './MessageRow';
 
 export function moodColor(t: Palette, mood: WorkerMood): string {
   if (mood === 'asking') return t.warning;
@@ -128,7 +128,7 @@ function KingPieceInner({
             <Led color={agentColor(t, agent)} />
             <Label style={{ color: agentColor(t, agent) }}>{who}</Label>
           </View>
-          <Markdown style={md} onLinkPress={openLink}>
+          <Markdown style={md} onLinkPress={openLink} markdownit={markdownParser} rules={markdownRules}>
             {entry.text}
           </Markdown>
         </View>

@@ -2,7 +2,7 @@
   "expo": {
     "name": "Leon",
     "slug": "leon",
-    "version": "0.11.0",
+    "version": "0.12.0",
     "scheme": "leon",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
@@ -52,9 +52,17 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Leon uses the camera to scan the pairing code shown on your computer.",
+          "cameraPermission": "Leon uses the camera to scan the pairing code shown on your computer and to take pictures you send to your agents.",
           "microphonePermission": false,
           "recordAudioAndroid": false
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Leon opens your photos so you can send pictures and screenshots to your agents.",
+          "cameraPermission": "Leon uses the camera to scan the pairing code shown on your computer and to take pictures you send to your agents.",
+          "microphonePermission": false
         }
       ]
     ],
