@@ -1227,6 +1227,18 @@ impl Shell {
         let Some(target) = self.king_typing_in(window, cx) else {
             return false;
         };
+        // Files copied in the file manager are attached as they are.
+        let files = crate::clip_image::files(cx);
+        if !files.is_empty() {
+            let attached = self.king_ui.attached.entry(target).or_default();
+            for path in files {
+                if !attached.contains(&path) {
+                    attached.push(path);
+                }
+            }
+            cx.notify();
+            return true;
+        }
         let Some(image) = (self.options.clipboard_image)(cx) else {
             return false;
         };

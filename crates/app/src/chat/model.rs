@@ -164,18 +164,25 @@ impl Conversation {
     pub fn resumed(session_id: String, earlier: impl IntoIterator<Item = (bool, String)>) -> Self {
         let mut conversation = Self::new();
         conversation.session_id = Some(session_id);
+        // What a program wrote in the person's name (a background task that
+        // finished, a reminder) reads as a note, not as their words.
         conversation.items = earlier
             .into_iter()
             .filter(|(_, text)| !text.trim().is_empty())
-            .map(|(person, text)| {
-                if person {
-                    Item::User { text }
-                } else {
-                    Item::Agent {
+            .flat_map(|(person, text)| {
+                if !person {
+                    return vec![Item::Agent {
                         text,
                         streaming: false,
-                    }
+                    }];
                 }
+                let split = super::harness::split(&text);
+                let note = split.note.map(|text| Item::Notice {
+                    tone: Tone::Plain,
+                    text,
+                });
+                let said = (!split.said.is_empty()).then_some(Item::User { text: split.said });
+                note.into_iter().chain(said).collect()
             })
             .collect();
         conversation
@@ -744,6 +751,36 @@ mod tests {
         assert_eq!(conversation.session_id.as_deref(), Some("abc"));
         assert_eq!(conversation.items.len(), 2);
         assert_eq!(conversation.phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn what_a_program_wrote_in_the_persons_name_is_read_back_as_a_note() {
+        let conversation = Conversation::resumed(
+            "abc".into(),
+            [
+                (
+                    true,
+                    "<task-notification><task-id>b1</task-id><summary>Tests passed</summary></task-notification>".to_owned(),
+                ),
+                (true, "<system-reminder>x</system-reminder>\nship it".to_owned()),
+            ],
+        );
+        assert_eq!(
+            conversation.items,
+            [
+                Item::Notice {
+                    tone: Tone::Plain,
+                    text: "task notification: Tests passed".into()
+                },
+                Item::Notice {
+                    tone: Tone::Plain,
+                    text: "system reminder".into()
+                },
+                Item::User {
+                    text: "ship it".into()
+                },
+            ]
+        );
     }
 
     #[test]

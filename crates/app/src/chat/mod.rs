@@ -10,6 +10,8 @@
 //!   protocol's events;
 //! * [`complete`]: what the field offers while a command, a file, a mode or
 //!   a model is being named;
+//! * [`harness`]: what a program wrote in the person's name, read back from
+//!   the history as a note;
 //! * [`turn`]: one turn on a pipe, the agent's process and its protocol;
 //! * [`reach`]: that process on the machine it belongs to, this computer or
 //!   another one.
@@ -19,6 +21,7 @@
 //! between this and the terminal; it is experimental (its own section of the settings) and off by default.
 
 pub mod complete;
+pub mod harness;
 pub mod model;
 pub mod reach;
 pub mod turn;

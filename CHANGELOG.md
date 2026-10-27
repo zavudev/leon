@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Added
+
+* A conversation of Leon's own interface attaches files: a paperclip by
+  the field picks them, files dropped on the field are attached, and files
+  copied in the Finder (or another file manager) are attached when pasted.
+  They go with what is said next, as paths the agent opens.
+
+### Changed
+
+* A conversation's answers say the exact model that wrote them
+  (`CLAUDE-OPUS-5-5`) instead of the agent's name, and its column is wider
+  (up to 1040 px), with less room between messages.
+
+### Fixed
+
+* The text of a conversation can be selected and copied: what you said is
+  selectable as the agent's answers are, and Cmd+C (Ctrl+C) copies the
+  selection while the field has the keyboard. Leon now mounts the window's
+  text-selection layer, which keeps a selection from one frame to the next.
+* On macOS an image copied with its address (from a browser) is pasted as
+  the image, read through AppleScript; a TIFF keeps its own extension.
+* A conversation reopened from the history shows what a program wrote in
+  your name (a background task that finished, a reminder, a command's
+  output) as a short note instead of the raw `<task-notification>` block.
+
 ## [0.13.0] - 2026-10-26
 
 ### Changed

@@ -342,6 +342,16 @@ pub fn model_shown(
         .map(label)
 }
 
+/// Who an answer is from, over it: the model the agent said it answered
+/// with (`answering`), exactly as it said it (`claude-opus-5-5`), in
+/// capitals; else the agent's own tag, as before any turn said its model.
+pub fn answered_by(answering: Option<&str>, agent: &str) -> String {
+    answering
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map_or_else(|| agent.to_owned(), str::to_uppercase)
+}
+
 /// The effort the next turn thinks with: the one asked for, else the one the
 /// agent is set up with. `None` when neither is known.
 pub fn effort_shown<'a>(
@@ -649,6 +659,16 @@ mod tests {
         assert_eq!(model_shown(Some(&options()), None, None), None);
         assert_eq!(effort_shown(Some(&options()), None), None);
         assert_eq!(model_shown(None, None, None), None);
+    }
+
+    #[test]
+    fn an_answer_is_said_to_be_from_the_exact_model_else_from_the_agent() {
+        assert_eq!(
+            answered_by(Some("claude-opus-5-5"), "CLAUDE CODE"),
+            "CLAUDE-OPUS-5-5"
+        );
+        assert_eq!(answered_by(Some(" "), "CODEX"), "CODEX");
+        assert_eq!(answered_by(None, "CODEX"), "CODEX");
     }
 
     #[test]

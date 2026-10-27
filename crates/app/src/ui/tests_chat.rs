@@ -1106,3 +1106,119 @@ fn a_turn_at_work_turns_a_spinner_and_says_for_how_long(cx: &mut TestAppContext)
     );
     assert!(!h.shows("chat-spinner-1", cx));
 }
+
+#[gpui_kit::test]
+fn what_the_agent_wrote_can_be_selected_by_dragging_and_copied(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "say hello");
+    prints(&h, cx, &[INIT, SAID, RESULT]);
+    let message = h
+        .bounds_of("chat-agent-1-1".to_owned(), cx)
+        .expect("the answer is on screen");
+    let mut visual = VisualTestContext::from_window(h.window.into(), cx);
+    let from = gpui_kit::point(
+        message.left() + gpui_kit::px(1.),
+        message.bottom() - gpui_kit::px(8.),
+    );
+    let to = gpui_kit::point(
+        message.right() - gpui_kit::px(1.),
+        message.bottom() - gpui_kit::px(4.),
+    );
+    visual.simulate_mouse_down(
+        from,
+        gpui_kit::MouseButton::Left,
+        gpui_kit::Modifiers::default(),
+    );
+    visual.simulate_mouse_move(
+        to,
+        Some(gpui_kit::MouseButton::Left),
+        gpui_kit::Modifiers::default(),
+    );
+    visual.simulate_mouse_up(
+        to,
+        gpui_kit::MouseButton::Left,
+        gpui_kit::Modifiers::default(),
+    );
+    visual.run_until_parked();
+    let selected = visual.update(gpui_kit::base::TextSelection::selected_text);
+    assert!(selected.contains("Hello"), "selected: {selected:?}");
+
+    // The usual chord copies it, though the field has the keyboard.
+    let chord = if crate::platform::is_mac() {
+        "cmd-c"
+    } else {
+        "ctrl-c"
+    };
+    h.press(chord, cx);
+    let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
+    assert_eq!(copied.as_deref(), Some(selected.trim()));
+
+    // What the person said is selected the same way.
+    let said = h
+        .bounds_of("chat-user-1-0".to_owned(), cx)
+        .expect("the prompt is on screen");
+    let mut visual = VisualTestContext::from_window(h.window.into(), cx);
+    let from = gpui_kit::point(said.left() + gpui_kit::px(30.), said.center().y);
+    let to = gpui_kit::point(said.right() - gpui_kit::px(1.), said.center().y);
+    visual.simulate_mouse_down(
+        from,
+        gpui_kit::MouseButton::Left,
+        gpui_kit::Modifiers::default(),
+    );
+    visual.simulate_mouse_move(
+        to,
+        Some(gpui_kit::MouseButton::Left),
+        gpui_kit::Modifiers::default(),
+    );
+    visual.simulate_mouse_up(
+        to,
+        gpui_kit::MouseButton::Left,
+        gpui_kit::Modifiers::default(),
+    );
+    visual.run_until_parked();
+    let selected = visual.update(gpui_kit::base::TextSelection::selected_text);
+    assert!(selected.contains("hello"), "selected: {selected:?}");
+}
+
+#[gpui_kit::test]
+fn files_are_attached_by_the_paperclip_and_by_pasting_them_from_the_file_manager(
+    cx: &mut TestAppContext,
+) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    // The paperclip asks for files; the ones picked show over the field.
+    let picked = std::path::PathBuf::from(&path).join("notes.md");
+    *h.picked_files.borrow_mut() = vec![picked.clone()];
+    click(&h, cx, "chat-attach-1");
+    h.settle(cx);
+    assert_eq!(
+        h.shell(cx, |s| s.chats[&LiveId(1)].attached.clone()),
+        std::slice::from_ref(&picked)
+    );
+    // Files copied in the file manager are attached as they are, not pasted
+    // as their paths.
+    let copied = std::path::PathBuf::from(&path).join("shot.png");
+    cx.update(|cx| {
+        cx.write_to_clipboard(gpui_kit::ClipboardItem {
+            entries: vec![gpui_kit::ClipboardEntry::ExternalPaths(
+                gpui_kit::ExternalPaths(vec![copied.clone()].into()),
+            )],
+        })
+    });
+    h.press_chord("cmd-v", "ctrl-v", cx);
+    assert_eq!(
+        h.shell(cx, |s| s.chats[&LiveId(1)].attached.clone()),
+        [picked.clone(), copied.clone()]
+    );
+    // Sent with what is said, as paths to open.
+    h.type_text("read these", cx);
+    h.press("enter", cx);
+    let said = written(&h).join("\n");
+    assert!(said.contains(&*picked.to_string_lossy()), "{said}");
+    assert!(said.contains(&*copied.to_string_lossy()), "{said}");
+}

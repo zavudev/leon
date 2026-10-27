@@ -35,8 +35,9 @@ use crate::format;
 use crate::icons::{agent_icon, icon, IconName};
 use crate::theme::{fonts, metrics, px, Palette};
 
-/// The widest the column of a conversation gets.
-const COLUMN: f32 = 820.;
+/// The widest the column of a conversation gets: wide enough that code and
+/// tables keep their lines on a large screen, narrow enough to read.
+const COLUMN: f32 = 1040.;
 
 impl Shell {
     /// The leaf of a conversation, with the accent outline when it is the
@@ -189,7 +190,7 @@ impl Shell {
     ) -> AnyElement {
         let items = &chat.conversation.items;
         let running = chat.conversation.running();
-        let mut list = column().px(px(16.)).pt(px(20.)).pb(px(12.)).gap(px(14.));
+        let mut list = column().px(px(16.)).pt(px(16.)).pb(px(12.)).gap(px(12.));
         for block in blocks(items, running) {
             list = list.child(match block {
                 Block::Single(at) => self.chat_item(id, at, &items[at], chat, colours),
@@ -250,7 +251,11 @@ impl Shell {
                         .flex_1()
                         .min_w_0()
                         .text_color(colours.text)
-                        .child(text.clone()),
+                        // Selected and copied like the agent's answers.
+                        .child(gpui_kit::base::SelectableText::new(
+                            SharedString::from(format!("chat-{}-said-{at}", id.0)),
+                            text.clone(),
+                        )),
                 )
                 .into_any_element(),
             Item::Agent { text, .. } => div()
@@ -266,7 +271,7 @@ impl Shell {
                         .items_center()
                         .gap(px(6.))
                         .child(agent_icon(chat.agent, px(12.), colours))
-                        .child(mono(format::agent_tag(chat.agent)).text_color(colours.text_faint)),
+                        .child(mono(answered_by(chat)).text_color(colours.text_faint)),
                 )
                 .child(
                     div().w_full().min_w_0().text_color(colours.text).child(
@@ -893,8 +898,20 @@ impl Shell {
                 }))
                 .into_any_element()
         };
+        let drop_over = colours.surface_2;
         div()
+            .id(SharedString::from(format!("chat-composer-{}", id.0)))
             .debug_selector(move || format!("chat-composer-{}", id.0))
+            // Files dropped on the field go with what is said next.
+            .drag_over::<gpui_kit::ExternalPaths>(move |style, _, _, _| style.bg(drop_over))
+            .on_drop(
+                cx.listener(move |this, paths: &gpui_kit::ExternalPaths, window, cx| {
+                    this.chat_attach_paths(id, paths.paths().to_vec(), cx);
+                    if let Some(chat) = this.chats.get(&id) {
+                        chat.input.update(cx, |input, cx| input.focus(window, cx));
+                    }
+                }),
+            )
             .relative()
             .w_full()
             .min_w_0()
@@ -962,6 +979,7 @@ impl Shell {
                             .items_center()
                             .justify_end()
                             .gap(px(6.))
+                            .child(self.chat_attach_button(id, colours, cx))
                             .child(self.chat_dictate_button(id, colours, cx))
                             .child(key_cap(if running { "ESC" } else { "ENTER" }, colours))
                             .child(action),
@@ -969,6 +987,48 @@ impl Shell {
             )
             .into_any_element()
     }
+}
+
+impl Shell {
+    /// The paperclip of a conversation's field: files to attach to what is
+    /// said next.
+    fn chat_attach_button(
+        &self,
+        id: LiveId,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let name = format!("chat-attach-{}", id.0);
+        let hover = colours.surface_2;
+        div()
+            .id(SharedString::from(name.clone()))
+            .debug_selector(move || name.clone())
+            .flex_none()
+            .size(px(26.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(metrics::RADIUS())
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new("Attach files (or paste or drop them)")
+                    .build(window, cx)
+            })
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.chat_attach(id, window, cx);
+            }))
+            .child(icon(IconName::Paperclip, px(13.), colours.text_muted))
+            .into_any_element()
+    }
+}
+
+/// Who an answer is from (see [`crate::chat::complete::answered_by`]).
+fn answered_by(chat: &Chat) -> String {
+    crate::chat::complete::answered_by(
+        chat.conversation.model.as_deref(),
+        format::agent_tag(chat.agent),
+    )
 }
 
 /// The column every part of a conversation sits in: as wide as the pane up
