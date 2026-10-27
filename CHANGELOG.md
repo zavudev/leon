@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-10-27
+
 ### Added
 
 * A conversation of Leon's own interface attaches files: a paperclip by
