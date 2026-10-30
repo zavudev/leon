@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import type { AgentOptions, QuestionKind, TurnEvent } from '@/link/types';
 
-import { answerLine, fitOptions, optionsLine, refitStored, withoutLegacyMode } from './model';
+import { answerLine, fitOptions, optionsLine, parseTodos, refitStored, withoutLegacyMode } from './model';
 import {
   initialTurn,
   isOver,
@@ -402,5 +402,49 @@ describe('options from before the agents were driven as sessions', () => {
     expect(refitStored(undefined, { old: { mode: 'edit', model: 'x' }, fine: { mode: 'm' } })).toEqual({
       old: { mode: undefined, model: 'x', effort: undefined },
     });
+  });
+
+  test('the agent\'s list of todos is one checklist row that each new list replaces', () => {
+    const list = (detail: string, summary: string): TurnEvent => ({
+      type: 'tool-use',
+      id: 'leon:todos',
+      name: 'TodoWrite',
+      summary,
+      detail,
+    });
+    const state = run([
+      list('[x] Read\n[~] Write\n[ ] Ship', '1 of 3 done'),
+      { type: 'text', text: 'Working.' },
+      list('[x] Read\n[x] Write\n[~] Ship', '2 of 3 done'),
+    ]);
+    const rows = state.items.filter((m) => m.kind === 'todos');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: 'todos',
+      todos: [
+        { text: 'Read', status: 'completed' },
+        { text: 'Write', status: 'completed' },
+        { text: 'Ship', status: 'in-progress' },
+      ],
+    });
+    // It never shows as a tool, and "stopped" does not apply to it.
+    expect(state.items.some((m) => m.kind === 'tool')).toBe(false);
+    expect(run([FINISHED, { type: 'exited', code: 0 }], state).items.filter((m) => m.kind === 'todos')).toHaveLength(1);
+  });
+
+  test('a list emptied by the agent leaves no row', () => {
+    const state = run([
+      { type: 'tool-use', id: 'leon:todos', name: 'TodoWrite', summary: '1 of 1 done', detail: '[x] A' },
+      { type: 'tool-use', id: 'leon:todos', name: 'TodoWrite', summary: '', detail: '' },
+    ]);
+    expect(state.items).toEqual([]);
+  });
+
+  test('parseTodos reads the lines the host writes and skips the rest', () => {
+    expect(parseTodos('[x] a\n[~] b\n[ ] c\nnoise\n')).toEqual([
+      { text: 'a', status: 'completed' },
+      { text: 'b', status: 'in-progress' },
+      { text: 'c', status: 'pending' },
+    ]);
   });
 });

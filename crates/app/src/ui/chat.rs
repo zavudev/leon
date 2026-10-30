@@ -28,16 +28,76 @@ use leon_turn::{
 };
 
 use super::activity::Activity;
+use super::chat_diff::DiffPanel;
+use super::chat_git::GitCell;
 use super::chat_menu::Menu;
+use super::chat_rewind::Rewinding;
 use super::live::{LiveId, LiveState};
 use super::shell::{Main, Pane, Shell};
 use super::terminals::Place;
 use super::tree;
+use crate::chat::checkpoint;
 use crate::chat::model::{Conversation, Phase};
+use crate::chat::rewind::{Mark, Memory};
 use crate::chat::turn::{Output, Start, Turn};
 use crate::engine::{MachineState, StatusKind};
 use crate::launch::{self, Launch};
 use crate::settings;
+
+/// What a conversation is titled from: its first prompt and the first answer,
+/// and where its agent runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TitleAsk {
+    /// The machine the conversation runs on.
+    pub machine: MachineId,
+    /// The folder it runs in.
+    pub path: String,
+    /// The agent that answered.
+    pub agent: AgentId,
+    /// What the person first said, as words.
+    pub prompt: String,
+    /// What the agent first answered.
+    pub reply: String,
+}
+
+/// How a title is made: the answer comes later, and a failure is a message
+/// nobody is shown.
+pub type Titler = std::rc::Rc<
+    dyn Fn(&crate::engine::Engine, TitleAsk, &mut gpui_kit::App) -> Task<Result<String, String>>,
+>;
+
+/// The real [`Titler`]: the agent is asked, headless and cheaply, on the
+/// machine the conversation runs on.
+pub fn title_by_agent(
+    engine: &crate::engine::Engine,
+    ask: TitleAsk,
+    cx: &mut gpui_kit::App,
+) -> Task<Result<String, String>> {
+    let asked = engine.suggest_title(ask.machine, ask.path, ask.agent, ask.prompt, ask.reply);
+    cx.spawn(async move |_| {
+        asked
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())
+    })
+}
+
+/// How long the checkpoints of a chat that was never closed are kept, in
+/// seconds: a crash leaves them behind.
+const CHECKPOINTS_KEPT_SECS: i64 = 30 * 24 * 60 * 60;
+/// How many checkpoints a chat keeps: the newest.
+const CHECKPOINTS_PER_CHAT: usize = 200;
+
+/// What the agent a conversation went on with is told of what came before,
+/// and whether it has been yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Handoff {
+    /// The block ([`crate::chat::handoff::text`]).
+    pub text: String,
+    /// The turn it went with. Going back to before that turn takes it away
+    /// with the turn: it goes with the next message again.
+    pub sent_in: Option<u32>,
+}
 
 /// One conversation with an agent.
 pub struct Chat {
@@ -88,6 +148,48 @@ pub struct Chat {
     pub filter: Entity<InputState>,
     /// Whether the person has looked at it since its agent last stopped.
     pub seen: bool,
+    /// The name the person gave it: it is what the tab and the tree say,
+    /// over anything generated.
+    pub name: Option<String>,
+    /// The title generated for it after its first turn.
+    pub title: Option<String>,
+    /// A title was asked for: once per conversation, whatever came of it.
+    pub titled: bool,
+    /// Names its checkpoints in the repository of its folder: unlike its id
+    /// in the window, no other run of Leon makes the same.
+    pub key: String,
+    /// Where each of its turns began, for going back to before one.
+    pub marks: Vec<Mark>,
+    /// The number the next turn's checkpoint is made under.
+    pub next_turn: u32,
+    /// The turn is being made ready: its checkpoint is being taken, and the
+    /// agent is not started yet.
+    pub launching: bool,
+    /// Going back to before one of its messages, asked or under way.
+    pub rewinding: Option<Rewinding>,
+    /// The bar that finds words in it, when open.
+    pub find: Option<super::chat_find::Find>,
+    /// Where the bar's words are written.
+    pub find_input: Entity<InputState>,
+    /// The panel of diffs beside it, when open.
+    pub diff: Option<DiffPanel>,
+    /// Counts the readings of the panel, so an answer that is no longer the
+    /// latest is dropped.
+    pub diff_reads: u64,
+    /// What each turn changed, as git counted it between the snapshots of
+    /// the worktree, by the turn's number. A turn without an entry is
+    /// counted from what its tools said.
+    pub measured: HashMap<u32, Vec<crate::chat::changed::Stat>>,
+    /// Its branch and the steps that take its changes away.
+    pub git: GitCell,
+    /// The other agents it can go on with (installed on its machine, and
+    /// driven by the protocol), as last looked up: asking the machine takes
+    /// a look for each program, so it is when the list is about to be
+    /// wanted.
+    pub switchable: Vec<AgentId>,
+    /// What the agent it went on with is told before the next message, after
+    /// a switch of agents.
+    pub handoff: Option<Handoff>,
     /// The turn in flight.
     turn: Option<Turn>,
     /// Reads what the turn in flight prints.
@@ -102,14 +204,18 @@ pub struct Chat {
 }
 
 impl Chat {
-    /// What the tree and the tab call it: the first thing the person said,
+    /// What the tree and the tab call it: the name the person gave it, else
+    /// the title generated for it, else the first thing the person said,
     /// else the agent's name.
     pub fn label(&self) -> String {
+        if let Some(name) = self.name.as_ref().or(self.title.as_ref()) {
+            return name.clone();
+        }
         self.conversation
             .items
             .iter()
             .find_map(|item| match item {
-                crate::chat::model::Item::User { text } => text
+                crate::chat::model::Item::User { text, .. } => text
                     .lines()
                     .map(str::trim)
                     .find(|line| !line.is_empty())
@@ -145,6 +251,19 @@ impl Chat {
         self.input.focus_handle(cx).is_focused(window)
             || self.reason.focus_handle(cx).is_focused(window)
             || self.filter.focus_handle(cx).is_focused(window)
+            || self.find_input.focus_handle(cx).is_focused(window)
+            || self.git.typing(window, cx)
+    }
+
+    /// Whether a turn's process is still there.
+    pub(super) fn turn_is_open(&self) -> bool {
+        self.turn.is_some()
+    }
+
+    /// Stops asking the agent what it offers: the answer would be the
+    /// previous agent's.
+    pub(super) fn probe_stop(&mut self) {
+        self.probe = None;
     }
 
     /// The turn in flight.
@@ -252,6 +371,19 @@ impl Shell {
         });
         let reason = cx.new(|cx| InputState::new(window, cx).placeholder("What to do instead"));
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Type to narrow"));
+        let find_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Find in the conversation"));
+        // Its words changed, or Enter went to the next match (Shift+Enter
+        // to the one before).
+        let finding = cx.subscribe_in(
+            &find_input,
+            window,
+            move |this, _, event: &InputEvent, _, cx| match event {
+                InputEvent::Change => this.chat_find_changed(id, cx),
+                InputEvent::PressEnter { shift, .. } => this.chat_find_step(id, !*shift, cx),
+                _ => {}
+            },
+        );
         let subscription = cx.subscribe_in(
             &input,
             window,
@@ -304,12 +436,32 @@ impl Shell {
                 menu: None,
                 filter,
                 seen: true,
+                name: None,
+                title: None,
+                titled: false,
+                key: format!(
+                    "{:x}-{}",
+                    (self.options.now)().timestamp_millis().max(0),
+                    id.0
+                ),
+                marks: Vec::new(),
+                next_turn: 1,
+                launching: false,
+                rewinding: None,
+                find: None,
+                find_input,
+                diff: None,
+                diff_reads: 0,
+                measured: HashMap::new(),
+                git: GitCell::new(window, cx),
+                switchable: Vec::new(),
+                handoff: None,
                 turn: None,
                 reader: None,
                 since: None,
                 spin: None,
                 probe: None,
-                _subscriptions: vec![subscription, narrowed],
+                _subscriptions: vec![subscription, narrowed, finding],
             },
         );
         match place {
@@ -326,6 +478,7 @@ impl Shell {
             self.chat_load_earlier(id, history, cx);
         }
         self.chat_probe(id, cx);
+        self.chat_look_for_agents(id);
         self.refresh_live();
         self.open_live(id, window, cx);
         true
@@ -355,8 +508,10 @@ impl Shell {
                     return;
                 };
                 let earlier = messages.iter().filter_map(|message| match message.role {
-                    Role::User => Some((true, message.text.clone())),
-                    Role::Assistant => Some((false, message.text.clone())),
+                    Role::User => Some((true, message.text.clone(), Some(message.at.timestamp()))),
+                    Role::Assistant => {
+                        Some((false, message.text.clone(), Some(message.at.timestamp())))
+                    }
                     Role::Tool | Role::System => None,
                 });
                 chat.conversation = Conversation::resumed(session, earlier);
@@ -371,7 +526,7 @@ impl Shell {
     /// Asks the agent what it offers on its machine (its modes and models),
     /// off the interface thread. Until it answers, and when it cannot, the
     /// conversation runs with the agent's own.
-    fn chat_probe(&mut self, id: LiveId, cx: &mut Context<Self>) {
+    pub(super) fn chat_probe(&mut self, id: LiveId, cx: &mut Context<Self>) {
         let Some(chat) = self.chats.get(&id) else {
             return;
         };
@@ -428,8 +583,9 @@ impl Shell {
                     }
                     chat.options = Some(options);
                     chat.probe = None;
-                    cx.notify();
                 }
+                this.chat_look_for_agents(id);
+                cx.notify();
             })
             .ok();
         });
@@ -440,7 +596,7 @@ impl Shell {
 
     /// The program that starts `agent`: the one the settings name, else the
     /// protocol's.
-    fn chat_program(&self, agent: AgentId, cx: &gpui_kit::App) -> String {
+    pub(super) fn chat_program(&self, agent: AgentId, cx: &gpui_kit::App) -> String {
         Self::launch_prefs(cx)
             .agent(agent)
             .executable
@@ -453,7 +609,7 @@ impl Shell {
     /// computer: what a terminal here is told (Leon's own, then the user's),
     /// then the account's. On another machine only the account's, with the
     /// home folder of that machine: the rest names files of this computer.
-    fn chat_env(
+    pub(super) fn chat_env(
         &self,
         machine: &Machine,
         agent: AgentId,
@@ -507,31 +663,216 @@ impl Shell {
             return;
         };
         chat.seen = true;
+        // The agent is not started yet: what is said now is the next turn.
+        if chat.launching {
+            chat.conversation.queued.push_back(text);
+            cx.notify();
+            return;
+        }
         if chat.turn.is_none() {
             self.chat_begin(id, text, cx);
             return;
         }
-        let told = chat
-            .turn
-            .as_mut()
-            .map(|turn| turn.act(Action::Prompt(text.clone())));
-        match told {
-            Some(Ok(events)) => {
-                chat.conversation.said(&text);
-                chat.scroll.scroll_to_bottom();
-                self.chat_events(id, events, cx);
-            }
+        // The person asked for what is said meanwhile to wait: it is the next
+        // turn, and the agent is told nothing until then.
+        if settings::text(cx, "chat_busy") == "queue" {
+            chat.conversation.queued.push_back(text);
+            cx.notify();
+            return;
+        }
+        if self.chat_tell(id, &text, cx).is_err() {
             // This agent takes nothing more while it works, or the turn just
             // ended: it is the next turn.
-            _ => {
+            if let Some(chat) = self.chats.get_mut(&id) {
                 chat.conversation.queued.push_back(text);
+            }
+            cx.notify();
+        }
+    }
+
+    /// Tells the turn in flight `text`, where the agent takes it: the
+    /// message is in the conversation at once. An error says why not (the
+    /// agent takes nothing more while it works, or there is no turn).
+    fn chat_tell(
+        &mut self,
+        id: LiveId,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), leon_turn::TurnError> {
+        let now = Some(self.now().timestamp());
+        let Some(chat) = self.chats.get_mut(&id) else {
+            return Err(leon_turn::TurnError::TurnEnded);
+        };
+        let Some(turn) = chat.turn.as_mut() else {
+            return Err(leon_turn::TurnError::TurnEnded);
+        };
+        let events = turn.act(Action::Prompt(text.to_owned()))?;
+        chat.conversation.said_at(text, now);
+        chat.scroll.scroll_to_bottom();
+        self.chat_events(id, events, cx);
+        Ok(())
+    }
+
+    /// Takes the queued message at `index` out of the queue: it is gone.
+    pub(super) fn chat_queue_remove(&mut self, id: LiveId, index: usize, cx: &mut Context<Self>) {
+        if let Some(chat) = self.chats.get_mut(&id) {
+            if chat.conversation.queued.remove(index).is_some() {
                 cx.notify();
             }
         }
     }
 
-    /// Starts a turn of a conversation with `prompt`.
+    /// Puts the queued message at `index` back in the field, with the files
+    /// that went with it, to be changed and sent again: it leaves the queue.
+    /// What is in the field already stays above it.
+    pub(super) fn chat_queue_edit(
+        &mut self,
+        id: LiveId,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chat) = self.chats.get_mut(&id) else {
+            return;
+        };
+        let Some(text) = chat.conversation.queued.remove(index) else {
+            return;
+        };
+        let (words, files) = super::king::split_attached(&text);
+        for file in files {
+            if !chat.attached.contains(&file) {
+                chat.attached.push(file);
+            }
+        }
+        let typed = chat.input.read(cx).value().to_string();
+        let value = if typed.trim().is_empty() {
+            words
+        } else {
+            format!("{typed}\n{words}")
+        };
+        chat.input.update(cx, |input, cx| {
+            input.set_value(value, window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Sends the queued message at `index` into the running turn now, where
+    /// the agent takes it, instead of at the end of the turn. An agent that
+    /// takes nothing more while it works keeps it queued, and the status line
+    /// says so. With no turn in flight it is the next turn already.
+    pub(super) fn chat_queue_steer(&mut self, id: LiveId, index: usize, cx: &mut Context<Self>) {
+        let Some(chat) = self.chats.get(&id) else {
+            return;
+        };
+        let Some(text) = chat.conversation.queued.get(index).cloned() else {
+            return;
+        };
+        if chat.turn.is_none() {
+            // Between turns, or while one is being made ready: it waits for
+            // the turn that is about to start.
+            return;
+        }
+        match self.chat_tell(id, &text, cx) {
+            Ok(()) => {
+                if let Some(chat) = self.chats.get_mut(&id) {
+                    // `chat_events` may have moved the queue: take out the
+                    // message that was sent, wherever it is now.
+                    if let Some(at) = chat
+                        .conversation
+                        .queued
+                        .iter()
+                        .position(|said| *said == text)
+                    {
+                        chat.conversation.queued.remove(at);
+                    }
+                }
+                cx.notify();
+            }
+            Err(_) => {
+                let name = self
+                    .chats
+                    .get(&id)
+                    .map_or("This agent", |chat| crate::format::agent_name(chat.agent));
+                self.engine.report(
+                    StatusKind::Info,
+                    format!("{name} cannot be told more while it works: the message waits for the next turn."),
+                );
+                cx.notify();
+            }
+        }
+    }
+
+    /// Starts a turn of a conversation with `prompt`: the words are on
+    /// screen at once, the worktree is snapshotted when there is one, and then
+    /// the agent is started ([`Self::chat_launch`]).
     fn chat_begin(&mut self, id: LiveId, prompt: String, cx: &mut Context<Self>) {
+        let projects = self.engine.prefs().roots.claude_projects;
+        let now = Some(self.now().timestamp());
+        let Some(chat) = self.chats.get_mut(&id) else {
+            return;
+        };
+        let Some(adapter) = crate::chat::adapter_of(chat.agent) else {
+            return;
+        };
+        if self.snapshot.machine(&chat.machine).is_none() {
+            return;
+        }
+        let local = chat.machine.is_local();
+        let memory = Memory::of(
+            adapter.rewind,
+            chat.conversation.session_id.as_deref(),
+            projects.as_deref(),
+            &chat.cwd,
+            local,
+        );
+        chat.conversation.sent_at(&prompt, now);
+        let turn = chat.next_turn;
+        chat.next_turn += 1;
+        chat.marks.push(Mark {
+            item: chat.conversation.items.len().saturating_sub(1),
+            turn,
+            checkpoint: None,
+            memory,
+        });
+        chat.scroll.scroll_to_bottom();
+        if !(local && checkpoint::in_worktree(std::path::Path::new(&chat.cwd))) {
+            self.chat_launch(id, prompt, cx);
+            return;
+        }
+        // The files as they are before the agent touches them. It takes as
+        // long as the repository is big, so the interface does not wait.
+        chat.launching = true;
+        let (key, cwd) = (chat.key.clone(), chat.cwd.clone());
+        let now = (self.options.now)().timestamp();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let commit = cx
+                .background_spawn(async move {
+                    let repo = checkpoint::Repo::of(std::path::Path::new(&cwd))?;
+                    repo.forget_older_than(now - CHECKPOINTS_KEPT_SECS, &key);
+                    let commit = repo.capture(&key, turn).ok()?;
+                    repo.keep_newest(&key, CHECKPOINTS_PER_CHAT);
+                    Some(commit)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let Some(chat) = this.chats.get_mut(&id) else {
+                    return;
+                };
+                chat.launching = false;
+                if let Some(mark) = chat.marks.iter_mut().find(|mark| mark.turn == turn) {
+                    mark.checkpoint = commit;
+                }
+                this.chat_launch(id, prompt, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Starts the agent's process for the turn whose prompt was just said.
+    fn chat_launch(&mut self, id: LiveId, prompt: String, cx: &mut Context<Self>) {
         let Some(chat) = self.chats.get(&id) else {
             return;
         };
@@ -544,6 +885,15 @@ impl Shell {
         let program = self.chat_program(chat.agent, cx);
         let env = self.chat_env(&machine, chat.agent, chat.account.as_deref(), &chat.cwd, cx);
         let resume = chat.conversation.session_id.clone();
+        // After a switch of agents the first message carries what was said
+        // before, out of sight: the conversation shows only the person's
+        // words.
+        let handed = chat
+            .handoff
+            .as_ref()
+            .filter(|handoff| handoff.sent_in.is_none())
+            .map(|handoff| format!("{}\n\n{prompt}", handoff.text));
+        let prompt = handed.clone().unwrap_or(prompt);
         let spec = TurnSpec {
             program: &program,
             prompt: &prompt,
@@ -565,9 +915,11 @@ impl Shell {
         let Some(chat) = self.chats.get_mut(&id) else {
             return;
         };
+        if let (Some(handoff), Some(_), true) = (chat.handoff.as_mut(), &handed, started.is_ok()) {
+            handoff.sent_in = Some(chat.next_turn.saturating_sub(1));
+        }
         match started {
             Ok((turn, output, events)) => {
-                chat.conversation.sent(&prompt);
                 chat.since = Some(unique);
                 chat.turn = Some(turn);
                 chat.reader = Some(cx.spawn(async move |this, cx| {
@@ -587,7 +939,6 @@ impl Shell {
                 self.chat_spin(id, cx);
             }
             Err(error) => {
-                chat.conversation.said(&prompt);
                 chat.conversation
                     .refused(&format!("The agent could not be started: {error}."));
                 chat.scroll.scroll_to_bottom();
@@ -666,27 +1017,66 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let on_screen = self.window_active && self.focused_chat() == Some(id);
+        let now = Some(self.now().timestamp());
         let Some(chat) = self.chats.get_mut(&id) else {
             return;
         };
         let follow = chat.at_end();
         let before = (chat.state(), chat.activity(), chat.label());
         let mut finished = false;
+        // What the person is told when they are not looking: the last thing
+        // of the batch that wants them.
+        let mut said = None;
         for event in events {
             if let TurnEvent::ModeChanged { mode } = &event {
                 chat.mode = Some(mode.clone());
+            }
+            match &event {
+                TurnEvent::Finished {
+                    ok,
+                    error,
+                    interrupted: false,
+                    ..
+                } => {
+                    said = Some(if *ok {
+                        super::notify::ChatEvent::Finished
+                    } else {
+                        super::notify::ChatEvent::Failed(
+                            error
+                                .as_deref()
+                                .and_then(|error| error.lines().next())
+                                .unwrap_or_default()
+                                .to_owned(),
+                        )
+                    });
+                }
+                TurnEvent::Question { kind, .. } => {
+                    said = Some(super::notify::ChatEvent::Asks(match kind {
+                        QuestionKind::Permission { tool, summary, .. } => {
+                            format!("permission \u{b7} {tool} {summary}")
+                                .trim_end()
+                                .to_owned()
+                        }
+                        QuestionKind::Choices { .. } => "a question".to_owned(),
+                        QuestionKind::Plan { .. } => "you to approve a plan".to_owned(),
+                    }));
+                }
+                _ => {}
             }
             if matches!(event, TurnEvent::Finished { .. }) {
                 chat.seen = on_screen;
                 finished = true;
             }
-            chat.conversation.apply(event);
+            chat.conversation.apply_at(event, now);
         }
         if follow {
             chat.scroll.scroll_to_bottom();
         }
         if before != (chat.state(), chat.activity(), chat.label()) {
             self.rebuild_rows();
+        }
+        if let (Some(said), false) = (said, on_screen) {
+            self.raise_chat(id, &said, cx);
         }
         // The agent may have opened a pull request: its branch's is asked
         // for now, not at the next minute, for the foot to show it.
@@ -699,6 +1089,84 @@ impl Shell {
         if let Some(project) = project {
             self.engine.check_open_pull_requests(project);
         }
+        // What the turn changed, counted in the worktree, for the card at its
+        // end.
+        if finished {
+            self.chat_measure(id, cx);
+            self.chat_title(id, cx);
+        }
+        cx.notify();
+    }
+
+    /// After a conversation's first turn, asks for a short title of it, unless
+    /// the setting is off, the person named it or it was asked already. It
+    /// never waits: the answer is put in by [`Self::chat_titled`], and a
+    /// failure changes nothing and says nothing.
+    fn chat_title(&mut self, id: LiveId, cx: &mut Context<Self>) {
+        if !settings::flag(cx, "chat_titles") {
+            return;
+        }
+        let Some(chat) = self.chats.get_mut(&id) else {
+            return;
+        };
+        if chat.titled || chat.name.is_some() || chat.conversation.failed {
+            return;
+        }
+        let first = |wanted: bool| {
+            chat.conversation.items.iter().find_map(|item| match item {
+                crate::chat::model::Item::User { text, .. } if wanted => {
+                    Some(super::king::split_attached(text).0)
+                }
+                crate::chat::model::Item::Agent { text, .. } if !wanted => Some(text.clone()),
+                _ => None,
+            })
+        };
+        let (Some(prompt), Some(reply)) = (first(true), first(false)) else {
+            return;
+        };
+        chat.titled = true;
+        let ask = TitleAsk {
+            machine: chat.machine.clone(),
+            path: chat.cwd.clone(),
+            agent: chat.agent,
+            prompt,
+            reply,
+        };
+        let titles = self.options.titles.clone();
+        let made = titles(&self.engine, ask, cx);
+        cx.spawn(async move |this, cx| {
+            let made = made.await;
+            this.update(cx, |this, cx| this.chat_titled(id, made, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// The title that was asked for came back. A name the person gave in the
+    /// meantime stays, and a failure is only noted in the log.
+    fn chat_titled(&mut self, id: LiveId, made: Result<String, String>, cx: &mut Context<Self>) {
+        let title = match made {
+            Ok(title) if !title.trim().is_empty() => title.trim().to_owned(),
+            Ok(_) => return,
+            Err(error) => {
+                tracing::debug!(%error, "no title for the conversation");
+                return;
+            }
+        };
+        let Some(chat) = self.chats.get_mut(&id) else {
+            return;
+        };
+        if chat.name.is_some() {
+            return;
+        }
+        chat.title = Some(title.clone());
+        // The session its agent wrote keeps it too, when it is known by now:
+        // otherwise it is kept when the two are linked ([`Self::link_chats`]).
+        if let Some(session) = chat.history.clone() {
+            self.engine
+                .submit(crate::engine::Op::TitleSession { session, title });
+        }
+        self.rebuild_rows();
         cx.notify();
     }
 
@@ -984,6 +1452,44 @@ impl Shell {
         if paste && self.chat_paste_image(id, cx) {
             return true;
         }
+        // Escape closes the bar that finds words before it does anything else.
+        if stroke.key == "escape"
+            && !stroke.modifiers.modified()
+            && self.chats.get(&id).is_some_and(|chat| chat.find.is_some())
+        {
+            self.chat_find_close(id, window, cx);
+            return true;
+        }
+        // Escape closes the question of going back before it stops anything.
+        if stroke.key == "escape"
+            && !stroke.modifiers.modified()
+            && self
+                .chats
+                .get(&id)
+                .is_some_and(|chat| chat.rewinding.is_some_and(|asked| !asked.busy))
+        {
+            self.chat_rewind_cancel(id, cx);
+            return true;
+        }
+        // Escape closes what is open beside the conversation (the diffs, the
+        // git cell) before it stops anything.
+        if stroke.key == "escape" && !stroke.modifiers.modified() {
+            let open = self
+                .chats
+                .get(&id)
+                .map(|chat| (chat.diff.is_some(), chat.git.open));
+            match open {
+                Some((true, _)) => {
+                    self.chat_diff_close(id, cx);
+                    return true;
+                }
+                Some((false, true)) => {
+                    self.chat_git_close(id, cx);
+                    return true;
+                }
+                _ => {}
+            }
+        }
         let running = self
             .chats
             .get(&id)
@@ -1127,6 +1633,7 @@ impl Shell {
         let was_open = matches!(self.main, Main::Live(open) if open == id);
         let closed = self.workspaces.close(id);
         self.refresh_live();
+        self.chat_forget_checkpoints(&chat, cx);
         self.after_close(closed, was_open, &chat.machine, &chat.cwd, window, cx);
         if self.pane == Pane::Main && self.focused_chat().is_none() {
             self.sync_focus(window, cx);
@@ -1155,6 +1662,13 @@ impl Shell {
             if let Some(found) = found {
                 chat.history = Some(found.id.clone());
                 linked = true;
+                // A title generated before the link goes to the session now.
+                if let (Some(title), None) = (&chat.title, &chat.name) {
+                    self.engine.submit(crate::engine::Op::TitleSession {
+                        session: found.id.clone(),
+                        title: title.clone(),
+                    });
+                }
             }
         }
         linked

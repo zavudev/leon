@@ -30,12 +30,15 @@
 //! the desktop both run it in a terminal behind the [`bridge`].
 //!
 //! * [`agents`]: the catalogue, and the [`AgentSession`] an adapter makes;
+//! * [`change`]: what a tool changed in a file, as lines;
 //! * [`claude`], [`codex`]: each agent's own protocol;
 //! * [`acp`]: the Agent Client Protocol, one session for every agent that
 //!   serves it, and [`opencode`], [`grok`], [`cursor`]: what each of them
 //!   does its own way;
 //! * [`bridge`]: an agent behind a terminal instead of a pipe: the script
 //!   between them, the frames written to it and the marks it answers with;
+//! * [`rewind`]: taking a conversation back to before a turn, as each agent
+//!   allows;
 //! * [`events`]: the events, the questions and the answers, and [`Lines`],
 //!   which cuts a stream of bytes into clean lines;
 //! * [`shell`]: the login shell an agent's command is started through;
@@ -44,6 +47,7 @@
 pub mod acp;
 pub mod agents;
 pub mod bridge;
+pub mod change;
 pub mod claude;
 pub mod codex;
 pub mod cursor;
@@ -51,6 +55,7 @@ pub mod error;
 pub mod events;
 pub mod grok;
 pub mod opencode;
+pub mod rewind;
 pub mod shell;
 pub mod tag;
 
@@ -58,9 +63,11 @@ pub use agents::{
     adapter, agents, Action, Adapter, AgentInfo, AgentSession, McpServer, Outgoing, Probe, Step,
     TurnSpec, ADAPTERS,
 };
+pub use change::{ChangeKind, DiffLine, FileChange, Hunk, LineKind};
 pub use claude::{AgentCommand, AgentMode, AgentModel, AgentOptions};
 pub use error::TurnError;
 pub use events::{
     object_on, Answer, ChoiceAnswer, ChoiceOption, ChoiceQuestion, Lines, PermissionChoice,
-    PermissionEffect, QuestionKind, Tokens, TurnEvent,
+    PermissionEffect, QuestionKind, Todo, TodoStatus, Tokens, TurnEvent,
 };
+pub use rewind::{fork_transcript, CodexRevert, RevertStep, Rewind};

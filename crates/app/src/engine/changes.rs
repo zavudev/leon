@@ -27,6 +27,16 @@ use super::{Engine, EngineError, SharedRunner, StatusKind};
 /// How long an agent is given to word a message.
 const AGENT_LIMIT: Duration = Duration::from_secs(120);
 
+/// How long a conversation's title is waited for: it is nothing to wait for.
+const TITLE_LIMIT: Duration = Duration::from_secs(45);
+
+/// The arguments that make an agent answer with its cheapest model, for the
+/// agents where that is known: Claude Code's alias. Others answer with their
+/// own default, which is why only the agents this lists are asked for titles.
+pub fn cheap_model_args(agent: AgentId) -> Option<Vec<String>> {
+    (agent == AgentId::CLAUDE).then(|| vec!["--model".to_owned(), "haiku".to_owned()])
+}
+
 /// A commit to make.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitRequest {
@@ -49,6 +59,9 @@ pub struct ShipRequest {
     pub path: String,
     /// The commit to make.
     pub commit: Option<CommitRequest>,
+    /// Whether to bring the branch up to its upstream first: `git pull
+    /// --ff-only`, so a branch that diverged is refused and left as it is.
+    pub pull: bool,
     /// Whether to push the branch.
     pub push: bool,
     /// The pull request to open.
@@ -82,6 +95,7 @@ impl ShipReport {
             said.push(
                 match step {
                     Step::Commit => "committed",
+                    Step::Pull => "pulled",
                     Step::Push => "pushed",
                     Step::PullRequest => "opened a pull request",
                     Step::Suggestion => continue,
@@ -217,6 +231,10 @@ impl Engine {
                 }
             };
         }
+        if request.pull {
+            let text = take!(Step::Pull, git.pull(path).await);
+            report.done.push((Step::Pull, text));
+        }
         if let Some(commit) = &request.commit {
             let text = take!(
                 Step::Commit,
@@ -283,15 +301,63 @@ impl Engine {
         })
     }
 
-    async fn suggest_now(
+    /// Asks `agent`, headless and with its cheapest model, for a short title
+    /// of the conversation that began with `prompt` and was answered with
+    /// `reply`. An agent that has no cheap model known is not asked: an error
+    /// comes at once. The caller keeps its own name when the answer fails.
+    pub fn suggest_title(
+        &self,
+        machine: MachineId,
+        path: String,
+        agent: AgentId,
+        prompt: String,
+        reply: String,
+    ) -> JoinHandle<Result<String, EngineError>> {
+        let engine = self.clone();
+        self.inner.handle.spawn(async move {
+            let asked = engine.title_now(&machine, &path, agent, &prompt, &reply);
+            tokio::time::timeout(TITLE_LIMIT, asked)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(EngineError::Invalid(format!(
+                        "{} did not title the conversation in {} seconds.",
+                        agent.name(),
+                        TITLE_LIMIT.as_secs()
+                    )))
+                })
+        })
+    }
+
+    async fn title_now(
         &self,
         machine_id: &MachineId,
         path: &str,
-        what: Suggest,
-        files: Option<Vec<ChangedFile>>,
         agent: AgentId,
+        prompt: &str,
+        reply: &str,
     ) -> Result<String, EngineError> {
+        let extra = cheap_model_args(agent).ok_or_else(|| {
+            EngineError::Invalid(format!("{} is not asked for titles.", agent.name()))
+        })?;
+        let (spec, program) = self.headless_program(machine_id, agent)?;
+        let headless = spec.headless.clone().unwrap_or_default();
         let machine = self.inner.store.machine(machine_id)?;
+        let runner = self.slow();
+        let ssh = self.ssh();
+        let input = title_input(prompt, reply);
+        Git::new(&runner, &machine, &ssh)
+            .title(path, &program, &headless, &extra, &input)
+            .await
+            .map_err(ship_error)
+    }
+
+    /// The agent's spec and the program that runs it on `machine`, for a
+    /// headless question; an error when the agent has no such form.
+    fn headless_program(
+        &self,
+        machine_id: &MachineId,
+        agent: AgentId,
+    ) -> Result<(leon_core::AgentSpec, String), EngineError> {
         let spec = agent
             .spec()
             .filter(|spec| spec.headless.is_some())
@@ -301,7 +367,6 @@ impl Engine {
                     agent.name()
                 ))
             })?;
-        let headless = spec.headless.clone().unwrap_or_default();
         // On another machine the program is where the probe found it: a
         // command run over SSH does not read the login shell's PATH.
         let program = match self.machine_state(machine_id) {
@@ -312,6 +377,20 @@ impl Engine {
             }
             _ => spec.command.clone(),
         };
+        Ok((spec.clone(), program))
+    }
+
+    async fn suggest_now(
+        &self,
+        machine_id: &MachineId,
+        path: &str,
+        what: Suggest,
+        files: Option<Vec<ChangedFile>>,
+        agent: AgentId,
+    ) -> Result<String, EngineError> {
+        let machine = self.inner.store.machine(machine_id)?;
+        let (spec, program) = self.headless_program(machine_id, agent)?;
+        let headless = spec.headless.clone().unwrap_or_default();
         let runner = self.slow();
         let ssh = self.ssh();
         let git = Git::new(&runner, &machine, &ssh);
@@ -345,6 +424,20 @@ impl Engine {
             .await
             .map_err(ship_error)
     }
+}
+
+/// What the agent is shown to title a conversation: the first prompt and the
+/// start of the first answer, each cut so a long paste is not sent whole.
+pub fn title_input(prompt: &str, reply: &str) -> String {
+    const LIMIT: usize = 1_500;
+    let cut = |text: &str| -> String {
+        let text = text.trim();
+        match text.char_indices().nth(LIMIT) {
+            Some((at, _)) => format!("{}\u{2026}", &text[..at]),
+            None => text.to_owned(),
+        }
+    };
+    format!("Person:\n{}\n\nAgent:\n{}\n", cut(prompt), cut(reply))
 }
 
 fn ship_error(error: ShipError) -> EngineError {
@@ -396,6 +489,7 @@ mod tests {
                 message: "Fix the tabs".to_owned(),
                 files: None,
             }),
+            pull: false,
             push: true,
             pull_request: Some(PullRequestDraft {
                 title: "Fix the tabs".to_owned(),
@@ -493,6 +587,112 @@ mod tests {
         assert_eq!(step, Step::Push);
         assert!(text.contains("non-fast-forward"));
         assert!(!programs(&rig).iter().any(|ran| ran == "gh pr"));
+    }
+
+    #[tokio::test]
+    async fn a_pull_is_the_first_step_and_a_diverged_branch_stops_everything_after_it() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok("## topic...origin/topic [behind 1]\0"))
+            .reply(Output::ok("Fast-forward\n"))
+            .reply(Output::ok("## topic...origin/topic\0")));
+        let only_pull = ShipRequest {
+            commit: None,
+            pull: true,
+            push: false,
+            pull_request: None,
+            ..request(&rig)
+        };
+        let report = rig.engine.ship(only_pull.clone()).await.unwrap();
+        let steps: Vec<Step> = report.done.iter().map(|(step, _)| *step).collect();
+        assert_eq!(steps, [Step::Pull]);
+        assert_eq!(rig.runner.calls()[1].args, ["pull", "--ff-only"]);
+        assert_eq!(rig.engine.status().unwrap().text, "Pulled.");
+
+        let rig = self::rig(
+            ScriptedRunner::new()
+                .reply(Output::ok("## topic...origin/topic [ahead 1, behind 1]\0"))
+                .reply(Output::failed(
+                    128,
+                    "fatal: Not possible to fast-forward, aborting.\n",
+                )),
+        );
+        let both = ShipRequest {
+            push: true,
+            ..only_pull
+        };
+        let report = rig
+            .engine
+            .ship(ShipRequest {
+                project: rig.project.clone(),
+                ..both
+            })
+            .await
+            .unwrap();
+        let (step, text) = report.failed.expect("the pull failed");
+        assert_eq!(step, Step::Pull);
+        assert!(text.contains("fast-forward"));
+        assert!(report.done.is_empty(), "nothing after it was taken");
+        assert_eq!(rig.runner.calls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_title_is_asked_of_claude_with_its_cheapest_model_and_cleaned() {
+        let rig = rig(ScriptedRunner::new().reply(Output::ok("\"Fix the tab leak.\"\n")));
+        let title = rig
+            .engine
+            .suggest_title(
+                MachineId::local(),
+                "/srv/api".to_owned(),
+                AgentId::CLAUDE,
+                "the tabs leak".to_owned(),
+                "Found it.".to_owned(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(title, "Fix the tab leak");
+        let calls = rig.runner.calls();
+        assert_eq!(calls[0].program, "claude");
+        assert!(
+            calls[0]
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--model", "haiku"]),
+            "{:?}",
+            calls[0].args
+        );
+        assert!(calls[0].args.contains(&"-p".to_owned()));
+        let said = String::from_utf8(calls[0].stdin.clone().unwrap()).unwrap();
+        assert!(
+            said.contains("the tabs leak") && said.contains("Found it."),
+            "{said}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_with_no_cheap_model_known_is_not_asked_for_a_title() {
+        let rig = rig(ScriptedRunner::new());
+        let asked = rig
+            .engine
+            .suggest_title(
+                MachineId::local(),
+                "/srv/api".to_owned(),
+                AgentId::CODEX,
+                "x".to_owned(),
+                "y".to_owned(),
+            )
+            .await
+            .unwrap();
+        assert!(asked.is_err());
+        assert!(rig.runner.calls().is_empty(), "nothing was run");
+    }
+
+    #[test]
+    fn what_the_agent_reads_to_title_is_cut_so_a_long_paste_is_not_sent_whole() {
+        let long = "x".repeat(10_000);
+        let input = title_input(&long, "ok");
+        assert!(input.len() < 3_300, "{}", input.len());
+        assert!(input.contains("Agent:\nok"));
     }
 
     #[tokio::test]

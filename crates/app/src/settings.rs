@@ -761,6 +761,10 @@ pub struct Notifications {
     pub desktop: bool,
     /// The desktop only while the window does not have the focus.
     pub only_unfocused: bool,
+    /// Say when a conversation finishes, fails or asks off screen.
+    pub chats: bool,
+    /// Play a sound with a conversation's desktop notification.
+    pub sound: bool,
 }
 
 impl Notifications {
@@ -787,6 +791,8 @@ pub fn notifications(cx: &App) -> Notifications {
         banner: how != "system",
         desktop: how != "banner",
         only_unfocused: flag(cx, "notify_only_unfocused"),
+        chats: flag(cx, "notify_chats"),
+        sound: flag(cx, "notify_sound"),
     }
 }
 

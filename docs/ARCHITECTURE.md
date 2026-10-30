@@ -1547,7 +1547,7 @@ for every agent (`chat/complete.rs` says which rows, `ui/chat_menu.rs` keeps
 the list and draws it):
 
 * a slash that opens the prompt lists the **commands**: Leon's own `/model`,
-  `/effort`, `/mode` and `/voice`, then the agent's (`AgentOptions::commands`). Each adapter says
+  `/effort`, `/mode`, `/agent` and `/voice`, then the agent's (`AgentOptions::commands`). Each adapter says
   where its list comes from: Claude Code's greeting, Codex's `skills/list`
   (a skill is asked for as `$name`) with the two things its server does
   itself (`/compact` is `thread/compact/start`, `/review` is `review/start`),
@@ -1561,6 +1561,19 @@ the list and draws it):
 * a chip, `/mode` or `/model` lists the agent's **modes** or **models** with
   a field of its own to narrow them. A change reaches a turn in flight where
   the agent takes it (`AgentOptions::live_changes`), the next turn otherwise;
+* the chip of the agent or `/agent` lists the **other agents** installed on
+  the conversation's machine and driven by the protocol
+  (`MenuKind::Agents`, `ui/chat_switch.rs`), when no turn runs. Choosing one
+  starts no process: the session id, model, effort and mode are dropped, the
+  conversation gets an `Item::Switched` rule, and `chat/handoff.rs` writes
+  the transcript (latest turns whole, tools one line each, older turns a
+  line each, todos, changed files; 24,000 characters at most) as a block in
+  a `<leon-handoff>` tag. The next turn's prompt is that block and the
+  person's words (`Chat::handoff`, taken in `chat_launch`); the conversation
+  keeps only the words. The tag is in `chat/harness.rs`'s list, so a history
+  read back shows the rule instead of the block. Going back to before a
+  message that precedes the rule is not offered (`rewind_blocked_by_switch`);
+  going back to the first message after it hands the block over again;
 * a chip or `/effort` lists the **efforts**: how hard the model in use can be
   told to think (`AgentModel::efforts`), the lightest first, after the
   agent's own setting. The model in use is the one asked for, else the one

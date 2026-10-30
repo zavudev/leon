@@ -729,6 +729,9 @@ impl Shell {
                     })
                     .child(self.dot(index, activity, colours))
                     .when(!flat, |this| this.child(count(sessions)))
+                    .when(!deleting, |this| {
+                        this.child(self.new_worktree_mark(index, &project.id, colours, cx))
+                    })
                     .into_any_element()
             }
             Kind::Worktree { worktree, sessions } => {
@@ -1097,6 +1100,43 @@ impl Shell {
                 .children(keys::keys_label(Command::OpenProject).map(|text| key_cap(text, colours)))
                 .into_any_element(),
         }
+    }
+
+    /// The plus of a project row, shown while the row is hovered: it opens
+    /// the dialog that makes a worktree of the project.
+    fn new_worktree_mark(
+        &self,
+        index: usize,
+        project: &leon_core::ProjectId,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tip: SharedString = tooltip_text(Command::NewWorktree).into();
+        let hover = colours.surface_2;
+        let project = project.clone();
+        div()
+            .id(("new-worktree", index))
+            .debug_selector(move || format!("tree-new-worktree-{index}"))
+            .flex_none()
+            .size(px(16.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(metrics::RADIUS())
+            .cursor_pointer()
+            .invisible()
+            .group_hover(ROW_GROUP, |style| style.visible())
+            .hover(move |style| style.bg(hover))
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.cursor = Some(index);
+                this.pane = Pane::Sidebar;
+                this.open_new_worktree_for(&project, window, cx);
+                cx.notify();
+            }))
+            .child(icon(IconName::Plus, px(12.), colours.text_muted))
+            .into_any_element()
     }
 
     /// The pin of a session, in the room a chevron takes: a pinned session

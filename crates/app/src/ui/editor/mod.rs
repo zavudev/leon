@@ -48,7 +48,7 @@ mod viewer;
 
 #[cfg(all(test, leon_posix_tests))]
 pub use document::Body;
-pub use document::EditorDoc;
+pub use document::{detect, EditorDoc};
 #[cfg(all(test, leon_posix_tests))]
 pub use drafts::{write as write_draft, Draft};
 pub use files_panel::{next_pane, FileTreeUi};

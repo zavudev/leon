@@ -267,6 +267,26 @@ pub fn with_attached(typed: &str, files: &[std::path::PathBuf]) -> Option<String
     Some(text)
 }
 
+/// What [`with_attached`] made, taken apart again: the words the person
+/// typed (none when they only attached files) and the files.
+pub fn split_attached(text: &str) -> (String, Vec<std::path::PathBuf>) {
+    const MARK: &str = "\n\nAttached (open each path):";
+    let Some((words, files)) = text.split_once(MARK) else {
+        return (text.to_owned(), Vec::new());
+    };
+    let files = files
+        .lines()
+        .filter_map(|line| line.strip_prefix("- "))
+        .map(std::path::PathBuf::from)
+        .collect();
+    let words = if words == "Look at the attached files." {
+        ""
+    } else {
+        words
+    };
+    (words.to_owned(), files)
+}
+
 /// What King is told of a task given to it from the board.
 pub fn task_for_king(task: &leon_core::Task, place: &str) -> String {
     let mut text = format!(
@@ -1627,6 +1647,22 @@ mod tests {
     use leon_king::transcript::Kind;
 
     use super::*;
+
+    #[test]
+    fn what_is_said_with_files_is_taken_apart_into_the_words_and_the_files() {
+        let files = [
+            std::path::PathBuf::from("/tmp/a b.png"),
+            std::path::PathBuf::from("/tmp/c.txt"),
+        ];
+        for typed in ["fix this", ""] {
+            let said = with_attached(typed, &files).unwrap();
+            assert_eq!(split_attached(&said), (typed.to_owned(), files.to_vec()));
+        }
+        assert_eq!(
+            split_attached("just words\n\n- not a list"),
+            ("just words\n\n- not a list".to_owned(), Vec::new())
+        );
+    }
 
     fn entry(seq: u64) -> Entry {
         Entry {

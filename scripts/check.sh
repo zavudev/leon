@@ -147,14 +147,8 @@ sim_tests() { # sim_tests <linux|windows> <cargo test arguments after --skip...>
 }
 case "$host_os" in
     Darwin)
-        # Skipped when simulating on a Mac, each an artefact of the simulation:
-        #  - down_moves_into_the_filtered_tree_...: it types Ctrl+A into a text
-        #    field; the toolkit binds select-all in text fields for the real
-        #    platform (Cmd+A here), so Ctrl+A cannot select all on a Mac.
-        sim_tests linux --skip down_moves_into_the_filtered_tree_and_enter_opens_the_best_match
-        sim_tests windows --skip down_moves_into_the_filtered_tree_and_enter_opens_the_best_match
-        notes="$notes
-  - the simulated runs skip 1 test (down_moves_into_the_filtered_tree_...: the toolkit's text-field select-all is bound for the real platform)"
+        sim_tests linux
+        sim_tests windows
         ;;
     Linux)
         sim_tests windows

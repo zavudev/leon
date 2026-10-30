@@ -142,6 +142,7 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
             Cmd(C::OpenChanges),
             Cmd(C::PushBranch),
             Cmd(C::ShipChanges),
+            Cmd(C::ToggleChatDiff),
             Sep,
             Cmd(C::SaveOutput),
             Cmd(C::SaveOutputAnsi),
@@ -175,6 +176,7 @@ pub const LAYOUT: &[(&str, &[Entry])] = &[
             Sep,
             Cmd(C::FindInFile),
             Cmd(C::ReplaceInFile),
+            Cmd(C::FindInChat),
             Sep,
             Cmd(C::FilterProjects),
             Cmd(C::SearchHistory),
@@ -412,6 +414,10 @@ pub const NOT_IN_MENUS: &[(Command, &str)] = &[
         "palette, a lion's menu and its key: needs a selected lion",
     ),
     (
+        C::SteerQueued,
+        "palette and its key: needs a conversation with a queued message",
+    ),
+    (
         C::HatchLion,
         "palette and the Den's key: the new session's questions",
     ),
@@ -558,7 +564,10 @@ pub fn menu_chord(command: Command, mac: bool) -> Option<Chord> {
     // The same goes for saving the terminal's output, which shares Cmd+S
     // with saving a file: the menu's Cmd+S saves the file, and a terminal
     // that has the keyboard still gets its own (the key is resolved first).
-    if matches!(command, C::FilterProjects | C::SaveOutput | C::FindInFile) {
+    if matches!(
+        command,
+        C::FilterProjects | C::SaveOutput | C::FindInFile | C::FindInChat
+    ) {
         return None;
     }
     let binding = keys::binding(command)?;

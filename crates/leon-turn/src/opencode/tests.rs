@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::agents::{Action, Outgoing, Step};
+use crate::change::FileChange;
 use crate::error::TurnError;
 use crate::events::*;
 use serde_json::json;
@@ -168,6 +169,7 @@ fn it_is_greeted_and_given_a_session_in_the_folder_then_the_prompt_when_the_sess
                     output: 4,
                     reasoning: 0,
                     context_window: Some(1_000_000),
+                    context_used: Some(14636),
                 },
             },
             TurnEvent::Finished {
@@ -427,6 +429,7 @@ fn a_command_it_may_not_run_by_itself_is_a_question_with_its_own_options() {
                     output: 190,
                     reasoning: 130,
                     context_window: Some(1_000_000),
+                    context_used: Some(18358),
                 },
             },
             TurnEvent::Finished {
@@ -468,6 +471,7 @@ fn a_refusal_ends_the_turn_as_opencode_ends_it() {
                     output: 113,
                     reasoning: 58,
                     context_window: Some(1_000_000),
+                    context_used: Some(19967),
                 },
             },
             TurnEvent::Finished {
@@ -590,6 +594,7 @@ fn stopping_it_cancels_the_session_and_what_it_still_asks() {
                     output: 115,
                     reasoning: 64,
                     context_window: Some(1_000_000),
+                    context_used: Some(20326),
                 },
             },
             TurnEvent::Finished {
@@ -880,14 +885,21 @@ fn a_change_said_as_a_diff_is_shown_when_it_is_said() {
             {"type": "diff", "path": "/work/new.txt", "oldText": null, "newText": "hi\n"},
         ],
     }));
-    assert!(read(session.as_mut(), &started)
-        .events
-        .contains(&TurnEvent::ToolUse {
-            id: "call-1".into(),
-            name: "patch".into(),
-            summary: String::new(),
-            detail: "/work/a.txt\n- two\n+ 2\n\n/work/new.txt\n+ hi".into(),
-        }));
+    let events = read(session.as_mut(), &started).events;
+    assert!(events.contains(&TurnEvent::ToolUse {
+        id: "call-1".into(),
+        name: "patch".into(),
+        summary: String::new(),
+        detail: "/work/a.txt\n- two\n+ 2\n\n/work/new.txt\n+ hi".into(),
+    }));
+    // And as lines, a file for each diff.
+    assert!(events.contains(&TurnEvent::ToolChange {
+        id: "call-1".into(),
+        changes: vec![
+            FileChange::edited("/work/a.txt", &[("one\ntwo\nthree", "one\n2\nthree")]),
+            FileChange::written("/work/new.txt", "hi\n"),
+        ],
+    }));
 
     // Said only once it was made, it comes with the result.
     let started = update(json!({
@@ -901,12 +913,18 @@ fn a_change_said_as_a_diff_is_shown_when_it_is_said() {
     }));
     assert_eq!(
         read(session.as_mut(), &done).events,
-        [TurnEvent::ToolResult {
-            id: "call-2".into(),
-            ok: true,
-            summary: String::new(),
-            detail: "/work/b.txt\n- a\n+ b".into(),
-        }]
+        [
+            TurnEvent::ToolChange {
+                id: "call-2".into(),
+                changes: vec![FileChange::edited("/work/b.txt", &[("a", "b")])],
+            },
+            TurnEvent::ToolResult {
+                id: "call-2".into(),
+                ok: true,
+                summary: String::new(),
+                detail: "/work/b.txt\n- a\n+ b".into(),
+            }
+        ]
     );
 }
 
@@ -971,4 +989,35 @@ fn its_commands_are_the_three_it_always_has_until_a_session_lists_them() {
         &update(json!({"sessionUpdate": "usage_update"})),
     );
     assert!(other.commands.is_none());
+}
+
+#[test]
+fn an_acp_plan_is_the_agent_s_list_of_todos() {
+    let mut session = fresh();
+    session.first(&spec("plan it"));
+    let plan = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":SESSION,"update":{"sessionUpdate":"plan","entries":[
+        {"content":"Read the code","priority":"high","status":"completed"},
+        {"content":"Write the test","priority":"medium","status":"in_progress"},
+        {"content":"Ship it","priority":"low","status":"pending"}
+    ]}}});
+    let step = read(session.as_mut(), &plan.to_string());
+    assert_eq!(
+        step.events,
+        [TurnEvent::Todos {
+            todos: vec![
+                Todo {
+                    text: "Read the code".into(),
+                    status: TodoStatus::Completed
+                },
+                Todo {
+                    text: "Write the test".into(),
+                    status: TodoStatus::InProgress
+                },
+                Todo {
+                    text: "Ship it".into(),
+                    status: TodoStatus::Pending
+                },
+            ]
+        }]
+    );
 }

@@ -47,6 +47,9 @@ pub enum MenuKind {
     Models,
     /// The efforts of the model in use, narrowed by the list's own field.
     Efforts,
+    /// The other agents the conversation can go on with, narrowed by the
+    /// list's own field.
+    Agents,
     /// The speech models of dictation, narrowed by the list's own field.
     Voices,
 }
@@ -57,7 +60,7 @@ impl MenuKind {
     fn has_field(self) -> bool {
         matches!(
             self,
-            Self::Modes | Self::Models | Self::Efforts | Self::Voices
+            Self::Modes | Self::Models | Self::Efforts | Self::Agents | Self::Voices
         )
     }
 }
@@ -112,6 +115,7 @@ impl Chat {
                 self.options.as_ref(),
                 self.efforts(),
                 &self.commands,
+                self.can_switch(),
             ),
             MenuKind::Files => match &self.files {
                 Some(files) => complete::file_rows(&typed(), files),
@@ -131,6 +135,7 @@ impl Chat {
                     .as_ref()
                     .and_then(|options| options.default_effort.as_deref()),
             ),
+            MenuKind::Agents => complete::agent_rows(&filter(), self.agents_to_switch_to()),
             MenuKind::Voices => complete::voice_rows(&filter(), voices),
         }
     }
@@ -141,6 +146,14 @@ impl Shell {
     /// word being typed, opening for a command or a file and closing when
     /// the word is neither any more.
     pub(super) fn chat_typed(&mut self, id: LiveId, cx: &mut Context<Self>) {
+        if self.chats.get(&id).is_some_and(|chat| {
+            chat.token(cx)
+                .is_some_and(|token| token.trigger == Trigger::Slash)
+        }) {
+            // A slash may list `/agent`: the programs are looked for as it
+            // opens, not at every frame.
+            self.chat_look_for_agents(id);
+        }
         let Some(chat) = self.chats.get_mut(&id) else {
             return;
         };
@@ -205,6 +218,12 @@ impl Shell {
             return;
         }
         chat.menu = Some(Menu::new(kind));
+        if kind == MenuKind::Agents {
+            self.chat_look_for_agents(id);
+        }
+        let Some(chat) = self.chats.get_mut(&id) else {
+            return;
+        };
         if kind.has_field() {
             chat.filter.update(cx, |field, cx| {
                 field.set_value("", window, cx);
@@ -277,6 +296,14 @@ impl Shell {
             Pick::Efforts => {
                 self.chat_write(id, None, window, cx);
                 self.chat_open_menu(id, MenuKind::Efforts, window, cx);
+            }
+            Pick::Agents => {
+                self.chat_write(id, None, window, cx);
+                self.chat_open_menu(id, MenuKind::Agents, window, cx);
+            }
+            Pick::Agent(agent) => {
+                self.chat_close_menu(id, window, cx);
+                self.chat_switch_agent(id, agent, window, cx);
             }
             Pick::Voices => {
                 self.chat_write(id, None, window, cx);
@@ -460,6 +487,7 @@ impl Shell {
             MenuKind::Modes => ("MODE", "No mode is called that."),
             MenuKind::Models => ("MODEL", "No model is called that."),
             MenuKind::Efforts => ("EFFORT", "No effort is called that."),
+            MenuKind::Agents => ("AGENT", "No other agent is called that."),
             MenuKind::Voices => ("DICTATION", "No speech model is called that."),
         };
         let title = match menu.kind {
@@ -555,6 +583,7 @@ impl Shell {
             Pick::Models
                 | Pick::Efforts
                 | Pick::Modes
+                | Pick::Agents
                 | Pick::Voices
                 | Pick::Command(_)
                 | Pick::File(_)

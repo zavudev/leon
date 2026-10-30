@@ -8,8 +8,18 @@
 //!
 //! * [`model`]: the conversation as a list of things to draw, built from the
 //!   protocol's events;
+//! * [`changed`]: what a turn changed, as the card at its end says it;
+//! * [`checkpoint`]: the worktree's files as they were when a turn began, kept
+//!   in git without touching the person's index, and the way back to them;
+//! * [`rewind`]: taking a conversation back to before one of its turns, in the
+//!   way each agent allows;
+//! * [`stamp`]: when a message was said, as a person reads it;
+//! * [`phrase`]: what a stretch of tools says of itself, in words;
+//! * [`find`]: finding words in what was said and answered;
 //! * [`complete`]: what the field offers while a command, a file, a mode or
 //!   a model is being named;
+//! * [`handoff`]: what a new agent is told of the conversation it takes over
+//!   when the person switches agents mid-thread;
 //! * [`harness`]: what a program wrote in the person's name, read back from
 //!   the history as a note;
 //! * [`turn`]: one turn on a pipe, the agent's process and its protocol;
@@ -20,10 +30,17 @@
 //! `ui/chat_view.rs` (what it draws). The setting `agent_interface` chooses
 //! between this and the terminal; it is experimental (its own section of the settings) and off by default.
 
+pub mod changed;
+pub mod checkpoint;
 pub mod complete;
+pub mod find;
+pub mod handoff;
 pub mod harness;
 pub mod model;
+pub mod phrase;
 pub mod reach;
+pub mod rewind;
+pub mod stamp;
 pub mod turn;
 
 use leon_core::AgentId;

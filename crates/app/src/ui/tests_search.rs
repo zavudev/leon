@@ -86,7 +86,7 @@ fn quick_open_lists_the_files_of_the_project_and_narrows_them_as_you_type(cx: &m
     assert!(!narrowed.contains(&"file:Cargo.toml".to_owned()));
 
     // The path counts when there is a slash.
-    h.press("ctrl-a", cx);
+    h.press("secondary-a", cx);
     h.type_text("~ui/tree", cx);
     assert_eq!(rows(&h, cx)[1], "file:src/ui/tree.rs");
 
@@ -367,7 +367,7 @@ fn the_case_and_regex_switches_change_what_is_found(cx: &mut TestAppContext) {
     assert!(!h.shell(cx, |s| s.palette.text.case_sensitive));
 
     // A regular expression: the text is a pattern, and a bad one says why.
-    h.press("ctrl-a", cx);
+    h.press("secondary-a", cx);
     h.type_text("%ne+dle =", cx);
     wait_until(&h, cx, "no line", |h, cx| {
         rows(h, cx).contains(&"line:No matches.".to_owned())
@@ -376,7 +376,7 @@ fn the_case_and_regex_switches_change_what_is_found(cx: &mut TestAppContext) {
     assert!(h.shell(cx, |s| s.palette.text.regex));
     wait_for_row(&h, cx, "the lines", "match:");
     assert_eq!(rows(&h, cx)[1], "match:src/main.rs:2");
-    h.press("ctrl-a", cx);
+    h.press("secondary-a", cx);
     h.type_text("%(", cx);
     wait_until(&h, cx, "the problem", |h, cx| {
         rows(h, cx).iter().any(|r| r.contains("unclosed group"))

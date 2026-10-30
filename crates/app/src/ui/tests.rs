@@ -364,6 +364,12 @@ struct Harness {
     opened: Rc<std::cell::RefCell<Vec<std::path::PathBuf>>>,
     /// The desktop notifications the shell asked for.
     notes: Rc<std::cell::RefCell<Vec<crate::ui::notify::Note>>>,
+    /// How many times the sound of a notification was played.
+    chimes: Rc<std::cell::Cell<usize>>,
+    /// What the generator of conversation titles was asked.
+    title_asked: Rc<std::cell::RefCell<Vec<crate::ui::chat::TitleAsk>>>,
+    /// What it answers.
+    title_says: Rc<std::cell::RefCell<Result<String, String>>>,
     /// How many times the system's folder dialog was asked for.
     folder_dialogs: Rc<std::cell::Cell<usize>>,
     /// The terminals the shell started, and what they were sent.
@@ -489,6 +495,12 @@ fn open_core(
     let opened_in = opened.clone();
     let notes = Rc::new(std::cell::RefCell::new(Vec::new()));
     let notes_in = notes.clone();
+    let chimes = Rc::new(std::cell::Cell::new(0));
+    let chimes_in = chimes.clone();
+    let title_asked = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let title_asked_in = title_asked.clone();
+    let title_says = Rc::new(std::cell::RefCell::new(Err("no title".to_owned())));
+    let title_says_in = title_says.clone();
     let ssh = Arc::new(tests_connect::FakeSsh::default());
     let key_answer = Rc::new(std::cell::RefCell::new(Picked::Cancelled));
     let key_answer_in = key_answer.clone();
@@ -523,6 +535,11 @@ fn open_core(
         activity: Thresholds::default(),
         error_flash: std::time::Duration::from_secs(4),
         notify: Rc::new(move |note, _| notes_in.borrow_mut().push(note.clone())),
+        chime: Rc::new(move |_| chimes_in.set(chimes_in.get() + 1)),
+        titles: Rc::new(move |_, ask, _| {
+            title_asked_in.borrow_mut().push(ask);
+            Task::ready(title_says_in.borrow().clone())
+        }),
         banner_duration: std::time::Duration::from_secs(30),
         den_tick: std::time::Duration::from_millis(5),
         den_submit_after: std::time::Duration::from_millis(5),
@@ -589,6 +606,9 @@ fn open_core(
         terminated,
         opened,
         notes,
+        chimes,
+        title_asked,
+        title_says,
         folder_dialogs: dialogs,
         computer,
         chat,
@@ -4022,7 +4042,9 @@ fn down_moves_into_the_filtered_tree_and_enter_opens_the_best_match(cx: &mut Tes
     );
 
     h.press("/", cx);
-    h.press("ctrl-a", cx);
+    // Select-all inside a text field is the toolkit's own binding, made for
+    // the real platform: `secondary` follows it, a simulated `ctrl` would not.
+    h.press("secondary-a", cx);
     h.type_text("login", cx);
     h.press("enter", cx);
     assert_eq!(h.main_kind(cx), "worktree:feature/login");

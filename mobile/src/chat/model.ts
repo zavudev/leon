@@ -71,13 +71,43 @@ export type QuestionMessage = {
   at: number;
 };
 
+export type TodoStatus = 'pending' | 'in-progress' | 'completed';
+
+export type Todo = { text: string; status: TodoStatus };
+
+/**
+ * The agent's list of what it means to do, with how far it is. One row per
+ * turn: each list the agent writes replaces the one before.
+ */
+export type TodosMessage = { id: string; kind: 'todos'; todos: Todo[]; at: number };
+
+/** The tool the host sends the agent's list as, and the id it keeps for it. */
+export const TODOS_TOOL = 'TodoWrite';
+export const TODOS_ID = 'leon:todos';
+
+/** The list in the lines the host writes: `[x] done`, `[~] doing`, `[ ] to do`. */
+export function parseTodos(detail: string): Todo[] {
+  const todos: Todo[] = [];
+  for (const line of detail.split('\n')) {
+    const found = /^\[([ x~])\] (.+)$/.exec(line.trimEnd());
+    if (!found) continue;
+    const mark = found[1];
+    todos.push({
+      text: found[2]!,
+      status: mark === 'x' ? 'completed' : mark === '~' ? 'in-progress' : 'pending',
+    });
+  }
+  return todos;
+}
+
 export type Message =
   | UserMessage
   | AssistantMessage
   | ToolMessage
   | NoticeMessage
   | NoteMessage
-  | QuestionMessage;
+  | QuestionMessage
+  | TodosMessage;
 
 /** A line for what was asked: the tool and what with, the first question, "a plan". */
 export function questionLine(ask: QuestionKind): string {

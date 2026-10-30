@@ -248,6 +248,10 @@ pub struct Options {
     /// How a note reaches the desktop's notification centre; tests record the
     /// notes instead.
     pub notify: notify::Notify,
+    /// How a sound is played with a desktop note, when asked for; tests count.
+    pub chime: Rc<dyn Fn(&mut App)>,
+    /// How a conversation is given a title; tests answer without an agent.
+    pub titles: super::chat::Titler,
     /// How long a banner stays on screen.
     pub banner_duration: Duration,
     /// How often the transcripts of the live sessions are read: for the
@@ -383,6 +387,8 @@ impl Default for Options {
             activity: Thresholds::default(),
             error_flash: Duration::from_secs(4),
             notify: Rc::new(notify::system),
+            chime: Rc::new(notify::chime),
+            titles: Rc::new(super::chat::title_by_agent),
             banner_duration: Duration::from_secs(8),
             den_tick: Duration::from_secs(1),
             den_submit_after: Duration::from_millis(150),
@@ -1057,6 +1063,7 @@ impl Shell {
         shell.usage_reload();
         shell.watch_usage(window, cx);
         shell.watch_updates(window, cx);
+        shell.watch_notifications(window, cx);
         shell.begin_session_restore(window, cx);
         shell.restore_open_files(window, cx);
         shell.watch_history(window, cx);
@@ -1408,8 +1415,11 @@ impl Shell {
     /// The rows of the tree that are active, and the nodes above them: what a
     /// live terminal (its row, or the history session it resumed) and a session
     /// held by another terminal or Leon are. Sleeping and history-only sessions
-    /// go, and with them every project and worktree left without a row; when
-    /// nothing is left the tree says so.
+    /// go, and with them every worktree left without a row. Projects (and the
+    /// machine they are on) stay whatever is under them: a worktree is made
+    /// from its project's row, so a project that hid with its sessions would
+    /// leave no way to make one. A project with nothing under it has no
+    /// chevron. When no session is left the tree says so, below the projects.
     pub(super) fn only_active(&self, rows: Vec<Row>) -> Vec<Row> {
         let leaf = |row: &Row| match &row.kind {
             Kind::Live(_) | Kind::NoMatch => true,
@@ -1441,12 +1451,17 @@ impl Shell {
         // seen since the last row at depth `d`.
         let mut keep = vec![false; rows.len()];
         let mut below = [false; 16];
+        let mut any_session = false;
         for (at, row) in rows.iter().enumerate().rev() {
             let depth = usize::from(row.depth).min(below.len() - 1);
-            let kept = if container(row) {
+            let kept = if matches!(row.kind, Kind::Project { .. }) {
+                true
+            } else if container(row) {
                 below[depth]
             } else {
-                leaf(row)
+                let kept = leaf(row);
+                any_session |= kept;
+                kept
             };
             for flag in &mut below[depth..] {
                 *flag = false;
@@ -1458,12 +1473,21 @@ impl Shell {
             }
             keep[at] = kept;
         }
-        let kept: Vec<Row> = rows
+        let mut kept: Vec<Row> = rows
             .into_iter()
             .zip(keep)
             .filter_map(|(row, keep)| keep.then_some(row))
             .collect();
-        if !kept.is_empty() {
+        // A project with nothing left under it is not a fold any more.
+        for at in 0..kept.len() {
+            let alone = kept
+                .get(at + 1)
+                .is_none_or(|next| next.depth <= kept[at].depth);
+            if alone && matches!(kept[at].kind, Kind::Project { .. }) {
+                kept[at].open = None;
+            }
+        }
+        if any_session {
             return kept;
         }
         let home = self
@@ -1471,13 +1495,14 @@ impl Shell {
             .machines
             .first()
             .map_or_else(MachineId::local, |machine| machine.id.clone());
-        vec![Row {
+        kept.push(Row {
             id: NodeId::NoActive,
             machine: home,
             depth: tree::project_depth(&self.snapshot),
             open: None,
             kind: Kind::NoActive,
-        }]
+        });
+        kept
     }
 
     /// The agents each machine has: this computer's by looking for their
@@ -1743,6 +1768,13 @@ impl Shell {
         };
         let live = || {
             let id = self.here_live()?;
+            if let Some(chat) = self.chats.get(&id) {
+                // A conversation that runs a history session is that session.
+                return Some(match &chat.history {
+                    Some(history) => RenameTarget::Session(history.clone(), chat.label(), Some(id)),
+                    None => RenameTarget::Live(id, chat.label()),
+                });
+            }
             let session = self.live.get(id)?;
             let _ = cx;
             // A terminal that runs a history session is that session.
@@ -3120,6 +3152,9 @@ impl Shell {
             typing,
             terminal: terminal || finding,
             file: self.file_has_keyboard(),
+            chat: self.overlay == Overlay::None
+                && self.pane == Pane::Main
+                && self.focused_chat().is_some(),
         };
         let Some(command) = keys::resolve(stroke, context) else {
             // A script of the project in view may have the chord; a command
@@ -3249,6 +3284,18 @@ impl Shell {
             C::OpenChanges => self.open_changes_here(window, cx),
             C::PushBranch => self.push_here(window, cx),
             C::ShipChanges => self.ship_here(window, cx),
+            C::FindInChat => match self.focused_chat() {
+                Some(id) => self.chat_find_open(id, window, cx),
+                None => return false,
+            },
+            C::SteerQueued => match self.focused_chat() {
+                Some(id) => self.chat_queue_steer(id, 0, cx),
+                None => return false,
+            },
+            C::ToggleChatDiff => match self.focused_chat() {
+                Some(id) => self.chat_diff_toggle(id, cx),
+                None => return false,
+            },
             C::SaveFile => self.save_file_here(window, cx),
             C::CloseFile => self.close_file_here(window, cx),
             C::TogglePreview => self.toggle_preview(window, cx),

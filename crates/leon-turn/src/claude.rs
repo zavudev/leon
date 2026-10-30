@@ -540,7 +540,9 @@ impl AgentSession for ClaudeSession {
         self.reader.value(value, &mut events);
         for mut event in events {
             match &mut event {
-                TurnEvent::ToolUse { id, .. } | TurnEvent::ToolResult { id, .. }
+                TurnEvent::ToolUse { id, .. }
+                | TurnEvent::ToolResult { id, .. }
+                | TurnEvent::ToolChange { id, .. }
                     if self.quiet_tools.contains(id) =>
                 {
                     continue;

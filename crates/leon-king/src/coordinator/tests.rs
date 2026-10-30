@@ -431,6 +431,7 @@ fn every_turn_is_measured_and_added_to_the_days_counts() {
             output,
             reasoning: 0,
             context_window: None,
+            context_used: None,
         },
     };
     // Each count replaces the one before it in the turn.
