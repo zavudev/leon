@@ -480,6 +480,10 @@ fn run(
     let mut command = leon_remote::spawn::std_child("git");
     command
         .current_dir(folder)
+        // Snapshots keep the bytes on disk as they are, and a restore writes
+        // them back the same: no line-ending conversion either way (Windows
+        // installs default to `core.autocrlf=true`).
+        .args(["-c", "core.autocrlf=false", "-c", "core.safecrlf=false"])
         .args(args)
         // Never wait for a person, and never take the lock a status takes.
         .env("GIT_TERMINAL_PROMPT", "0")
