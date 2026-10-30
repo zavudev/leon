@@ -385,7 +385,22 @@ impl ScratchIndex {
         let index = Self { path };
         // The copy keeps git from reading every file again; without one the
         // index starts empty and `add -A` fills it.
-        let _ = std::fs::copy(real, &index.path);
+        // It keeps the real index's mtime: git trusts an entry's stat data
+        // only when the file is older than the index, so a copy stamped "now"
+        // would hide a same-size edit made in the second of the last commit.
+        if std::fs::copy(&real, &index.path).is_ok() {
+            let kept = std::fs::metadata(&real)
+                .and_then(|meta| meta.modified())
+                .and_then(|time| {
+                    std::fs::File::options()
+                        .write(true)
+                        .open(&index.path)?
+                        .set_modified(time)
+                });
+            if kept.is_err() {
+                index.reset();
+            }
+        }
         Ok(index)
     }
 
@@ -588,6 +603,33 @@ mod tests {
         assert!(in_worktree(&repo.top));
         assert!(in_worktree(&repo.top.join("sub")));
         drop(inside);
+    }
+
+    #[test]
+    fn a_same_size_edit_in_the_second_of_the_last_commit_is_still_kept() {
+        let (_dir, repo) = repo();
+        let root = repo.top.clone();
+        let stamp = |path: &Path, time: std::time::SystemTime| {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(time)
+                .unwrap();
+        };
+        let committed = fs::metadata(root.join("a.txt"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        // Same size, same mtime as the indexed entry, and an index written in
+        // that same instant: only git's racy check can see the change, and it
+        // works only when the index keeps its own mtime.
+        write(&root, "a.txt", "a1\n");
+        stamp(&root.join("a.txt"), committed);
+        let index = text(repo.git(&["rev-parse", "--git-path", "index"]).unwrap());
+        stamp(&root.join(index), committed);
+        let commit = repo.capture("chat", 1).unwrap();
+        assert_eq!(git(&root, &["show", &format!("{commit}:a.txt")]), "a1");
     }
 
     #[test]
