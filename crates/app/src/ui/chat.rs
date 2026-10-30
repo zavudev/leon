@@ -173,6 +173,9 @@ pub struct Chat {
     pub find_input: Entity<InputState>,
     /// The panel of diffs beside it, when open.
     pub diff: Option<DiffPanel>,
+    /// Where the person is in the prompts they sent before, while browsing
+    /// them with the arrows in the field.
+    pub recall: Option<super::chat_recall::Recall>,
     /// Counts the readings of the panel, so an answer that is no longer the
     /// latest is dropped.
     pub diff_reads: u64,
@@ -451,6 +454,7 @@ impl Shell {
                 find: None,
                 find_input,
                 diff: None,
+                recall: None,
                 diff_reads: 0,
                 measured: HashMap::new(),
                 git: GitCell::new(window, cx),
@@ -1425,6 +1429,10 @@ impl Shell {
         };
         if self.chats.get(&id).is_some_and(|chat| chat.menu.is_some()) {
             return self.chat_menu_key(id, stroke, window, cx);
+        }
+        // Up and Down in the field walk the prompts sent before.
+        if self.chat_recall_key(id, stroke, window, cx) {
+            return true;
         }
         // While the microphone is open, Enter ends the dictation and Escape
         // drops it: neither sends the prompt nor stops the turn.

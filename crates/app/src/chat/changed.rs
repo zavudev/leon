@@ -10,6 +10,7 @@
 
 use std::ops::Range;
 
+use leon_history::live::ToolKind;
 use leon_remote::{DiffLine, LineKind as GitLine};
 use leon_turn::{FileChange, LineKind};
 
@@ -82,6 +83,68 @@ pub fn changes_in(items: &[Item]) -> impl Iterator<Item = &FileChange> {
 /// What `items` (the work of one turn) changed, from what the tools say.
 pub fn from_items(items: &[Item], root: &str) -> Vec<Stat> {
     stats_of(changes_in(items), root)
+}
+
+/// What `items` (the work of one turn) changed, as the card says it.
+///
+/// A worktree changes under an agent's feet (a git hook, an indexer, the
+/// person's editor), so a snapshot-to-snapshot count alone would hang a card
+/// on a turn that only talked. The card therefore needs a tool that can
+/// change files:
+///
+/// - none: no card;
+/// - only file-change tools (`Edit`, `Write`…): the files they named, with
+///   git's count of them when `measured` has one, else what they said;
+/// - a command (or a sub-agent, which may run one): everything `measured`
+///   saw, since a command can touch any file, else what the tools said.
+pub fn of_turn(items: &[Item], root: &str, measured: Option<&[Stat]>) -> Vec<Stat> {
+    let said = from_items(items, root);
+    match reach(items) {
+        Reach::Nothing => Vec::new(),
+        Reach::Anything => measured.map_or(said, <[Stat]>::to_vec),
+        Reach::Files => match measured {
+            Some(measured) => measured
+                .iter()
+                .filter(|stat| said.iter().any(|told| same_file(&told.path, &stat.path)))
+                .cloned()
+                .collect(),
+            None => said,
+        },
+    }
+}
+
+/// How far the tools of a turn could have reached into the worktree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// No tool that changes files.
+    Nothing,
+    /// File-change tools only: the files they name.
+    Files,
+    /// A command, or a sub-agent that may run one: any file.
+    Anything,
+}
+
+/// The widest reach among the tools of `items`.
+fn reach(items: &[Item]) -> Reach {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Tool(tool) => Some(tool),
+            _ => None,
+        })
+        .fold(Reach::Nothing, |reach, tool| {
+            let found = match ToolKind::of(&tool.name) {
+                ToolKind::Run | ToolKind::Delegate => Reach::Anything,
+                ToolKind::Edit => Reach::Files,
+                _ if !tool.changes.is_empty() => Reach::Files,
+                _ => Reach::Nothing,
+            };
+            match (reach, found) {
+                (Reach::Anything, _) | (_, Reach::Anything) => Reach::Anything,
+                (Reach::Files, _) | (_, Reach::Files) => Reach::Files,
+                _ => Reach::Nothing,
+            }
+        })
 }
 
 /// The lines that came and went, in all.
@@ -297,5 +360,99 @@ mod tests {
 
     fn merged_none(changes: &[FileChange]) -> bool {
         merged(changes, "c.rs", "/w").is_none()
+    }
+
+    fn tool(name: &str, changes: Vec<FileChange>) -> Item {
+        Item::Tool(Tool {
+            id: name.to_owned(),
+            name: name.to_owned(),
+            summary: String::new(),
+            detail: String::new(),
+            changes,
+            outcome: None,
+        })
+    }
+
+    fn said() -> Item {
+        Item::Agent {
+            text: "Hola".into(),
+            streaming: false,
+            at: None,
+        }
+    }
+
+    fn stat(path: &str, added: usize) -> Stat {
+        Stat {
+            path: path.into(),
+            added,
+            removed: 0,
+        }
+    }
+
+    #[test]
+    fn a_turn_that_only_talked_shows_no_card_whatever_the_worktree_did() {
+        // A hook or an indexer wrote a file while the agent said "Hola".
+        let measured = [stat("graft/.cache/session.json", 10)];
+        assert_eq!(of_turn(&[said()], "/w", Some(&measured)), []);
+        assert_eq!(of_turn(&[said()], "/w", None), []);
+        // Looking and thinking change nothing either.
+        let looked = [tool("Read", Vec::new()), tool("Grep", Vec::new()), said()];
+        assert_eq!(of_turn(&looked, "/w", Some(&measured)), []);
+    }
+
+    #[test]
+    fn a_turn_of_edits_lists_only_the_files_its_tools_touched() {
+        let items = [
+            tool(
+                "Edit",
+                vec![FileChange::edited("/w/src/a.rs", &[("one", "two")])],
+            ),
+            said(),
+        ];
+        let measured = [
+            stat("graft/.cache/session.json", 10),
+            Stat {
+                path: "src/a.rs".into(),
+                added: 1,
+                removed: 1,
+            },
+        ];
+        // Git's count, for the file the tool named.
+        assert_eq!(
+            of_turn(&items, "/w", Some(&measured)),
+            [Stat {
+                path: "src/a.rs".into(),
+                added: 1,
+                removed: 1
+            }]
+        );
+        // Before git has counted, what the tool said.
+        assert_eq!(
+            of_turn(&items, "/w", None),
+            [Stat {
+                path: "src/a.rs".into(),
+                added: 1,
+                removed: 1
+            }]
+        );
+    }
+
+    #[test]
+    fn a_turn_that_ran_a_command_lists_everything_git_saw() {
+        let items = [
+            tool(
+                "Edit",
+                vec![FileChange::edited("/w/src/a.rs", &[("one", "two")])],
+            ),
+            tool("Bash", Vec::new()),
+            said(),
+        ];
+        let measured = [stat("src/a.rs", 1), stat("generated/out.txt", 4)];
+        assert_eq!(of_turn(&items, "/w", Some(&measured)), measured);
+        // A command alone, with git's count, is all of it too.
+        let items = [tool("shell", Vec::new())];
+        assert_eq!(of_turn(&items, "/w", Some(&measured)), measured);
+        // Not yet counted and nothing said: nothing to show.
+        assert_eq!(of_turn(&items, "/w", None), []);
     }
 }

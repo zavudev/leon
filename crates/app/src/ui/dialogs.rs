@@ -17,7 +17,9 @@ use crate::theme::{metrics, px, Palette};
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::*;
-use gpui_kit::{div, AnyElement, Context, Div, Entity, FontWeight, SharedString, Stateful, Window};
+use gpui_kit::{
+    div, AnyElement, Context, Div, Entity, FontWeight, ScrollHandle, SharedString, Stateful, Window,
+};
 use leon_core::{AgentId, MachineId, ProjectId};
 
 /// What the "Add a project" dialog is showing. The rows are: the host, then
@@ -54,8 +56,16 @@ pub struct NewWorktreeUi {
     pub base_typed: bool,
     /// Whether the agent list is open.
     pub agent_list: bool,
-    /// The entry of that list the keyboard is on.
+    /// The entry of that list the keyboard is on, as a place in the entries
+    /// that match [`NewWorktreeUi::agent_query`].
     pub agent_cursor: usize,
+    /// What was typed while the agent list is open: it keeps the agents
+    /// whose name holds it, case aside.
+    pub agent_query: String,
+    /// The scroll of the agent list, kept on the highlighted entry.
+    pub agent_scroll: ScrollHandle,
+    /// The scroll of the branch list, kept on the highlighted entry.
+    pub base_scroll: ScrollHandle,
     /// The entry of that list the keyboard is on.
     pub base_cursor: usize,
     /// The row the keyboard is on: 0 name, 1 base, 2 agent, 3 more, 4 create.
@@ -392,6 +402,9 @@ impl Shell {
             base_cursor: 0,
             agent_list: false,
             agent_cursor: 0,
+            agent_query: String::new(),
+            agent_scroll: ScrollHandle::new(),
+            base_scroll: ScrollHandle::new(),
             cursor: 0,
             agent,
             create_more: false,
@@ -482,13 +495,10 @@ impl Shell {
             }
             2 => {
                 self.focus.focus(window, cx);
+                let all = agent_choices(cx);
                 if let Some(ui) = self.new_worktree_ui.as_mut() {
                     ui.base_list = false;
-                    ui.agent_list = true;
-                    ui.agent_cursor = agent_choices(cx)
-                        .iter()
-                        .position(|agent| *agent == ui.agent)
-                        .unwrap_or(0);
+                    ui.open_agent_list(&all);
                 }
             }
             _ => self.focus.focus(window, cx),
@@ -520,7 +530,19 @@ impl Shell {
                     .new_worktree_ui
                     .as_ref()
                     .is_some_and(|ui| ui.agent_list);
-                if self.base_list_open() || agent_open {
+                let filtering = self
+                    .new_worktree_ui
+                    .as_ref()
+                    .is_some_and(|ui| ui.agent_list && !ui.agent_query.is_empty());
+                if filtering {
+                    // The first Escape takes back the filter, not the list.
+                    if let Some(ui) = self.new_worktree_ui.as_mut() {
+                        ui.agent_query.clear();
+                        ui.agent_cursor = 0;
+                        ui.agent_scroll.scroll_to_item(0);
+                    }
+                    cx.notify();
+                } else if self.base_list_open() || agent_open {
                     if let Some(ui) = self.new_worktree_ui.as_mut() {
                         ui.base_list = false;
                         ui.agent_list = false;
@@ -530,6 +552,15 @@ impl Shell {
                     self.close_overlay(window, cx);
                     cx.notify();
                 }
+            }
+            "backspace" if cursor == 2 => {
+                if let Some(ui) = self.new_worktree_ui.as_mut() {
+                    if ui.agent_list && ui.agent_query.pop().is_some() {
+                        ui.agent_cursor = 0;
+                        ui.agent_scroll.scroll_to_item(0);
+                    }
+                }
+                cx.notify();
             }
             "tab" => {
                 if let Some(ui) = self.new_worktree_ui.as_mut() {
@@ -560,22 +591,16 @@ impl Shell {
                     .as_ref()
                     .is_some_and(|ui| ui.cursor == 2 && ui.agent_list);
                 if cursor == 2 && forward && !agent_open {
+                    let all = agent_choices(cx);
                     if let Some(ui) = self.new_worktree_ui.as_mut() {
-                        ui.agent_list = true;
-                        ui.agent_cursor = agent_choices(cx)
-                            .iter()
-                            .position(|agent| *agent == ui.agent)
-                            .unwrap_or(0);
+                        ui.open_agent_list(&all);
                     }
                     cx.notify();
                 } else if cursor == 2 && agent_open {
-                    let count = agent_choices(cx).len();
-                    if forward {
-                        if let Some(ui) = self.new_worktree_ui.as_mut() {
-                            ui.agent_cursor = (ui.agent_cursor + 1).min(count - 1);
-                        }
-                    } else if let Some(ui) = self.new_worktree_ui.as_mut() {
-                        ui.agent_cursor = ui.agent_cursor.saturating_sub(1);
+                    let count = self.agent_options(cx).len();
+                    if let Some(ui) = self.new_worktree_ui.as_mut() {
+                        ui.agent_cursor = step_cursor(ui.agent_cursor, count, forward);
+                        ui.agent_scroll.scroll_to_item(ui.agent_cursor);
                     }
                     cx.notify();
                 } else if cursor == 1 && forward && has_refs && !self.base_list_open() {
@@ -591,11 +616,8 @@ impl Shell {
                     let count = self.filtered_bases(cx).len();
                     if count > 0 {
                         if let Some(ui) = self.new_worktree_ui.as_mut() {
-                            ui.base_cursor = if forward {
-                                (ui.base_cursor + 1).min(count - 1)
-                            } else {
-                                ui.base_cursor.saturating_sub(1)
-                            };
+                            ui.base_cursor = step_cursor(ui.base_cursor, count, forward);
+                            ui.base_scroll.scroll_to_item(ui.base_cursor);
                         }
                     }
                     cx.notify();
@@ -636,15 +658,16 @@ impl Shell {
                         .as_ref()
                         .is_some_and(|ui| ui.agent_list)
                 {
-                    let picked = agent_choices(cx)
+                    // A filter nothing matches leaves nothing to pick.
+                    let picked = self
+                        .agent_options(cx)
                         .get(
                             self.new_worktree_ui
                                 .as_ref()
                                 .map_or(0, |ui| ui.agent_cursor),
                         )
-                        .copied()
-                        .flatten();
-                    if let Some(ui) = self.new_worktree_ui.as_mut() {
+                        .copied();
+                    if let (Some(picked), Some(ui)) = (picked, self.new_worktree_ui.as_mut()) {
                         ui.agent = picked;
                         ui.agent_list = false;
                     }
@@ -709,6 +732,28 @@ impl Shell {
                 cx.notify();
             }
             _ => {
+                // The agent row types into its list's filter.
+                if cursor == 2 {
+                    let typed = stroke
+                        .key_char
+                        .as_deref()
+                        .filter(|text| !text.is_empty() && !text.chars().any(char::is_control));
+                    if let Some(typed) = typed {
+                        let all = agent_choices(cx);
+                        if let Some(ui) = self.new_worktree_ui.as_mut() {
+                            if !ui.agent_list {
+                                ui.open_agent_list(&all);
+                            }
+                            if !(ui.agent_query.is_empty() && typed.trim().is_empty()) {
+                                ui.agent_query.push_str(typed);
+                                ui.agent_cursor = 0;
+                                ui.agent_scroll.scroll_to_item(0);
+                            }
+                        }
+                        cx.notify();
+                    }
+                    return true;
+                }
                 // The fields type; the other rows swallow the key.
                 if cursor <= 1 {
                     if cursor == 1 {
@@ -864,6 +909,16 @@ impl Shell {
             })
     }
 
+    /// What the agent list shows now: `None` and the agents on offer, kept to
+    /// those whose name holds what was typed.
+    pub(super) fn agent_options(&self, cx: &gpui_kit::App) -> Vec<Option<AgentId>> {
+        let query = self
+            .new_worktree_ui
+            .as_ref()
+            .map_or("", |ui| ui.agent_query.as_str());
+        filter_agents(agent_choices(cx), query)
+    }
+
     /// Whether the "Create from" list is open (and the row has the
     /// keyboard).
     fn base_list_open(&self) -> bool {
@@ -955,6 +1010,8 @@ impl Shell {
             || "Shell".to_owned(),
             |agent| format::agent_name(agent).to_owned(),
         );
+        // While a filter is being typed, the field shows it.
+        let typing_agent = ui.agent_list && !ui.agent_query.is_empty();
         let agent_lead: AnyElement = match ui.agent {
             Some(agent) => agent_icon(agent, px(14.), colours).into_any_element(),
             None => div().into_any_element(),
@@ -1103,6 +1160,7 @@ impl Shell {
                                     .left_0()
                                     .right_0()
                                     .max_h(px(180.))
+                                    .track_scroll(&ui.base_scroll)
                                     .overflow_y_scroll()
                                     .occlude()
                                     .rounded(metrics::RADIUS())
@@ -1216,12 +1274,20 @@ impl Shell {
                                                     .flex_1()
                                                     .min_w_0()
                                                     .truncate()
-                                                    .child(agent_name),
+                                                    .when(typing_agent, |this| {
+                                                        this.text_color(colours.text_muted)
+                                                    })
+                                                    .child(if typing_agent {
+                                                        format!("{}_", ui.agent_query)
+                                                    } else {
+                                                        agent_name
+                                                    }),
                                             )
                                             .child(mono("\u{25be}").text_color(colours.text_faint))
                                             .into_any_element(),
                                     ))
                                     .when(ui.cursor == 2 && ui.agent_list, |this| {
+                                        let options = self.agent_options(cx);
                                         let mut list = div()
                                             .id("agent-list")
                                             .debug_selector(|| "agent-list".into())
@@ -1229,6 +1295,9 @@ impl Shell {
                                             .top(metrics::CONTROL() + px(5.))
                                             .left_0()
                                             .right_0()
+                                            .max_h(agent_list_height(self.viewport.height))
+                                            .track_scroll(&ui.agent_scroll)
+                                            .overflow_y_scroll()
                                             .occlude()
                                             .rounded(metrics::RADIUS())
                                             .border_1()
@@ -1238,9 +1307,19 @@ impl Shell {
                                             .flex()
                                             .flex_col()
                                             .p_1();
-                                        for (at, agent) in agent_choices(cx).iter().enumerate() {
-                                            let chosen = at
-                                                == ui.agent_cursor.min(agent_choices(cx).len() - 1);
+                                        if options.is_empty() {
+                                            list = list.child(
+                                                div()
+                                                    .px(px(10.))
+                                                    .py(px(6.))
+                                                    .text_size(metrics::TEXT_SMALL())
+                                                    .text_color(colours.text_faint)
+                                                    .child("No agent matches"),
+                                            );
+                                        }
+                                        for (at, agent) in options.iter().enumerate() {
+                                            let chosen =
+                                                at == ui.agent_cursor.min(options.len() - 1);
                                             let picked = *agent;
                                             let label = agent.map_or_else(
                                                 || "None".to_owned(),
@@ -1258,7 +1337,8 @@ impl Shell {
                                                         format!("agent-option-{at}")
                                                     })
                                                     .relative()
-                                                    .h(px(28.))
+                                                    .h(px(AGENT_ROW_HEIGHT))
+                                                    .flex_none()
                                                     .px(px(10.))
                                                     .flex()
                                                     .items_center()
@@ -1450,6 +1530,54 @@ fn shorten_path_start(path: &str, max: usize) -> String {
     }
     let tail: String = path.chars().skip(count - (max - 1)).collect();
     format!("\u{2026}{tail}")
+}
+
+impl NewWorktreeUi {
+    /// Opens the agent list on the agent chosen now, with nothing typed.
+    fn open_agent_list(&mut self, all: &[Option<AgentId>]) {
+        self.agent_list = true;
+        self.agent_query.clear();
+        self.agent_cursor = all
+            .iter()
+            .position(|agent| *agent == self.agent)
+            .unwrap_or(0);
+        self.agent_scroll.scroll_to_item(self.agent_cursor);
+    }
+}
+
+/// The entry after (or before) `at` in a list of `count`, stopping at the
+/// ends.
+fn step_cursor(at: usize, count: usize, forward: bool) -> usize {
+    if forward {
+        (at + 1).min(count.saturating_sub(1))
+    } else {
+        at.saturating_sub(1)
+    }
+}
+
+/// How tall the open agent list may be: eight rows, and no more than a third
+/// of the window, so it never runs off the bottom of a short one.
+fn agent_list_height(window: gpui_kit::Pixels) -> gpui_kit::Pixels {
+    let rows = px(AGENT_ROW_HEIGHT * 8. + 8.);
+    rows.min(window * 0.35).max(px(AGENT_ROW_HEIGHT * 3. + 8.))
+}
+
+/// The height of one entry of the agent list.
+const AGENT_ROW_HEIGHT: f32 = 28.;
+
+/// The entries of the agent list whose name holds `query`, case aside; an
+/// empty query keeps them all.
+fn filter_agents(all: Vec<Option<AgentId>>, query: &str) -> Vec<Option<AgentId>> {
+    let query = query.trim().to_lowercase();
+    all.into_iter()
+        .filter(|agent| {
+            query.is_empty()
+                || agent
+                    .map_or("None", format::agent_name)
+                    .to_lowercase()
+                    .contains(&query)
+        })
+        .collect()
 }
 
 /// What the agent list offers, in order: no agent, then every agent a new

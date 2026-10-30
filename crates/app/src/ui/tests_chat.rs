@@ -1695,6 +1695,19 @@ fn files_stay_where_another_conversation_works_in_the_same_folder(cx: &mut TestA
 const EDIT_A: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"e1","name":"Edit","input":{"file_path":"a.rs","old_string":"one","new_string":"two\nthree"}}]}}"#;
 const WRITE_B: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"e2","name":"Write","input":{"file_path":"b.rs","content":"x\ny"}}]}}"#;
 
+const RUN_FORMAT: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"r1","name":"Bash","input":{"command":"cargo fmt"}}]}}"#;
+
+/// An edit of a file whose path is far longer than any card is wide.
+fn edit_of_a_long_path() -> String {
+    let path = format!(
+        "graft/.cache/session/{}3b947915-d89e-4514-9ef8-1cc93002439a.json",
+        "a-very-long-directory-name/".repeat(9)
+    );
+    format!(
+        r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"e3","name":"Edit","input":{{"file_path":"{path}","old_string":"one","new_string":"two"}}}}]}}}}"#
+    )
+}
+
 /// What `git status` says in the tests of the git cell: three changed files
 /// on a branch with an upstream.
 const STATUS: &str = "## trunk...origin/trunk\0 M a.rs\0A  b.rs\0?? c.txt\0";
@@ -1770,6 +1783,57 @@ fn a_turn_that_changed_files_ends_with_a_card_that_opens_the_diffs_beside_it(
 }
 
 #[gpui_kit::test]
+fn a_file_with_a_very_long_path_stays_on_one_line_inside_the_card(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "move the cache");
+    let long = edit_of_a_long_path();
+    prints(&h, cx, &[INIT, &long, WRITE_B, SAID, RESULT]);
+    exits(&h, cx, 0);
+    let card = h
+        .bounds_of("chat-changed-1-1".to_owned(), cx)
+        .expect("the card");
+    let long_row = h
+        .bounds_of("chat-changed-file-1-1-0".to_owned(), cx)
+        .expect("the long path's row");
+    let short_row = h
+        .bounds_of("chat-changed-file-1-1-1".to_owned(), cx)
+        .expect("the short path's row");
+    let within = |inner: gpui_kit::Bounds<gpui_kit::Pixels>| {
+        inner.left() >= card.left()
+            && inner.right() <= card.right()
+            && inner.top() >= card.top()
+            && inner.bottom() <= card.bottom()
+    };
+    assert!(within(long_row), "{long_row:?} is not inside {card:?}");
+    assert!(within(short_row), "{short_row:?} is not inside {card:?}");
+    assert_eq!(
+        long_row.size.height, short_row.size.height,
+        "the long path wrapped onto a second line"
+    );
+    let text = h
+        .bounds_of("chat-changed-path-1-1-0".to_owned(), cx)
+        .expect("the path");
+    assert!(
+        text.left() >= long_row.left() && text.right() <= long_row.right(),
+        "{text:?} runs out of {long_row:?}"
+    );
+    assert!(
+        text.size.height <= long_row.size.height,
+        "{text:?} is taller than {long_row:?}"
+    );
+    let name = h
+        .bounds_of("chat-changed-name-1-1-0".to_owned(), cx)
+        .expect("the file name is drawn");
+    assert!(
+        name.right() <= long_row.right(),
+        "the name is cut off: {name:?}"
+    );
+}
+
+#[gpui_kit::test]
 fn the_panel_shows_a_single_file_or_everything_uncommitted(cx: &mut TestAppContext) {
     use crate::ui::chat_diff::Scope;
     let Some((h, _dir, path)) = window(cx) else {
@@ -1831,11 +1895,11 @@ fn what_a_command_changed_in_a_repository_is_counted_from_its_snapshots(cx: &mut
     sessions_in(&h, nothing.path());
     git_repo(&path);
     start(&h, cx, AgentId::CLAUDE, &path);
-    // The agent's tools say nothing: a shell command did it all.
+    // The agent's tools say nothing of the files: a shell command did it all.
     say(&h, cx, 1, "format everything");
     std::fs::write(format!("{path}/a.txt"), "a0\nmore\n").unwrap();
     std::fs::write(format!("{path}/made.txt"), "1\n2\n3\n").unwrap();
-    prints(&h, cx, &[INIT, SAID, RESULT]);
+    prints(&h, cx, &[INIT, RUN_FORMAT, SAID, RESULT]);
     exits(&h, cx, 0);
     wait_until(&h, cx, "the count of turn 1", |h, cx| {
         h.shell(cx, |shell| {
@@ -1885,6 +1949,34 @@ fn what_a_command_changed_in_a_repository_is_counted_from_its_snapshots(cx: &mut
         []
     );
     assert!(!h.shows_dynamic("chat-changed-1-2".into(), cx));
+}
+
+#[gpui_kit::test]
+fn a_file_a_background_process_wrote_during_a_turn_that_only_talked_is_no_card(
+    cx: &mut TestAppContext,
+) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    let nothing = tempfile::tempdir().unwrap();
+    sessions_in(&h, nothing.path());
+    git_repo(&path);
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "hola");
+    // A hook or an indexer writes while the agent only answers.
+    std::fs::write(format!("{path}/indexed.json"), "1\n2\n3\n").unwrap();
+    prints(&h, cx, &[INIT, SAID, RESULT]);
+    exits(&h, cx, 0);
+    wait_until(&h, cx, "the count of turn 1", |h, cx| {
+        h.shell(cx, |shell| {
+            shell.chats[&LiveId(1)].measured.contains_key(&1)
+        })
+    });
+    assert_eq!(
+        h.shell(cx, |shell| shell.chats[&LiveId(1)].turn_stats(1)),
+        []
+    );
+    assert!(!h.shows_dynamic("chat-changed-1-1".into(), cx));
 }
 
 #[gpui_kit::test]
@@ -3049,6 +3141,170 @@ fn command_labels(h: &Harness, cx: &mut TestAppContext) -> Vec<String> {
         })
     });
     rows
+}
+
+// ----- the history of what was sent, in the field --------------------------------------
+
+/// What the person said in conversation 1, oldest first, as the conversation
+/// holds it (a restored one is no different).
+fn said_before(h: &Harness, cx: &mut TestAppContext, prompts: &[&str]) {
+    cx.update(|cx| {
+        h.shell.update(cx, |shell, _| {
+            let chat = shell.chats.get_mut(&LiveId(1)).unwrap();
+            for prompt in prompts {
+                chat.conversation.said_at(prompt, None);
+            }
+        })
+    });
+}
+
+/// Writes `text` in the field of conversation 1, the caret at `caret`
+/// (the end without one).
+fn write_field(h: &Harness, cx: &mut TestAppContext, text: &str, caret: Option<usize>) {
+    cx.update_window(h.window.into(), |_, window, cx| {
+        let input = h.shell.read(cx).chats[&LiveId(1)].input.clone();
+        input.update(cx, |input, cx| {
+            input.set_value(text.to_owned(), window, cx);
+            let at = caret.unwrap_or(text.len());
+            input.set_selected_range(at..at, cx);
+            input.focus(window, cx);
+        });
+    })
+    .unwrap();
+    h.settle(cx);
+}
+
+fn caret(h: &Harness, cx: &mut TestAppContext) -> usize {
+    cx.update(|cx| h.shell.read(cx).chats[&LiveId(1)].input.read(cx).cursor())
+}
+
+#[gpui_kit::test]
+fn up_recalls_the_last_prompt_and_up_again_the_one_before(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    said_before(&h, cx, &["first", "second", "third"]);
+    h.press("up", cx);
+    assert_eq!(field(&h, cx, 1), "third");
+    h.press("up", cx);
+    assert_eq!(field(&h, cx, 1), "second");
+    h.press("up", cx);
+    assert_eq!(field(&h, cx, 1), "first");
+    h.press("up", cx);
+    assert_eq!(field(&h, cx, 1), "first", "the oldest stays");
+    assert_eq!(caret(&h, cx), "first".len(), "the caret is at the end");
+}
+
+#[gpui_kit::test]
+fn down_walks_forward_and_finally_gives_back_the_draft(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    said_before(&h, cx, &["first", "second"]);
+    write_field(&h, cx, "half a thought", None);
+    h.press("up", cx);
+    h.press("up", cx);
+    assert_eq!(field(&h, cx, 1), "first");
+    h.press("down", cx);
+    assert_eq!(field(&h, cx, 1), "second");
+    h.press("down", cx);
+    assert_eq!(field(&h, cx, 1), "half a thought", "the draft is back");
+    // Out of browsing, Down is the field's own again and changes nothing.
+    h.press("down", cx);
+    assert_eq!(field(&h, cx, 1), "half a thought");
+}
+
+#[gpui_kit::test]
+fn a_prompt_sent_twice_in_a_row_is_recalled_once_and_attachments_come_back(
+    cx: &mut TestAppContext,
+) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    let with_file = crate::ui::king::with_attached(
+        "look at this",
+        &[std::path::PathBuf::from("/tmp/shot.png")],
+    )
+    .unwrap();
+    said_before(&h, cx, &["older", "again", "again", &with_file]);
+    h.press("up", cx);
+    assert_eq!(field(&h, cx, 1), "look at this");
+    assert_eq!(
+        h.shell(cx, |s| s.chats[&LiveId(1)].attached.clone()),
+        [std::path::PathBuf::from("/tmp/shot.png")]
+    );
+    h.press("up", cx);
+    assert_eq!(field(&h, cx, 1), "again");
+    assert!(h.shell(cx, |s| s.chats[&LiveId(1)].attached.is_empty()));
+    h.press("up", cx);
+    assert_eq!(field(&h, cx, 1), "older", "no second `again`");
+}
+
+#[gpui_kit::test]
+fn up_with_the_caret_below_the_first_line_only_moves_the_caret(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    said_before(&h, cx, &["old"]);
+    write_field(&h, cx, "line one\nline two", None);
+    let before = caret(&h, cx);
+    h.press("up", cx);
+    assert_eq!(
+        field(&h, cx, 1),
+        "line one\nline two",
+        "nothing was recalled"
+    );
+    assert!(caret(&h, cx) < before, "the caret went up a line");
+    // Now on the first line: Up recalls.
+    h.press("up", cx);
+    assert_eq!(field(&h, cx, 1), "old");
+}
+
+#[gpui_kit::test]
+fn up_belongs_to_the_slash_menu_while_it_is_open(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    offers(&h, cx);
+    said_before(&h, cx, &["old"]);
+    h.type_text("/", cx);
+    assert!(h.shows("chat-menu-1", cx));
+    h.press("down", cx);
+    h.press("down", cx);
+    assert_eq!(
+        h.shell(cx, |s| s.chats[&LiveId(1)].menu.as_ref().unwrap().selected),
+        2
+    );
+    h.press("up", cx);
+    assert_eq!(
+        h.shell(cx, |s| s.chats[&LiveId(1)].menu.as_ref().unwrap().selected),
+        1
+    );
+    assert_eq!(field(&h, cx, 1), "/", "no prompt was recalled");
+}
+
+#[gpui_kit::test]
+fn up_belongs_to_a_question_the_agent_waits_on(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "old");
+    prints(&h, cx, &[INIT, BASH, ASK]);
+    assert!(
+        h.shell(cx, |s| !s.chats[&LiveId(1)]
+            .conversation
+            .questions
+            .is_empty()),
+        "the agent asks"
+    );
+    h.press("up", cx);
+    assert_eq!(field(&h, cx, 1), "", "the question has the arrows");
 }
 
 #[gpui_kit::test]

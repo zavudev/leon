@@ -16,6 +16,7 @@
 //!
 //! Escape closes the panel, and so does the command that opens it.
 
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::*;
 use gpui_kit::{div, AnyElement, ClickEvent, Context, SharedString, UniformListScrollHandle};
 use leon_remote::{parse_diff, ChangedFile, DiffLine, FileDiff, FileStatus};
@@ -164,12 +165,14 @@ impl Chat {
     }
 
     /// What the turn numbered `turn` changed: git's count when it was made,
-    /// else what its tools said.
+    /// else what its tools said, and only when a tool that can change files
+    /// ran in it (see [`changed::of_turn`]).
     pub fn turn_stats(&self, turn: u32) -> Vec<Stat> {
-        self.measured
-            .get(&turn)
-            .cloned()
-            .unwrap_or_else(|| changed::from_items(self.turn_items(turn), &self.cwd))
+        changed::of_turn(
+            self.turn_items(turn),
+            &self.cwd,
+            self.measured.get(&turn).map(Vec::as_slice),
+        )
     }
 
     /// The cards of the conversation: for each turn that is over and changed
@@ -613,14 +616,21 @@ impl Shell {
         let _ = (added, removed);
         for (at, stat) in stats.iter().take(CARD_FILES).enumerate() {
             let path = stat.path.clone();
+            let tip = SharedString::from(stat.path.clone());
             let name = format!("chat-changed-file-{}-{turn}-{at}", id.0);
+            let path_name = format!("chat-changed-path-{}-{turn}-{at}", id.0);
+            let file_name = format!("chat-changed-name-{}-{turn}-{at}", id.0);
             let (dir, file) = split_name(&stat.path);
+            // One line: the folders give way (cut with an ellipsis) so the
+            // file name always stays whole. The row grows with its text, the
+            // card with its rows: nothing has a fixed height.
             card = card.child(
                 div()
                     .id(SharedString::from(name.clone()))
                     .debug_selector(move || name.clone())
-                    .h(px(22.))
+                    .min_h(px(22.))
                     .px(px(10.))
+                    .py(px(2.))
                     .flex()
                     .items_center()
                     .gap(px(8.))
@@ -628,20 +638,42 @@ impl Shell {
                     .border_color(colours.border)
                     .cursor_pointer()
                     .hover(move |style| style.bg(hover))
+                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.chat_diff_open(id, Source::Turn(turn), Some(path.clone()), true, cx);
                     }))
                     .child(
                         div()
+                            .debug_selector(move || path_name.clone())
                             .flex_1()
                             .min_w_0()
-                            .truncate()
+                            .overflow_hidden()
+                            .flex()
+                            .items_center()
+                            .whitespace_nowrap()
                             .font_family(fonts::mono())
                             .text_size(metrics::TEXT_SMALL())
-                            .child(div().text_color(colours.text_faint).child(dir.to_owned()))
-                            .child(div().text_color(colours.text).child(file.to_owned())),
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(colours.text_faint)
+                                    .child(dir.to_owned()),
+                            )
+                            .child(
+                                div()
+                                    .debug_selector(move || file_name.clone())
+                                    .flex_shrink_0()
+                                    .max_w_full()
+                                    .text_color(colours.text)
+                                    .child(file.to_owned()),
+                            ),
                     )
-                    .child(counts_of(stat.added, stat.removed, colours)),
+                    .child(
+                        div()
+                            .flex_none()
+                            .child(counts_of(stat.added, stat.removed, colours)),
+                    ),
             );
         }
         if stats.len() > CARD_FILES {
