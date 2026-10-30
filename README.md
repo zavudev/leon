@@ -456,6 +456,7 @@ platform (see below).
 | Command | macOS | Linux and Windows |
 | --- | --- | --- |
 | **Search** | | |
+| Find in the conversation… | `⌘F` | `Ctrl+F` |
 | Go to a project, worktree, session or machine | `⌘P` `⌘K` `⇧⌘K` | `Ctrl+P` `Ctrl+K` `Ctrl+Shift+K` |
 | Command palette | `⇧⌘P` | `Ctrl+Shift+P` |
 | Search the session history | `⇧⌘F` | `Ctrl+Shift+I` |
@@ -533,6 +534,7 @@ platform (see below).
 | Open the transcript | `⇧⌘L` | `Ctrl+Shift+L` |
 | Remove from history | palette only | palette only |
 | Delete the session and its worktree | palette only | palette only |
+| Send the first queued message into the running turn | `⌘↩` | `Ctrl+Enter` |
 | **Files** | | |
 | Find in the file… | `⌘F` | `Ctrl+F` |
 | Replace in the file… | `⌥⌘F` | `Ctrl+H` |
@@ -546,6 +548,7 @@ platform (see below).
 | Show the changes of the worktree | `⌥⌘G` | `Ctrl+Shift+Alt+G` |
 | Push the branch | palette only | palette only |
 | Commit, push and open a pull request | palette only | palette only |
+| Show or hide the changes beside the conversation | `⌥⌘D` | `Ctrl+Shift+Alt+D` |
 | **Terminal** | | |
 | Find in the terminal… | `⌘F` | `Ctrl+Shift+F` |
 | Find next | `⌘G` | `Ctrl+Shift+E` |

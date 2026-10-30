@@ -159,7 +159,7 @@ fn undoing_back_to_what_was_saved_makes_the_file_clean_again(cx: &mut TestAppCon
     let (h, _dir, _file) = with_file(cx, "notes.txt", b"hello\n");
     h.type_text("x", cx);
     assert!(dirty(&h, cx));
-    h.press("ctrl-z", cx);
+    h.press("secondary-z", cx);
     assert_eq!(editor_text(&h, cx), "hello\n");
     assert!(!dirty(&h, cx), "the text is what was read");
     assert_eq!(doc(&h, cx, |_, d| Shell::file_label(d)), "notes.txt");

@@ -870,6 +870,14 @@ impl Shell {
     /// label.
     pub(super) fn rename_live(&mut self, id: LiveId, name: &str, cx: &mut Context<Self>) {
         let name = name.trim();
+        // A conversation has no terminal to ask: the name is Leon's alone,
+        // and it wins over any generated title.
+        if let Some(chat) = self.chats.get_mut(&id) {
+            chat.name = (!name.is_empty()).then(|| name.to_owned());
+            self.rebuild_rows();
+            cx.notify();
+            return;
+        }
         let Some(session) = self.live.get_mut(id) else {
             return;
         };
@@ -1003,6 +1011,87 @@ impl Shell {
             return;
         }
         let note = notify::note(event, id, session);
+        self.announce(note, prefs, cx);
+    }
+
+    /// Says what a conversation just did, in the ways the settings ask for,
+    /// when the person is not looking at it: the window is in the background,
+    /// or another tab is open. The row of the conversation and its tab carry
+    /// a dot until it is seen, whatever the settings say.
+    pub(super) fn raise_chat(
+        &mut self,
+        id: LiveId,
+        event: &notify::ChatEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let prefs = crate::settings::notifications(cx);
+        if !prefs.enabled || !prefs.chats || !prefs.allows(event.event()) {
+            return;
+        }
+        let Some(chat) = self.chats.get(&id) else {
+            return;
+        };
+        let machine = self
+            .snapshot
+            .machine(&chat.machine)
+            .map(|machine| machine.name.clone())
+            .unwrap_or_default();
+        let note = notify::chat_note(
+            event,
+            id,
+            &chat.label(),
+            &chat.cwd,
+            &machine,
+            chat.machine.is_local(),
+        );
+        self.announce(note, prefs, cx);
+    }
+
+    /// Takes the person to what a notification of the centre was about when
+    /// it is clicked: the window comes forward and the session, a terminal or
+    /// a conversation, is open.
+    pub(super) fn watch_notifications(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        let handle = window.window_handle();
+        cx.on_system_notification_response(move |response, cx| {
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            let tag = response.tag.to_string();
+            handle
+                .update(cx, |_, window, cx| {
+                    window.activate_window();
+                    this.update(cx, |shell, cx| {
+                        shell.notification_activated(&tag, window, cx)
+                    });
+                })
+                .ok();
+        });
+    }
+
+    /// A notification of the centre with this tag was clicked.
+    pub(super) fn notification_activated(
+        &mut self,
+        tag: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = notify::session_of_tag(tag) else {
+            return;
+        };
+        if self.live.get(id).is_some() || self.chats.contains_key(&id) {
+            self.open_live(id, window, cx);
+        }
+    }
+
+    /// Shows a note the ways the settings ask: the banner over the window and
+    /// the desktop notification, with a sound when asked.
+    fn announce(
+        &mut self,
+        note: notify::Note,
+        prefs: crate::settings::Notifications,
+        cx: &mut Context<Self>,
+    ) {
         if prefs.banner {
             let until = cx.background_executor().now() + self.options.banner_duration;
             // A newer note of the same session refreshes its banner instead of
@@ -1035,6 +1124,9 @@ impl Shell {
         }
         if prefs.desktop && (!prefs.only_unfocused || !self.window_active) {
             (self.options.notify)(&note, cx);
+            if prefs.sound {
+                (self.options.chime)(cx);
+            }
         }
     }
 
@@ -2598,6 +2690,24 @@ impl Shell {
             .into_any_element()
     }
 
+    /// The dot of a tab: the conversation of its panes, other than the one in
+    /// view, whose agent stopped, failed or asks while it was out of sight.
+    /// It goes when that conversation is looked at.
+    fn tab_dot(&self, leaves: &[LiveId], colours: &Palette) -> Option<Div> {
+        leaves.iter().find_map(|leaf| {
+            if matches!(self.main, Main::Live(open) if open == *leaf) {
+                return None;
+            }
+            let colour = match self.chats.get(leaf)?.activity() {
+                Activity::TurnOver => colours.info,
+                Activity::Failed => colours.error,
+                Activity::NeedsYou => colours.warning,
+                _ => return None,
+            };
+            Some(super::widgets::led(colour))
+        })
+    }
+
     fn render_tab_bar(
         &self,
         workspace: &workspace::Workspace,
@@ -2668,6 +2778,13 @@ impl Shell {
                                 FontWeight::NORMAL
                             })
                             .child(label),
+                    )
+                    // A conversation whose agent stopped, failed or asks
+                    // while it was out of sight carries a dot, as its row.
+                    .children(
+                        self.tab_dot(&tab.layout.leaves(), colours).map(|dot| {
+                            dot.debug_selector(move || format!("terminal-tab-dot-{index}"))
+                        }),
                     )
                     .when(panes > 1, |this| {
                         this.child(

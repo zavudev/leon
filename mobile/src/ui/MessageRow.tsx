@@ -284,6 +284,50 @@ function MessageRowInner({ message, agent, agentName, cwd, open = false, onToggl
         </Callout>
       );
 
+    case 'todos': {
+      // The agent's checklist: a glyph per entry, as the tools above say theirs.
+      const done = message.todos.filter((todo) => todo.status === 'completed').length;
+      return (
+        <View
+          accessible
+          accessibilityLabel={`Plan, ${done} of ${message.todos.length} done`}
+          style={[styles.tool, { borderLeftColor: t.guide }]}>
+          <View style={styles.toolHead}>
+            <Label tone="muted">Plan</Label>
+            <Txt variant="mono" tone="faint">
+              {done}/{message.todos.length}
+            </Txt>
+          </View>
+          {message.todos.map((todo, index) => (
+            <View key={index} style={styles.todo}>
+              <Txt
+                variant="mono"
+                style={{
+                  width: 12,
+                  color:
+                    todo.status === 'completed'
+                      ? t.success
+                      : todo.status === 'in-progress'
+                        ? t.signal
+                        : t.textFaint,
+                }}>
+                {todo.status === 'completed' ? '✓' : todo.status === 'in-progress' ? '…' : '○'}
+              </Txt>
+              <Txt
+                variant="small"
+                tone={todo.status === 'in-progress' ? 'text' : 'muted'}
+                style={[
+                  { flex: 1 },
+                  todo.status === 'completed' ? { textDecorationLine: 'line-through' } : null,
+                ]}>
+                {fromCwd(todo.text, cwd)}
+              </Txt>
+            </View>
+          ))}
+        </View>
+      );
+    }
+
     case 'question': {
       // The record of something the agent asked: a line, as a tool is. The
       // question itself is answered above the composer while it is open.
@@ -345,6 +389,7 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   toolHead: { flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 30, paddingRight: 4 },
+  todo: { flexDirection: 'row', gap: 6, paddingRight: 4, paddingVertical: 1 },
   toolBody: { gap: 6, paddingTop: 2, paddingBottom: 8 },
   block: {
     padding: 10,

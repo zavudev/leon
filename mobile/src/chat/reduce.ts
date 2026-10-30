@@ -9,6 +9,10 @@ import {
   type NoteMessage,
   type NoticeMessage,
   type QuestionMessage,
+  parseTodos,
+  TODOS_ID,
+  TODOS_TOOL,
+  type TodosMessage,
   type ToolMessage,
 } from './model';
 
@@ -118,6 +122,22 @@ function resumed(state: TurnState): TurnState {
   return state.status === 'finished' ? { ...state, status: 'running' } : state;
 }
 
+/**
+ * The state with the agent's list of todos: the row of the turn is replaced in
+ * its place, or made when it is the first, or dropped when the list is empty.
+ */
+function withTodos(state: TurnState, detail: string, now: number): TurnState {
+  const todos = parseTodos(detail);
+  const known = state.items.find((m) => m.kind === 'todos');
+  if (known) {
+    return todos.length === 0
+      ? { ...state, items: state.items.filter((m) => m.id !== known.id) }
+      : patch(state, known.id, (m) => (m.kind === 'todos' ? { ...m, todos } : m));
+  }
+  if (todos.length === 0) return state;
+  return push(settleDraft(state), (id): TodosMessage => ({ id, kind: 'todos', todos, at: now }));
+}
+
 /** The state after `event`. `now` is the time to stamp new rows with. */
 export function reduceTurn(before: TurnState, event: TurnEvent, now: number): TurnState {
   const state =
@@ -215,7 +235,8 @@ export function reduceTurn(before: TurnState, event: TurnEvent, now: number): Tu
       }));
     }
 
-    case 'tool-use':
+    case 'tool-use': {
+      if (event.name === TODOS_TOOL && event.id === TODOS_ID) return withTodos(state, event.detail, now);
       return push(settleDraft(state), (id): ToolMessage => ({
         id,
         kind: 'tool',
@@ -226,6 +247,7 @@ export function reduceTurn(before: TurnState, event: TurnEvent, now: number): Tu
         ...(event.detail ? { detail: event.detail } : null),
         at: now,
       }));
+    }
 
     case 'tool-result': {
       const target = [...state.items]

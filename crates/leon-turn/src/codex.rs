@@ -45,6 +45,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use serde_json::{json, Map, Value};
 
 use crate::agents::{strings, Action, AgentSession, McpServer, Outgoing, Step, TurnSpec};
+use crate::change::FileChange;
 use crate::claude::{AgentCommand, AgentMode, AgentModel, AgentOptions};
 use crate::error::TurnError;
 use crate::events::{
@@ -699,12 +700,20 @@ impl CodexSession {
         let declined = item["status"] == "declined";
         let whole_use;
         let whole_result;
+        let mut files = Vec::new();
         let (name, summary, ok, result) = match item["type"].as_str() {
             Some("agentMessage" | "plan") => {
                 if let (true, Some(text)) = (completed, item["text"].as_str()) {
                     if !text.is_empty() {
-                        step.events.push(TurnEvent::Text {
-                            text: text.to_owned(),
+                        // A plan written as checkboxes is the agent's list.
+                        let list = (item["type"] == "plan")
+                            .then(|| crate::events::checklist(text))
+                            .flatten();
+                        step.events.push(match list {
+                            Some(todos) => TurnEvent::Todos { todos },
+                            None => TurnEvent::Text {
+                                text: text.to_owned(),
+                            },
                         });
                     }
                 }
@@ -723,6 +732,7 @@ impl CodexSession {
             Some("fileChange") => {
                 let (line, whole) = changes_of(&item["changes"]);
                 self.changes.insert(id.clone(), (line.clone(), whole));
+                files = FileChange::from_codex(&item["changes"]);
                 whole_use = changes_detail(&item["changes"]);
                 whole_result = String::new();
                 ("edit".to_owned(), line, !failed, String::new())
@@ -773,6 +783,12 @@ impl CodexSession {
                 detail: text_detail(&whole_use, &summary),
                 summary,
             });
+            if !files.is_empty() {
+                step.events.push(TurnEvent::ToolChange {
+                    id: id.clone(),
+                    changes: files,
+                });
+            }
         }
         if completed {
             self.announced.remove(&id);
@@ -810,6 +826,7 @@ impl CodexSession {
                         output: total.output.saturating_sub(last.output),
                         reasoning: total.reasoning.saturating_sub(last.reasoning),
                         context_window: None,
+                        context_used: None,
                     }
                 });
                 step.events.push(TurnEvent::Usage {
@@ -819,9 +836,16 @@ impl CodexSession {
                         output: total.output.saturating_sub(before.output),
                         reasoning: total.reasoning.saturating_sub(before.reasoning),
                         context_window: usage["modelContextWindow"].as_u64(),
+                        // The thread's last call of the model is what fills
+                        // its context.
+                        context_used: Some(codex_tokens(&usage["last"]).total())
+                            .filter(|used| *used > 0),
                     },
                 });
             }
+            "turn/plan/updated" => step.events.push(TurnEvent::Todos {
+                todos: crate::events::todos_of(&params["plan"], "step", "status"),
+            }),
             "item/started" => self.item(&params["item"], false, step),
             "item/completed" => self.item(&params["item"], true, step),
             "item/agentMessage/delta" | "item/plan/delta" => {
@@ -901,6 +925,7 @@ fn codex_tokens(breakdown: &Value) -> Tokens {
         output: count("outputTokens"),
         reasoning: count("reasoningOutputTokens"),
         context_window: None,
+        context_used: None,
     }
 }
 

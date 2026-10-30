@@ -399,6 +399,10 @@ const DICTATION_LANGUAGES: Choices = Choices::Fixed(&[
     ("uk", "Ukrainian"),
     ("vi", "Vietnamese"),
 ]);
+const BUSY_HOW: Choices = Choices::Fixed(&[
+    ("steer", "Steer the running turn"),
+    ("queue", "Queue it for the next turn"),
+]);
 const INTERFACES: Choices = Choices::Fixed(&[("terminal", "Terminal"), ("chat", "Leon's own")]);
 const RESTORE: Choices =
     Choices::Fixed(&[("ask", "Ask me"), ("always", "Always"), ("never", "Never")]);
@@ -747,6 +751,24 @@ const BASE: &[Def] = &[
         "resume transcript enter click",
         K::Choice(OPEN_MODES),
         D::Text("resume"),
+    ),
+    def(
+        "chat_busy",
+        S::Agents,
+        "When the agent is busy",
+        "What a message sent to a conversation of Leon's own interface does while its agent is working. Steer: it goes into the running turn, where the agent takes it (Claude Code and Codex do). Queue: it waits, listed above the field, and becomes the next turn. An agent that cannot be told more while it works queues the message either way.",
+        "chat queue steer follow-up followup busy running message send working turn interrupt",
+        K::Choice(BUSY_HOW),
+        D::Text("steer"),
+    ),
+    def(
+        "chat_titles",
+        S::Agents,
+        "Name conversations automatically",
+        "After the first turn of a conversation of Leon's own interface, ask the agent for a short title and show it in the tab and the sidebar instead of the first words you wrote. A name you gave it by hand is never replaced. Claude Code is asked once, with its cheapest model; if that fails, nothing changes.",
+        "chat title name rename summary conversation automatic generate haiku",
+        K::Toggle,
+        D::Bool(true),
     ),
     def(
         crate::memory::BUDGET_KEY,
@@ -1155,6 +1177,24 @@ const BASE: &[Def] = &[
         "focus foreground quiet mute",
         K::Toggle,
         D::Bool(true),
+    ),
+    def(
+        "notify_chats",
+        S::Notifications,
+        "When a conversation needs you",
+        "A conversation of Leon's own interface finished its turn, failed, or asks a question while it is not on screen: the window is in the background, or another tab is open. Its row in the sidebar and its tab carry a dot until you look at it.",
+        "chat conversation turn finished question failed ask background dot badge agent",
+        K::Toggle,
+        D::Bool(true),
+    ),
+    def(
+        "notify_sound",
+        S::Notifications,
+        "Play a sound",
+        "Play a short sound with the desktop notification of a conversation. Off by default. macOS only: the system's own notification sound is not asked for, so this plays one of the system sounds.",
+        "audio beep ping chime sound noise alert",
+        K::Toggle,
+        D::Bool(false),
     ),
     // ----- sidebar and window
     def(

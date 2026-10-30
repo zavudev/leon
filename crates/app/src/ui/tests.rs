@@ -364,6 +364,12 @@ struct Harness {
     opened: Rc<std::cell::RefCell<Vec<std::path::PathBuf>>>,
     /// The desktop notifications the shell asked for.
     notes: Rc<std::cell::RefCell<Vec<crate::ui::notify::Note>>>,
+    /// How many times the sound of a notification was played.
+    chimes: Rc<std::cell::Cell<usize>>,
+    /// What the generator of conversation titles was asked.
+    title_asked: Rc<std::cell::RefCell<Vec<crate::ui::chat::TitleAsk>>>,
+    /// What it answers.
+    title_says: Rc<std::cell::RefCell<Result<String, String>>>,
     /// How many times the system's folder dialog was asked for.
     folder_dialogs: Rc<std::cell::Cell<usize>>,
     /// The terminals the shell started, and what they were sent.
@@ -489,6 +495,12 @@ fn open_core(
     let opened_in = opened.clone();
     let notes = Rc::new(std::cell::RefCell::new(Vec::new()));
     let notes_in = notes.clone();
+    let chimes = Rc::new(std::cell::Cell::new(0));
+    let chimes_in = chimes.clone();
+    let title_asked = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let title_asked_in = title_asked.clone();
+    let title_says = Rc::new(std::cell::RefCell::new(Err("no title".to_owned())));
+    let title_says_in = title_says.clone();
     let ssh = Arc::new(tests_connect::FakeSsh::default());
     let key_answer = Rc::new(std::cell::RefCell::new(Picked::Cancelled));
     let key_answer_in = key_answer.clone();
@@ -523,6 +535,11 @@ fn open_core(
         activity: Thresholds::default(),
         error_flash: std::time::Duration::from_secs(4),
         notify: Rc::new(move |note, _| notes_in.borrow_mut().push(note.clone())),
+        chime: Rc::new(move |_| chimes_in.set(chimes_in.get() + 1)),
+        titles: Rc::new(move |_, ask, _| {
+            title_asked_in.borrow_mut().push(ask);
+            Task::ready(title_says_in.borrow().clone())
+        }),
         banner_duration: std::time::Duration::from_secs(30),
         den_tick: std::time::Duration::from_millis(5),
         den_submit_after: std::time::Duration::from_millis(5),
@@ -589,6 +606,9 @@ fn open_core(
         terminated,
         opened,
         notes,
+        chimes,
+        title_asked,
+        title_says,
         folder_dialogs: dialogs,
         computer,
         chat,
@@ -2676,6 +2696,145 @@ fn clicking_an_agent_option_picks_it_and_closes_the_list(cx: &mut TestAppContext
     assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
 }
 
+/// Opens the "Create worktree" dialog of the `api` project and walks to its
+/// agent row, whose list opens.
+fn open_the_agent_list(cx: &mut TestAppContext) -> Harness {
+    let h = open(cx, ScriptedRunner::new());
+    let api = h
+        .store
+        .projects(Some(&MachineId::local()))
+        .unwrap()
+        .into_iter()
+        .find(|project| project.name == "api")
+        .unwrap()
+        .id;
+    put_cursor(&h, cx, NodeId::Project(api));
+    h.press("ctrl-shift-n", cx);
+    h.press("tab", cx);
+    h.press("tab", cx);
+    assert!(h.shows("agent-list", cx));
+    h
+}
+
+/// The names the agent list shows now, in order (`None` is "None").
+fn agent_names(h: &Harness, cx: &mut TestAppContext) -> Vec<String> {
+    cx.update(|cx| {
+        h.shell
+            .read(cx)
+            .agent_options(cx)
+            .into_iter()
+            .map(|agent| {
+                agent.map_or_else(
+                    || "None".to_owned(),
+                    |agent| crate::format::agent_name(agent).to_owned(),
+                )
+            })
+            .collect()
+    })
+}
+
+/// Types text into whatever has the keyboard, one key at a time, the way a
+/// keyboard reports it (the key and the character it makes).
+fn type_keys(h: &Harness, text: &str, cx: &mut TestAppContext) {
+    for character in text.chars() {
+        h.press(&format!("{character}->{character}"), cx);
+    }
+}
+
+#[gpui_kit::test]
+fn the_agent_list_stays_inside_the_window_and_keeps_the_highlighted_row_in_view(
+    cx: &mut TestAppContext,
+) {
+    let h = open_the_agent_list(cx);
+    let count = agent_names(&h, cx).len();
+    assert!(count > 12, "the catalogue is long: {count}");
+    let window_bottom = gpui_kit::px(800.);
+    let list = h.bounds_of("agent-list".to_owned(), cx).unwrap();
+    assert!(
+        list.bottom() <= window_bottom,
+        "the list runs off the window: {list:?}"
+    );
+    for step in 1..count {
+        h.press("down", cx);
+        let list = h.bounds_of("agent-list".to_owned(), cx).unwrap();
+        let option = h
+            .bounds_of(format!("agent-option-{step}"), cx)
+            .unwrap_or_else(|| panic!("agent-option-{step} is not drawn"));
+        assert!(
+            option.top() >= list.top() && option.bottom() <= list.bottom(),
+            "row {step} is out of view: {option:?} in {list:?}"
+        );
+        assert!(list.bottom() <= window_bottom, "{list:?}");
+    }
+    assert_eq!(
+        h.shell(cx, |s| s.new_worktree_ui.as_ref().unwrap().agent_cursor),
+        count - 1
+    );
+}
+
+#[gpui_kit::test]
+fn typing_while_the_agent_list_is_open_filters_it_by_name(cx: &mut TestAppContext) {
+    let h = open_the_agent_list(cx);
+    type_keys(&h, "cod", cx);
+    let names = agent_names(&h, cx);
+    assert!(names.contains(&"Codex".to_owned()), "{names:?}");
+    assert!(names.len() >= 2 && names.len() < 20, "{names:?}");
+    assert!(
+        names.iter().all(|name| name.to_lowercase().contains("cod")),
+        "{names:?}"
+    );
+    // Case does not matter.
+    h.press("escape", cx);
+    assert_eq!(
+        h.shell(cx, |s| s
+            .new_worktree_ui
+            .as_ref()
+            .unwrap()
+            .agent_query
+            .clone()),
+        "",
+        "Escape clears the filter first"
+    );
+    assert!(h.shows("agent-list", cx), "and keeps the list open");
+    type_keys(&h, "CODEX", cx);
+    let names = agent_names(&h, cx);
+    assert_eq!(names, ["Codex"]);
+    // Backspace edits what was typed.
+    h.press("backspace", cx);
+    let names = agent_names(&h, cx);
+    assert!(names.len() >= 2, "{names:?}");
+    h.press("escape", cx);
+    h.press("escape", cx);
+    assert!(
+        !h.shows("agent-list", cx),
+        "the second Escape closes the list"
+    );
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::NewWorktree);
+}
+
+#[gpui_kit::test]
+fn enter_picks_the_filtered_row_and_a_filter_with_no_match_picks_nothing(cx: &mut TestAppContext) {
+    let h = open_the_agent_list(cx);
+    type_keys(&h, "codex", cx);
+    h.press("enter", cx);
+    assert_eq!(
+        h.shell(cx, |s| s.new_worktree_ui.as_ref().unwrap().agent),
+        Some(AgentId::CODEX)
+    );
+    assert!(h.shell(cx, |s| !s.new_worktree_ui.as_ref().unwrap().agent_list));
+    // Reopened, the filter starts empty again.
+    h.press("down", cx);
+    assert!(h.shows("agent-list", cx));
+    type_keys(&h, "zzzz", cx);
+    h.press("enter", cx);
+    assert_eq!(
+        h.shell(cx, |s| s.new_worktree_ui.as_ref().unwrap().agent),
+        Some(AgentId::CODEX),
+        "nothing matched, so nothing was picked"
+    );
+    assert!(h.shows("agent-list", cx), "the list stays open");
+}
+
 #[gpui_kit::test]
 fn typing_in_the_new_worktree_dialog_reaches_the_name_field(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
@@ -4022,7 +4181,9 @@ fn down_moves_into_the_filtered_tree_and_enter_opens_the_best_match(cx: &mut Tes
     );
 
     h.press("/", cx);
-    h.press("ctrl-a", cx);
+    // Select-all inside a text field is the toolkit's own binding, made for
+    // the real platform: `secondary` follows it, a simulated `ctrl` would not.
+    h.press("secondary-a", cx);
     h.type_text("login", cx);
     h.press("enter", cx);
     assert_eq!(h.main_kind(cx), "worktree:feature/login");

@@ -554,6 +554,37 @@ fn pushing_sets_the_upstream_when_there_is_none_and_never_forces(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
+fn the_changes_tab_pulls_with_a_fast_forward_only(cx: &mut TestAppContext) {
+    let (h, _dir, _path) = with_worktree(cx);
+    h.runner
+        .queue(Output::ok("## topic...origin/topic [behind 1]\0 M a.rs\0"));
+    h.runner.queue(Output::ok(DIFF_A));
+    queue_start(&h, "");
+    h.press_chord("cmd-alt-g", "ctrl-shift-alt-g", cx);
+    for _ in 0..3 {
+        h.settle(cx);
+    }
+    assert!(h.shows("changes-pull", cx));
+    let before = h.runner.calls().len();
+    h.runner
+        .queue(Output::ok("## topic...origin/topic [behind 1]\0 M a.rs\0")); // the branch
+    h.runner.queue(Output::ok("Fast-forward\n"));
+    h.runner
+        .queue(Output::ok("## topic...origin/topic\0 M a.rs\0")); // the store
+    h.runner
+        .queue(Output::ok("## topic...origin/topic\0 M a.rs\0")); // the window
+    h.runner.queue(Output::ok(DIFF_A));
+    queue_start(&h, "");
+    click(&h, cx, "changes-pull");
+    let ran = calls(&h);
+    assert_eq!(ran[before + 1].1, ["pull", "--ff-only"]);
+    let (ok, title, text, _) = outcome(&h, cx).unwrap();
+    assert!(ok);
+    assert_eq!(title, "Pulled");
+    assert!(text.contains("Fast-forward"));
+}
+
+#[gpui_kit::test]
 fn the_pull_request_form_opens_prefilled_and_opens_the_pull_request_with_a_link(
     cx: &mut TestAppContext,
 ) {

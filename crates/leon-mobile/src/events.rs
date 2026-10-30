@@ -249,6 +249,42 @@ pub enum Answer {
     },
 }
 
+/// The id every list of todos crosses under: each one replaces the one before.
+pub const TODOS_ID: &str = "leon:todos";
+/// The name of the tool a list of todos crosses as.
+pub const TODOS_TOOL: &str = "TodoWrite";
+
+/// The agent's list as the phone reads it: a tool use named [`TODOS_TOOL`]
+/// whose detail is one line per entry, `[x]` done, `[~]` in progress, `[ ]`
+/// not started. It is a tool use, not an event of its own, because what
+/// crosses is declared in the generated bindings an installed app already has.
+fn todos_crossing(todos: &[leon_turn::Todo]) -> TurnEvent {
+    use leon_turn::TodoStatus as S;
+    let done = todos.iter().filter(|t| t.status == S::Completed).count();
+    let detail = todos
+        .iter()
+        .map(|todo| {
+            let mark = match todo.status {
+                S::Completed => "[x]",
+                S::InProgress => "[~]",
+                S::Pending => "[ ]",
+            };
+            format!("{mark} {}", todo.text.replace('\n', " "))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    TurnEvent::ToolUse {
+        id: TODOS_ID.to_owned(),
+        name: TODOS_TOOL.to_owned(),
+        summary: if todos.is_empty() {
+            String::new()
+        } else {
+            format!("{done} of {} done", todos.len())
+        },
+        detail,
+    }
+}
+
 impl TurnEvent {
     /// The event as it crosses to the application, or nothing for one the
     /// application does not show.
@@ -311,6 +347,9 @@ impl TurnEvent {
             T::ModeChanged { mode } => Self::ModeChanged { mode },
             // The phone has no notice for it yet.
             T::ModeRefused { .. } => return None,
+            // Nor for the lines a tool changed: the phone has the text of it.
+            T::ToolChange { .. } => return None,
+            T::Todos { todos } => todos_crossing(&todos),
             T::Disconnected => Self::Disconnected,
             T::Reconnected => Self::Reconnected,
             T::Gap => Self::Gap,
@@ -423,6 +462,7 @@ mod tests {
             output: 3_100,
             reasoning: 900,
             context_window: Some(200_000),
+            context_used: None,
         };
         assert_eq!(
             TurnEvent::crossing(leon_turn::TurnEvent::Usage { tokens }),
@@ -432,6 +472,47 @@ mod tests {
                 output: 3_100,
                 reasoning: 900,
                 context_window: Some(200_000),
+            })
+        );
+    }
+
+    #[test]
+    fn the_agents_todos_cross_as_a_checklist_the_phone_reads() {
+        use leon_turn::{Todo, TodoStatus};
+        let todos = vec![
+            Todo {
+                text: "Read the code".to_owned(),
+                status: TodoStatus::Completed,
+            },
+            Todo {
+                text: "Write the test".to_owned(),
+                status: TodoStatus::InProgress,
+            },
+            Todo {
+                text: "Ship it".to_owned(),
+                status: TodoStatus::Pending,
+            },
+        ];
+        assert_eq!(
+            TurnEvent::crossing(leon_turn::TurnEvent::Todos { todos }),
+            Some(TurnEvent::ToolUse {
+                id: TODOS_ID.to_owned(),
+                name: TODOS_TOOL.to_owned(),
+                summary: "1 of 3 done".to_owned(),
+                detail: "[x] Read the code\n[~] Write the test\n[ ] Ship it".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_emptied_list_crosses_empty() {
+        assert_eq!(
+            TurnEvent::crossing(leon_turn::TurnEvent::Todos { todos: Vec::new() }),
+            Some(TurnEvent::ToolUse {
+                id: TODOS_ID.to_owned(),
+                name: TODOS_TOOL.to_owned(),
+                summary: String::new(),
+                detail: String::new(),
             })
         );
     }

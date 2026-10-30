@@ -156,6 +156,68 @@ fn folder_name(cwd: &str) -> &str {
         .unwrap_or(cwd)
 }
 
+/// What a conversation of Leon's own interface just did out of sight.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChatEvent {
+    /// Its agent finished the turn: the person's move.
+    Finished,
+    /// Its agent asks something and waits; the words say what.
+    Asks(String),
+    /// The turn failed; the first line of why, when the agent says.
+    Failed(String),
+}
+
+impl ChatEvent {
+    /// The event of a terminal session it counts as, for the settings that
+    /// say which events are told.
+    pub fn event(&self) -> Event {
+        match self {
+            Self::Finished => Event::TurnOver,
+            Self::Asks(_) => Event::NeedsAnswer,
+            Self::Failed(_) => Event::Failed { code: 1 },
+        }
+    }
+
+    /// What happened, as one line.
+    pub fn line(&self) -> String {
+        match self {
+            Self::Finished => "finished its turn \u{b7} your move".to_owned(),
+            Self::Asks(what) if what.is_empty() => "asks you something".to_owned(),
+            Self::Asks(what) => format!("asks {what}"),
+            Self::Failed(why) if why.is_empty() => "the turn failed".to_owned(),
+            Self::Failed(why) => format!("the turn failed \u{b7} {why}"),
+        }
+    }
+}
+
+/// The note of a conversation: its name and folder, and what it did.
+pub fn chat_note(
+    event: &ChatEvent,
+    id: LiveId,
+    label: &str,
+    cwd: &str,
+    machine: &str,
+    local: bool,
+) -> Note {
+    let line = event.line();
+    Note {
+        kind: event.event().kind(),
+        session: Some(id),
+        title: title(label, cwd),
+        body: if local || machine.is_empty() {
+            line
+        } else {
+            format!("{line} \u{b7} {machine}")
+        },
+    }
+}
+
+/// The conversation or terminal a notification of the centre was about, from
+/// its [`tag`].
+pub fn session_of_tag(tag: &str) -> Option<LiveId> {
+    tag.strip_prefix("leon-session-")?.parse().ok().map(LiveId)
+}
+
 /// A notification on screen, with when it goes away.
 pub struct Banner {
     /// Its identity, for dismissing exactly this one.
@@ -185,6 +247,17 @@ pub fn system_notification(note: &Note) -> SystemNotification {
         title: note.title.clone().into(),
         body: note.body.clone().into(),
         actions: Vec::new(),
+    }
+}
+
+/// Plays a short system sound, for a note the person asked to hear. Only on
+/// macOS, where the system sounds are files; elsewhere nothing is played.
+pub fn chime(_cx: &mut App) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = leon_remote::spawn::std_child("afplay")
+            .arg("/System/Library/Sounds/Glass.aiff")
+            .spawn();
     }
 }
 
@@ -288,5 +361,48 @@ mod tests {
             ..note(Kind::Finished)
         };
         assert_eq!(system_notification(&orphan).tag, "leon");
+    }
+
+    #[test]
+    fn a_conversations_note_says_what_it_did_in_its_own_words() {
+        let finished = chat_note(
+            &ChatEvent::Finished,
+            LiveId(2),
+            "Fix tabs",
+            "/srv/leon",
+            "",
+            true,
+        );
+        assert_eq!(finished.kind, Kind::TurnOver);
+        assert_eq!(finished.title, "Fix tabs \u{b7} leon");
+        assert_eq!(finished.body, "finished its turn \u{b7} your move");
+        let asks = chat_note(
+            &ChatEvent::Asks("permission \u{b7} Bash: ls".into()),
+            LiveId(2),
+            "Fix tabs",
+            "/srv/leon",
+            "mac-mini",
+            false,
+        );
+        assert_eq!(asks.kind, Kind::NeedsAnswer);
+        assert_eq!(asks.body, "asks permission \u{b7} Bash: ls \u{b7} mac-mini");
+        let failed = chat_note(
+            &ChatEvent::Failed("boom".into()),
+            LiveId(2),
+            "x",
+            "/",
+            "",
+            true,
+        );
+        assert_eq!(failed.kind, Kind::Failed);
+        assert_eq!(failed.body, "the turn failed \u{b7} boom");
+        assert_eq!(ChatEvent::Failed(String::new()).line(), "the turn failed");
+    }
+
+    #[test]
+    fn the_tag_of_a_note_leads_back_to_its_session() {
+        assert_eq!(session_of_tag(&tag(&note(Kind::Failed))), Some(LiveId(7)));
+        assert_eq!(session_of_tag("leon"), None);
+        assert_eq!(session_of_tag("leon-session-x"), None);
     }
 }

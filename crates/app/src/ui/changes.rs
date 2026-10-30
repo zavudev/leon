@@ -71,6 +71,8 @@ pub enum Steps {
     Commit,
     /// `git push`.
     Push,
+    /// `git pull --ff-only`.
+    Pull,
     /// `gh pr create`.
     PullRequest,
     /// All of them, each only when there is something for it to do.
@@ -244,6 +246,8 @@ pub struct Allowed {
     pub commit: bool,
     /// There is a branch to push.
     pub push: bool,
+    /// There is a branch to bring up to its upstream.
+    pub pull: bool,
     /// There is a branch, a title and a base.
     pub pull_request: bool,
     /// The whole chain can start: it can do at least its first step.
@@ -289,6 +293,7 @@ pub fn allowed(fields: Fields<'_>) -> Allowed {
     Allowed {
         commit,
         push,
+        pull: push,
         pull_request: push && !fields.base.trim().is_empty() && !fields.title.trim().is_empty(),
         all,
     }
@@ -326,6 +331,7 @@ fn done_words(steps: &[(Step, String)]) -> String {
         .iter()
         .map(|(step, _)| match step {
             Step::Commit => "committed",
+            Step::Pull => "pulled",
             Step::Push => "pushed",
             Step::PullRequest => "opened a pull request",
             Step::Suggestion => "worded",
@@ -910,7 +916,7 @@ impl Shell {
         let wants_commit = match steps {
             Steps::Commit => true,
             Steps::All => !files.is_empty(),
-            Steps::Push | Steps::PullRequest => false,
+            Steps::Push | Steps::Pull | Steps::PullRequest => false,
         };
         let refuse = |view: &mut ChangesView, why: &str| {
             view.outcome = Some(Outcome {
@@ -979,12 +985,14 @@ impl Shell {
             project: view.target.project.clone(),
             path: view.target.path.clone(),
             commit,
+            pull: steps == Steps::Pull,
             push: matches!(steps, Steps::Push | Steps::All),
             pull_request,
         };
         let working = match steps {
             Steps::Commit => "Committing\u{2026}",
             Steps::Push => "Pushing\u{2026}",
+            Steps::Pull => "Pulling\u{2026}",
             Steps::PullRequest => "Opening the pull request\u{2026}",
             Steps::All => "Committing, pushing and opening the pull request\u{2026}",
         };

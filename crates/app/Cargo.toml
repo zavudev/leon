@@ -76,6 +76,8 @@ toml.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# The id of a session Claude Code is given when its transcript is forked.
+uuid.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

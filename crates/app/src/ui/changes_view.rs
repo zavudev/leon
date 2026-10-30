@@ -75,7 +75,7 @@ fn size_words(bytes: usize) -> String {
 }
 
 /// The directory of a path with its last separator, and its file name.
-fn split_name(path: &str) -> (&str, &str) {
+pub(super) fn split_name(path: &str) -> (&str, &str) {
     match path.rfind('/') {
         Some(at) => path.split_at(at + 1),
         None => ("", path),
@@ -459,77 +459,18 @@ impl Shell {
             }
             None => "No file selected".to_owned(),
         };
-        let palette = *colours;
-        let content = match &view.diff {
-            DiffState::None => placeholder(
-                "changes-no-diff",
-                "Select a file to see what changed in it.",
-                colours,
-            ),
-            DiffState::Loading => placeholder("changes-diff-loading", "Reading the diff\u{2026}", colours),
-            DiffState::Failed(why) => failure("changes-diff-failed", why, colours),
-            DiffState::Ready(FileDiff::Binary) => placeholder(
-                "changes-binary",
-                "This file is not text: there is no diff to show.",
-                colours,
-            ),
-            DiffState::Ready(FileDiff::TooLarge { bytes }) => placeholder(
-                "changes-too-large",
-                &format!(
-                    "The diff of this file is too large to show here ({}). Open the file to read it.",
-                    size_words(*bytes)
-                ),
-                colours,
-            ),
-            DiffState::Ready(FileDiff::Empty) => placeholder(
-                "changes-empty-diff",
-                "Nothing to show: the file is empty, or only its mode changed.",
-                colours,
-            ),
-            DiffState::Ready(FileDiff::Lines(lines)) => {
-                let count = lines.len();
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        uniform_list(
-                            "changes-diff",
-                            count,
-                            cx.processor(
-                                move |this, range: std::ops::Range<usize>, _window, cx| {
-                                    let font = Self::terminal_font(cx).family;
-                                    let size = crate::theme::px(
-                                        crate::settings::int(cx, "editor_font_size") as f32,
-                                    );
-                                    let Some(DiffState::Ready(FileDiff::Lines(lines))) =
-                                        this.changes.get(&id).map(|view| &view.diff)
-                                    else {
-                                        return Vec::new();
-                                    };
-                                    range
-                                        .filter_map(|index| {
-                                            lines.get(index).map(|line| {
-                                                diff_line(
-                                                    index,
-                                                    line,
-                                                    font.clone(),
-                                                    size,
-                                                    &palette,
-                                                )
-                                            })
-                                        })
-                                        .collect::<Vec<_>>()
-                                },
-                            ),
-                        )
-                        .track_scroll(&view.diff_scroll)
-                        .size_full(),
-                    )
-                    .child(Scrollbar::vertical(&view.diff_scroll))
-                    .into_any_element()
-            }
-        };
+        let content = self.diff_body(
+            id,
+            &view.diff,
+            &view.diff_scroll,
+            &CHANGES_NAMES,
+            |shell, id| match shell.changes.get(&id).map(|view| &view.diff) {
+                Some(DiffState::Ready(FileDiff::Lines(lines))) => Some(lines.as_slice()),
+                _ => None,
+            },
+            colours,
+            cx,
+        );
         div()
             .debug_selector(|| "changes-diff-pane".into())
             .flex_1()
@@ -651,6 +592,16 @@ impl Shell {
                 colours,
                 cx,
                 move |this, window, cx| this.changes_ship(id, Steps::Push, window, cx),
+            ))
+            .child(button(
+                "changes-pull",
+                "PULL",
+                "git pull --ff-only: only a fast-forward, nothing is merged",
+                ok.pull,
+                false,
+                colours,
+                cx,
+                move |this, window, cx| this.changes_ship(id, Steps::Pull, window, cx),
             ))
             .child(button(
                 "changes-pull-request",
@@ -785,7 +736,7 @@ impl Shell {
 
     /// What the last step came to: its title in the colour of how it went, the
     /// address of a pull request that was opened, and what the commands printed.
-    fn render_outcome(
+    pub(super) fn render_outcome(
         &self,
         outcome: &super::changes::Outcome,
         colours: &Palette,
@@ -837,9 +788,131 @@ impl Shell {
     }
 }
 
+/// The selectors of the parts of a diff body: the changes tab and the
+/// conversation's panel draw the same body under their own names.
+pub(super) struct DiffNames {
+    /// The list of lines.
+    pub list: &'static str,
+    /// A line is `{line}-{index}`.
+    pub line: &'static str,
+    /// No file is selected.
+    pub none: &'static str,
+    /// The diff is being read.
+    pub loading: &'static str,
+    /// The diff could not be read.
+    pub failed: &'static str,
+    /// The file is not text.
+    pub binary: &'static str,
+    /// The diff is longer than is shown.
+    pub too_large: &'static str,
+    /// There is nothing to show.
+    pub empty: &'static str,
+}
+
+/// The changes tab's names.
+const CHANGES_NAMES: DiffNames = DiffNames {
+    list: "changes-diff",
+    line: "changes-line",
+    none: "changes-no-diff",
+    loading: "changes-diff-loading",
+    failed: "changes-diff-failed",
+    binary: "changes-binary",
+    too_large: "changes-too-large",
+    empty: "changes-empty-diff",
+};
+
+impl Shell {
+    /// The body of a diff, whoever holds it: the lines of the file's diff on
+    /// their bands, or a sentence for what has none. `lines` finds the lines
+    /// again when the list asks for the ones in view.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn diff_body(
+        &self,
+        id: LiveId,
+        state: &DiffState,
+        scroll: &gpui_kit::UniformListScrollHandle,
+        names: &'static DiffNames,
+        lines: fn(&Shell, LiveId) -> Option<&[DiffLine]>,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let palette = *colours;
+        match state {
+            DiffState::None => placeholder(
+                names.none,
+                "Select a file to see what changed in it.",
+                colours,
+            ),
+            DiffState::Loading => placeholder(names.loading, "Reading the diff\u{2026}", colours),
+            DiffState::Failed(why) => failure(names.failed, why, colours),
+            DiffState::Ready(FileDiff::Binary) => placeholder(
+                names.binary,
+                "This file is not text: there is no diff to show.",
+                colours,
+            ),
+            DiffState::Ready(FileDiff::TooLarge { bytes }) => placeholder(
+                names.too_large,
+                &format!(
+                    "The diff of this file is too large to show here ({}). Open the file to read it.",
+                    size_words(*bytes)
+                ),
+                colours,
+            ),
+            DiffState::Ready(FileDiff::Empty) => placeholder(
+                names.empty,
+                "Nothing to show: the file is empty, or only its mode changed.",
+                colours,
+            ),
+            DiffState::Ready(FileDiff::Lines(shown)) => {
+                let count = shown.len();
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        uniform_list(
+                            names.list,
+                            count,
+                            cx.processor(
+                                move |this, range: std::ops::Range<usize>, _window, cx| {
+                                    let font = Self::terminal_font(cx).family;
+                                    let size = crate::theme::px(
+                                        crate::settings::int(cx, "editor_font_size") as f32,
+                                    );
+                                    let Some(lines) = lines(this, id) else {
+                                        return Vec::new();
+                                    };
+                                    range
+                                        .filter_map(|index| {
+                                            lines.get(index).map(|line| {
+                                                diff_line(
+                                                    names.line,
+                                                    index,
+                                                    line,
+                                                    font.clone(),
+                                                    size,
+                                                    &palette,
+                                                )
+                                            })
+                                        })
+                                        .collect::<Vec<_>>()
+                                },
+                            ),
+                        )
+                        .track_scroll(scroll)
+                        .size_full(),
+                    )
+                    .child(Scrollbar::vertical(scroll))
+                    .into_any_element()
+            }
+        }
+    }
+}
+
 /// One line of a diff: the numbers of both sides, the sign and the text, on
 /// the band of its kind.
 fn diff_line(
+    name: &'static str,
     index: usize,
     line: &DiffLine,
     font: SharedString,
@@ -852,7 +925,7 @@ fn diff_line(
         LineKind::Added | LineKind::Removed | LineKind::Context
     );
     div()
-        .debug_selector(move || format!("changes-line-{index}"))
+        .debug_selector(move || format!("{name}-{index}"))
         .flex_none()
         .h(px(LINE_HEIGHT))
         .w_full()

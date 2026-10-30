@@ -13,6 +13,8 @@ use std::collections::VecDeque;
 
 use serde_json::Value;
 
+use crate::change::FileChange;
+
 /// A line longer than this is not an agent's event; it is dropped rather
 /// than kept in memory. (A frame of the wire is 10 MiB at most.)
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -80,6 +82,16 @@ pub enum TurnEvent {
         /// error. Empty when the summary says it all.
         detail: String,
     },
+    /// What a tool changed in files, as lines. After the [`TurnEvent::ToolUse`]
+    /// it is what the tool was given to do, without line numbers; after the
+    /// [`TurnEvent::ToolResult`], when the agent says it, what it did, with
+    /// them. Each replaces the one before it for the same tool.
+    ToolChange {
+        /// The id of its [`TurnEvent::ToolUse`].
+        id: String,
+        /// The files, in the order they were changed.
+        changes: Vec<FileChange>,
+    },
     /// The agent finished the turn. Exactly one per turn, before
     /// [`TurnEvent::Exited`].
     Finished {
@@ -102,6 +114,13 @@ pub enum TurnEvent {
     Usage {
         /// The counts.
         tokens: Tokens,
+    },
+    /// The agent's list of what it means to do, with how far it is: Claude's
+    /// `TodoWrite`, Codex's plan updates, an ACP agent's plan. Each one is the
+    /// whole list and replaces the one before it.
+    Todos {
+        /// The entries, in the order the agent keeps them.
+        todos: Vec<Todo>,
     },
     /// The agent asks something and waits for an [`Answer`].
     /// Several may be open at once.
@@ -149,6 +168,38 @@ pub enum TurnEvent {
     Gone,
 }
 
+/// One entry of the agent's list of things to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Todo {
+    /// What is to be done.
+    pub text: String,
+    /// How far it is.
+    pub status: TodoStatus,
+}
+
+/// How far an entry of the agent's list is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TodoStatus {
+    /// Not started.
+    Pending,
+    /// The agent is on it.
+    InProgress,
+    /// Done.
+    Completed,
+}
+
+impl TodoStatus {
+    /// The status an agent names: `completed`, `done`; `in_progress`,
+    /// `inProgress`, `active`; anything else is not started.
+    pub fn named(name: &str) -> Self {
+        match name.to_ascii_lowercase().replace(['_', '-'], "").as_str() {
+            "completed" | "complete" | "done" => Self::Completed,
+            "inprogress" | "active" | "running" => Self::InProgress,
+            _ => Self::Pending,
+        }
+    }
+}
+
 /// The tokens of a turn, as the agent counts them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Tokens {
@@ -162,6 +213,9 @@ pub struct Tokens {
     pub reasoning: u64,
     /// How many the model can hold at once, when the agent says.
     pub context_window: Option<u64>,
+    /// How many of those the conversation fills now, as the agent counts
+    /// them at its last call of the model, when it says.
+    pub context_used: Option<u64>,
 }
 
 impl Tokens {
@@ -394,6 +448,12 @@ pub(crate) struct Reader {
     finished: bool,
     /// An error the agent reported that did not end the turn by itself.
     last_error: Option<String>,
+    /// The tools that were the agent's list of todos: their results say
+    /// nothing a chat shows.
+    todo_tools: Vec<String>,
+    /// What the agent's last call of the model read and wrote: what fills
+    /// the context now.
+    context: Option<u64>,
     /// The last lines that were not events.
     noise: VecDeque<String>,
 }
@@ -407,6 +467,8 @@ impl Reader {
             started: false,
             finished: false,
             last_error: None,
+            todo_tools: Vec::new(),
+            context: None,
             noise: VecDeque::new(),
         }
     }
@@ -529,6 +591,9 @@ impl Reader {
                 }
             }
             Some("assistant") => {
+                if let Some(used) = claude_context(&value["message"]["usage"]) {
+                    self.context = Some(used);
+                }
                 for block in blocks(&value["message"]["content"]) {
                     match block["type"].as_str() {
                         Some("text") => {
@@ -538,30 +603,61 @@ impl Reader {
                                 });
                             }
                         }
+                        Some("tool_use") if block["name"] == "TodoWrite" => {
+                            self.todo_tools.push(text_of(&block["id"]));
+                            events.push(TurnEvent::Todos {
+                                todos: todos_of(&block["input"]["todos"], "content", "status"),
+                            });
+                        }
                         Some("tool_use") => {
                             let summary = input_summary(&block["input"]);
+                            let id = text_of(&block["id"]);
+                            let name = text_of(&block["name"]);
+                            let changes = FileChange::from_input(&name, &block["input"]);
                             events.push(TurnEvent::ToolUse {
-                                id: text_of(&block["id"]),
-                                name: text_of(&block["name"]),
+                                id: id.clone(),
+                                name,
                                 detail: input_detail(&block["input"], &summary),
                                 summary,
                             });
+                            if !changes.is_empty() {
+                                events.push(TurnEvent::ToolChange { id, changes });
+                            }
                         }
                         _ => {}
                     }
                 }
             }
             Some("user") => {
-                for block in blocks(&value["message"]["content"]) {
-                    if block["type"] == "tool_result" {
-                        let said = content_text(&block["content"]);
-                        let summary = first_line(&said);
-                        events.push(TurnEvent::ToolResult {
-                            id: text_of(&block["tool_use_id"]),
-                            ok: block["is_error"].as_bool() != Some(true),
-                            detail: text_detail(&said, &summary),
-                            summary,
-                        });
+                let results = blocks(&value["message"]["content"]);
+                let results: Vec<&Value> = results
+                    .iter()
+                    .filter(|block| block["type"] == "tool_result")
+                    .collect();
+                for block in &results {
+                    let id = text_of(&block["tool_use_id"]);
+                    if self.todo_tools.contains(&id) {
+                        continue;
+                    }
+                    let said = content_text(&block["content"]);
+                    let summary = first_line(&said);
+                    events.push(TurnEvent::ToolResult {
+                        id: id.clone(),
+                        ok: block["is_error"].as_bool() != Some(true),
+                        detail: text_detail(&said, &summary),
+                        summary,
+                    });
+                    // The line's `tool_use_result` is of its one result: with
+                    // several it is no one's.
+                    if let [_] = results[..] {
+                        if let Some(change) =
+                            FileChange::from_tool_use_result(&value["tool_use_result"])
+                        {
+                            events.push(TurnEvent::ToolChange {
+                                id,
+                                changes: vec![change],
+                            });
+                        }
                     }
                 }
             }
@@ -584,7 +680,8 @@ impl Reader {
                     .map(str::to_owned)
                     .collect();
                 self.finished = true;
-                if let Some(tokens) = claude_tokens(value) {
+                if let Some(mut tokens) = claude_tokens(value) {
+                    tokens.context_used = self.context;
                     events.push(TurnEvent::Usage { tokens });
                 }
                 events.push(TurnEvent::Finished {
@@ -599,6 +696,21 @@ impl Reader {
             _ => {}
         }
     }
+}
+
+/// What one call of the model read and wrote, from the `usage` of the
+/// message it made: that is how full the context is after it.
+fn claude_context(usage: &Value) -> Option<u64> {
+    if !usage.is_object() {
+        return None;
+    }
+    let count = |key: &str| usage[key].as_u64().unwrap_or(0);
+    Some(
+        count("input_tokens")
+            + count("cache_creation_input_tokens")
+            + count("cache_read_input_tokens")
+            + count("output_tokens"),
+    )
 }
 
 /// The tokens of a Claude Code turn, from its result's `usage` and
@@ -621,7 +733,56 @@ fn claude_tokens(result: &Value) -> Option<Tokens> {
             .as_u64()
             .unwrap_or(0),
         context_window,
+        context_used: None,
     })
+}
+
+/// The entries of an agent's list of todos: each names `text_key` and
+/// `status_key`. An entry without words is left out.
+pub(crate) fn todos_of(entries: &Value, text_key: &str, status_key: &str) -> Vec<Todo> {
+    blocks(entries)
+        .iter()
+        .filter_map(|entry| {
+            let text = entry[text_key].as_str()?.trim();
+            (!text.is_empty()).then(|| Todo {
+                text: text.to_owned(),
+                status: TodoStatus::named(entry[status_key].as_str().unwrap_or_default()),
+            })
+        })
+        .collect()
+}
+
+/// A plan written as Markdown checkboxes (`- [x] done`, `- [ ] to do`, and
+/// nothing else) as a list of todos; `None` for any other text.
+pub(crate) fn checklist(text: &str) -> Option<Vec<Todo>> {
+    let todos = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let rest = line
+                .strip_prefix("- ")
+                .or_else(|| line.strip_prefix("* "))?;
+            let (done, words) = if let Some(words) = rest.strip_prefix("[ ]") {
+                (false, words)
+            } else {
+                (
+                    true,
+                    rest.strip_prefix("[x]")
+                        .or_else(|| rest.strip_prefix("[X]"))?,
+                )
+            };
+            Some(Todo {
+                text: words.trim().to_owned(),
+                status: if done {
+                    TodoStatus::Completed
+                } else {
+                    TodoStatus::Pending
+                },
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!todos.is_empty()).then_some(todos)
 }
 
 /// The elements of a JSON array, or none.
@@ -966,10 +1127,77 @@ mod tests {
                     output: 416,
                     reasoning: 290,
                     context_window: Some(1_000_000),
+                    context_used: None,
                 }
             }
         );
         assert!(matches!(events[2], TurnEvent::Finished { ok: true, .. }));
+    }
+
+    #[test]
+    fn what_fills_claude_s_context_is_its_last_call_of_the_model() {
+        // Two calls in one turn: the result's `usage` sums them, the context
+        // is what the second one read and wrote.
+        let first = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"a"}],"usage":{"input_tokens":3,"cache_creation_input_tokens":1000,"cache_read_input_tokens":2000,"output_tokens":50}},"parent_tool_use_id":null}"#;
+        let second = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"b"}],"usage":{"input_tokens":5,"cache_creation_input_tokens":100,"cache_read_input_tokens":3000,"output_tokens":70}},"parent_tool_use_id":null}"#;
+        let inner = r#"{"type":"assistant","message":{"content":[],"usage":{"input_tokens":9,"cache_read_input_tokens":90000,"output_tokens":9}},"parent_tool_use_id":"toolu_9"}"#;
+        let result = r#"{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":8,"cache_creation_input_tokens":1100,"cache_read_input_tokens":5000,"output_tokens":120},"modelUsage":{"m":{"contextWindow":200000}},"permission_denials":[]}"#;
+        let events =
+            Reader::new().data(format!("{first}\n{second}\n{inner}\n{result}\n").as_bytes());
+        let tokens = events
+            .iter()
+            .find_map(|event| match event {
+                TurnEvent::Usage { tokens } => Some(*tokens),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(tokens.context_used, Some(5 + 100 + 3000 + 70));
+        assert_eq!(tokens.context_window, Some(200_000));
+    }
+
+    fn todo(text: &str, status: TodoStatus) -> Todo {
+        Todo {
+            text: text.to_owned(),
+            status,
+        }
+    }
+
+    #[test]
+    fn claude_s_todo_list_is_a_list_and_not_a_tool() {
+        let write = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"TodoWrite","input":{"todos":[{"content":"Read the code","status":"completed","activeForm":"Reading the code"},{"content":"Write the test","status":"in_progress","activeForm":"Writing the test"},{"content":"Ship it","status":"pending","activeForm":"Shipping it"}]}}]},"parent_tool_use_id":null}"#;
+        let made = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Todos have been modified successfully"}]},"parent_tool_use_id":null}"#;
+        let mut reader = Reader::new();
+        let events = reader.data(format!("{write}\n{made}\n").as_bytes());
+        assert_eq!(
+            events,
+            [TurnEvent::Todos {
+                todos: vec![
+                    todo("Read the code", TodoStatus::Completed),
+                    todo("Write the test", TodoStatus::InProgress),
+                    todo("Ship it", TodoStatus::Pending),
+                ]
+            }]
+        );
+    }
+
+    #[test]
+    fn a_todo_list_without_entries_still_replaces_the_one_before() {
+        let write = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"TodoWrite","input":{"todos":[]}}]},"parent_tool_use_id":null}"#;
+        let events = Reader::new().data(format!("{write}\n").as_bytes());
+        assert_eq!(events, [TurnEvent::Todos { todos: Vec::new() }]);
+    }
+
+    #[test]
+    fn a_status_is_read_in_the_words_every_agent_uses() {
+        for (name, status) in [
+            ("completed", TodoStatus::Completed),
+            ("in_progress", TodoStatus::InProgress),
+            ("inProgress", TodoStatus::InProgress),
+            ("pending", TodoStatus::Pending),
+            ("whatever", TodoStatus::Pending),
+        ] {
+            assert_eq!(TodoStatus::named(name), status, "{name}");
+        }
     }
 
     #[test]
@@ -1012,6 +1240,40 @@ mod tests {
                 TurnEvent::Exited { code: 0 },
             ]
         );
+    }
+
+    #[test]
+    fn a_claude_edit_says_its_change_as_given_then_as_made() {
+        let edit = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Edit","input":{"file_path":"/w/a.rs","old_string":"x","new_string":"y"}}]},"parent_tool_use_id":null,"session_id":"s"}"#;
+        let made = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"updated"}]},"parent_tool_use_id":null,"tool_use_result":{"filePath":"/w/a.rs","structuredPatch":[{"oldStart":7,"oldLines":1,"newStart":7,"newLines":1,"lines":["-x","+y"]}]}}"#;
+        let events = Reader::new().data(format!("{edit}\n{made}\n").as_bytes());
+        let changes: Vec<&TurnEvent> = events
+            .iter()
+            .filter(|event| matches!(event, TurnEvent::ToolChange { .. }))
+            .collect();
+        let [TurnEvent::ToolChange { id, changes: given }, TurnEvent::ToolChange { changes: done, .. }] =
+            changes[..]
+        else {
+            panic!("two changes, got {events:?}");
+        };
+        assert_eq!(id, "t1");
+        assert_eq!(given[0].hunks[0].lines[0].new, None);
+        assert_eq!(done[0].hunks[0].lines[1].new, Some(7));
+        // The given one comes right after its tool, the made one after its result.
+        assert!(matches!(events[0], TurnEvent::ToolUse { .. }));
+        assert!(matches!(events[1], TurnEvent::ToolChange { .. }));
+        assert!(matches!(events[2], TurnEvent::ToolResult { .. }));
+        assert!(matches!(events[3], TurnEvent::ToolChange { .. }));
+    }
+
+    #[test]
+    fn a_result_of_several_tools_is_not_taken_for_the_change_of_any() {
+        // Its `tool_use_result` is of no one of them.
+        let made = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"a"},{"type":"tool_result","tool_use_id":"t2","content":"b"}]},"parent_tool_use_id":null,"tool_use_result":{"filePath":"/w/a.rs","structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":1,"lines":["-x","+y"]}]}}"#;
+        let events = Reader::new().data(format!("{made}\n").as_bytes());
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, TurnEvent::ToolChange { .. })));
     }
 
     #[test]
@@ -1312,6 +1574,10 @@ mod tests {
                     name: "Edit".into(),
                     summary: "/work/a.txt".into(),
                     detail: "/work/a.txt\n- one\n+ two".into(),
+                },
+                TurnEvent::ToolChange {
+                    id: "t1".into(),
+                    changes: vec![FileChange::edited("/work/a.txt", &[("one", "two")])],
                 },
                 TurnEvent::ToolResult {
                     id: "t1".into(),

@@ -356,6 +356,14 @@ pub enum Op {
         /// Its new name; blank gives the agent's own title back.
         name: String,
     },
+    /// Give a history session the title generated for its conversation,
+    /// unless a person named it. Says nothing.
+    TitleSession {
+        /// The session.
+        session: leon_core::SessionId,
+        /// The generated title.
+        title: String,
+    },
     /// Remember that a history session ran with an account of its agent (an
     /// id), so that resuming it starts the same one. Says nothing.
     SetSessionAccount {
@@ -1852,6 +1860,10 @@ impl Engine {
                 } else {
                     format!("Renamed the session to {name}.")
                 }))
+            }
+            Op::TitleSession { session, title } => {
+                self.inner.store.set_generated_title(&session, &title)?;
+                Ok(None)
             }
             Op::SetSessionAccount { session, account } => {
                 match self

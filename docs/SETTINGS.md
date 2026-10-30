@@ -222,6 +222,8 @@ How each coding agent is started and resumed.
 | Jcode executable | `agent_jcode_executable` | a path | empty | The program that starts Jcode. Empty lets the login shell find `jcode`. |
 | Jcode arguments, new session | `agent_jcode_args` | text | empty | Extra arguments typed after the command of a new Jcode session. |
 | Jcode arguments, resume | `agent_jcode_resume_args` | text | empty | Extra arguments typed after the command that resumes a Jcode session. |
+| When the agent is busy | `chat_busy` | `steer`, `queue` | `steer` | What a message sent to a conversation of Leon's own interface does while its agent is working. Steer: it goes into the running turn, where the agent takes it (Claude Code and Codex do). Queue: it waits, listed above the field, and becomes the next turn. An agent that cannot be told more while it works queues the message either way. |
+| Name conversations automatically | `chat_titles` | on, off | `on` | After the first turn of a conversation of Leon's own interface, ask the agent for a short title and show it in the tab and the sidebar instead of the first words you wrote. A name you gave it by hand is never replaced. Claude Code is asked once, with its cheapest model; if that fails, nothing changes. |
 | Memory file size | `memory_budget` | 2000 to 200000 bytes | `12000` | The most bytes of the summary of the shared memory that an agent reads when it starts. `leon memory search` and `show` reach the rest. |
 | Offer agent memory when a project is added | `memory_offer` | on, off | `on` | Ask whether a project's agents should share Leon's memory when you open, clone or create it here. Off: nothing is asked. |
 
@@ -315,6 +317,8 @@ What Leon says when a session wants you or finishes, and how it says it.
 | When a session fails | `notify_failed` | on, off | `on` | A program ended with an error. |
 | How to say it | `notify_how` | `both`, `banner`, `system` | `both` | The geek banner in the window, the desktop notification, or both. |
 | Desktop only without focus | `notify_only_unfocused` | on, off | `on` | Show the desktop notification only while the Leon window does not have the focus. The banner still appears for a session that is not on screen. |
+| When a conversation needs you | `notify_chats` | on, off | `on` | A conversation of Leon's own interface finished its turn, failed, or asks a question while it is not on screen: the window is in the background, or another tab is open. Its row in the sidebar and its tab carry a dot until you look at it. |
+| Play a sound | `notify_sound` | on, off | `off` | Play a short sound with the desktop notification of a conversation. Off by default. macOS only: the system's own notification sound is not asked for, so this plays one of the system sounds. |
 
 ## Sidebar & window
 

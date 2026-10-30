@@ -16,7 +16,7 @@ use regex::Regex;
 
 /// The harness's blocks: the pattern of the tag, and the name a note of it
 /// goes by.
-const TAGS: [(&str, &str); 14] = [
+const TAGS: [(&str, &str); 15] = [
     ("task-notification", "task notification"),
     ("system-reminder", "system reminder"),
     ("command-(?:name|message|args|contents)", "command"),
@@ -37,6 +37,8 @@ const TAGS: [(&str, &str); 14] = [
     ),
     ("in-app-browser-context", "browser context"),
     ("turn_aborted|user_action", "interruption"),
+    // What Leon itself hands a new agent when the person switches agents.
+    ("leon-handoff", "context handed off"),
 ];
 
 fn alternatives() -> String {
@@ -184,6 +186,19 @@ mod tests {
             Split {
                 said: "fix the build".into(),
                 note: Some("system reminder + shell output".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_handoff_to_another_agent_is_the_harnesss_and_not_the_persons() {
+        let text =
+            "<leon-handoff from=\"claude\" to=\"codex\">\nUser:\nold\n</leon-handoff>\n\nnext";
+        assert_eq!(
+            split(text),
+            Split {
+                said: "next".into(),
+                note: Some("context handed off".into()),
             }
         );
     }

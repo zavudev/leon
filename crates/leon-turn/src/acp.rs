@@ -45,6 +45,7 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use serde_json::{json, Value};
 
 use crate::agents::{Action, AgentSession, McpServer, Outgoing, Step, TurnSpec};
+use crate::change::FileChange;
 use crate::claude::AgentCommand;
 use crate::error::TurnError;
 use crate::events::{
@@ -143,6 +144,7 @@ pub fn session(unique: u64, dialect: &'static Dialect) -> Box<dyn AgentSession> 
         model: None,
         cost: None,
         context_window: None,
+        context_used: None,
         noise: VecDeque::new(),
     })
 }
@@ -194,6 +196,8 @@ struct Tool {
     name: String,
     /// Whether what it does was shown in full when it started.
     shown: bool,
+    /// The change of files last said of it.
+    changes: Vec<FileChange>,
 }
 
 struct AcpSession {
@@ -248,13 +252,19 @@ struct AcpSession {
     cost: Option<f64>,
     /// How many tokens the model can hold, as last said.
     context_window: Option<u64>,
+    /// How many of them the conversation fills, as last said.
+    context_used: Option<u64>,
     noise: VecDeque<String>,
 }
 
 /// The tokens of a turn, from the `usage` of the prompt's answer: what was
 /// read is the fresh input and both caches, what was written the answer and
 /// the thoughts.
-fn acp_tokens(usage: &Value, context_window: Option<u64>) -> Option<Tokens> {
+fn acp_tokens(
+    usage: &Value,
+    context_window: Option<u64>,
+    context_used: Option<u64>,
+) -> Option<Tokens> {
     if !usage.is_object() {
         return None;
     }
@@ -274,6 +284,7 @@ fn acp_tokens(usage: &Value, context_window: Option<u64>) -> Option<Tokens> {
         output: count(&["outputTokens"]) + reasoning,
         reasoning,
         context_window,
+        context_used,
     })
 }
 
@@ -562,7 +573,11 @@ impl AcpSession {
                     "refusal" => "The model declined to go on.".to_owned(),
                     other => format!("The turn stopped: {other}"),
                 });
-                if let Some(tokens) = acp_tokens(&value["result"]["usage"], self.context_window) {
+                if let Some(tokens) = acp_tokens(
+                    &value["result"]["usage"],
+                    self.context_window,
+                    self.context_used,
+                ) {
                     step.events.push(TurnEvent::Usage { tokens });
                 }
                 step.events.push(TurnEvent::Finished {
@@ -736,6 +751,14 @@ impl AcpSession {
         let name = tool.name.clone();
         let done = matches!(status, "completed" | "failed");
         let changes = changes_detail(update);
+        // The files it changes, as lines: what the agent says of it, or else
+        // what it was given to do.
+        let mut lines = FileChange::from_acp(&update["content"]);
+        if lines.is_empty() {
+            let kind = update["kind"].as_str().unwrap_or_default();
+            let given = if kind == "edit" { "write" } else { &name };
+            lines = FileChange::from_input(given, &update["rawInput"]);
+        }
         if self.announced.insert(id.clone()) {
             // What it was given, in a line; where that is not something this
             // library reads (nothing, or the whole input as it stands), the
@@ -759,6 +782,15 @@ impl AcpSession {
                 summary,
                 detail,
             });
+        }
+        if let Some(tool) = self.tools.get_mut(&id) {
+            if !lines.is_empty() && tool.changes != lines {
+                tool.changes = lines.clone();
+                step.events.push(TurnEvent::ToolChange {
+                    id: id.clone(),
+                    changes: lines,
+                });
+            }
         }
         if done {
             self.announced.remove(&id);
@@ -844,25 +876,15 @@ impl AcpSession {
             }
             "tool_call" | "tool_call_update" => self.tool(update, step),
             "plan" => {
-                let lines: Vec<String> = blocks(&update["entries"])
-                    .iter()
-                    .map(|entry| {
-                        let mark = match entry["status"].as_str() {
-                            Some("completed") => "x",
-                            _ => " ",
-                        };
-                        format!("- [{mark}] {}", text_of(&entry["content"]))
-                    })
-                    .collect();
-                if !lines.is_empty() {
+                let todos = crate::events::todos_of(&update["entries"], "content", "status");
+                if !todos.is_empty() {
                     self.settle(step);
-                    step.events.push(TurnEvent::Text {
-                        text: lines.join("\n"),
-                    });
+                    step.events.push(TurnEvent::Todos { todos });
                 }
             }
             "usage_update" => {
                 self.context_window = update["size"].as_u64().or(self.context_window);
+                self.context_used = update["used"].as_u64().or(self.context_used);
                 if update["cost"]["currency"] == "USD" {
                     self.cost = update["cost"]["amount"].as_f64().or(self.cost);
                 }

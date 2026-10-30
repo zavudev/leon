@@ -105,7 +105,7 @@ fn unsaved_text_is_kept_in_a_draft_until_it_is_saved(cx: &mut TestAppContext) {
     assert_eq!(draft.path, file.to_string_lossy());
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello\n");
     // Undone back to what is on disk, the draft has nothing to keep.
-    h.press("ctrl-z", cx);
+    h.press("secondary-z", cx);
     wait_until(&h, cx, "the draft to go", |_, _| {
         drafts_in(&settings).is_empty()
     });

@@ -38,6 +38,8 @@ const MAX_COMMITS: usize = 50;
 pub enum Step {
     /// `git add` and `git commit`.
     Commit,
+    /// `git pull --ff-only`.
+    Pull,
     /// `git push`.
     Push,
     /// `gh pr create`.
@@ -51,6 +53,7 @@ impl Step {
     pub fn words(self) -> &'static str {
         match self {
             Self::Commit => "The commit",
+            Self::Pull => "The pull",
             Self::Push => "The push",
             Self::PullRequest => "The pull request",
             Self::Suggestion => "The suggestion",
@@ -195,6 +198,22 @@ impl<R: Runner> Git<'_, R> {
         let args = push_args(changes.branch.as_deref(), changes.has_upstream)?;
         let output = self.output(git_command(cwd, args)).await?;
         judged(Step::Push, "git push", output)
+    }
+
+    // ----- pull ------------------------------------------------------------------
+
+    /// Brings the branch of the checkout at `cwd` up to its upstream, only
+    /// when that is a fast-forward: a branch that diverged is left as it is
+    /// and git's refusal is the error. Never a merge, never a rebase.
+    pub async fn pull(&self, cwd: &str) -> Result<String, ShipError> {
+        reject_option_like("path", cwd).map_err(|error| ShipError::Invalid(error.to_string()))?;
+        let changes = self
+            .changes(cwd)
+            .await
+            .map_err(|error| ShipError::Invalid(error.to_string()))?;
+        let args = pull_args(changes.branch.as_deref(), changes.has_upstream)?;
+        let output = self.output(git_command(cwd, args)).await?;
+        judged(Step::Pull, "git pull", output)
     }
 
     // ----- what a pull request starts with ---------------------------------------
@@ -355,6 +374,26 @@ pub fn push_args(branch: Option<&str>, has_upstream: bool) -> Result<Vec<String>
             .map(str::to_owned)
             .collect()
     })
+}
+
+/// The arguments of `git pull`: only a fast-forward, so that nothing is merged
+/// or rewritten behind the person's back. A detached head, or a branch without
+/// an upstream, has nothing to pull from.
+pub fn pull_args(branch: Option<&str>, has_upstream: bool) -> Result<Vec<String>, ShipError> {
+    if branch.is_none() {
+        return Err(ShipError::Invalid(
+            "This worktree has a detached head: check out a branch before pulling.".to_owned(),
+        ));
+    }
+    if !has_upstream {
+        return Err(ShipError::Invalid(
+            "This branch has no upstream to pull from: push it first.".to_owned(),
+        ));
+    }
+    Ok(["pull", "--ff-only"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect())
 }
 
 // ----- commits, as a pull request starts from them ------------------------------
@@ -544,6 +583,15 @@ pub fn suggestion_prompt(what: Suggest) -> &'static str {
     }
 }
 
+/// The instruction that asks an agent for a conversation's title; what the
+/// conversation said is its standard input.
+pub fn title_prompt() -> &'static str {
+    "Give a short title, at most six words, for the conversation on standard input: \
+     what the person wants done. Use the language the person wrote in. \
+     Reply with the title alone: no quotes, no trailing period, no preface. \
+     Do not run commands and do not change any file."
+}
+
 /// Cuts text for an agent at [`MAX_PROMPT_BYTES`], at the end of a line, and
 /// says so when it did.
 pub fn cut_for_prompt(text: &str) -> String {
@@ -603,6 +651,40 @@ pub fn clean_suggestion(raw: &str) -> String {
     text.trim_end().to_owned()
 }
 
+/// The longest title a conversation is given, in characters.
+pub const TITLE_CHARS: usize = 60;
+
+/// A conversation's title from what an agent answered: its first line
+/// without a label, decoration or a closing period, cut to [`TITLE_CHARS`].
+/// Nothing when the agent said nothing.
+pub fn clean_title(raw: &str) -> Option<String> {
+    let cleaned = clean_suggestion(raw);
+    let first = cleaned
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let mut title = first.trim_start_matches('#').trim().to_owned();
+    for label in ["title:", "conversation title:"] {
+        if title.to_lowercase().starts_with(label) {
+            title = title[label.len()..].trim_start().to_owned();
+        }
+    }
+    let title = title
+        .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '*' | '\u{201c}' | '\u{201d}'))
+        .trim()
+        .trim_end_matches(['.', ':'])
+        .trim();
+    if title.is_empty() {
+        return None;
+    }
+    if title.chars().count() <= TITLE_CHARS {
+        return Some(title.to_owned());
+    }
+    let kept: String = title.chars().take(TITLE_CHARS - 1).collect();
+    let kept = kept.rfind(' ').map_or(kept.as_str(), |at| &kept[..at]);
+    Some(format!("{}\u{2026}", kept.trim_end()))
+}
+
 /// A pull request's title and body from what an agent answered: the first
 /// line (without a Markdown heading mark) and the rest.
 pub fn split_title_and_body(answer: &str) -> (String, String) {
@@ -629,7 +711,41 @@ pub fn suggestion_command(
         .stdin(input.to_owned())
 }
 
+/// The command that asks an agent for a conversation's title: like
+/// [`suggestion_command`], with `extra` (the arguments that pick a cheap
+/// model) between the agent's non-interactive form and the instruction.
+pub fn title_command(
+    cwd: &str,
+    program: &str,
+    headless: &[String],
+    extra: &[String],
+    input: &str,
+) -> CommandSpec {
+    CommandSpec::new(program)
+        .args(headless.iter().chain(extra).cloned())
+        .arg(title_prompt())
+        .env("NO_COLOR", "1")
+        .cwd(cwd)
+        .stdin(input.to_owned())
+}
+
 impl<R: Runner> Git<'_, R> {
+    /// Asks an agent for a conversation's title from `input`: its answer
+    /// cleaned by [`clean_title`]. A failure is the text the agent printed.
+    pub async fn title(
+        &self,
+        cwd: &str,
+        program: &str,
+        headless: &[String],
+        extra: &[String],
+        input: &str,
+    ) -> Result<String, ShipError> {
+        let command = title_command(cwd, program, headless, extra, input);
+        let output = self.output(command).await?;
+        let text = judged(Step::Suggestion, program, output)?;
+        clean_title(&text).ok_or_else(|| ShipError::Invalid(format!("{program} answered nothing.")))
+    }
+
     /// Asks an agent, headless, to word something from `input`, and answers
     /// its text cleaned. A failure is the text the agent printed.
     pub async fn suggest(
@@ -859,6 +975,101 @@ mod tests {
             runner.calls()[1].args,
             ["push", "--set-upstream", "origin", "topic"]
         );
+    }
+
+    #[test]
+    fn a_title_is_the_first_line_of_what_the_agent_said_without_decoration() {
+        assert_eq!(
+            clean_title("Fix the tab leak\n").as_deref(),
+            Some("Fix the tab leak")
+        );
+        assert_eq!(
+            clean_title("\"Fix the tab leak.\"").as_deref(),
+            Some("Fix the tab leak")
+        );
+        assert_eq!(
+            clean_title("Title: **Fix the tab leak**\n\nBecause it leaked.").as_deref(),
+            Some("Fix the tab leak")
+        );
+        assert_eq!(
+            clean_title("```\nFix the tab leak\n```").as_deref(),
+            Some("Fix the tab leak")
+        );
+        assert_eq!(clean_title("  \n\n"), None);
+        assert_eq!(clean_title("\"\""), None);
+        let long = "word ".repeat(40);
+        let cut = clean_title(&long).unwrap();
+        assert!(cut.chars().count() <= TITLE_CHARS, "{cut}");
+        assert!(cut.ends_with('\u{2026}'), "{cut}");
+    }
+
+    #[test]
+    fn asking_for_a_title_gives_the_agent_what_was_said_on_stdin_and_a_cheap_model() {
+        let command = title_command(
+            "/srv/wt",
+            "claude",
+            &["-p".to_owned()],
+            &["--model".to_owned(), "haiku".to_owned()],
+            "User: fix tabs\n\nAgent: done",
+        );
+        assert_eq!(command.program, "claude");
+        assert_eq!(&command.args[..3], ["-p", "--model", "haiku"]);
+        assert_eq!(command.args[3], title_prompt());
+        assert!(title_prompt().contains("title"));
+        assert_eq!(
+            command.stdin.as_deref(),
+            Some(b"User: fix tabs\n\nAgent: done".as_slice())
+        );
+    }
+
+    #[test]
+    fn a_pull_only_ever_fast_forwards_and_needs_a_branch_with_an_upstream() {
+        assert_eq!(
+            pull_args(Some("main"), true).unwrap(),
+            ["pull", "--ff-only"]
+        );
+        assert!(matches!(
+            pull_args(None, true),
+            Err(ShipError::Invalid(text)) if text.contains("detached")
+        ));
+        assert!(matches!(
+            pull_args(Some("topic"), false),
+            Err(ShipError::Invalid(text)) if text.contains("upstream")
+        ));
+    }
+
+    #[tokio::test]
+    async fn pulling_reads_the_branch_first_and_a_diverged_one_is_shown_as_git_said_it() {
+        let runner = ScriptedRunner::new()
+            .reply(Output::ok("## topic...origin/topic [behind 2]\0"))
+            .reply(Output::ok("Updating 1a2b3c4..5d6e7f8\nFast-forward\n"));
+        let machine = local();
+        let ssh = SshOptions::default();
+        let said = Git::new(&runner, &machine, &ssh)
+            .pull("/srv/wt")
+            .await
+            .unwrap();
+        assert!(said.contains("Fast-forward"));
+        assert_eq!(runner.calls()[1].args, ["pull", "--ff-only"]);
+
+        let runner = ScriptedRunner::new()
+            .reply(Output::ok("## topic...origin/topic [ahead 1, behind 2]\0"))
+            .reply(Output::failed(
+                128,
+                "fatal: Not possible to fast-forward, aborting.\n",
+            ));
+        let error = Git::new(&runner, &machine, &ssh)
+            .pull("/srv/wt")
+            .await
+            .expect_err("diverged");
+        assert!(error.to_string().contains("fast-forward"), "{error}");
+        assert!(matches!(
+            error,
+            ShipError::Failed {
+                step: Step::Pull,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

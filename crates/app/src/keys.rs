@@ -257,6 +257,11 @@ pub enum Command {
     FindInFile,
     /// Looks for text in the file that has the keyboard and replaces it.
     ReplaceInFile,
+    /// Looks for words in the conversation that has the keyboard.
+    FindInChat,
+    /// Sends the first message that waits in the conversation in view into
+    /// its running turn now, instead of at the end of the turn.
+    SteerQueued,
     /// Looks for text in the files of the project in view.
     SearchProject,
     /// Shows a Markdown file as text, as text and page, or as the page.
@@ -272,6 +277,9 @@ pub enum Command {
     PushBranch,
     /// Commits, pushes and opens a pull request for the worktree in view.
     ShipChanges,
+    /// Shows or hides the panel of diffs beside the conversation in view:
+    /// what its last turn changed, or every uncommitted change.
+    ToggleChatDiff,
     // ----- terminal
     /// Splits the focused pane, the new one to its right.
     SplitRight,
@@ -512,6 +520,8 @@ pub enum When {
     Terminal,
     /// Only while an editor has the keyboard.
     File,
+    /// Only while a conversation with an agent is the main pane.
+    Chat,
 }
 
 /// The sections of the shortcuts sheet, in its order.
@@ -886,6 +896,25 @@ pub const BINDINGS: &[Binding] = &[
         S::Files,
         W::File,
         &[mac(with_alt(secondary("f"))), other(secondary("h"))],
+        true,
+    ),
+    // And a conversation: `Cmd+F` finds words in it.
+    bind(
+        C::FindInChat,
+        "Find in the conversation\u{2026}",
+        S::Search,
+        W::Chat,
+        &[secondary("f")],
+        true,
+    ),
+    // And in a conversation, `Cmd+Enter` tells the running turn the message
+    // that waits first.
+    bind(
+        C::SteerQueued,
+        "Send the first queued message into the running turn",
+        S::Create,
+        W::Chat,
+        &[secondary("enter")],
         true,
     ),
     bind(
@@ -1700,6 +1729,17 @@ pub const BINDINGS: &[Binding] = &[
         S::Files,
         W::Anywhere,
         &[],
+        true,
+    ),
+    bind(
+        C::ToggleChatDiff,
+        "Show or hide the changes beside the conversation",
+        S::Files,
+        W::Anywhere,
+        &[
+            mac(with_alt(secondary("d"))),
+            other(with_alt(secondary_shift("d"))),
+        ],
         true,
     ),
     // Terminal
@@ -2526,8 +2566,11 @@ pub fn keywords(command: Command) -> &'static str {
         C::OpenChanges => "git diff status modified changed files review staged unstaged",
         C::PushBranch => "git upstream remote origin publish send branch",
         C::ShipChanges => "git commit push pull request pr github gh ship publish merge review",
+        C::ToggleChatDiff => "diff panel changes files turn conversation chat side review git hide show",
         C::QuickOpen => "file name fuzzy find go open path goto ctrl+p",
         C::FindInFile | C::ReplaceInFile => "search editor text code substitute change",
+        C::FindInChat => "search conversation chat messages words text thread find",
+        C::SteerQueued => "queue queued steer follow up followup message send now running turn agent busy tell",
         C::SearchProject => "grep ripgrep find text content files everywhere project code",
         C::CopyAll | C::CopyScreen => "clipboard terminal output",
         C::ToggleSidebar => "hide show panel tree",
@@ -2611,6 +2654,8 @@ pub struct Context {
     pub terminal: bool,
     /// An editor has the keyboard: the chords of [`When::File`] apply.
     pub file: bool,
+    /// A conversation is the main pane: the chords of [`When::Chat`] apply.
+    pub chat: bool,
 }
 
 /// Whether `chord` exists on a platform that is, or is not, macOS.
@@ -2633,6 +2678,8 @@ pub fn kept_in_terminal(binding: &Binding, chord: &Chord, mac: bool) -> bool {
         When::Anywhere => chord.secondary && (mac || chord.shift),
         // An editor is not a terminal: its chords never apply there.
         When::File => false,
+        // Nor is a conversation.
+        When::Chat => false,
         // Scrollback keys are bare. Copy and paste also keep the operating
         // system's ordinary primary-modifier chord on every platform; the
         // shell takes a copy chord only when there is a selection and gives
@@ -2674,6 +2721,7 @@ pub fn resolve_on(stroke: &Keystroke, context: Context, mac: bool) -> Option<Com
             When::Panes => !context.typing && !context.terminal,
             When::Terminal => context.terminal,
             When::File => context.file,
+            When::Chat => context.chat,
         })
         .find(|binding| {
             binding.chords.iter().any(|chord| {
@@ -2705,21 +2753,31 @@ mod tests {
         typing: false,
         terminal: false,
         file: false,
+        chat: false,
     };
     const TYPING: Context = Context {
         typing: true,
         terminal: false,
         file: false,
+        chat: false,
+    };
+    const CHAT: Context = Context {
+        typing: true,
+        terminal: false,
+        file: false,
+        chat: true,
     };
     const TERMINAL: Context = Context {
         typing: false,
         terminal: true,
         file: false,
+        chat: false,
     };
     const FILE: Context = Context {
         typing: true,
         terminal: false,
         file: true,
+        chat: false,
     };
 
     /// Every variant, written out. The `match` makes adding a variant without
@@ -2768,12 +2826,15 @@ mod tests {
             C::QuickOpen,
             C::FindInFile,
             C::ReplaceInFile,
+            C::FindInChat,
+            C::SteerQueued,
             C::SearchProject,
             C::TogglePreview,
             C::RevealInTree,
             C::OpenChanges,
             C::PushBranch,
             C::ShipChanges,
+            C::ToggleChatDiff,
             C::SplitRight,
             C::SplitDown,
             C::FocusPaneLeft,
@@ -2953,12 +3014,15 @@ mod tests {
                 | C::QuickOpen
                 | C::FindInFile
                 | C::ReplaceInFile
+                | C::FindInChat
+                | C::SteerQueued
                 | C::SearchProject
                 | C::TogglePreview
                 | C::RevealInTree
                 | C::OpenChanges
                 | C::PushBranch
                 | C::ShipChanges
+                | C::ToggleChatDiff
                 | C::SplitRight
                 | C::SplitDown
                 | C::FocusPaneLeft
@@ -3147,16 +3211,19 @@ mod tests {
                         // something only while a terminal or an editor has
                         // the keyboard, listed before (so winning over) the
                         // command it shares the chord with everywhere else.
-                        let deliberate = matches!(other_when, When::Terminal | When::File)
-                            && binding.when != other_when
-                            && matches!(
-                                (other, binding.command),
-                                (C::ClearBuffer, C::GoTo)
-                                    | (C::Find, C::FindInFile)
-                                    | (C::Find, C::FilterProjects)
-                                    | (C::FindInFile, C::FilterProjects)
-                                    | (C::SaveOutput, C::SaveFile)
-                            );
+                        let deliberate =
+                            matches!(other_when, When::Terminal | When::File | When::Chat)
+                                && binding.when != other_when
+                                && matches!(
+                                    (other, binding.command),
+                                    (C::ClearBuffer, C::GoTo)
+                                        | (C::Find, C::FindInFile)
+                                        | (C::Find, C::FilterProjects)
+                                        | (C::FindInFile, C::FilterProjects)
+                                        | (C::FindInFile, C::FindInChat)
+                                        | (C::FindInChat, C::FilterProjects)
+                                        | (C::SaveOutput, C::SaveFile)
+                                );
                         assert!(
                             deliberate,
                             "{} is both {other:?} and {:?} (mac: {mac})",
@@ -3899,6 +3966,34 @@ mod tests {
             .iter()
             .chain(terminal_chords(false).iter())
             .any(|(command, _)| matches!(command, C::FindInFile | C::ReplaceInFile)));
+    }
+
+    #[test]
+    fn find_in_the_conversation_is_the_chord_of_a_conversation_on_screen_and_nothing_else() {
+        assert_eq!(
+            resolve_on(&stroke("cmd-f"), CHAT, true),
+            Some(C::FindInChat)
+        );
+        assert_eq!(
+            resolve_on(&stroke("ctrl-f"), CHAT, false),
+            Some(C::FindInChat)
+        );
+        // Without one the chord keeps its older meanings.
+        assert_eq!(resolve_on(&stroke("cmd-f"), TYPING, true), None);
+        assert_eq!(
+            resolve_on(&stroke("cmd-f"), NOT_TYPING, true),
+            Some(C::FilterProjects)
+        );
+        assert_eq!(resolve_on(&stroke("cmd-f"), TERMINAL, true), Some(C::Find));
+        // An editor has its own find, which wins where both could apply.
+        assert_eq!(
+            resolve_on(&stroke("cmd-f"), FILE, true),
+            Some(C::FindInFile)
+        );
+        assert!(!terminal_chords(true)
+            .iter()
+            .chain(terminal_chords(false).iter())
+            .any(|(command, _)| *command == C::FindInChat));
     }
 
     #[test]

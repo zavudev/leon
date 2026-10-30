@@ -17,6 +17,7 @@ use serde_json::Value;
 use crate::claude::{AgentCommand, AgentOptions};
 use crate::error::TurnError;
 use crate::events::{Answer, TurnEvent};
+use crate::rewind::Rewind;
 
 /// An agent this library can drive.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,6 +222,8 @@ pub struct Adapter {
     /// Its protocol must be told the folder to work in as a whole path:
     /// [`TurnSpec::cwd`] is found out when the turn names none.
     pub needs_folder: bool,
+    /// How its conversation is taken back to before a turn.
+    pub rewind: Rewind,
 }
 
 /// Every agent that can be driven. Nothing else is offered: a session of
@@ -238,6 +241,7 @@ pub const ADAPTERS: &[Adapter] = &[
             parse: crate::claude::parse_options,
         },
         needs_folder: false,
+        rewind: Rewind::Fork,
     },
     Adapter {
         id: "codex",
@@ -251,6 +255,7 @@ pub const ADAPTERS: &[Adapter] = &[
             parse: crate::codex::parse_options,
         },
         needs_folder: false,
+        rewind: Rewind::Revert,
     },
     Adapter {
         id: "opencode",
@@ -264,6 +269,7 @@ pub const ADAPTERS: &[Adapter] = &[
             parse: crate::opencode::parse_options,
         },
         needs_folder: true,
+        rewind: Rewind::Reset,
     },
     Adapter {
         id: "grok",
@@ -277,6 +283,7 @@ pub const ADAPTERS: &[Adapter] = &[
             parse: crate::grok::parse_options,
         },
         needs_folder: true,
+        rewind: Rewind::Reset,
     },
     Adapter {
         id: "cursor",
@@ -290,6 +297,7 @@ pub const ADAPTERS: &[Adapter] = &[
             parse: crate::cursor::parse_options,
         },
         needs_folder: true,
+        rewind: Rewind::Reset,
     },
 ];
 
@@ -318,6 +326,16 @@ pub fn strings(items: &[&str]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_agent_says_how_its_conversation_goes_back_to_before_a_turn() {
+        let how = |id: &str| adapter(id).unwrap().rewind;
+        assert_eq!(how("claude"), Rewind::Fork);
+        assert_eq!(how("codex"), Rewind::Revert);
+        for id in ["opencode", "grok", "cursor"] {
+            assert_eq!(how(id), Rewind::Reset, "{id}");
+        }
+    }
 
     #[test]
     fn the_catalogue_names_its_agents_once_each() {

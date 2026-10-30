@@ -5,6 +5,7 @@
 //! adapter's fixed ones here; a run with these very ids answered the same.
 
 use super::*;
+use crate::change::{ChangeKind, FileChange};
 use crate::events::ChoiceAnswer;
 
 const THREAD: &str = r#"{"id":"leon-thread","result":{"thread":{"id":"01a11902-6cec","sessionId":"01a11902-6cec","preview":"","ephemeral":false,"historyMode":"paginated","modelProvider":"openai","model":"gpt-5.6-sol","reasoningEffort":"medium","status":{"type":"idle"},"cliVersion":"0.160.1","originator":"leon-mobile","turns":[]},"model":"gpt-5.6-sol","modelProvider":"openai","serviceTier":null,"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":{"type":"readOnly","networkAccess":false},"reasoningEffort":"medium"}}"#;
@@ -481,16 +482,38 @@ fn a_change_of_files_is_shown_as_the_lines_that_went_and_came() {
     let events = read(session.as_mut(), &started.to_string()).events;
     assert_eq!(
         events,
-        [TurnEvent::ToolUse {
-            id: "patch-1".into(),
-            name: "edit".into(),
-            summary: "/work/a.rs, /work/old.txt".into(),
-            detail: concat!(
-                "/work/a.rs\n@@ -1,3 +1,3 @@\n  fn a() {\n-     one();\n+     two();\n  }\n\n",
-                "/work/old.txt\n- bye"
-            )
-            .into(),
-        }]
+        [
+            TurnEvent::ToolUse {
+                id: "patch-1".into(),
+                name: "edit".into(),
+                summary: "/work/a.rs, /work/old.txt".into(),
+                detail: concat!(
+                    "/work/a.rs\n@@ -1,3 +1,3 @@\n  fn a() {\n-     one();\n+     two();\n  }\n\n",
+                    "/work/old.txt\n- bye"
+                )
+                .into(),
+            },
+            TurnEvent::ToolChange {
+                id: "patch-1".into(),
+                changes: vec![
+                    FileChange::from_diff(
+                        "/work/a.rs",
+                        ChangeKind::Updated,
+                        "@@ -1,3 +1,3 @@\n fn a() {\n-    one();\n+    two();\n }\n",
+                    ),
+                    FileChange::from_diff("/work/old.txt", ChangeKind::Deleted, "bye\n"),
+                ],
+            }
+        ]
+    );
+    // The lines carry the numbers its header gave.
+    let TurnEvent::ToolChange { changes, .. } = &events[1] else {
+        panic!()
+    };
+    assert_eq!(changes[0].hunks[0].lines[1].old, Some(2));
+    assert_eq!(
+        (changes[1].kind, changes[1].removed()),
+        (ChangeKind::Deleted, 1)
     );
 }
 
@@ -528,12 +551,18 @@ fn a_change_of_files_is_asked_with_the_change_and_every_decision_the_protocol_ha
     let mut session = running();
     assert_eq!(
         read(session.as_mut(), PATCH).events,
-        [TurnEvent::ToolUse {
-            id: "exec-061b".into(),
-            name: "edit".into(),
-            summary: "/work/note.txt".into(),
-            detail: "/work/note.txt\n+ hi".into(),
-        }]
+        [
+            TurnEvent::ToolUse {
+                id: "exec-061b".into(),
+                name: "edit".into(),
+                summary: "/work/note.txt".into(),
+                detail: "/work/note.txt\n+ hi".into(),
+            },
+            TurnEvent::ToolChange {
+                id: "exec-061b".into(),
+                changes: vec![FileChange::written("/work/note.txt", "hi\n")],
+            }
+        ]
     );
     let asked = read(session.as_mut(), ASK_PATCH).events;
     let [TurnEvent::Question {
@@ -1234,6 +1263,7 @@ fn the_turns_tokens_are_what_the_thread_added_since_it_began() {
                 output: 50,
                 reasoning: 20,
                 context_window: Some(400_000),
+                context_used: Some(550),
             }
         }]
     );
@@ -1247,5 +1277,63 @@ fn the_turns_tokens_are_what_the_thread_added_since_it_began() {
     assert_eq!(
         (tokens.input, tokens.output, tokens.reasoning),
         (1100, 110, 30)
+    );
+}
+
+#[test]
+fn a_plan_update_is_the_agent_s_list_of_todos() {
+    let mut session = running();
+    let update = r#"{"method":"turn/plan/updated","params":{"threadId":"01a11902-6cec","turnId":"01a11902-6fb7","explanation":null,"plan":[{"step":"Read the code","status":"completed"},{"step":"Write the test","status":"inProgress"},{"step":"Ship it","status":"pending"}]}}"#;
+    let step = read(session.as_mut(), update);
+    assert_eq!(
+        step.events,
+        [TurnEvent::Todos {
+            todos: vec![
+                crate::events::Todo {
+                    text: "Read the code".into(),
+                    status: crate::events::TodoStatus::Completed
+                },
+                crate::events::Todo {
+                    text: "Write the test".into(),
+                    status: crate::events::TodoStatus::InProgress
+                },
+                crate::events::Todo {
+                    text: "Ship it".into(),
+                    status: crate::events::TodoStatus::Pending
+                },
+            ]
+        }]
+    );
+}
+
+#[test]
+fn a_plan_item_of_checkboxes_is_a_list_and_one_of_prose_is_an_answer() {
+    let item = |text: &str| {
+        serde_json::json!({"method":"item/completed","params":{"item":{"type":"plan","id":"p1","text":text},"threadId":"t","turnId":"u"}})
+            .to_string()
+    };
+    let mut session = running();
+    let step = read(session.as_mut(), &item("- [x] Read\n- [ ] Write"));
+    assert_eq!(
+        step.events,
+        [TurnEvent::Todos {
+            todos: vec![
+                crate::events::Todo {
+                    text: "Read".into(),
+                    status: crate::events::TodoStatus::Completed
+                },
+                crate::events::Todo {
+                    text: "Write".into(),
+                    status: crate::events::TodoStatus::Pending
+                },
+            ]
+        }]
+    );
+    let step = read(session.as_mut(), &item("# Plan\n\nDo the thing."));
+    assert_eq!(
+        step.events,
+        [TurnEvent::Text {
+            text: "# Plan\n\nDo the thing.".into()
+        }]
     );
 }

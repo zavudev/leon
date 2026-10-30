@@ -280,6 +280,45 @@ pub(super) fn with_latest(
         .into_any_element()
 }
 
+/// Whether a file is a picture a thumbnail can show, by its extension.
+pub(super) fn is_image(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
+                .contains(&ext.to_ascii_lowercase().as_str())
+        })
+}
+
+/// A picture as a square thumbnail, that opens in the system's viewer when
+/// clicked: the larger image is one click away.
+pub(super) fn thumbnail(
+    path: &std::path::Path,
+    size: Pixels,
+    selector: String,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    let opened = path.to_path_buf();
+    div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .size(size)
+        .rounded(px(2.))
+        .overflow_hidden()
+        .cursor_pointer()
+        .child(
+            img(path.to_path_buf())
+                .size_full()
+                .object_fit(ObjectFit::Cover),
+        )
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            let open = this.options.open_file.clone();
+            open(cx, &opened);
+        }))
+        .into_any_element()
+}
+
 /// Files attached to what is said next, over the field they go with: an
 /// image as a thumbnail, any other file as its name, each with the button
 /// that takes it off (`remove`). `names` are the selectors of the row and
@@ -311,13 +350,7 @@ pub(super) fn attached_files(
             .file_name()
             .map(|label| label.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
-        let image = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| {
-                ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
-                    .contains(&ext.to_ascii_lowercase().as_str())
-            });
+        let image = is_image(path);
         let gone = path.clone();
         let remove = remove.clone();
         let item = format!("{name}-{place}");
@@ -338,12 +371,7 @@ pub(super) fn attached_files(
                 .border_color(c.border)
                 .bg(c.background)
                 .child(if image {
-                    img(path.clone())
-                        .flex_none()
-                        .size(px(32.))
-                        .rounded(px(2.))
-                        .object_fit(ObjectFit::Cover)
-                        .into_any_element()
+                    thumbnail(path, px(32.), format!("{name}-preview-{place}"), cx)
                 } else {
                     div()
                         .flex_none()

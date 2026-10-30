@@ -739,6 +739,14 @@ fn kinds(h: &Harness, cx: &mut TestAppContext) -> Vec<String> {
     })
 }
 
+/// The tree but for its machines and projects, which stay whatever is hidden.
+fn without_projects(h: &Harness, cx: &mut TestAppContext) -> Vec<String> {
+    kinds(h, cx)
+        .into_iter()
+        .filter(|kind| kind != "machine" && !kind.starts_with("project:"))
+        .collect()
+}
+
 fn toggle_show_inactive(h: &Harness, cx: &mut TestAppContext) {
     h.pick_in_machine_menu(crate::keys::Command::ToggleInactiveSessions, cx);
     h.settle(cx);
@@ -761,7 +769,7 @@ fn inactive_sessions_are_hidden_by_default_and_the_toggle_shows_them_and_is_reme
     let (h, _processes, _dir, _path, _id) = rig_filter(cx);
     // Off from the start: nothing is active, so the tree says so.
     assert!(!cx.update(|cx| crate::settings::flag(cx, "sidebar_show_inactive")));
-    assert_eq!(kinds(&h, cx), ["no-active"]);
+    assert_eq!(without_projects(&h, cx), ["no-active"]);
     assert!(h.shows("tree-no-active", cx));
     assert_eq!(inactive_item(&h, cx), "Show inactive sessions");
     // On: the whole tree is back.
@@ -771,7 +779,7 @@ fn inactive_sessions_are_hidden_by_default_and_the_toggle_shows_them_and_is_reme
     assert!(cx.update(|cx| crate::settings::flag(cx, "sidebar_show_inactive")));
     // Off again: only the active ones.
     toggle_show_inactive(&h, cx);
-    assert_eq!(kinds(&h, cx), ["no-active"]);
+    assert_eq!(without_projects(&h, cx), ["no-active"]);
     assert!(!cx.update(|cx| crate::settings::flag(cx, "sidebar_show_inactive")));
 }
 
@@ -783,7 +791,7 @@ fn the_old_active_only_setting_is_ignored(cx: &mut TestAppContext) {
     let def = crate::schema::find("sidebar_show_inactive").unwrap();
     assert_eq!(def.default, crate::schema::Initial::Bool(false));
     assert!(crate::schema::find("sidebar_active_only").is_none());
-    assert_eq!(kinds(&h, cx), ["no-active"]);
+    assert_eq!(without_projects(&h, cx), ["no-active"]);
 }
 
 #[gpui_kit::test]
@@ -807,13 +815,13 @@ fn hiding_inactive_keeps_a_session_running_elsewhere_and_what_holds_it(cx: &mut 
     // When the other process ends, nothing is active.
     processes.show(&[]);
     scan(&h, cx);
-    assert_eq!(kinds(&h, cx), ["no-active"]);
+    assert_eq!(without_projects(&h, cx), ["no-active"]);
 }
 
 #[gpui_kit::test]
 fn hiding_inactive_keeps_a_live_terminal_and_the_nodes_above_it(cx: &mut TestAppContext) {
     let (h, _processes, _dir, _path, id) = rig_filter(cx);
-    assert_eq!(kinds(&h, cx), ["no-active"]);
+    assert_eq!(without_projects(&h, cx), ["no-active"]);
     toggle_show_inactive(&h, cx);
     put_cursor_on(&h, cx, NodeId::Session(id));
     h.press("enter", cx);
@@ -831,8 +839,11 @@ fn hiding_inactive_keeps_a_live_terminal_and_the_nodes_above_it(cx: &mut TestApp
         1,
         "{shown:?}"
     );
-    assert_eq!(shown.last().map(String::as_str), Some("session:alpha"));
-    assert!(shown.len() < 6, "{shown:?}");
+    // Every project is still listed; what is under them is the session, and
+    // the nodes above it.
+    let below = without_projects(&h, cx);
+    assert_eq!(below.last().map(String::as_str), Some("session:alpha"));
+    assert!(below.len() < 4, "{below:?}");
 }
 
 #[gpui_kit::test]
@@ -865,4 +876,79 @@ fn hiding_inactive_lets_the_person_fold_and_open_nodes(cx: &mut TestAppContext) 
     // Opening it brings the session back.
     cx.update(|cx| h.shell.update(cx, |s, _| s.set_open(&project, true)));
     assert_eq!(kinds(&h, cx), open);
+}
+
+/// The projects the tree lists, by name.
+fn projects(h: &Harness, cx: &mut TestAppContext) -> Vec<String> {
+    h.shell(cx, |s| {
+        s.rows
+            .iter()
+            .filter_map(|row| match &row.kind {
+                Kind::Project { project, .. } => Some(project.name.clone()),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn hiding_inactive_keeps_every_project_so_a_worktree_can_still_be_made(cx: &mut TestAppContext) {
+    let (h, _processes, _dir, _path, _id) = rig_filter(cx);
+    // Nothing is active, yet the projects are all there: only their
+    // sessions and worktrees are hidden.
+    let shown = kinds(&h, cx);
+    assert!(
+        !shown.iter().any(|k| k.starts_with("session:")),
+        "{shown:?}"
+    );
+    assert!(!shown.contains(&"worktree".to_owned()), "{shown:?}");
+    assert_eq!(
+        shown.iter().filter(|k| k.starts_with("project:")).count(),
+        h.shell(cx, |s| s.snapshot.projects.len()),
+        "{shown:?}"
+    );
+    assert!(!shown.is_empty());
+    // The tree still says why it holds no sessions.
+    assert!(shown.contains(&"no-active".to_owned()), "{shown:?}");
+    // A project with nothing under it has no chevron to fold.
+    assert!(h.shell(cx, |s| s
+        .rows
+        .iter()
+        .filter(|row| matches!(row.kind, Kind::Project { .. }))
+        .all(|row| row.open.is_none())));
+}
+
+#[gpui_kit::test]
+fn the_plus_on_a_project_row_opens_the_new_worktree_dialog_for_that_project(
+    cx: &mut TestAppContext,
+) {
+    let (h, _processes, _dir, _path, _id) = rig_filter(cx);
+    assert!(!projects(&h, cx).is_empty());
+    let (at, project) = h.shell(cx, |s| {
+        s.rows
+            .iter()
+            .enumerate()
+            .find_map(|(at, row)| match &row.kind {
+                Kind::Project { project, .. } => Some((at, project.id.clone())),
+                _ => None,
+            })
+            .unwrap()
+    });
+    // Drawn, but only visible to the mouse once the row is hovered.
+    h.hover_on(format!("tree-row-{at}"), cx);
+    assert!(h.shows_dynamic(format!("tree-new-worktree-{at}"), cx));
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::None);
+    h.mouse_on(
+        format!("tree-new-worktree-{at}"),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
+    assert_eq!(h.shell(cx, |s| s.overlay), Overlay::NewWorktree);
+    assert_eq!(
+        h.shell(cx, |s| s
+            .new_worktree_ui
+            .as_ref()
+            .map(|ui| ui.project.clone())),
+        Some(project)
+    );
 }

@@ -2,6 +2,45 @@
 
 ## [Unreleased]
 
+### Added
+
+* The agent of a conversation can be switched in the middle of it: the chip
+  of the agent under the field (or `/agent`) lists the other installed
+  agents, and choosing one starts a new session of it in the same folder.
+  Its first message goes with what was said before, written from Leon's own
+  transcript (the latest turns whole, tools one line each, the older turns a
+  line each, the todos and the changed files, in at most 24,000 characters)
+  and out of sight: the conversation shows a rule, "Switched from Claude Code
+  to Codex · context handed off". The model, effort and mode are the new
+  agent's own. It is not offered while a turn runs, and the messages before
+  the rule cannot be edited or retried.
+* A turn of a conversation that changed files ends with a card, "3 files
+  changed (+12 -4)", listing them. Its numbers are git's own between the
+  snapshots of the worktree around the turn, and what the agent's tools said
+  where there are none. A click opens a panel of diffs on the right of the
+  conversation, for the turn, for one file or for every uncommitted change
+  (Escape, or the same command, closes it: `Show or hide the changes beside
+  the conversation`, Cmd+Alt+D, Ctrl+Shift+Alt+D).
+* The foot of a conversation says the branch of its worktree and how far it
+  is from its upstream, and a GIT button opens a cell to commit, commit and
+  push, commit, push and open a pull request, or push, with the commands of
+  the changes tab. The pull request chip shows the one it opened at once.
+* The agent's list of things to do is a card of its own in a conversation,
+  "Todos 3/7": a mark for each entry, the one it is on in the accent, the
+  done ones struck. It is Claude's `TodoWrite`, Codex's plan updates and an
+  ACP agent's plan, and each newer list replaces the card within the turn.
+  A proposed plan has a card of its own too, with a button to copy it.
+* Code in the agent's answers is highlighted with the editor's grammars (also
+  for `sh`, `zsh`, `jsx`, `yml` and the other names agents write), and each
+  block says its language and has a button that copies its code.
+* Messages say the time they were said (the date too when it was not today).
+* `Find in the conversation…` (Cmd+F, Ctrl+F) opens a bar that counts the
+  matches, tints the messages that hold one and goes to the next with Enter
+  and to the previous with Shift+Enter; Escape closes it.
+* The foot of a conversation shows how full the model's context is, from what
+  Claude Code, Codex and the ACP agents report, and hides it when the agent
+  does not say how large the window is.
+
 ## [0.13.1] - 2026-10-27
 
 ### Added

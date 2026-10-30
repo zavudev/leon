@@ -223,6 +223,30 @@ impl Store {
         })
     }
 
+    /// Gives a session the title generated for it, unless a person named it:
+    /// `true` when it was set. Like a name, it survives the next import, and
+    /// a blank name takes it back to the agent's own title.
+    pub fn set_generated_title(&self, id: &SessionId, title: &str) -> Result<bool> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Ok(false);
+        }
+        self.write(StoreChange::Sessions, |tx| {
+            let exists: bool = tx
+                .prepare_cached("SELECT 1 FROM session WHERE id = ?1")?
+                .exists(params![id.as_str()])?;
+            if !exists {
+                return Err(StoreError::NotFound("session"));
+            }
+            let changed = tx
+                .prepare_cached(
+                    "UPDATE session SET custom_title = ?2 WHERE id = ?1 AND custom_title IS NULL",
+                )?
+                .execute(params![id.as_str(), title])?;
+            Ok(changed > 0)
+        })
+    }
+
     /// Remembers which account the session ran with (`None`: the agent's own
     /// setup), so that resuming it starts the same one. Announces nothing when
     /// the session already has it.
@@ -692,6 +716,29 @@ mod tests {
         assert_eq!(store.session(&id).unwrap().title, "Fresh heading");
         assert!(store
             .rename_session(&SessionId::from_string("nope"), Some("x"))
+            .is_err());
+    }
+
+    #[test]
+    fn a_generated_title_never_replaces_a_name_a_person_gave() {
+        let store = Store::open_in_memory().unwrap();
+        let id = store.upsert_session(&session("s1"), &transcript()).unwrap();
+        // With no name of the person's, it is the title shown, and it
+        // survives the next import.
+        assert!(store
+            .set_generated_title(&id, "  Fix the login flow ")
+            .unwrap());
+        assert_eq!(store.session(&id).unwrap().title, "Fix the login flow");
+        store.upsert_session(&session("s1"), &transcript()).unwrap();
+        assert_eq!(store.session(&id).unwrap().title, "Fix the login flow");
+        // A person's name is stronger, and a later generated title leaves it.
+        store.rename_session(&id, Some("Login")).unwrap();
+        assert!(!store.set_generated_title(&id, "Something else").unwrap());
+        assert_eq!(store.session(&id).unwrap().title, "Login");
+        // Blank titles and unknown sessions change nothing.
+        assert!(!store.set_generated_title(&id, "  ").unwrap());
+        assert!(store
+            .set_generated_title(&SessionId::from_string("nope"), "x")
             .is_err());
     }
 

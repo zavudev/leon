@@ -3,13 +3,13 @@
 //! Three things are named rather than written out, the same way whatever the
 //! agent is:
 //!
-//! * a **command**, after a slash that opens the prompt: Leon's own four
-//!   (`/model`, `/effort`, `/mode`, `/voice`), then whatever the agent lists
+//! * a **command**, after a slash that opens the prompt: Leon's own
+//!   (`/model`, `/effort`, `/mode`, `/agent`, `/voice`), then whatever the agent lists
 //!   as its own (its commands, its skills, the prompts somebody saved for
 //!   it);
 //! * a **file** of the folder the agent works in, after an `@` anywhere;
-//! * a **mode**, a **model** or an **effort** (how hard the model thinks),
-//!   in the list a chip of the field opens;
+//! * a **mode**, a **model**, an **effort** (how hard the model thinks) or
+//!   another **agent** to go on with, in the list a chip of the field opens;
 //! * a **speech model** for dictation, in the list `/voice` opens (and the
 //!   field's own button, until there is a model to dictate with).
 //!
@@ -17,6 +17,7 @@
 //! for where the cursor is ([`token`]), and the rows that answer what was
 //! typed, best first. `ui/chat_menu.rs` draws them and does what a row says.
 
+use leon_core::AgentId;
 use leon_turn::{AgentCommand, AgentModel, AgentOptions};
 use leon_voice::catalog;
 
@@ -78,6 +79,8 @@ pub enum Pick {
     Efforts,
     /// Opens the list of the agent's modes.
     Modes,
+    /// Opens the list of the agents the conversation can go on with.
+    Agents,
     /// Opens the list of the speech models of dictation.
     Voices,
     /// Writes this in place of the word: what asks the agent for a command.
@@ -90,6 +93,8 @@ pub enum Pick {
     Model(Option<String>),
     /// The model thinks this hard; `None` is as the agent is set up.
     Effort(Option<String>),
+    /// The conversation goes on with this agent, which is told what was said.
+    Agent(AgentId),
     /// Dictation uses this speech model, downloaded first when it is not
     /// on this computer.
     Voice(String),
@@ -113,8 +118,9 @@ pub struct Row {
 }
 
 /// The commands that answer `query`: Leon's own first (a list of the
-/// agent's models, of the `efforts` of the one in use, or of its modes, when
-/// there is any to choose from), then the agent's. One of the agent's that
+/// agent's models, of the `efforts` of the one in use, of its modes, or of
+/// the other agents (`switch`), when there is any to choose from), then the
+/// agent's. One of the agent's that
 /// is called like one of Leon's is left out: in its terminal it opens a
 /// picker, which is what Leon's does.
 pub fn command_rows(
@@ -122,6 +128,7 @@ pub fn command_rows(
     options: Option<&AgentOptions>,
     efforts: &[String],
     agent: &[AgentCommand],
+    switch: bool,
 ) -> Vec<Row> {
     let mut rows = Vec::new();
     if options.is_some_and(|options| !options.models.is_empty()) {
@@ -154,6 +161,16 @@ pub fn command_rows(
             pick: Pick::Modes,
         });
     }
+    if switch {
+        rows.push(Row {
+            label: "/agent".to_owned(),
+            detail: Some("Go on with another agent, which is told what was said.".to_owned()),
+            note: Some("BUILT IN".to_owned()),
+            current: false,
+            warn: false,
+            pick: Pick::Agents,
+        });
+    }
     rows.push(Row {
         label: "/voice".to_owned(),
         detail: Some("Choose the speech model you dictate with.".to_owned()),
@@ -178,6 +195,27 @@ pub fn command_rows(
     );
     // Ranked by the name alone, without its sign: `/re` finds `$review` too.
     let mut rows = fuzzy::rank(query, rows, |row| row.label[1..].to_owned());
+    rows.truncate(ROWS);
+    rows
+}
+
+/// The `others` (agents the conversation can go on with) that answer
+/// `query`, in the order given.
+pub fn agent_rows(query: &str, others: &[AgentId]) -> Vec<Row> {
+    let rows = others
+        .iter()
+        .map(|agent| Row {
+            label: agent.name().to_owned(),
+            detail: None,
+            note: Some(agent.as_str().to_owned()),
+            current: false,
+            warn: false,
+            pick: Pick::Agent(*agent),
+        })
+        .collect();
+    let mut rows = fuzzy::rank(query, rows, |row: &Row| {
+        format!("{} {}", row.label, row.note.as_deref().unwrap_or_default())
+    });
     rows.truncate(ROWS);
     rows
 }
@@ -721,7 +759,7 @@ mod tests {
                 ..AgentCommand::slash("humanizer", None, None)
             },
         ];
-        let all = command_rows("", Some(&options()), &[], &agent);
+        let all = command_rows("", Some(&options()), &[], &agent, false);
         assert_eq!(
             labels(&all),
             ["/model", "/mode", "/voice", "/compact", "$humanizer"]
@@ -734,31 +772,58 @@ mod tests {
         // A model that can be told how hard to think adds a third, which
         // shadows the agent's own as the others do.
         let thinks = [AgentCommand::slash("effort", None, None)];
-        let with = command_rows("", Some(&options()), &["low".to_owned()], &thinks);
+        let with = command_rows("", Some(&options()), &["low".to_owned()], &thinks, false);
         assert_eq!(labels(&with), ["/model", "/effort", "/mode", "/voice"]);
         assert_eq!(with[1].pick, Pick::Efforts);
-        let without = command_rows("", Some(&options()), &[], &thinks);
+        let without = command_rows("", Some(&options()), &[], &thinks, false);
         assert_eq!(without[3].pick, Pick::Command("/effort".into()));
 
         assert_eq!(
-            labels(&command_rows("mo", Some(&options()), &[], &agent)),
+            labels(&command_rows("mo", Some(&options()), &[], &agent, false)),
             ["/mode", "/model"]
         );
         // A skill is found by its name, whatever sign asks for it.
         assert_eq!(
-            labels(&command_rows("hum", Some(&options()), &[], &agent)),
+            labels(&command_rows("hum", Some(&options()), &[], &agent, false)),
             ["$humanizer"]
         );
-        assert!(command_rows("zzz", Some(&options()), &[], &agent).is_empty());
+        assert!(command_rows("zzz", Some(&options()), &[], &agent, false).is_empty());
 
         // An agent that was not asked yet, or has one mode and no list of
         // models, has nothing of Leon's to choose: its own command stays.
-        let bare = command_rows("", None, &[], &agent);
+        let bare = command_rows("", None, &[], &agent, false);
         assert_eq!(
             labels(&bare),
             ["/voice", "/model", "/compact", "$humanizer"]
         );
         assert_eq!(bare[1].pick, Pick::Command("/model".into()));
+    }
+
+    #[test]
+    fn switching_agents_is_a_command_only_where_there_is_another_agent_to_switch_to() {
+        let with = command_rows("", Some(&options()), &[], &[], true);
+        assert_eq!(labels(&with), ["/model", "/mode", "/agent", "/voice"]);
+        assert_eq!(with[2].pick, Pick::Agents);
+        // The agent's own command of that name gives way, as the others do.
+        let own = [AgentCommand::slash("agent", None, None)];
+        let shadowed = command_rows("", None, &[], &own, true);
+        assert_eq!(labels(&shadowed), ["/agent", "/voice"]);
+        assert_eq!(shadowed[0].pick, Pick::Agents);
+        let alone = command_rows("", None, &[], &own, false);
+        assert_eq!(alone[1].pick, Pick::Command("/agent".into()));
+    }
+
+    #[test]
+    fn the_agents_to_switch_to_are_found_by_name_and_chosen_by_id() {
+        let others = [AgentId::CODEX, AgentId::OPENCODE, AgentId::GROK];
+        let all = agent_rows("", &others);
+        assert_eq!(labels(&all), ["Codex", "opencode", "Grok"]);
+        assert_eq!(all[0].pick, Pick::Agent(AgentId::CODEX));
+        assert_eq!(all[0].note.as_deref(), Some("codex"));
+        assert!(all.iter().all(|row| !row.current && !row.warn));
+        assert_eq!(labels(&agent_rows("gro", &others)), ["Grok"]);
+        assert!(agent_rows("zzz", &others).is_empty());
+        assert!(agent_rows("", &[]).is_empty());
     }
 
     #[test]

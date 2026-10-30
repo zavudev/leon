@@ -21,23 +21,25 @@ use gpui_kit::prelude::*;
 use gpui_kit::{
     div, AnyElement, ClickEvent, Context, Div, FontWeight, MouseDownEvent, SharedString, Stateful,
 };
-use leon_turn::{ChoiceQuestion, PermissionChoice, PermissionEffect, QuestionKind};
+use leon_turn::{
+    ChangeKind, ChoiceQuestion, DiffLine, FileChange, LineKind, PermissionChoice, PermissionEffect,
+    QuestionKind,
+};
 
 use super::chat::Chat;
+use super::chat_find::Mark;
 use super::chat_menu::MenuKind;
+use super::chat_rewind::Files;
 use super::live::LiveId;
 use super::shell::Shell;
 use super::widgets::{attached_files, key_cap, led, mark, mono, with_latest, Lion};
 use crate::chat::model::{
-    blocks, cost_text, duration_text, work_label, Block, Item, Phase, Question, Tone, Tool,
+    blocks, cost_text, diff_rows, duration_text, segments, todo_title, work_label, Block, Item,
+    Level, Phase, Question, Row, Segment, Tone, Tool,
 };
 use crate::format;
 use crate::icons::{agent_icon, icon, IconName};
-use crate::theme::{fonts, metrics, px, Palette};
-
-/// The widest the column of a conversation gets: wide enough that code and
-/// tables keep their lines on a large screen, narrow enough to read.
-const COLUMN: f32 = 1040.;
+use crate::theme::{fonts, metrics, px, Palette, DIFF_TINT};
 
 impl Shell {
     /// The leaf of a conversation, with the accent outline when it is the
@@ -61,6 +63,40 @@ impl Shell {
             .iter()
             .map(|question| self.chat_question(id, chat, question, colours, cx))
             .collect::<Vec<_>>();
+        let panel = self.chat_diff_panel(id, chat, colours, cx);
+        let find = self.chat_find_bar(id, chat, colours, cx);
+        let column_of_chat = div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(body)
+            .children(find)
+            .child(
+                column()
+                    .flex_none()
+                    .px(px(16.))
+                    .pb(px(12.))
+                    .gap(px(8.))
+                    .children(questions)
+                    .children(self.chat_rewind_cell(id, chat, colours, cx))
+                    .children(self.chat_git_cell(id, chat, colours, cx))
+                    .children(self.chat_menu(id, chat, colours, cx))
+                    .child(self.chat_composer(id, chat, colours, cx))
+                    .child(chat_foot(
+                        id,
+                        chat,
+                        [
+                            self.chat_branch_label(id, chat, colours),
+                            self.chat_pull_request(id, chat, colours, cx),
+                            Some(self.chat_git_button(id, chat, colours, cx)),
+                        ],
+                        colours,
+                    )),
+            );
         Some(
             div()
                 .debug_selector(move || format!("pane-{}", id.0))
@@ -69,7 +105,7 @@ impl Shell {
                 .min_w_0()
                 .min_h_0()
                 .flex()
-                .flex_col()
+                .flex_row()
                 .bg(colours.background)
                 .rounded(metrics::RADIUS_CELL())
                 .border_1()
@@ -85,23 +121,8 @@ impl Shell {
                         this.open_live(id, window, cx);
                     }
                 }))
-                .child(body)
-                .child(
-                    column()
-                        .flex_none()
-                        .px(px(16.))
-                        .pb(px(12.))
-                        .gap(px(8.))
-                        .children(questions)
-                        .children(self.chat_menu(id, chat, colours, cx))
-                        .child(self.chat_composer(id, chat, colours, cx))
-                        .child(chat_foot(
-                            id,
-                            chat,
-                            self.chat_pull_request(id, chat, colours, cx),
-                            colours,
-                        )),
-                )
+                .child(column_of_chat)
+                .children(panel)
                 .into_any_element(),
         )
     }
@@ -157,7 +178,6 @@ impl Shell {
             )
             .child(
                 div()
-                    .max_w(px(COLUMN))
                     .min_w_0()
                     .px(px(16.))
                     .flex()
@@ -190,28 +210,70 @@ impl Shell {
     ) -> AnyElement {
         let items = &chat.conversation.items;
         let running = chat.conversation.running();
-        let mut list = column().px(px(16.)).pt(px(16.)).pb(px(12.)).gap(px(12.));
+        // The list is the scrolling element itself, so that each of its
+        // children can be scrolled to (the first one is the space above it,
+        // and the gap after the last is the space below).
+        let mut list = vec![div().flex_none().h(px(4.)).into_any_element()];
+        let cards = chat.cards();
+        let found = chat.found();
+        let marked =
+            super::chat_find::marks(&found, chat.find.as_ref().map_or(0, |bar| bar.current));
         for block in blocks(items, running) {
-            list = list.child(match block {
-                Block::Single(at) => self.chat_item(id, at, &items[at], chat, colours),
+            let end = match block {
+                Block::Single(at) => at + 1,
+                Block::Work { to, .. } => to,
+            };
+            let mark = match block {
+                Block::Single(at) => marked.get(&at).copied(),
+                Block::Work { .. } => None,
+            };
+            let drawn = match block {
+                Block::Single(at) => self.chat_item(id, at, &items[at], chat, colours, cx),
                 Block::Work { from, to, live } => {
                     self.chat_work(id, chat, from, &items[from..to], live, colours, cx)
                 }
-            });
+            };
+            list.push(
+                div()
+                    .flex_none()
+                    .w_full()
+                    .min_w_0()
+                    .rounded(metrics::RADIUS())
+                    .when_some(mark, |this, mark| {
+                        this.bg(colours.signal.opacity(match mark {
+                            Mark::Current => 0.2,
+                            Mark::Some => 0.07,
+                        }))
+                    })
+                    .child(drawn)
+                    .into_any_element(),
+            );
+            // The turn that ends here changed files: its card closes it.
+            for (_, turn, stats) in cards.iter().filter(|(at, ..)| *at == end) {
+                list.push(
+                    div()
+                        .flex_none()
+                        .w_full()
+                        .child(self.chat_changed_card(id, chat, *turn, stats, colours, cx))
+                        .into_any_element(),
+                );
+            }
         }
         let now = (self.options.now)().timestamp_millis().max(0) as u64;
         if let Some(status) = chat_status(id, chat, now, colours) {
-            list = list.child(status);
+            list.push(div().flex_none().child(status).into_any_element());
         }
-        let scrolling = div()
+        list.push(div().flex_none().h(px(0.)).into_any_element());
+        let scrolling = column()
             .id(SharedString::from(format!("chat-scroll-{}", id.0)))
             .debug_selector(move || format!("chat-scroll-{}", id.0))
             .track_scroll(&chat.scroll)
             .overflow_y_scroll()
             .flex_1()
             .min_h_0()
-            .w_full()
-            .child(list);
+            .px(px(16.))
+            .gap(px(12.))
+            .children(list);
         with_latest(
             scrolling,
             &chat.scroll,
@@ -229,60 +291,103 @@ impl Shell {
         item: &Item,
         chat: &Chat,
         colours: &Palette,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         match item {
             // What the person said reads as a command typed at a prompt:
             // the accent's `>` and a bar of it down the left.
-            Item::User { text } => div()
-                .debug_selector(move || format!("chat-user-{}-{at}", id.0))
-                .w_full()
-                .min_w_0()
-                .flex()
-                .gap(px(10.))
-                .py(px(2.))
-                .pl(px(12.))
-                .border_l_2()
-                .border_color(colours.signal)
-                .font_family(fonts::mono())
-                .font_features(fonts::mono_features())
-                .child(div().flex_none().text_color(colours.signal).child(">"))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_color(colours.text)
-                        // Selected and copied like the agent's answers.
-                        .child(gpui_kit::base::SelectableText::new(
-                            SharedString::from(format!("chat-{}-said-{at}", id.0)),
-                            text.clone(),
-                        )),
-                )
-                .into_any_element(),
-            Item::Agent { text, .. } => div()
-                .debug_selector(move || format!("chat-agent-{}-{at}", id.0))
-                .w_full()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .child(agent_icon(chat.agent, px(12.), colours))
-                        .child(mono(answered_by(chat)).text_color(colours.text_faint)),
-                )
-                .child(
-                    div().w_full().min_w_0().text_color(colours.text).child(
-                        TextView::markdown(
-                            SharedString::from(format!("chat-{}-message-{at}", id.0)),
-                            text.clone(),
-                        )
-                        .selectable(true),
-                    ),
-                )
-                .into_any_element(),
+            Item::User { text, at: said_at } => {
+                let (words, files) = super::king::split_attached(text);
+                let group = SharedString::from(format!("chat-said-{}-{at}", id.0));
+                div()
+                    .debug_selector(move || format!("chat-user-{}-{at}", id.0))
+                    .group(group.clone())
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .gap(px(10.))
+                    .py(px(2.))
+                    .pl(px(12.))
+                    .border_l_2()
+                    .border_color(colours.signal)
+                    .font_family(fonts::mono())
+                    .font_features(fonts::mono_features())
+                    .child(div().flex_none().text_color(colours.signal).child(">"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .text_color(colours.text)
+                            // Selected and copied like the agent's answers;
+                            // the list of paths the agent reads is not shown
+                            // as text: the files are below.
+                            .child(gpui_kit::base::SelectableText::new(
+                                SharedString::from(format!("chat-{}-said-{at}", id.0)),
+                                words,
+                            ))
+                            .children(self.chat_sent_files(id, at, &files, colours, cx)),
+                    )
+                    .children(self.chat_time(id, at, *said_at, colours))
+                    .children(
+                        chat.can_rewind(at)
+                            .then(|| self.chat_said_actions(id, at, group, colours, cx)),
+                    )
+                    .into_any_element()
+            }
+            Item::Agent {
+                text, at: said_at, ..
+            } => {
+                let (lines, palette) = (id.0, *colours);
+                let who = crate::chat::model::agent_at(&chat.conversation.items, at, chat.agent);
+                div()
+                    .debug_selector(move || format!("chat-agent-{}-{at}", id.0))
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(agent_icon(who, px(12.), colours))
+                            .child(
+                                mono(if who == chat.agent {
+                                    answered_by(chat)
+                                } else {
+                                    // Said by the agent before a switch: the
+                                    // model in use now is not its.
+                                    crate::chat::complete::answered_by(None, format::agent_tag(who))
+                                })
+                                .text_color(colours.text_faint),
+                            )
+                            .child(div().flex_1())
+                            .children(self.chat_time(id, at, *said_at, colours)),
+                    )
+                    .child(
+                        div().w_full().min_w_0().text_color(colours.text).child(
+                            TextView::markdown(
+                                SharedString::from(format!("chat-{}-message-{at}", id.0)),
+                                SharedString::from(super::chat_code::normalize(text).into_owned()),
+                            )
+                            .selectable(true)
+                            .code_block_actions(move |block, _, _| {
+                                super::chat_code::corner(
+                                    format!("chat-code-{lines}-{at}"),
+                                    block.lang().as_deref(),
+                                    block.code(),
+                                    &palette,
+                                )
+                            }),
+                        ),
+                    )
+                    .into_any_element()
+            }
+            Item::Todos(todos) => self.chat_todos(id, at, todos, colours),
             Item::Notice { tone, text } => div()
                 .debug_selector(move || format!("chat-notice-{}-{at}", id.0))
                 .w_full()
@@ -304,15 +409,179 @@ impl Shell {
                         .child(text.clone()),
                 )
                 .into_any_element(),
+            // A rule with the switch said on it: what is above is the first
+            // agent's, what is below the second's.
+            Item::Switched { from, to } => {
+                let rule = || div().flex_1().h(px(1.)).bg(colours.border);
+                div()
+                    .debug_selector(move || format!("chat-switch-{}-{at}", id.0))
+                    .w_full()
+                    .py(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(rule())
+                    .child(
+                        mono(switched_said(*from, *to))
+                            .flex_none()
+                            .text_color(colours.text_faint),
+                    )
+                    .child(rule())
+                    .into_any_element()
+            }
             // Work is drawn by `chat_work`.
             Item::Thought { .. } | Item::Tool(_) => div().into_any_element(),
         }
     }
 
-    /// A stretch of work: one line that says how much, and under it, when it
-    /// is open, each thought and tool.
+    /// When a message was said, small and muted, at the end of its line:
+    /// the time of day, and the date when it was not today.
+    fn chat_time(
+        &self,
+        id: LiveId,
+        at: usize,
+        said: Option<i64>,
+        colours: &Palette,
+    ) -> Option<AnyElement> {
+        let said = said?;
+        let words = crate::chat::stamp::label(
+            said,
+            self.now().timestamp(),
+            crate::chat::stamp::local_offset(said),
+        );
+        (!words.is_empty()).then(|| {
+            div()
+                .debug_selector(move || format!("chat-time-{}-{at}", id.0))
+                .flex_none()
+                .font_family(fonts::mono())
+                .font_features(fonts::mono_features())
+                .text_size(metrics::TEXT_LABEL())
+                .text_color(colours.text_faint)
+                .child(words)
+                .into_any_element()
+        })
+    }
+
+    /// The agent's list of things to do, as a compact card: a mark for how
+    /// far each one is, the one it is on in the accent, the done ones struck
+    /// and muted, and how many are done in the title.
+    fn chat_todos(
+        &self,
+        id: LiveId,
+        at: usize,
+        todos: &[leon_turn::Todo],
+        colours: &Palette,
+    ) -> AnyElement {
+        use leon_turn::TodoStatus;
+        let row = |n: usize, todo: &leon_turn::Todo| {
+            let (sign, text) = match todo.status {
+                TodoStatus::Completed => (
+                    icon(IconName::Check, px(12.), colours.success).into_any_element(),
+                    colours.text_faint,
+                ),
+                TodoStatus::InProgress => (
+                    mono(super::king_view::spinner_frame())
+                        .text_color(colours.signal)
+                        .into_any_element(),
+                    colours.text,
+                ),
+                TodoStatus::Pending => (
+                    icon(IconName::Circle, px(12.), colours.text_faint).into_any_element(),
+                    colours.text_muted,
+                ),
+            };
+            div()
+                .debug_selector(move || format!("chat-todo-{}-{at}-{n}", id.0))
+                .flex()
+                .items_start()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(14.))
+                        .h(px(18.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(sign),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(metrics::TEXT_SMALL())
+                        .text_color(text)
+                        .when(todo.status == TodoStatus::InProgress, |this| {
+                            this.font_weight(FontWeight::SEMIBOLD)
+                        })
+                        .when(todo.status == TodoStatus::Completed, |this| {
+                            this.line_through()
+                        })
+                        .child(todo.text.clone()),
+                )
+        };
+        div()
+            .debug_selector(move || format!("chat-todos-{}-{at}", id.0))
+            .w_full()
+            .min_w_0()
+            .p(px(10.))
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .rounded(metrics::RADIUS())
+            .border_1()
+            .border_color(colours.border)
+            .bg(colours.surface)
+            .child(
+                mono(todo_title(todos).to_uppercase())
+                    .debug_selector(move || format!("chat-todos-title-{}-{at}", id.0))
+                    .text_color(colours.text_muted),
+            )
+            .children(todos.iter().enumerate().map(|(n, todo)| row(n, todo)))
+            .into_any_element()
+    }
+
+    /// A stretch of work, as the terminal draws it: what is not an edit
+    /// folds into a muted line that says what it did, and every edit stands
+    /// out of it with its diff.
     #[allow(clippy::too_many_arguments)]
     fn chat_work(
+        &self,
+        id: LiveId,
+        chat: &Chat,
+        from: usize,
+        items: &[Item],
+        live: bool,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let parts = segments(items);
+        let last = parts.len().saturating_sub(1);
+        let mut out = div().w_full().min_w_0().flex().flex_col().gap(px(2.));
+        for (n, part) in parts.into_iter().enumerate() {
+            out = out.child(match part {
+                Segment::Edit(at) => match &items[at] {
+                    Item::Tool(tool) => self.chat_edit(id, chat, tool, colours, cx),
+                    _ => div().into_any_element(),
+                },
+                Segment::Run { from: a, to: b } => self.chat_run(
+                    id,
+                    chat,
+                    from + a,
+                    &items[a..b],
+                    live && n == last,
+                    colours,
+                    cx,
+                ),
+            });
+        }
+        out.into_any_element()
+    }
+
+    /// Thoughts and tools that change no file: one line that says what they
+    /// did, and under it, when it is open, each of them.
+    #[allow(clippy::too_many_arguments)]
+    fn chat_run(
         &self,
         id: LiveId,
         chat: &Chat,
@@ -331,6 +600,19 @@ impl Shell {
             _ => None,
         });
         let hover = colours.surface_2;
+        let tools = || {
+            items.iter().filter_map(|item| match item {
+                Item::Tool(tool) => Some(tool),
+                _ => None,
+            })
+        };
+        let run_light = if tools().any(|tool| matches!(&tool.outcome, Some(o) if !o.ok)) {
+            colours.error
+        } else if tools().any(|tool| tool.outcome.is_none()) && live {
+            colours.signal
+        } else {
+            colours.text_faint
+        };
         let head = div()
             .id(SharedString::from(format!("chat-work-{}-{from}", id.0)))
             .debug_selector(move || format!("chat-work-{}-{from}", id.0))
@@ -354,7 +636,8 @@ impl Shell {
                 px(12.),
                 colours.text_faint,
             ))
-            .child(mono(work_label(items).to_uppercase()).text_color(colours.text_muted))
+            .child(led(run_light))
+            .child(mono(work_label(items)).text_color(colours.text_muted))
             .when(!open, |this| {
                 this.children(last.map(|last| {
                     div()
@@ -496,6 +779,93 @@ impl Shell {
             .into_any_element()
     }
 
+    /// A tool that changes files, as the terminal draws it: for each file a
+    /// line of what was done to it and how much, and under it, open unless
+    /// it was folded by hand, the diff.
+    fn chat_edit(
+        &self,
+        id: LiveId,
+        chat: &Chat,
+        tool: &Tool,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = !chat.open_tools.contains(&tool.id);
+        let light = match &tool.outcome {
+            None => colours.signal,
+            Some(outcome) if outcome.ok => colours.success,
+            Some(_) => colours.error,
+        };
+        let hover = colours.surface_2;
+        let failure = tool
+            .outcome
+            .as_ref()
+            .filter(|outcome| !outcome.ok)
+            .map(|outcome| {
+                if outcome.detail.trim().is_empty() {
+                    outcome.summary.clone()
+                } else {
+                    outcome.detail.clone()
+                }
+            })
+            .filter(|said| !said.trim().is_empty());
+        let mut out = div().w_full().min_w_0().flex().flex_col();
+        for (at, change) in tool.changes.iter().enumerate() {
+            let key = tool.id.clone();
+            let name = if at == 0 {
+                format!("chat-tool-{}-{}", id.0, tool.id)
+            } else {
+                format!("chat-tool-{}-{}-{at}", id.0, tool.id)
+            };
+            out = out
+                .child(
+                    div()
+                        .id(SharedString::from(name.clone()))
+                        .debug_selector(move || name.clone())
+                        .h(px(24.))
+                        .px(px(6.))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .rounded(metrics::RADIUS())
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(hover))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.chat_toggle_tool(id, &key, cx);
+                        }))
+                        .child(led(light))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(fonts::mono())
+                                .text_size(metrics::TEXT_SMALL())
+                                .text_color(colours.text_muted)
+                                .child(format!("{} ", change_verb(change.kind)))
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(colours.text)
+                                        .child(change.path.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(colours.text_faint)
+                                        .child(format!(" ({})", change_counts(change))),
+                                ),
+                        ),
+                )
+                .when(open, |this| {
+                    this.child(diff_block(&tool.id, at, id, change, colours))
+                });
+        }
+        out.when_some(failure, |this, said| {
+            this.child(code_cell(&said, colours).ml(px(14.)).my(px(4.)))
+        })
+        .into_any_element()
+    }
+
     /// What the agent asks, with the ways to answer it.
     fn chat_question(
         &self,
@@ -635,17 +1005,67 @@ impl Shell {
             QuestionKind::Plan { plan } => {
                 let start = asked.clone();
                 let keep = asked.clone();
-                frame("PLAN")
+                let palette = *colours;
+                let copied = plan.clone();
+                let hover = colours.surface_2;
+                // A plan is a document to read before it is approved: the
+                // frame names it, the plan itself sits in a page of its own
+                // (as long as it needs, up to a scroll), and what it says can
+                // be copied.
+                frame("PROPOSED PLAN")
+                    .debug_selector(move || format!("chat-plan-card-{}", id.0))
                     .child(
                         div()
                             .id(SharedString::from(format!("chat-plan-{}", id.0)))
-                            .max_h(px(320.))
+                            .debug_selector(move || format!("chat-plan-page-{}", id.0))
+                            .max_h(px(360.))
                             .overflow_y_scroll()
                             .min_w_0()
-                            .child(TextView::markdown(
-                                SharedString::from(format!("chat-{}-plan", id.0)),
-                                plan.clone(),
-                            )),
+                            .px(px(12.))
+                            .py(px(8.))
+                            .rounded(metrics::RADIUS())
+                            .border_1()
+                            .border_color(colours.border)
+                            .bg(colours.background)
+                            .child(
+                                TextView::markdown(
+                                    SharedString::from(format!("chat-{}-plan", id.0)),
+                                    SharedString::from(
+                                        super::chat_code::normalize(plan).into_owned(),
+                                    ),
+                                )
+                                .selectable(true)
+                                .code_block_actions(
+                                    move |block, _, _| {
+                                        super::chat_code::corner(
+                                            format!("chat-plan-code-{}", id.0),
+                                            block.lang().as_deref(),
+                                            block.code(),
+                                            &palette,
+                                        )
+                                    },
+                                ),
+                            ),
+                    )
+                    .child(
+                        div().flex().child(
+                            div()
+                                .id(SharedString::from(format!("chat-plan-copy-{}", id.0)))
+                                .debug_selector(move || format!("chat-plan-copy-{}", id.0))
+                                .h(px(20.))
+                                .px(px(6.))
+                                .flex()
+                                .items_center()
+                                .rounded(metrics::RADIUS())
+                                .cursor_pointer()
+                                .hover(move |style| style.bg(hover))
+                                .child(mono("COPY PLAN").text_color(colours.text_muted))
+                                .on_click(move |_: &ClickEvent, _, cx| {
+                                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                        copied.clone(),
+                                    ));
+                                }),
+                        ),
                     )
                     .child(reason_field(&chat.reason, colours))
                     .child(
@@ -833,6 +1253,19 @@ impl Shell {
             .as_ref()
             .is_some_and(|options| !options.models.is_empty());
         let mut foot = div().flex().items_center().gap(px(6.)).min_w_0();
+        // The agent, first of the chips: a click lists the others to go on
+        // with. While something goes on it is there and does not open.
+        if !chat.agents_to_switch_to().is_empty() {
+            let label = format::agent_name(chat.agent).to_uppercase();
+            let agent = chip("chat-agent-chip", id, label, false, colours);
+            foot = foot.child(if chat.can_switch() {
+                agent.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.chat_open_menu(id, MenuKind::Agents, window, cx);
+                }))
+            } else {
+                agent.opacity(0.5).cursor_default()
+            });
+        }
         if can_pick_mode {
             let dangerous = mode.is_some_and(|mode| mode.dangerous);
             let label = mode.map_or_else(
@@ -925,6 +1358,7 @@ impl Shell {
             .border_color(colours.elevated_border)
             .bg(colours.surface)
             .children(super::lines::focus_ticks("chat-composer", colours))
+            .children(self.chat_queue_list(id, chat, colours, cx))
             .children(attached_files(
                 &chat.attached,
                 (
@@ -990,6 +1424,329 @@ impl Shell {
 }
 
 impl Shell {
+    /// The files that went with a message: a picture as a thumbnail, any
+    /// other file as a chip with its name. Each opens in the system's viewer
+    /// when clicked.
+    fn chat_sent_files(
+        &self,
+        id: LiveId,
+        at: usize,
+        files: &[std::path::PathBuf],
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if files.is_empty() {
+            return None;
+        }
+        let tiles = files.iter().enumerate().map(|(place, file)| {
+            if super::widgets::is_image(file) {
+                return super::widgets::thumbnail(
+                    file,
+                    px(96.),
+                    format!("chat-sent-image-{}-{at}-{place}", id.0),
+                    cx,
+                );
+            }
+            let opened = file.clone();
+            let hover = colours.surface_2;
+            div()
+                .id(SharedString::from(format!(
+                    "chat-sent-file-{}-{at}-{place}",
+                    id.0
+                )))
+                .debug_selector(move || format!("chat-sent-file-{}-{at}-{place}", id.0))
+                .flex_none()
+                .max_w(px(220.))
+                .h(px(28.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .rounded(metrics::RADIUS())
+                .border_1()
+                .border_color(colours.border)
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover))
+                .child(icon(IconName::File, px(12.), colours.text_muted))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(metrics::TEXT_SMALL())
+                        .text_color(colours.text_muted)
+                        .child(
+                            file.file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| file.display().to_string()),
+                        ),
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    let open = this.options.open_file.clone();
+                    open(cx, &opened);
+                }))
+                .into_any_element()
+        });
+        Some(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_wrap()
+                .gap(px(6.))
+                .children(tiles)
+                .into_any_element(),
+        )
+    }
+
+    /// The messages that wait for the turn to end, one row each above the
+    /// field: what was said (its first line), and what can be done with it.
+    /// Edit puts it back in the field, remove drops it, and send now tells
+    /// the running turn instead of waiting for its end.
+    fn chat_queue_list(
+        &self,
+        id: LiveId,
+        chat: &Chat,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if chat.conversation.queued.is_empty() {
+            return None;
+        }
+        let action = |part: &'static str, label: &'static str, index: usize| {
+            let hover = colours.surface_2;
+            div()
+                .id(SharedString::from(format!(
+                    "chat-queue-{part}-{}-{index}",
+                    id.0
+                )))
+                .debug_selector(move || format!("chat-queue-{part}-{}-{index}", id.0))
+                .flex_none()
+                .h(px(20.))
+                .px(px(6.))
+                .flex()
+                .items_center()
+                .rounded(metrics::RADIUS())
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover))
+                .child(mono(label).text_color(colours.text_muted))
+        };
+        let rows = chat
+            .conversation
+            .queued
+            .iter()
+            .enumerate()
+            .map(|(index, text)| {
+                let (words, files) = super::king::split_attached(text);
+                let first = words
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .unwrap_or("")
+                    .to_owned();
+                let shown = if files.is_empty() {
+                    first
+                } else {
+                    format!("{first}  ({} attached)", files.len())
+                };
+                div()
+                    .debug_selector(move || format!("chat-queue-item-{}-{index}", id.0))
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(mono(format!("{}", index + 1)).text_color(colours.text_faint))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(metrics::TEXT_SMALL())
+                            .text_color(colours.text_muted)
+                            .child(shown),
+                    )
+                    .child(action("edit", "EDIT", index).on_click(cx.listener(
+                        move |this, _: &ClickEvent, window, cx| {
+                            this.chat_queue_edit(id, index, window, cx);
+                        },
+                    )))
+                    .child(action("remove", "REMOVE", index).on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.chat_queue_remove(id, index, cx);
+                        },
+                    )))
+                    .child(action("steer", "SEND NOW", index).on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.chat_queue_steer(id, index, cx);
+                        },
+                    )))
+            });
+        Some(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .pb(px(4.))
+                .border_b_1()
+                .border_color(colours.border)
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    /// What can be done with a message the person sent, shown while it is
+    /// hovered: put it back in the field to change it, or send it again.
+    fn chat_said_actions(
+        &self,
+        id: LiveId,
+        at: usize,
+        group: SharedString,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let action = |name: &'static str, label: &'static str, resend: bool| {
+            let hover = colours.surface_2;
+            div()
+                .id(SharedString::from(format!("{name}-{}-{at}", id.0)))
+                .debug_selector(move || format!("{name}-{}-{at}", id.0))
+                .flex_none()
+                .h(px(20.))
+                .px(px(6.))
+                .flex()
+                .items_center()
+                .rounded(metrics::RADIUS())
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover))
+                .child(mono(label).text_color(colours.text_muted))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.chat_rewind_ask(id, at, resend, cx);
+                }))
+        };
+        div()
+            .flex_none()
+            .flex()
+            .items_start()
+            .gap(px(2.))
+            .invisible()
+            .group_hover(group, |style| style.visible())
+            .child(action("chat-edit", "EDIT FROM HERE", false))
+            .child(action("chat-retry", "RETRY", true))
+            .into_any_element()
+    }
+
+    /// The question of what to do about the files, above the field, while
+    /// the conversation is asked to go back to before one of its messages.
+    fn chat_rewind_cell(
+        &self,
+        id: LiveId,
+        chat: &Chat,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let asked = chat.rewinding?;
+        let files = self.chat_rewind_files(id, asked.at);
+        let what = if asked.resend { "Retry" } else { "Edit" };
+        let (head, body) = match files {
+            Files::Offered => (
+                format!("{what} from here?"),
+                "The conversation goes back to before this message. The files can go back to how they were then, or stay as they are.",
+            ),
+            Files::NoCheckpoint => (
+                format!("{what} from here?"),
+                "The conversation goes back to before this message. The files stay as they are: none were kept of them here.",
+            ),
+            Files::Shared => (
+                format!("{what} from here?"),
+                "The conversation goes back to before this message. Another session works in this folder, so the files stay as they are.",
+            ),
+        };
+        let mut answers = div().flex().flex_wrap().items_center().gap(px(8.));
+        if asked.busy {
+            answers = answers.child(mono("GOING BACK\u{2026}").text_color(colours.text_muted));
+        } else {
+            if files == Files::Offered {
+                answers = answers.child(
+                    button(
+                        "chat-rewind-files",
+                        id,
+                        "REVERT FILES TOO",
+                        Look::Primary,
+                        colours,
+                    )
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, window, cx| {
+                            this.chat_rewind(id, true, window, cx);
+                        },
+                    )),
+                );
+            }
+            answers = answers
+                .child(
+                    button(
+                        "chat-rewind-keep",
+                        id,
+                        if files == Files::Offered {
+                            "KEEP FILES"
+                        } else {
+                            "CONTINUE"
+                        },
+                        if files == Files::Offered {
+                            Look::Outline
+                        } else {
+                            Look::Primary
+                        },
+                        colours,
+                    )
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, window, cx| {
+                            this.chat_rewind(id, false, window, cx);
+                        },
+                    )),
+                )
+                .child(
+                    button("chat-rewind-cancel", id, "CANCEL", Look::Quiet, colours).on_click(
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.chat_rewind_cancel(id, cx);
+                        }),
+                    ),
+                );
+        }
+        Some(
+            div()
+                .debug_selector(move || format!("chat-rewind-{}", id.0))
+                .w_full()
+                .min_w_0()
+                .p(px(12.))
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .rounded(metrics::RADIUS())
+                .border_1()
+                .border_color(colours.signal)
+                .bg(colours.surface)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(led(colours.signal))
+                        .child(
+                            mono(format!("[ {} ]", head.to_uppercase())).text_color(colours.signal),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(metrics::TEXT_SMALL())
+                        .text_color(colours.text_muted)
+                        .child(body),
+                )
+                .child(answers)
+                .into_any_element(),
+        )
+    }
+
     /// The paperclip of a conversation's field: files to attach to what is
     /// said next.
     fn chat_attach_button(
@@ -1031,16 +1788,10 @@ fn answered_by(chat: &Chat) -> String {
     )
 }
 
-/// The column every part of a conversation sits in: as wide as the pane up
-/// to [`COLUMN`], on its centre line.
+/// The column every part of a conversation sits in: the whole width of the
+/// pane, so code and tables keep their lines on any screen.
 fn column() -> Div {
-    div()
-        .w_full()
-        .max_w(px(COLUMN))
-        .mx_auto()
-        .min_w_0()
-        .flex()
-        .flex_col()
+    div().w_full().min_w_0().flex().flex_col()
 }
 
 /// What the agent is doing, under the last thing it did, while a turn is in
@@ -1080,7 +1831,7 @@ fn chat_status(id: LiveId, chat: &Chat, now: u64, colours: &Palette) -> Option<A
 
 /// The line under the field: the agent, the folder, and what the
 /// conversation cost and took so far, then its branch's pull request.
-fn chat_foot(id: LiveId, chat: &Chat, pull_request: Option<AnyElement>, colours: &Palette) -> Div {
+fn chat_foot(id: LiveId, chat: &Chat, controls: [Option<AnyElement>; 3], colours: &Palette) -> Div {
     let mut parts = vec![format::agent_tag(chat.agent).to_owned()];
     if let Some(account) = &chat.account {
         parts.push(format::account_tag(account));
@@ -1097,6 +1848,46 @@ fn chat_foot(id: LiveId, chat: &Chat, pull_request: Option<AnyElement>, colours:
     if let Some(cost) = chat.conversation.cost_usd {
         parts.push(cost_text(cost));
     }
+    let meter = chat.conversation.context.map(|meter| {
+        let fill = match meter.level() {
+            Level::Roomy => colours.text_muted,
+            Level::Tight => colours.warning,
+            Level::Full => colours.error,
+        };
+        div()
+            .id(SharedString::from(format!("chat-context-tip-{}", id.0)))
+            .debug_selector(move || format!("chat-context-{}", id.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                div()
+                    .debug_selector(move || format!("chat-context-bar-{}", id.0))
+                    .w(px(36.))
+                    .h(px(4.))
+                    .rounded(px(2.))
+                    .bg(colours.border)
+                    .child(
+                        div()
+                            .h_full()
+                            .w(gpui_kit::relative(meter.fraction()))
+                            .rounded(px(2.))
+                            .bg(fill),
+                    ),
+            )
+            .child(
+                mono(format!("{}%", meter.percent()))
+                    .debug_selector(move || format!("chat-context-percent-{}", id.0))
+                    .text_color(fill),
+            )
+            .tooltip({
+                let tip = SharedString::from(format!("Context window: {} tokens", meter.label()));
+                move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                }
+            })
+    });
     div()
         .debug_selector(move || format!("chat-foot-{}", id.0))
         .px(px(2.))
@@ -1113,7 +1904,8 @@ fn chat_foot(id: LiveId, chat: &Chat, pull_request: Option<AnyElement>, colours:
                 .text_color(colours.text_faint)
                 .child(parts.join("  \u{b7}  ")),
         )
-        .children(pull_request)
+        .children(meter)
+        .children(controls.into_iter().flatten())
         .child(mono("BETA").text_color(colours.text_faint))
 }
 
@@ -1166,6 +1958,119 @@ fn folder_name(path: &str) -> String {
         1 | 2 => path.to_owned(),
         count => format!("\u{2026}/{}/{}", parts[count - 2], parts[count - 1]),
     }
+}
+
+/// How many lines of a diff are drawn before the rest is counted.
+const DIFF_LINES: usize = 200;
+
+/// What was done to a file, as a verb.
+fn change_verb(kind: ChangeKind) -> &'static str {
+    match kind {
+        ChangeKind::Created => "Created",
+        ChangeKind::Updated => "Updated",
+        ChangeKind::Deleted => "Deleted",
+    }
+}
+
+/// How many lines came and went, as the header says it: "+3 -1", "+12".
+fn change_counts(change: &FileChange) -> String {
+    match change.kind {
+        ChangeKind::Created => format!("+{}", change.added()),
+        ChangeKind::Deleted => format!("-{}", change.removed()),
+        ChangeKind::Updated => format!("+{} -{}", change.added(), change.removed()),
+    }
+}
+
+/// The lines of the change of one file as a diff: a gutter with the number
+/// of each line where the agent said it (the new file's for kept and added
+/// lines, the old's for removed ones), the `+` or `-`, and the text; the
+/// added lines on the success tint and the removed ones on the error's.
+fn diff_block(tool: &str, at: usize, id: LiveId, change: &FileChange, colours: &Palette) -> Div {
+    let width = change
+        .lines()
+        .flat_map(|line| [line.old, line.new])
+        .flatten()
+        .max()
+        .map_or(0, |most| most.to_string().len());
+    let number = |line: &DiffLine| match line.kind {
+        LineKind::Removed => line.old,
+        _ => line.new,
+    };
+    let (rows, hidden) = diff_rows(change, DIFF_LINES);
+    let mut lines = div().flex().flex_col();
+    for row in rows {
+        let Row::Line(line) = row else {
+            lines = lines.child(
+                div()
+                    .px(px(8.))
+                    .text_color(colours.text_faint)
+                    .child("\u{22ef}"),
+            );
+            continue;
+        };
+        let (sign_colour, band, sign) = match line.kind {
+            LineKind::Added => (
+                colours.success,
+                Some(colours.success.opacity(DIFF_TINT)),
+                "+",
+            ),
+            LineKind::Removed => (colours.error, Some(colours.error.opacity(DIFF_TINT)), "-"),
+            LineKind::Context => (colours.text_faint, None, " "),
+        };
+        lines = lines.child(
+            div()
+                .flex()
+                .min_h(px(16.))
+                .px(px(8.))
+                .gap(px(8.))
+                .text_color(colours.text)
+                .when_some(band, |row, band| row.bg(band))
+                .when(width > 0, |row| {
+                    row.child(
+                        div()
+                            .flex_none()
+                            .w(px(width as f32 * 8.))
+                            .flex()
+                            .justify_end()
+                            .text_color(colours.text_faint)
+                            .child(number(line).map(|n| n.to_string()).unwrap_or_default()),
+                    )
+                })
+                .child(div().flex_none().text_color(sign_colour).child(sign))
+                .child(div().flex_1().min_w_0().child(if line.text.is_empty() {
+                    " ".to_owned()
+                } else {
+                    line.text.clone()
+                })),
+        );
+    }
+    let selector = if at == 0 {
+        format!("chat-diff-{}-{tool}", id.0)
+    } else {
+        format!("chat-diff-{}-{tool}-{at}", id.0)
+    };
+    div()
+        .debug_selector(move || selector.clone())
+        .min_w_0()
+        .ml(px(14.))
+        .my(px(4.))
+        .py(px(4.))
+        .rounded(metrics::RADIUS())
+        .bg(colours.surface_2)
+        .overflow_hidden()
+        .font_family(fonts::mono())
+        .font_features(fonts::mono_features())
+        .text_size(metrics::TEXT_SMALL())
+        .child(lines)
+        .when(hidden > 0, |this| {
+            this.child(
+                div()
+                    .px(px(8.))
+                    .pt(px(2.))
+                    .text_color(colours.text_faint)
+                    .child(format!("\u{2026} {hidden} more lines")),
+            )
+        })
 }
 
 /// Text as the agent wrote it, in a cell: mono, on the raised surface, as
@@ -1226,7 +2131,7 @@ pub(super) fn reason_field(
 
 /// How a button looks.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Look {
+pub(super) enum Look {
     /// The one thing to do next: filled with the accent.
     Primary,
     /// Something else that can be done: an outline.
@@ -1236,7 +2141,7 @@ enum Look {
 }
 
 /// A button: mono capitals in a control-high box.
-fn button(
+pub(super) fn button(
     selector: impl Into<SharedString>,
     id: LiveId,
     label: impl Into<SharedString>,
@@ -1311,6 +2216,15 @@ fn chip(
             colours.text_muted
         }))
         .child(icon(IconName::ChevronDown, px(10.), colours.text_faint))
+}
+
+/// What the rule of a switch of agents says.
+pub(super) fn switched_said(from: leon_core::AgentId, to: leon_core::AgentId) -> String {
+    format!(
+        "Switched from {} to {} \u{b7} context handed off",
+        format::agent_name(from),
+        format::agent_name(to)
+    )
 }
 
 /// How much of an "always allow" rule its button shows.
