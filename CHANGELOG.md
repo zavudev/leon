@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-30
+
 ### Added
 
 * The Office has a row in the sidebar, under the Orchestrator's row and over the filter, with
