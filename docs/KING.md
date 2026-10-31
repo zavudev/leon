@@ -139,14 +139,14 @@ script is, and it is yours to stop. The service keeps the request until a
 window takes it, so with no window open it opens in the next one; only one
 window opens it.
 
-**King's workers in the Den.** Each worker that is still King's is a lion of
-the Den: how King's status says it stands (working, asking, failed, done),
+**King's workers in the Office.** Each worker that is still King's is a lion of
+the Office: how King's status says it stands (working, asking, failed, done),
 and, while it works, what its transcript says it does (the file it edits,
 the command it runs), as for any session. Opening the lion opens its card in
-King's view. A paired phone's Den shows them too.
+King's view. A paired phone's Office shows them too.
 
 The window joins King's service whenever the service runs, without starting
-it, so that the Den and the terminals follow King with King's view closed.
+it, so that the Office and the terminals follow King with King's view closed.
 
 The sidebar's row shows how King stands when it is not on screen: a dot
 while King or a worker works, the waiting dot when one of them asks you
@@ -300,7 +300,7 @@ terminal above the agent, for you to give it. Leon runs no turn of it: King
 cannot tell it more, does not hear when it is done, and knows no cost of it
 (the record says "cost not known"). King reads its work with `worktree_diff`,
 checks it with `worktree_check` and opens its pull request as for any worker.
-In the Den it is the terminal's lion.
+In the Office it is the terminal's lion.
 
 King is never asked to poll. When a worker finishes, fails or asks something,
 Leon gathers the news for a few seconds and then wakes King with it. If you

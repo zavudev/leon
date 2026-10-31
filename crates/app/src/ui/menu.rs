@@ -273,8 +273,9 @@ pub fn items_for_lion(lion: LionMenu) -> Vec<Item> {
 
 /// The items of the menu at the foot of the sidebar: the places that are not
 /// rows of it, this computer's ways out, the cleaner (with how many worktrees
-/// it suggests, when any) and the look of the window.
-pub fn items_for_machine(suggested: usize, show_inactive: bool) -> Vec<Item> {
+/// it suggests, when any) and the look of the window. The toggle of the
+/// inactive sessions is not here: it is a button of the sidebar's filter row.
+pub fn items_for_machine(suggested: usize) -> Vec<Item> {
     use Command as C;
     let named = |command: Command| Item::new(keys::label(command), command);
     vec![
@@ -290,14 +291,6 @@ pub fn items_for_machine(suggested: usize, show_inactive: bool) -> Vec<Item> {
                 keys::label(C::CleanUp).to_owned()
             },
             C::CleanUp,
-        ),
-        Item::new(
-            if show_inactive {
-                "Hide inactive sessions"
-            } else {
-                "Show inactive sessions"
-            },
-            C::ToggleInactiveSessions,
         ),
         named(C::ToggleAppearance),
         named(C::Shortcuts),
@@ -631,7 +624,7 @@ impl Shell {
         if self.overlay != Overlay::None {
             self.close_overlay(window, cx);
         }
-        let items = items_for_machine(self.sweep_suggested, self.show_inactive);
+        let items = items_for_machine(self.sweep_suggested);
         let height = px(ITEM) * items.len() as f32 + px(8.);
         let mut menu = Menu::new(
             NodeId::Machine(leon_core::MachineId::local()),
@@ -1009,7 +1002,7 @@ mod tests {
         let labels = |items: Vec<Item>| -> Vec<Command> {
             items.into_iter().map(|item| item.command).collect()
         };
-        let commands = labels(items_for_machine(0, false));
+        let commands = labels(items_for_machine(0));
         for command in [
             Command::GoHome,
             Command::ShowTasks,
@@ -1017,22 +1010,20 @@ mod tests {
             Command::AddMachine,
             Command::ShareMachine,
             Command::CleanUp,
-            Command::ToggleInactiveSessions,
             Command::Settings,
         ] {
             assert!(commands.contains(&command), "{command:?} in {commands:?}");
         }
-        let items = items_for_machine(3, true);
+        assert!(
+            !commands.contains(&Command::ToggleInactiveSessions),
+            "the toggle moved to the filter row: {commands:?}"
+        );
+        let items = items_for_machine(3);
         let clean = items
             .iter()
             .find(|item| item.command == Command::CleanUp)
             .unwrap();
         assert!(clean.label.ends_with("(3)"), "{}", clean.label);
-        let inactive = items
-            .iter()
-            .find(|item| item.command == Command::ToggleInactiveSessions)
-            .unwrap();
-        assert_eq!(inactive.label, "Hide inactive sessions");
     }
     use crate::ui::live::LiveId;
     use crate::ui::tree::LiveEntry;

@@ -60,8 +60,8 @@ pub use command::{interactive_on, remote_shell_command, run_on, CommandSpec, Ssh
 pub use diagnosis::{classify, Diagnosis, DiagnosisKind, Stage};
 pub use git::{parse_status, parse_worktree_list, CheckoutState, Git, GitError, GitWorktree};
 pub use github::{
-    is_github_url, issue_number_of_url, parse_issues, parse_open_pull_requests, parse_repository,
-    Github, GithubError, Issue, IssueEdit, RepoInfo,
+    is_github_url, issue_number_of_url, parse_issues, parse_open_pull_requests,
+    parse_pull_request_states, parse_repository, Github, GithubError, Issue, IssueEdit, RepoInfo,
 };
 pub use probe::{
     catalogue_tools, parse_probe, probe, probe_command, probe_command_for, probe_script,

@@ -658,7 +658,10 @@ fn the_foot_of_the_feed_is_what_the_den_says_of_itself() {
     let p = palette(true);
     let scene = build(&den, &den.frame(at(2000)), &l, &p, None);
     let shown = texts(&scene);
-    assert!(shown.contains(&"The den is quiet. Too quiet."), "{shown:?}");
+    assert!(
+        shown.contains(&"The office is quiet. Too quiet."),
+        "{shown:?}"
+    );
     assert!(shown.contains(&"Nothing to tell yet."));
     // In a narrow view the feed is under the room, with the same things.
     let narrow = layout(700, 860, 1., 0);
@@ -1081,7 +1084,7 @@ fn the_keys_are_listed_over_the_room_in_as_many_columns_as_they_need() {
     let scene = build(&den, &den.frame(at(400)), &l, &p, None);
     let said = texts(&scene);
     for expected in [
-        "THE KEYS OF THE DEN",
+        "THE KEYS OF THE OFFICE",
         "K0",
         "does thing number 8",
         "? or Escape closes this.",
@@ -1117,5 +1120,5 @@ fn the_keys_are_listed_over_the_room_in_as_many_columns_as_they_need() {
     // Taken away, nothing of them is left.
     assert!(den.set_keys(None));
     let scene = build(&den, &den.frame(at(400)), &l, &p, None);
-    assert!(scene.keys.is_none() && !texts(&scene).contains(&"THE KEYS OF THE DEN"));
+    assert!(scene.keys.is_none() && !texts(&scene).contains(&"THE KEYS OF THE OFFICE"));
 }

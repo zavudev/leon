@@ -248,7 +248,7 @@ pub(super) struct DenKeyRow {
 /// table and the overlay (`?`) lists it, so the two cannot differ.
 /// What is said when 2.5D is on and the Den shows the pixel art.
 pub(super) fn den_fallback_line(why: &str) -> String {
-    format!("2.5D is on but cannot be drawn here: {why}. The Den shows the pixel art.")
+    format!("2.5D is on but cannot be drawn here: {why}. The Office shows the pixel art.")
 }
 
 /// Why a view that shows this picture is not in 2.5D although it was asked
@@ -415,7 +415,7 @@ pub(super) const DEN_KEYS: &[DenKeyRow] = &[
     DenKeyRow {
         strokes: &[("escape", false)],
         label: "Escape",
-        what: "let go of the entry, the lion, then the Den",
+        what: "let go of the entry, the lion, then the Office",
         key: DenKey::Back,
     },
 ];
@@ -1121,7 +1121,7 @@ impl Shell {
         let Some(info) = self.den_lion_info(cx) else {
             self.engine.report(
                 crate::engine::StatusKind::Info,
-                "Select a lion in the Den first.",
+                "Select a lion in the Office first.",
             );
             return;
         };
@@ -1316,8 +1316,7 @@ impl Shell {
         let live = self.den_lion_live();
         let pinned = live.and_then(|live| {
             let history = self.history_of_live(live)?;
-            let machine = self.live.get(live)?.machine.clone();
-            Some(self.pinned_ids(&machine).contains(&history))
+            Some(self.pinned_ids().contains(&history))
         });
         super::menu::items_for_lion(super::menu::LionMenu {
             pinned,
@@ -1461,9 +1460,9 @@ impl Shell {
         let Some(session) = self.live.get(live) else {
             return;
         };
-        let (machine, name) = (session.machine.clone(), session.label());
+        let name = session.label();
         match self.history_of_live(live) {
-            Some(history) => self.pin_session(history, machine, pinned, cx),
+            Some(history) => self.pin_session(history, pinned, cx),
             None => self.engine.report(
                 crate::engine::StatusKind::Info,
                 format!("{name} is not in the history yet: there is nothing to pin."),
@@ -1818,7 +1817,7 @@ impl Shell {
         if needs_lion && self.den_lion().is_none() {
             self.engine.report(
                 crate::engine::StatusKind::Info,
-                "Select a lion in the Den first.",
+                "Select a lion in the Office first.",
             );
             cx.notify();
             return true;
@@ -1891,7 +1890,7 @@ impl Shell {
                 if !moved && !three_d {
                     self.engine.report(
                         crate::engine::StatusKind::Info,
-                        "The Den zooms in 2.5D only.",
+                        "The Office zooms in 2.5D only.",
                     );
                 }
             }
@@ -2553,8 +2552,8 @@ impl Shell {
         let lions = self.den.cubs.iter().filter(|cub| cub.parent.is_none());
         let working = lions.clone().filter(|cub| cub.state.is_working()).count();
         (
-            "Den",
-            "The Den".to_owned(),
+            "Office",
+            "The Office".to_owned(),
             format!("{} LIVE \u{b7} {working} WORKING", lions.count()),
         )
     }
@@ -2607,7 +2606,7 @@ mod tests {
         assert_eq!(
             said.as_deref(),
             Some(
-                "2.5D is on but cannot be drawn here: no adapter: none was found. The Den shows the pixel art."
+                "2.5D is on but cannot be drawn here: no adapter: none was found. The Office shows the pixel art."
             )
         );
         // What was asked for is shown, or will be: nothing to say.
@@ -2695,7 +2694,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("the README has no row for {label:?}"));
             let key = row.strokes[0].0.to_uppercase();
             assert!(
-                line.contains(&format!("`{key}` in the Den")),
+                line.contains(&format!("`{key}` in the Office")),
                 "the README does not say {key} for {label:?}: {line}"
             );
         }

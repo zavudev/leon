@@ -63,8 +63,8 @@ function DenCard() {
       accessibilityRole="button"
       accessibilityLabel={
         count.live === 0
-          ? 'The Den'
-          : `The Den, ${count.live} live, ${count.working} working, ${count.waiting} waiting for you`
+          ? 'The Office'
+          : `The Office, ${count.live} live, ${count.working} working, ${count.waiting} waiting for you`
       }
       accessibilityHint="Shows every agent that is live on your computers."
       onPress={() => router.push('/den')}
@@ -78,7 +78,7 @@ function DenCard() {
       })}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingLeft: 14, paddingRight: 10 }}>
         <View style={{ flex: 1, gap: 6 }}>
-          <Label style={{ color: edge }}>[ The Den ]</Label>
+          <Label style={{ color: edge }}>[ The Office ]</Label>
           {says ? (
             <Txt variant="small" tone="muted">
               {says}

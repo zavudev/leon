@@ -1346,7 +1346,7 @@ fn paint(
             match advice_for(editor.layout()).first() {
                 Some((voiced, plain)) => vec![(*voiced).to_owned(), (*plain).to_owned()],
                 None => vec![
-                    "The den is being rearranged.".to_owned(),
+                    "The office is being rearranged.".to_owned(),
                     "Every place is there: desk, shelf, board, rack, lookout, rest, rug and nest."
                         .to_owned(),
                 ],

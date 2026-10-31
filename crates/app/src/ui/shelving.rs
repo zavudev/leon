@@ -21,7 +21,7 @@ use crate::engine::{Op, StatusKind};
 use crate::keys::Command;
 use chrono::{DateTime, Utc};
 use gpui_kit::{Context, Task, Window};
-use leon_core::{MachineId, Session, SessionId, SessionScope, Shelf};
+use leon_core::{Session, SessionId, SessionScope, Shelf};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -146,15 +146,14 @@ impl Shell {
     }
 
     /// Records the unpinning of a session, to be undone: `order` is the Pinned
-    /// section of its machine before.
+    /// section before.
     pub(super) fn offer_unpin_undo(
         &mut self,
-        machine: MachineId,
         order: Vec<SessionId>,
         title: &str,
         cx: &mut Context<Self>,
     ) {
-        self.offer_undo(Undo::Unpinned { machine, order }, title, Vec::new(), cx);
+        self.offer_undo(Undo::Unpinned { order }, title, Vec::new(), cx);
     }
 
     /// Shows the banner that offers Undo for the step just taken. `forget` is
@@ -227,14 +226,10 @@ impl Shell {
                 .report(StatusKind::Info, "There is nothing to undo.");
             return;
         };
-        let machine = match &pending.undo {
-            Undo::Unpinned { machine, .. } => Some(machine.clone()),
-            _ => None,
+        let pinned = match &pending.undo {
+            Undo::Unpinned { .. } => self.pinned_ids(),
+            _ => Vec::new(),
         };
-        let pinned = machine
-            .as_ref()
-            .map(|machine| self.pinned_ids(machine))
-            .unwrap_or_default();
         let known = |id: &SessionId| {
             self.snapshot
                 .sessions
@@ -252,8 +247,8 @@ impl Shell {
                 changes,
                 done: Some("Undone.".to_owned()),
             }),
-            Restore::Pins { machine, order } => self.engine.submit(Op::PinSessions {
-                parent: SessionScope::Machine(machine),
+            Restore::Pins { order } => self.engine.submit(Op::PinSessions {
+                parent: SessionScope::Pinned,
                 pinned: order,
                 done: "Undone.",
             }),

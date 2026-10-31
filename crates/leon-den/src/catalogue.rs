@@ -73,7 +73,7 @@ impl Category {
             Category::Machines => "Machines",
             Category::Wall => "Wall",
             Category::Decor => "Decor",
-            Category::Den => "Den",
+            Category::Den => "Lair",
         }
     }
 }

@@ -160,8 +160,8 @@ fn a_click_in_the_den_gives_it_the_keyboard_back_from_the_sidebar(cx: &mut TestA
 fn the_den_is_in_the_palette_with_its_keys(cx: &mut TestAppContext) {
     let h = open(cx, ScriptedRunner::new());
     h.press("ctrl-shift-p", cx);
-    h.type_text("open the den", cx);
-    assert_eq!(h.palette_titles(cx)[1], "Open the Den");
+    h.type_text("open the office", cx);
+    assert_eq!(h.palette_titles(cx)[1], "Open the Office");
     assert!(
         h.shows("palette-keys-1", cx),
         "its shortcut is printed beside it"
@@ -172,7 +172,7 @@ fn the_den_is_in_the_palette_with_its_keys(cx: &mut TestAppContext) {
     h.press("escape", cx);
     h.press("ctrl-shift-p", cx);
     h.type_text("lions", cx);
-    assert_eq!(h.palette_titles(cx)[1], "Open the Den");
+    assert_eq!(h.palette_titles(cx)[1], "Open the Office");
 }
 
 #[gpui_kit::test]
@@ -213,7 +213,7 @@ fn an_empty_den_says_so_and_follows_nothing(cx: &mut TestAppContext) {
     let h = open_live(cx);
     toggle(&h, cx);
     assert!(lions(&h, cx).is_empty());
-    assert_eq!(said(&h, cx), vec!["The den is quiet. Too quiet."]);
+    assert_eq!(said(&h, cx), vec!["The office is quiet. Too quiet."]);
     assert!(
         h.shell(cx, |shell| shell.den.watch_is_idle()),
         "no session is live: nothing is polled"
@@ -748,6 +748,10 @@ fn going_home_closes_no_terminal_and_the_home_counts_them_and_opens_the_one_that
     assert!(!h.shows("sidebar-den-waits", cx));
     // The Den counts them.
     assert_eq!(cx.update(|cx| h.shell.read(cx).den_glance(cx)), (2, false));
+    assert!(
+        h.shows("sidebar-den-count", cx),
+        "and the Den's row of the sidebar says how many"
+    );
 
     // One of them wants the user: the home lists it, and a click opens it.
     cx.update(|cx| {
@@ -763,7 +767,7 @@ fn going_home_closes_no_terminal_and_the_home_counts_them_and_opens_the_one_that
     assert!(!h.shows("home-waiting-1", cx));
     assert!(
         h.shows("sidebar-den-waits", cx),
-        "and the machine at the foot of the sidebar says that one waits"
+        "and the Den's row of the sidebar says that one waits"
     );
     assert_eq!(cx.update(|cx| h.shell.read(cx).den_glance(cx)), (2, true));
     h.mouse_on("home-waiting-0".to_owned(), gpui_kit::MouseButton::Left, cx);
@@ -1370,7 +1374,7 @@ fn an_agent_is_interrupted_only_in_the_middle_of_a_turn_and_queued_messages_are_
     });
     // Nobody is selected: the key says so and nothing is sent anywhere.
     h.press("x", cx);
-    assert_eq!(h.status(), "Select a lion in the Den first.");
+    assert_eq!(h.status(), "Select a lion in the Office first.");
     h.press("n", cx);
     assert_eq!(h.shell(cx, |shell| shell.den_lion_live()), Some(LiveId(1)));
     // At its prompt there is nothing to interrupt: no key is sent.
@@ -1452,7 +1456,7 @@ fn the_pride_is_messaged_after_saying_who_and_a_lion_is_gone_to_by_what_is_typed
     })
     .unwrap();
     assert!(
-        h.status().starts_with("Open the Den first"),
+        h.status().starts_with("Open the Office first"),
         "{}",
         h.status()
     );

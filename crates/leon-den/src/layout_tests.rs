@@ -42,7 +42,7 @@ fn the_least_a_file_must_say_is_the_size_of_the_room() {
     assert_eq!((room.cols, room.rows, room.version), (10, 9, VERSION));
     assert_eq!(
         (room.name.as_str(), room.floor.as_str(), room.wall.as_str()),
-        ("Den", "wood", "rock")
+        ("Room", "wood", "rock")
     );
     assert!(room.items.is_empty() && room.carpets.is_empty());
     // What a later Leon may add is ignored, not an error.
@@ -64,7 +64,7 @@ fn a_text_that_is_no_den_gives_the_default_one_and_says_so() {
         let (room, notes) = read(text);
         assert_eq!(room, small_office(), "{text:?}");
         assert_eq!(notes.len(), 1, "{text:?}");
-        assert!(notes[0].starts_with("This is not a den"), "{}", notes[0]);
+        assert!(notes[0].starts_with("This is not a room"), "{}", notes[0]);
         assert!(
             notes[0].ends_with("The office is used instead."),
             "{}",
@@ -96,7 +96,7 @@ fn what_a_file_gets_wrong_is_left_out_or_put_right_and_said() {
         }"#,
     );
     assert_eq!((room.cols, room.rows), (MAX_COLS, 8));
-    assert_eq!((room.version, room.name.as_str()), (VERSION, "Den"));
+    assert_eq!((room.version, room.name.as_str()), (VERSION, "Room"));
     assert_eq!((room.floor.as_str(), room.wall.as_str()), ("wood", "rock"));
     assert_eq!(
         room.carpets,

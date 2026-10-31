@@ -1246,7 +1246,7 @@ pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
             [title, ..] => Outcome::Run(Action::NewTask(title.clone())),
         },
         Command::SaveDenAs => match answers {
-            [] => text("Den name", "My den", Validate::Required),
+            [] => text("Room name", "My room", Validate::Required),
             [name, ..] => Outcome::Run(Action::SaveDenAs(name.clone())),
         },
         Command::RenameDen => match (world.den(), answers) {
@@ -1254,7 +1254,7 @@ pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
                 "{} is built in: save it under a name first.",
                 den.name
             )),
-            (None, _) => Outcome::Refuse("There is no den in use.".to_owned()),
+            (None, _) => Outcome::Refuse("There is no room in use.".to_owned()),
             (Some(den), []) => text("New name", den.name.clone(), Validate::Required),
             (Some(_), [name, ..]) => Outcome::Run(Action::RenameDen(name.clone())),
         },
@@ -1262,9 +1262,9 @@ pub fn advance(command: Command, answers: &[String], world: &World) -> Outcome {
             (Some(den), _) if !den.user => {
                 Outcome::Refuse(format!("{} is built in: it cannot be deleted.", den.name))
             }
-            (None, _) => Outcome::Refuse("There is no den in use.".to_owned()),
+            (None, _) => Outcome::Refuse("There is no room in use.".to_owned()),
             (Some(den), []) => choices(
-                "Delete this den?",
+                "Delete this room?",
                 vec![
                     Choice::new(
                         format!("Delete {}", den.name),
@@ -2173,7 +2173,7 @@ fn snooze_session(answers: &[String], world: &World) -> Outcome {
 /// The live lion a flow of the Den is about, or why there is none.
 fn lion_here(world: &World) -> Result<(&LionInfo, LiveId), String> {
     let Some(lion) = &world.lion else {
-        return Err("Select a lion in the Den first.".to_owned());
+        return Err("Select a lion in the Office first.".to_owned());
     };
     match (lion.live, &lion.elsewhere) {
         (Some(live), None) => Ok((lion, live)),
@@ -2276,7 +2276,7 @@ fn names(lions: &[&PrideLion]) -> String {
 /// who is left out and why.
 fn message_pride(answers: &[String], world: &World) -> Outcome {
     if !world.pride.open {
-        return Outcome::Refuse("Open the Den first: a message goes to its lions.".to_owned());
+        return Outcome::Refuse("Open the Office first: a message goes to its lions.".to_owned());
     }
     let all = reachable(world);
     if all.is_empty() {
@@ -2540,7 +2540,7 @@ fn wake_lion(answers: &[String], world: &World) -> Outcome {
 /// user are listed first, as in the roster.
 fn go_to_lion(answers: &[String], world: &World) -> Outcome {
     if world.pride.lions.is_empty() {
-        return Outcome::Refuse("The Den is empty: no agent session is live.".to_owned());
+        return Outcome::Refuse("The Office is empty: no agent session is live.".to_owned());
     }
     match answers {
         [] => choices(
@@ -3642,7 +3642,7 @@ fn king_mode(answers: &[String], world: &World) -> Outcome {
 fn choose_den(answers: &[String], world: &World) -> Outcome {
     match answers {
         [] => choices(
-            "Den",
+            "Room",
             world
                 .dens
                 .iter()
@@ -3655,7 +3655,7 @@ fn choose_den(answers: &[String], world: &World) -> Outcome {
         ),
         [chosen, ..] => match world.dens.iter().find(|den| den.id == *chosen) {
             Some(den) => Outcome::Run(Action::SetDen(den.id.clone())),
-            None => Outcome::Refuse(format!("Unknown den {chosen:?}.")),
+            None => Outcome::Refuse(format!("Unknown room {chosen:?}.")),
         },
     }
 }
@@ -6343,7 +6343,7 @@ mod tests {
         // Nobody is selected.
         assert_eq!(
             advance(Command::MessageLion, &[], &world()),
-            Outcome::Refuse("Select a lion in the Den first.".into())
+            Outcome::Refuse("Select a lion in the Office first.".into())
         );
         let known = world().with_lion(Some(lion(Some(LiveId(3)))));
         let Outcome::Ask(step) = advance(Command::MessageLion, &[], &known) else {
@@ -6414,7 +6414,7 @@ mod tests {
         );
         assert_eq!(
             advance(Command::SendLionHome, &[], &world()),
-            Outcome::Refuse("Select a lion in the Den first.".into())
+            Outcome::Refuse("Select a lion in the Office first.".into())
         );
     }
 
@@ -6504,7 +6504,7 @@ mod tests {
         }
         assert_eq!(
             advance(Command::QueuedMessages, &[], &world()),
-            Outcome::Refuse("Select a lion in the Den first.".into())
+            Outcome::Refuse("Select a lion in the Office first.".into())
         );
     }
 
@@ -6513,7 +6513,7 @@ mod tests {
         // The Den is closed: there is no pride to message.
         assert_eq!(
             advance(Command::MessagePride, &[], &world()),
-            Outcome::Refuse("Open the Den first: a message goes to its lions.".into())
+            Outcome::Refuse("Open the Office first: a message goes to its lions.".into())
         );
         let known = world().with_pride(pride());
         let who = rows_of(&advance(Command::MessagePride, &[], &known));
@@ -6683,7 +6683,7 @@ mod tests {
     fn a_lion_is_gone_to_by_its_name_its_state_or_its_place() {
         assert_eq!(
             advance(Command::GoToLion, &[], &world()),
-            Outcome::Refuse("The Den is empty: no agent session is live.".into())
+            Outcome::Refuse("The Office is empty: no agent session is live.".into())
         );
         let mut den = pride();
         den.lions[1].needs = true;

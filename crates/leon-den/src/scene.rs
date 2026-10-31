@@ -502,7 +502,7 @@ fn keys_box(scene: &mut Scene, keys: &[(String, String)], layout: &Layout, palet
     frame_box(scene, rect, layout, palette);
     scene.keys = Some(rect);
     let (x, mut y) = (rect.x + pad, rect.y + pad);
-    scene.text(x, y, "THE KEYS OF THE DEN", palette.text_muted, true);
+    scene.text(x, y, "THE KEYS OF THE OFFICE", palette.text_muted, true);
     y += line_h * 2;
     for (index, (key, what)) in keys.iter().take(rows * columns).enumerate() {
         let (col, row) = ((index / rows) as i32, (index % rows) as i32);

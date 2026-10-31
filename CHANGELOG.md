@@ -2,6 +2,48 @@
 
 ## [Unreleased]
 
+### Added
+
+* The Office has a row in the sidebar, under King's and over the filter, with
+  its paw icon: a click, or `Enter` with the cursor on it, opens the Office.
+  The row is the selected one while the Office is open, the arrow keys walk
+  King, the Office and then the tree, and it says how many lions there are
+  and, with a light, that one waits for you. It replaces the light that the
+  machine's button at the foot showed for the same thing; the Office is still
+  in that menu, in the palette and on its chord.
+* The sessions pinned on every machine are one `Pinned` section at the top of
+  the sidebar, above the machines, and the one pinned last is first. Each row
+  says the machine it runs on (a badge, when there are several machines) and
+  its project under the title, and its tooltip says machine, project and
+  worktree whole. Pinning, unpinning, dragging, moving with the keyboard and
+  undoing an unpin work on the one list. Pins made before keep their place:
+  positions that were per machine are read side by side, machine by machine,
+  until the section is ordered by hand once.
+
+### Changed
+
+* The Den is now called **the Office** wherever you read its name: the sidebar
+  row, the view's title, the View menu and the palette (**Open the Office**,
+  **Edit the Office**, **Show the keys of the Office**), the settings
+  (**Narrator in the Office**, **Sessions running elsewhere in the Office**,
+  **The Office in 2.5D**), the messages and the phone app. The setting that
+  picks the room is now titled **Room**, and its commands are **Choose a
+  room…**, **Save the room as…**, **Rename the room…**, **Delete the room…**
+  and **Open rooms folder**. Nothing you have set changes: the settings keys,
+  the `--den` option, the `dens` folder and the room ids are the same.
+* The merged and open marks of the worktrees are found sooner. GitHub is asked
+  by a timer of the window itself, every 30 seconds while the window is in
+  front and every 5 minutes while it is not, and at once when the window comes
+  back to the front, when a worktree's head or branch moves, when an agent's
+  turn ends and after a pull request is opened from Leon. It no longer waits
+  for a terminal to be running. One question (two `gh pr list` calls that run
+  together, the heavy checks and reviews only for the open pull requests)
+  gives every state of every branch. Without `gh`, signed out or offline, a
+  project backs off up to 15 minutes and nothing is said.
+* The button that shows or hides the inactive sessions moved from the menu of
+  the machine at the foot of the sidebar to the end of the filter field at the
+  top, beside the key that opens it, as an eye with a tooltip.
+
 ## [0.14.0] - 2026-10-29
 
 ### Added

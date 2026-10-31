@@ -84,11 +84,11 @@ pub enum Nav {
 }
 
 impl Nav {
-    /// The rows over the tree, top to bottom: King alone, pinned. Home, the
-    /// board and the Den are in the machine's menu at the foot of the
-    /// sidebar and in the palette, and the sidebar's keys treat them as
-    /// that row.
-    pub const ALL: [Nav; 1] = [Nav::King];
+    /// The rows over the tree, top to bottom: King and the Den, pinned. Home
+    /// and the board are in the machine's menu at the foot of the sidebar and
+    /// in the palette (the Den is in both too), and the sidebar's keys treat
+    /// them as that row.
+    pub const ALL: [Nav; 2] = [Nav::King, Nav::Den];
 
     /// Its name.
     pub fn label(self) -> &'static str {
@@ -96,7 +96,7 @@ impl Nav {
             Nav::Home => "Home",
             Nav::King => "The King",
             Nav::Tasks => "Tasks",
-            Nav::Den => "The Den",
+            Nav::Den => "The Office",
         }
     }
 
@@ -111,10 +111,15 @@ impl Nav {
     }
 
     /// The row the cursor goes to from this one: the one above (`up`) or
-    /// below, `None` where the navigation ends (below it is the tree). With
-    /// King the only row, up is King and down is the tree.
+    /// below, `None` where the navigation ends (below it is the tree). Up
+    /// from the first row stays on it.
     pub fn step(self, up: bool) -> Option<Nav> {
-        up.then_some(Nav::King)
+        let at = Self::ALL.iter().position(|row| *row == self)?;
+        if up {
+            Some(Self::ALL[at.saturating_sub(1)])
+        } else {
+            Self::ALL.get(at + 1).copied()
+        }
     }
 }
 
@@ -502,7 +507,7 @@ impl Shell {
         (live.len() + self.den_away(cx).len(), waits)
     }
 
-    /// The navigation of the sidebar: King, pinned between the header and the
+    /// The navigation of the sidebar: King and the Den, pinned between the header and the
     /// filter and outside the tree's list, so that no scroll and no filter
     /// takes it away. Each is a row like a project's: the same
     /// height, the same columns for the icon and the name, the same hover
@@ -627,8 +632,8 @@ impl Shell {
     }
 
     /// Whether the sidebar's cursor is on a row of the navigation rather
-    /// than in the tree. Home, the board and the Den are places without a
-    /// row: while one is open the tree keeps its cursor.
+    /// than in the tree. Home and the board are places without a row: while
+    /// one is open the tree keeps its cursor.
     pub(super) fn on_nav_row(&self) -> bool {
         self.home.nav.is_some_and(|nav| Nav::ALL.contains(&nav))
     }

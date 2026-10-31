@@ -34,7 +34,7 @@ pub use model::{
     AgentId, Machine, MachineKind, Message, NewMessage, NewSession, NewWorktree, Project, Role,
     Session, SessionScope, Worktree,
 };
-pub use status::{Checks, Divergence, PullRequest, Review, WorktreeStatus};
+pub use status::{Checks, Divergence, PullRequest, PullState, Review, WorktreeStatus};
 pub use store::memory::{
     Memory, MemoryChoice, MemoryCounts, MemoryError, MemoryHit, MemoryKind, MemoryPatch,
     MemoryScope, NewMemory, Saved as SavedMemory,

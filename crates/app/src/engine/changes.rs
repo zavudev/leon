@@ -262,14 +262,14 @@ impl Engine {
 
     /// Reads the worktree's state again after a step: git for the changed
     /// files and the distance, and, when a pull request was opened, GitHub for
-    /// it without waiting for the once-a-minute allowance of the timer.
+    /// it without waiting for the cadence of the timer.
     async fn refresh_after_ship(&self, request: &ShipRequest, report: &ShipReport) {
         let Ok(project) = self.inner.store.project(&request.project) else {
             return;
         };
         self.refresh_checkouts_of(&project.id).await;
         if report.url.is_some() {
-            if let Err(error) = self.probe_open_pull_requests(&project, None).await {
+            if let Err(error) = self.probe_github_now(&project).await {
                 tracing::debug!(%error, "could not read the new pull request");
             }
         }
@@ -721,12 +721,13 @@ mod tests {
         use leon_core::{Checks, PullRequest, Review};
         let rig = rig(ScriptedRunner::new());
         // The project is known to have asked GitHub a moment ago.
-        rig.engine
-            .inner
-            .github_asked
-            .lock()
-            .unwrap()
-            .insert(rig.project.clone(), std::time::Instant::now());
+        rig.engine.inner.github_asked.lock().unwrap().insert(
+            rig.project.clone(),
+            crate::engine::pull_poll::Asked {
+                at: std::time::Instant::now(),
+                failures: 0,
+            },
+        );
         rig.store
             .replace_worktrees(
                 &rig.project,
@@ -743,10 +744,11 @@ mod tests {
             .queue(Output::ok("https://github.com/zavudev/leon/pull/41\n"));
         // refresh_checkouts: git status of the worktree
         rig.runner.queue(Output::ok("## topic...origin/topic\n"));
-        // probe_open_pull_requests: origin, then gh pr list
+        // probe_github_now: origin, then the two gh pr list
         rig.runner
             .queue(Output::ok("git@github.com:zavudev/leon.git\n"));
         rig.runner.queue(Output::ok(open));
+        rig.runner.queue(Output::ok("[]"));
         let only_pr = ShipRequest {
             commit: None,
             push: false,
@@ -765,6 +767,7 @@ mod tests {
             status.pull_request,
             Some(PullRequest {
                 number: 41,
+                state: leon_core::PullState::Open,
                 url: "https://github.com/zavudev/leon/pull/41".into(),
                 draft: false,
                 review: Review::None,

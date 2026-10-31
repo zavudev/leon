@@ -1,9 +1,9 @@
-# The Den
+# The Office
 
-The Den shows the live sessions as lions at work in a room. The room is yours
+The Office shows the live sessions as lions at work in a room. The room is yours
 to change: move the furniture, put more in, lay carpets, repaint the walls,
 make it larger or smaller, or pick another room altogether. This page is about
-the room; what the lions do in it is in the README ("The Den").
+the room; what the lions do in it is in the README ("The Office").
 
 A lion goes to the piece of furniture that fits what its agent does. So the
 furniture is more than decoration: it decides where everybody is.
@@ -37,16 +37,16 @@ No shelf. Readers will stand around.
 No bookshelf: lions that read or search stand on free floor.
 ```
 
-## Who is in the den
+## Who is in the Office
 
 Every agent session of this window is a lion; a terminal without an agent is
 none. So is every Claude Code or Codex
 session of this computer that runs somewhere else, in another Leon window or
 in a plain terminal, as long as its process names its session and its
-transcript is found: open the Den in any window to watch all of them. These
+transcript is found: open the Office in any window to watch all of them. These
 are told by their transcripts alone, and their card says where they run. The
 setting `den_elsewhere` leaves them out. What Leon does and does not claim
-about them is in the README ("The Den").
+about them is in the README ("The Office").
 
 ## What you can do to a lion
 
@@ -67,9 +67,9 @@ rest is shown dimmed, and a click says why. The right button on a lion, `M`,
 | Send home (`H`) | Stops the agent and leaves the session in the sidebar, asleep, to be woken where it left off. It always asks first. |
 | Close | Ends the session and takes it out of the sidebar. It asks while a program runs. |
 
-`?` lists every key of the Den over the room; any key or a click takes the
+`?` lists every key of the Office over the room; any key or a click takes the
 list away. The keys are read from the same table the list is written from.
-While the Den has the keyboard these single keys are the Den's, `?` and `/`
+While the Office has the keyboard these single keys are the Office's, `?` and `/`
 included: the sheet of all of Leon's shortcuts is **Keyboard shortcuts** in
 the palette, and the sidebar's filter is its chord.
 
@@ -81,7 +81,7 @@ error. The roster lists those first, the permission prompts ahead, then
 whoever has waited longest, and its heading counts them; so does a button of
 the bar. `N` selects the next of them, around the end, and **Go to the next
 lion that needs you** in the palette does the same from anywhere in Leon,
-opening the Den if it is closed.
+opening the Office if it is closed.
 
 **What it asks is on its card, in full.** A permission prompt shows the whole
 command, path or address of the call it is about, not the short caption; a
@@ -151,7 +151,7 @@ what the lion asks is the last thing to go.
 ## Hatch, send home, wake
 
 **Hatch a lion** (`A`) asks where and which agent, as a new session does,
-starts it and stays in the Den with the new lion selected: it joins as an
+starts it and stays in the Office with the new lion selected: it joins as an
 egg. The agent's own first questions (trusting a folder, signing in) are in
 its terminal: `Enter` opens it. With a lion selected, the worktree it works
 in is offered first and said to be shared: it is still asked, never taken,
@@ -159,7 +159,7 @@ since a second agent there writes to the same files.
 
 A lion that was **sent home** is listed under the roster, in *At home*. A
 click on its row, or `W`, wakes it: its agent starts again where the session
-left off, and Leon comes back to the Den. When Leon first has to look for
+left off, and Leon comes back to the Office. When Leon first has to look for
 another process that holds the session, its terminal opens a moment later
 and stays in front.
 
@@ -187,10 +187,10 @@ style is (planks, tiles, slabs, a checker, or nothing for a carpet).
 The pixel art is the other picture of the same room, with the same lions in
 the same places. It is what you see:
 
-* with the setting **The Den in 2.5D** (`den_3d`) off;
+* with the setting **The Office in 2.5D** (`den_3d`) off;
 * on a computer whose graphics card cannot draw the room. Leon tries once
   and says why: in the status line when it happens, under the setting, and
-  at the end of the keys of the Den (`?`).
+  at the end of the keys of the Office (`?`).
 
 Turning the setting on or off changes the picture at once.
 
@@ -201,7 +201,7 @@ follows the table's top, one that hangs follows the back wall), and is drawn
 where it would go, green where it may and red where it may not. A piece that
 is dragged keeps the height it was taken by, so it does not jump. The
 selected piece has its edges in the accent. The pictures of the pieces and of
-the dens in the strip are drawn the same way, and a floor is a swatch of the
+the rooms in the strip are drawn the same way, and a floor is a swatch of the
 tone the room lays it in.
 
 Lions that have to share a tile, when the floor is full, stand side by side
@@ -209,9 +209,9 @@ on it. Those that wait for you stand in a line across the entrance, each
 wholly in view, three to a line. A name plate that would cover another plate or another lion's head
 goes down a few lines and keeps a line to its lion.
 
-### Looking at a full den
+### Looking at a full Office
 
-`leon --den` opens on the Den. A development build (`cargo run`) also reads
+`leon --den` opens on the Office. A development build (`cargo run`) also reads
 `LEON_DEN_CAST=<count>`: that many made-up lions, at most 40, each moving
 through the states every few seconds, beside the real ones. Nothing can be
 done to them: they are nobody's session. A release build ignores it.
@@ -222,11 +222,11 @@ LEON_DEN_CAST=14 cargo run -p leon -- --den --data-dir /tmp/leon-try
 
 Without a window, `cargo run -p leon-den --features den3d --example
 den_view_png -- DIR` writes pictures of the whole view (a crowd, the editor
-with a piece in hand, an empty den, the strip's pictures) into `DIR`.
+with a piece in hand, an empty room, the strip's pictures) into `DIR`.
 
-## Choose a den
+## Choose a room
 
-**Choose a den…** in the palette lists the dens by name; **Choose a den** on
+**Choose a room…** in the palette lists the rooms by name; **Choose a room** on
 the bar over the room shows a picture of each. There are six built in:
 
 | Id | Name | Tiles | Work seats | Little seats | |
@@ -240,13 +240,13 @@ the bar over the room shows a picture of each. There are six built in:
 
 More lions than seats is fine: the rest work standing, with a tablet.
 
-Choosing a den never loses one of yours: a den you changed is a file of its
+Choosing a room never loses one of yours: a room you changed is a file of its
 own (below) and stays in the list.
 
-## Edit the den
+## Edit the Office
 
-**Edit the Den** (the palette, the View menu, the button on the bar over the
-room, or `E` while the Den has the keyboard) opens the editor. The lions go on
+**Edit the Office** (the palette, the View menu, the button on the bar over the
+room, or `E` while the Office has the keyboard) opens the editor. The lions go on
 living in the room while you change it: move a desk and the lion that sat at
 it walks to where its seat went.
 
@@ -266,7 +266,7 @@ piece drawn as it will look; a bar over the room holds the rest.
 | change the whole floor, the walls | **Floor**, **Walls** | `F`, `W` (with `Shift`: the previous one) |
 | make the room larger or smaller | **Wider**, **Narrower**, **Deeper**, **Shallower** | `Shift` with an arrow |
 | undo, redo | **Undo**, **Redo** | `Ctrl+Z`, `Ctrl+Shift+Z` (`⌘Z`, `⇧⌘Z` on macOS) |
-| go back to the built-in den it was made from | **Reset to prefab** (one step to undo) | |
+| go back to the built-in room it was made from | **Reset to prefab** (one step to undo) | |
 | leave the editor | **Done** | `Esc` (after the hand is empty and nothing is selected), or `E` |
 
 The rules, which the editor enforces and a file is held to:
@@ -287,22 +287,22 @@ The rules, which the editor enforces and a file is held to:
 
 A change that is refused changes nothing, and the note over the feed says why.
 
-## Your dens
+## Your rooms
 
-A built-in den is never changed. The first change you make to one makes a den
-of your own from it, named after it ("My office"), and that is the den in use
+A built-in room is never changed. The first change you make to one makes a room
+of your own from it, named after it ("My office"), and that is the room in use
 from then on; every later change is written to it at once.
 
 | Command | |
 | --- | --- |
-| **Save the den as…** | A new den of yours with the room as it is: how a den, built in or yours, is duplicated. |
-| **Rename the den…** | Another name for the den in use, and for its file. |
-| **Delete the den…** | Removes the den in use, after asking. The den it was made from takes its place. |
-| **Open dens folder** | Shows the folder in the file manager. |
+| **Save the room as…** | A new room of yours with the room as it is: how a room, built in or yours, is duplicated. |
+| **Rename the room…** | Another name for the room in use, and for its file. |
+| **Delete the room…** | Removes the room in use, after asking. The room it was made from takes its place. |
+| **Open rooms folder** | Shows the folder in the file manager. |
 
 ### Where the files go
 
-One JSON file per den, in a `dens` folder inside Leon's data directory, the
+One JSON file per room, in a `dens` folder inside Leon's data directory, the
 folder that holds `settings.json`:
 
 | Platform | Folder |
@@ -311,13 +311,13 @@ folder that holds `settings.json`:
 | Linux | `$XDG_DATA_HOME/leon/dens/` (`~/.local/share/leon/dens/`) |
 | Windows | `%APPDATA%\leon\dens\` |
 
-With `--data-dir <path>`, it is `<path>/dens/`. The den in use is the setting
-`den`: a built-in den's id, or the name of a file without `.json`.
+With `--data-dir <path>`, it is `<path>/dens/`. The room in use is the setting
+`den`: a built-in room's id, or the name of a file without `.json`.
 
-**Sharing a den** is copying its file: there is no export or import command.
+**Sharing a room** is copying its file: there is no export or import command.
 Put a file from somebody else in the folder (its name in lower-case letters,
-digits and dashes, and not a built-in den's id) and it is in the list. Leon
-reads a den's file when the Den opens, so a file you edit by hand shows the
+digits and dashes, and not a built-in room's id) and it is in the list. Leon
+reads a room's file when the Office opens, so a file you edit by hand shows the
 next time you open it.
 
 ## The file
@@ -347,8 +347,8 @@ next time you open it.
 | Key | |
 | --- | --- |
 | `version` | The format: `1`. |
-| `name` | What the den is called. |
-| `based_on` | The built-in den it was made from: what "Reset to prefab" goes back to. Optional. |
+| `name` | What the room is called. |
+| `based_on` | The built-in room it was made from: what "Reset to prefab" goes back to. Optional. |
 | `cols`, `rows` | The size of the room in tiles, walls included. Row 0 and row 1 are the back wall, the first and last columns the side walls, the last row is open. The only keys a file must have. |
 | `floor`, `wall` | The floor and the walls, by id (below). |
 | `carpets` | Patches of another floor, the lowest first: `x`, `y`, `w`, `h` in tiles and `style`, a floor's id. |
@@ -358,7 +358,7 @@ next time you open it.
 or puts right, and the status line says the first thing it changed: a piece
 with an unknown id is dropped, a piece outside the room is moved inside, one
 that lands on another is dropped, an unknown floor or wall is the default, a
-room out of bounds is cut to the limits. A file that is no den at all (not
+room out of bounds is cut to the limits. A file that is no room at all (not
 JSON, no size) gives The office, and says so; the file is left as it is.
 
 ### Floors and walls
@@ -367,7 +367,7 @@ Floors (also the styles of carpets): `wood` (wooden planks), `walnut`, `pine`,
 `stone` (slabs), `slate`, `sand` (sandstone), `checker` (checkerboard), and the
 carpets `red`, `green`, `blue`, `plum`, `ochre`.
 
-Walls: `rock` (the den's own), `navy`, `plum`, `moss`, `clay`, `ash`.
+Walls: `rock` (Cave rock, the default), `navy`, `plum`, `moss`, `clay`, `ash`.
 
 ### The catalogue
 
@@ -404,9 +404,9 @@ Footprints are in tiles, width by height. "Wall" pieces go on the back wall,
 | `pot` | Pot | Decor | floor | 1x1 | 1 | |
 | `bin` | Bin | Decor | floor | 1x1 | 1 | |
 | `coffee` | Coffee | Decor | surface | 1x1 | 1 | |
-| `rug` | Entrance rug | Den | floor | 3x2 | 1 | entrance |
-| `nest` | Nest | Den | floor | 1x1 | 1 | nest |
-| `telescope` | Telescope | Den | floor | 1x2 | 1 | lookout |
+| `rug` | Entrance rug | Lair | floor | 3x2 | 1 | entrance |
+| `nest` | Nest | Lair | floor | 1x1 | 1 | nest |
+| `telescope` | Telescope | Lair | floor | 1x2 | 1 | lookout |
 
 The furniture, the floors and the wall tiles are from
 [pixel-agents](https://github.com/pixel-agents-hq/pixel-agents) (MIT); the
