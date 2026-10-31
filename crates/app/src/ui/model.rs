@@ -119,11 +119,23 @@ impl Snapshot {
             .find(|worktree| leon_core::path::key(&worktree.path) == key)
     }
 
+    /// The worktree with this id.
+    pub fn worktree(&self, id: &WorktreeId) -> Option<&Worktree> {
+        self.projects
+            .iter()
+            .flat_map(|entry| &entry.worktrees)
+            .find(|worktree| &worktree.id == id)
+    }
+
     /// The open pull request of the branch checked out at `path` on
-    /// `machine`, as GitHub last said it.
+    /// `machine`, as GitHub last said it: one that was merged or closed is no
+    /// longer something to open from a conversation.
     pub fn pull_request_at(&self, machine: &MachineId, path: &str) -> Option<&PullRequest> {
         let worktree = self.worktree_at(machine, path)?;
-        self.status(&worktree.id)?.pull_request.as_ref()
+        self.status(&worktree.id)?
+            .pull_request
+            .as_ref()
+            .filter(|pull_request| pull_request.state == leon_core::PullState::Open)
     }
 }
 

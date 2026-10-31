@@ -60,7 +60,7 @@ creates in a loop.
 
 ## The board in the window
 
-The board is the main pane, as the Den is, and the sidebar stays beside it. It
+The board is the main pane, as the Office is, and the sidebar stays beside it. It
 opens from the **Tasks** row under Home, `⇧⌘I` (`Ctrl+Shift+Alt+I` on Linux and
 Windows), **Show the task board** in the palette, or `leon --tasks` at the
 start; the same command, `Esc` or the row closes it and puts back what the

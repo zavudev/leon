@@ -1096,6 +1096,7 @@ fn the_pull_request_of_a_conversations_branch_is_in_its_foot_and_opens(cx: &mut 
         .update_worktree_status(&worktree.id, |status| {
             status.pull_request = Some(leon_core::PullRequest {
                 number: 565,
+                state: leon_core::PullState::Open,
                 url: "https://github.com/zavudev/zavu/pull/565".into(),
                 draft: false,
                 review: leon_core::Review::None,

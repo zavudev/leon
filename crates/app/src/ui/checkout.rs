@@ -7,7 +7,7 @@
 //! distance from the upstream (`↑2↓1`), and on a narrow sidebar only the
 //! first of those that is known. The screen says all of it in words.
 
-use leon_core::{Checks, PullRequest, Review, WorktreeStatus};
+use leon_core::{Checks, PullRequest, PullState, Review, WorktreeStatus};
 
 /// How a part is coloured; the view maps each to a token of the theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,8 +33,12 @@ pub struct Part {
     pub tone: Tone,
 }
 
-/// The tone of a pull request: its checks, unless it is a draft.
+/// The tone of a pull request: its checks, unless it is a draft, and nothing
+/// to look at once it was merged or closed (its checks stopped mattering).
 pub fn pull_request_tone(pull_request: &PullRequest) -> Tone {
+    if pull_request.state != PullState::Open {
+        return Tone::Muted;
+    }
     if pull_request.draft {
         return Tone::Faint;
     }
@@ -139,14 +143,21 @@ pub fn checks_words(checks: Checks) -> Option<&'static str> {
     }
 }
 
-/// The pull request on one line: `#123 · Draft · Approved · Checks passing`.
+/// The pull request on one line: `#123 · Draft · Approved · Checks passing`,
+/// `#123 · Merged` or `#123 · Closed`.
 pub fn pull_request_words(pull_request: &PullRequest) -> String {
     let mut words = vec![format!("#{}", pull_request.number)];
-    if pull_request.draft {
-        words.push("Draft".to_owned());
+    match pull_request.state {
+        PullState::Merged => words.push("Merged".to_owned()),
+        PullState::Closed => words.push("Closed".to_owned()),
+        PullState::Open => {
+            if pull_request.draft {
+                words.push("Draft".to_owned());
+            }
+            words.extend(review_words(pull_request.review).map(str::to_owned));
+            words.extend(checks_words(pull_request.checks).map(str::to_owned));
+        }
     }
-    words.extend(review_words(pull_request.review).map(str::to_owned));
-    words.extend(checks_words(pull_request.checks).map(str::to_owned));
     words.join(" \u{b7} ")
 }
 
@@ -181,6 +192,7 @@ mod tests {
     fn pull_request(draft: bool, review: Review, checks: Checks) -> PullRequest {
         PullRequest {
             number: 123,
+            state: PullState::Open,
             url: "https://github.com/zavudev/leon/pull/123".into(),
             draft,
             review,
@@ -254,6 +266,29 @@ mod tests {
         assert_eq!(texts(&of(4, 0)), ["\u{2191}4"]);
         assert_eq!(of(4, 0)[0].tone, Tone::Muted);
         assert_eq!(texts(&of(0, 2)), ["\u{2193}2"]);
+    }
+
+    #[test]
+    fn a_merged_or_closed_pull_request_says_so_and_nothing_about_its_checks() {
+        let ended = |state| PullRequest {
+            state,
+            ..pull_request(false, Review::Approved, Checks::Failing)
+        };
+        assert_eq!(
+            pull_request_words(&ended(PullState::Merged)),
+            "#123 \u{b7} Merged"
+        );
+        assert_eq!(
+            pull_request_words(&ended(PullState::Closed)),
+            "#123 \u{b7} Closed"
+        );
+        assert_eq!(pull_request_tone(&ended(PullState::Merged)), Tone::Muted);
+        assert_eq!(pull_request_tone(&ended(PullState::Closed)), Tone::Muted);
+        // Open, the same one reads as before.
+        assert_eq!(
+            pull_request_words(&ended(PullState::Open)),
+            "#123 \u{b7} Approved \u{b7} Checks failing"
+        );
     }
 
     #[test]

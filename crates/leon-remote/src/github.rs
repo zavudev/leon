@@ -1,18 +1,21 @@
 //! What the GitHub CLI says about the repository of a project.
 //!
-//! Only the questions the sidebar asks are here: which branches have a merged
-//! pull request, and which have an open one with how its reviews and checks
-//! stand. Everything runs through the [`Runner`] on the project's
+//! Only the questions the sidebar asks are here: the pull request of every
+//! branch (open, merged or closed) and, for the open ones, how their reviews
+//! and checks stand. Everything runs through the [`Runner`] on the project's
 //! machine, so a repository on an SSH server is asked over SSH and a missing
 //! `gh` there is the same quiet "cannot ask" as a missing one here.
 //!
-//! `gh pr list --state merged --json headRefName` answers in one round trip for
-//! the whole repository, which is what keeps a sidebar full of worktrees from
-//! asking once per row.
+//! `gh pr list --json ...` answers in one round trip for the whole repository,
+//! which is what keeps a sidebar full of worktrees from asking once per row.
+//! The answer is made of two such calls that run at the same time (see
+//! [`Github::branch_pull_requests`]): a light one for every state, and the
+//! heavy one (checks and reviews) for the open pull requests only, so a long
+//! history of merged ones never pays for the check rollups.
 
 use std::collections::HashMap;
 
-use leon_core::{Checks, Machine, PullRequest, Review};
+use leon_core::{Checks, Machine, PullRequest, PullState, Review};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -35,9 +38,9 @@ pub enum GithubError {
     },
 }
 
-/// The default number of merged pull requests asked for: enough for a busy
-/// project, few enough to stay one short answer.
-pub const DEFAULT_LIMIT: usize = 100;
+/// The default number of pull requests asked for in every state: enough for a
+/// busy project, few enough to stay one short answer.
+pub const DEFAULT_LIMIT: usize = 200;
 
 /// GitHub questions bound to one machine.
 #[derive(Debug)]
@@ -57,18 +60,47 @@ impl<'a, R: Runner> Github<'a, R> {
         }
     }
 
-    /// The head branches of the repository at `cwd` that have a merged pull
-    /// request, at most `limit` of them. One question for the whole
-    /// repository: the CLI reads the repository from `cwd`.
+    /// The pull request of every branch of the repository at `cwd`, open,
+    /// merged or closed, as far as the newest `states_limit` pull requests and
+    /// the `open_limit` open ones go. Two questions that run at the same time:
+    /// the open pull requests with their reviews and checks, and every state
+    /// without them. A branch with an open pull request has that one; else
+    /// its newest.
     ///
     /// `Ok(None)` is "cannot ask here": no `gh`, no repository, or a failure
     /// that says nothing about the branches. The caller reads that as "not
-    /// known", never as "no pull request was merged".
-    pub async fn merged_pull_request_branches(
+    /// known", never as "no pull request".
+    pub async fn branch_pull_requests(
+        &self,
+        cwd: &str,
+        open_limit: usize,
+        states_limit: usize,
+    ) -> Result<Option<HashMap<String, PullRequest>>, GithubError> {
+        // The open question goes first: it is the one a failure is worth
+        // hearing about, and the one whose answer carries the most.
+        let (open, states) = tokio::join!(
+            self.open_pull_requests(cwd, open_limit),
+            self.pull_request_states(cwd, states_limit),
+        );
+        let (Some(mut found), Some(mut states)) = (open?, states?) else {
+            return Ok(None);
+        };
+        // The open ones are in both: the detailed answer wins.
+        for (branch, pull_request) in states.drain() {
+            found.entry(branch).or_insert(pull_request);
+        }
+        Ok(Some(found))
+    }
+
+    /// The pull request of every branch of the repository at `cwd` in any
+    /// state, without reviews or checks, at most `limit` pull requests asked
+    /// for (the newest). `Ok(None)` is "cannot ask here", as for
+    /// [`Self::branch_pull_requests`].
+    pub async fn pull_request_states(
         &self,
         cwd: &str,
         limit: usize,
-    ) -> Result<Option<Vec<String>>, GithubError> {
+    ) -> Result<Option<HashMap<String, PullRequest>>, GithubError> {
         let limit = limit.clamp(1, 1000).to_string();
         let asked = self
             .ask(
@@ -77,15 +109,15 @@ impl<'a, R: Runner> Github<'a, R> {
                     "pr",
                     "list",
                     "--state",
-                    "merged",
+                    "all",
                     "--json",
-                    "headRefName",
+                    STATE_FIELDS,
                     "--limit",
                     &limit,
                 ],
             )
             .await?;
-        Ok(asked.map(|stdout| parse_head_branches(&stdout)))
+        Ok(asked.map(|stdout| parse_pull_request_states(&stdout)))
     }
 
     /// The open pull request of every branch of the repository at `cwd` that
@@ -458,22 +490,51 @@ pub fn issue_number_of_url(url: &str) -> Option<i64> {
 /// The fields of an open pull request the worktree views show.
 const OPEN_FIELDS: &str = "number,url,headRefName,isDraft,reviewDecision,statusCheckRollup";
 
-/// The `headRefName` of every entry `gh` printed, in its order. Output that is
-/// not the expected array yields nothing rather than an error: a new shape
-/// from the CLI must not take the sidebar down.
-pub fn parse_head_branches(stdout: &str) -> Vec<String> {
-    serde_json::from_str::<Vec<serde_json::Value>>(stdout)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|entry| {
-            entry
-                .get("headRefName")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|branch| !branch.is_empty())
-                .map(str::to_owned)
-        })
-        .collect()
+/// The fields of a pull request of any state the worktree views show.
+const STATE_FIELDS: &str = "number,url,headRefName,state,isDraft";
+
+/// The pull request of each head branch `gh pr list --state all --json` printed
+/// (newest first): the open one when the branch has one, else the newest. A
+/// merged or closed one carries no reviews or checks, they stopped mattering.
+/// Output that is not the expected array yields nothing rather than an error:
+/// a new shape from the CLI must not take the sidebar down.
+pub fn parse_pull_request_states(stdout: &str) -> HashMap<String, PullRequest> {
+    let mut found: HashMap<String, PullRequest> = HashMap::new();
+    let entries = serde_json::from_str::<Vec<Value>>(stdout).unwrap_or_default();
+    for entry in entries {
+        let text = |key: &str| entry.get(key).and_then(Value::as_str).unwrap_or_default();
+        let branch = text("headRefName").trim();
+        let number = entry.get("number").and_then(Value::as_u64);
+        let state = match text("state") {
+            "OPEN" => PullState::Open,
+            "MERGED" => PullState::Merged,
+            "CLOSED" => PullState::Closed,
+            _ => continue,
+        };
+        let (false, Some(number)) = (branch.is_empty(), number) else {
+            continue;
+        };
+        let pull_request = PullRequest {
+            number,
+            state,
+            url: text("url").trim().to_owned(),
+            draft: state == PullState::Open
+                && entry
+                    .get("isDraft")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            review: Review::None,
+            checks: Checks::None,
+        };
+        match found.get(branch) {
+            // The newest stands, unless an open one comes after it.
+            Some(kept) if kept.state == PullState::Open || state != PullState::Open => {}
+            _ => {
+                found.insert(branch.to_owned(), pull_request);
+            }
+        }
+    }
+    found
 }
 
 /// The open pull requests `gh pr list --json` printed, by head branch. When a
@@ -497,6 +558,7 @@ pub fn parse_open_pull_requests(stdout: &str) -> HashMap<String, PullRequest> {
             .entry(branch.to_owned())
             .or_insert_with(|| PullRequest {
                 number,
+                state: PullState::Open,
                 url: text("url").trim().to_owned(),
                 draft: entry
                     .get("isDraft")
@@ -574,35 +636,83 @@ mod tests {
         SshOptions::default()
     }
 
+    /// What `gh pr list --state all --json ...` printed, newest first: a merged
+    /// pull request, a closed one, an open draft with an older merged one on
+    /// the same branch, a branch reused after its pull request was closed
+    /// (the newest, merged, wins), and entries that say nothing usable.
+    const STATES: &str = r#"[
+        {"number":50,"url":"https://github.com/zavudev/leon/pull/50","headRefName":"feature/login","state":"MERGED","isDraft":false},
+        {"number":49,"url":"https://github.com/zavudev/leon/pull/49","headRefName":"fix/typo","state":"CLOSED","isDraft":false},
+        {"number":48,"url":"https://github.com/zavudev/leon/pull/48","headRefName":"wip/spike","state":"OPEN","isDraft":true},
+        {"number":40,"url":"https://github.com/zavudev/leon/pull/40","headRefName":"wip/spike","state":"MERGED","isDraft":false},
+        {"number":45,"url":"https://github.com/zavudev/leon/pull/45","headRefName":"reused","state":"MERGED","isDraft":false},
+        {"number":30,"url":"https://github.com/zavudev/leon/pull/30","headRefName":"reused","state":"CLOSED","isDraft":false},
+        {"number":20,"url":"https://github.com/zavudev/leon/pull/20","headRefName":"strange","state":"DRAFT","isDraft":false},
+        {"number":10,"url":"u","headRefName":"  ","state":"MERGED"},
+        {"url":"u","headRefName":"no-number","state":"MERGED"}
+    ]"#;
+
     #[test]
-    fn the_head_branches_of_a_merged_listing_are_read() {
-        let branches =
-            parse_head_branches(r#"[{"headRefName":"feature/login"},{"headRefName":"main"}]"#);
-        assert_eq!(branches, ["feature/login", "main"]);
+    fn every_state_of_a_pull_request_is_read_by_branch_and_the_open_one_wins() {
+        let found = parse_pull_request_states(STATES);
+        assert_eq!(found["feature/login"].state, PullState::Merged);
+        assert_eq!(found["feature/login"].number, 50);
+        assert_eq!(found["fix/typo"].state, PullState::Closed);
+        // The open draft is newer, and an open one wins over a merged one
+        // wherever it comes in the listing.
+        assert_eq!(found["wip/spike"].number, 48);
+        assert_eq!(found["wip/spike"].state, PullState::Open);
+        assert!(found["wip/spike"].draft);
+        // Otherwise the newest.
+        assert_eq!(found["reused"].number, 45);
+        assert_eq!(found["reused"].state, PullState::Merged);
+        assert!(!found["feature/login"].draft);
+        assert_eq!(found["feature/login"].checks, Checks::None);
+        assert_eq!(found["feature/login"].review, Review::None);
+        assert_eq!(
+            found["feature/login"].url,
+            "https://github.com/zavudev/leon/pull/50"
+        );
+        assert!(
+            !found.contains_key("strange"),
+            "an unknown state says nothing"
+        );
+        assert!(!found.contains_key("no-number"));
+        assert!(!found.contains_key(""));
+        assert_eq!(found.len(), 4);
+    }
+
+    #[test]
+    fn an_open_pull_request_listed_after_a_merged_one_of_its_branch_still_wins() {
+        let found = parse_pull_request_states(
+            r#"[{"number":9,"url":"u","headRefName":"b","state":"MERGED"},
+                {"number":3,"url":"v","headRefName":"b","state":"OPEN","isDraft":false}]"#,
+        );
+        assert_eq!(found["b"].number, 3);
+        assert_eq!(found["b"].state, PullState::Open);
     }
 
     #[test]
     fn output_that_is_not_the_expected_array_reads_as_nothing() {
-        assert!(parse_head_branches("").is_empty());
-        assert!(parse_head_branches("[]").is_empty());
-        assert!(parse_head_branches("not json").is_empty());
-        assert!(parse_head_branches(r#"[{"other":"x"}]"#).is_empty());
-        assert!(parse_head_branches(r#"[{"headRefName":"  "}]"#).is_empty());
+        assert!(parse_pull_request_states("").is_empty());
+        assert!(parse_pull_request_states("[]").is_empty());
+        assert!(parse_pull_request_states("not json").is_empty());
+        assert!(parse_pull_request_states(r#"[{"other":"x"}]"#).is_empty());
+        assert!(parse_pull_request_states(r#"{"number":1}"#).is_empty());
     }
 
     #[tokio::test]
-    async fn one_question_asks_for_the_whole_repository() {
-        let runner = ScriptedRunner::new().reply(Output::ok(
-            r#"[{"headRefName":"feature/login"}]"#.to_owned(),
-        ));
+    async fn the_states_are_asked_for_the_whole_repository_in_one_light_question() {
+        let runner = ScriptedRunner::new().reply(Output::ok(STATES.to_owned()));
         let machine = local();
         let ssh = ssh();
         let github = Github::new(&runner, &machine, &ssh);
-        let branches = github
-            .merged_pull_request_branches("/srv/api", DEFAULT_LIMIT)
+        let found = github
+            .pull_request_states("/srv/api", DEFAULT_LIMIT)
             .await
+            .unwrap()
             .unwrap();
-        assert_eq!(branches, Some(vec!["feature/login".to_owned()]));
+        assert_eq!(found["feature/login"].state, PullState::Merged);
         let call = &runner.calls()[0];
         assert_eq!(call.program, "gh");
         assert_eq!(
@@ -611,14 +721,38 @@ mod tests {
                 "pr",
                 "list",
                 "--state",
-                "merged",
+                "all",
                 "--json",
-                "headRefName",
+                "number,url,headRefName,state,isDraft",
                 "--limit",
-                "100"
+                "200"
             ]
         );
         assert_eq!(call.cwd.as_deref(), Some("/srv/api"));
+    }
+
+    #[tokio::test]
+    async fn the_open_details_and_every_state_are_asked_together_and_the_open_details_win() {
+        let open = r#"[{"number":48,"url":"https://github.com/zavudev/leon/pull/48","headRefName":"wip/spike","isDraft":true,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}]}]"#;
+        let runner = ScriptedRunner::new()
+            .reply(Output::ok(open.to_owned()))
+            .reply(Output::ok(STATES.to_owned()));
+        let machine = local();
+        let ssh = ssh();
+        let github = Github::new(&runner, &machine, &ssh);
+        let found = github
+            .branch_pull_requests("/srv/api", 100, DEFAULT_LIMIT)
+            .await
+            .unwrap()
+            .unwrap();
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 2, "two questions, no more");
+        assert_eq!(calls[0].args[3], "open");
+        assert_eq!(calls[1].args[3], "all");
+        assert_eq!(found["wip/spike"].review, Review::Approved);
+        assert_eq!(found["wip/spike"].checks, Checks::Failing);
+        assert_eq!(found["feature/login"].state, PullState::Merged);
+        assert_eq!(found["fix/typo"].state, PullState::Closed);
     }
 
     #[tokio::test]
@@ -632,7 +766,7 @@ mod tests {
         let github = Github::new(&runner, &machine, &ssh);
         assert!(
             github
-                .merged_pull_request_branches("/srv/api", DEFAULT_LIMIT)
+                .branch_pull_requests("/srv/api", 100, DEFAULT_LIMIT)
                 .await
                 .unwrap()
                 .is_none(),
@@ -647,7 +781,7 @@ mod tests {
         let ssh = ssh();
         let github = Github::new(&runner, &machine, &ssh);
         let error = github
-            .merged_pull_request_branches("/srv/api", DEFAULT_LIMIT)
+            .branch_pull_requests("/srv/api", 100, DEFAULT_LIMIT)
             .await
             .expect_err("a failure the user may want to hear about");
         assert!(matches!(error, GithubError::Failed { .. }), "{error:?}");

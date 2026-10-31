@@ -2,7 +2,8 @@
 //!
 //! [`WorktreeStatus`] is the one reusable answer to "how is this worktree
 //! doing": how many files changed, how far it is from its upstream and the
-//! open pull request of its branch with the summary of its checks. The engine
+//! pull request of its branch (open, merged or closed) with, while it is open,
+//! the summary of its checks. The engine
 //! reads it from git and from `gh` on the worktree's machine and writes it to
 //! the store ([`Store::update_worktree_status`](crate::Store::update_worktree_status));
 //! the views only read it back. Every part is optional because every part can
@@ -54,11 +55,28 @@ pub enum Checks {
     Running,
 }
 
-/// The open pull request of a worktree's branch.
+/// Where a pull request stands in its life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PullState {
+    /// Still to be decided. A status stored before the states existed was
+    /// always an open one, hence the default.
+    #[default]
+    Open,
+    /// Its work landed on the base branch.
+    Merged,
+    /// Closed without merging.
+    Closed,
+}
+
+/// The pull request of a worktree's branch: the open one, or else the newest
+/// that was merged or closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullRequest {
     /// Its number on the repository (`#123`).
     pub number: u64,
+    /// Whether it is open, merged or closed.
+    #[serde(default)]
+    pub state: PullState,
     /// The address of its page, as GitHub printed it.
     pub url: String,
     /// Whether it is a draft.
@@ -79,7 +97,7 @@ pub struct WorktreeStatus {
     /// Distance from the upstream branch, or `None` when the branch has no
     /// upstream (or git could not say).
     pub divergence: Option<Divergence>,
-    /// The open pull request of the branch, or `None` when there is none or
+    /// The pull request of the branch, or `None` when there is none or
     /// GitHub could not be asked.
     pub pull_request: Option<PullRequest>,
 }
@@ -98,6 +116,7 @@ mod tests {
             }),
             pull_request: Some(PullRequest {
                 number: 12,
+                state: PullState::Open,
                 url: "https://github.com/zavudev/leon/pull/12".into(),
                 draft: true,
                 review: Review::ChangesRequested,
@@ -116,6 +135,22 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<WorktreeStatus>("{}").unwrap(),
             WorktreeStatus::default()
+        );
+    }
+
+    #[test]
+    fn a_pull_request_stored_before_the_states_existed_reads_as_open() {
+        let old = r#"{"number":7,"url":"u","draft":false,"review":"None","checks":"None"}"#;
+        let read: PullRequest = serde_json::from_str(old).unwrap();
+        assert_eq!(read.state, PullState::Open);
+        let merged = PullRequest {
+            state: PullState::Merged,
+            ..read
+        };
+        let text = serde_json::to_string(&merged).unwrap();
+        assert_eq!(
+            serde_json::from_str::<PullRequest>(&text).unwrap().state,
+            PullState::Merged
         );
     }
 

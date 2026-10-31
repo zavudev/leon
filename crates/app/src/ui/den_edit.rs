@@ -96,7 +96,7 @@ impl Tab {
         match self {
             Tab::Pieces(category) => category.name(),
             Tab::Floors => "Floors",
-            Tab::Dens => "Dens",
+            Tab::Dens => "Rooms",
         }
     }
 
@@ -222,7 +222,7 @@ impl Shell {
                 more => format!(" (and {more} more)"),
             };
             self.engine
-                .report(StatusKind::Error, format!("Den: {first}{more}"));
+                .report(StatusKind::Error, format!("Office: {first}{more}"));
         }
     }
 
@@ -311,10 +311,10 @@ impl Shell {
         match loaded.notes.first() {
             Some(note) => self
                 .engine
-                .report(StatusKind::Error, format!("Den: {note}")),
+                .report(StatusKind::Error, format!("Office: {note}")),
             None => self
                 .engine
-                .report(StatusKind::Info, format!("Den: {}.", loaded.layout.name)),
+                .report(StatusKind::Info, format!("Office: {}.", loaded.layout.name)),
         }
         cx.notify();
     }
@@ -357,7 +357,7 @@ impl Shell {
         let Some(folder) = self.dens_folder(cx) else {
             self.engine.report(
                 StatusKind::Info,
-                "There is no dens folder: the settings are kept in memory.",
+                "There is no rooms folder: the settings are kept in memory.",
             );
             return;
         };
@@ -383,7 +383,7 @@ impl Shell {
                 self.set_den_setting(&id, cx);
                 self.engine.report(
                     StatusKind::Info,
-                    format!("Saved the den as {name}: {}", path.display()),
+                    format!("Saved the room as {name}: {}", path.display()),
                 );
             }
             Err(error) => self.engine.report(
@@ -470,7 +470,7 @@ impl Shell {
         self.den_choose(&next, cx);
         self.engine.report(
             StatusKind::Info,
-            format!("Deleted {}. The den is {} again.", active.name, {
+            format!("Deleted {}. The room is {} again.", active.name, {
                 self.den_active_now(cx).name
             }),
         );
@@ -482,7 +482,7 @@ impl Shell {
         let Some(folder) = self.dens_folder(cx) else {
             self.engine.report(
                 StatusKind::Info,
-                "There is no dens folder: the settings are kept in memory.",
+                "There is no rooms folder: the settings are kept in memory.",
             );
             return;
         };
@@ -497,7 +497,7 @@ impl Shell {
         reveal(cx, &folder);
         self.engine.report(
             StatusKind::Info,
-            format!("Dens folder: {}", folder.display()),
+            format!("Rooms folder: {}", folder.display()),
         );
     }
 
@@ -606,7 +606,7 @@ impl Shell {
                 let Some(prefab) = active.based_on.as_deref().and_then(prefab) else {
                     self.engine.report(
                         StatusKind::Error,
-                        format!("{} was not made from a built-in den.", active.name),
+                        format!("{} was not made from a built-in room.", active.name),
                     );
                     return;
                 };
@@ -932,8 +932,8 @@ impl Shell {
             ]);
         } else {
             tools.extend([
-                ("den-choose", "Choose a den", Tool::Tab(Tab::Dens), true),
-                ("den-edit", "Edit the Den", Tool::Edit, true),
+                ("den-choose", "Choose a room", Tool::Tab(Tab::Dens), true),
+                ("den-edit", "Edit the Office", Tool::Edit, true),
             ]);
         }
         let kind = if active.user { "YOURS" } else { "BUILT IN" };

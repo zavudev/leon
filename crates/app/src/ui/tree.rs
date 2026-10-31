@@ -59,9 +59,9 @@ pub enum NodeId {
     Unsorted(MachineId),
     /// One folder among the unsorted sessions.
     Folder(MachineId, String),
-    /// The Pinned section of a machine: its pinned sessions, above the
-    /// projects.
-    Pinned(MachineId),
+    /// The Pinned section: the pinned sessions of every machine, at the top
+    /// of the tree, above the machines.
+    Pinned,
     /// A shelf of a machine, at the bottom of it: the sessions snoozed until a
     /// time, or put away.
     Shelf(MachineId, ShelfKind),
@@ -90,7 +90,7 @@ impl NodeId {
             NodeId::Worktree(id) => format!("worktree:{id}"),
             NodeId::Unsorted(id) => format!("unsorted:{id}"),
             NodeId::Folder(id, cwd) => format!("folder:{id}:{cwd}"),
-            NodeId::Pinned(id) => format!("pinned:{id}"),
+            NodeId::Pinned => "pinned".to_owned(),
             NodeId::Shelf(id, kind) => format!("shelf:{id}:{}", kind.tag()),
             NodeId::Session(id) => format!("session:{id}"),
             NodeId::Live(id) => format!("live:{id}"),
@@ -147,7 +147,7 @@ pub enum Kind {
         /// Sessions under it.
         sessions: usize,
     },
-    /// The Pinned section of a machine, with how many sessions it holds.
+    /// The Pinned section, with how many sessions it holds.
     Pinned {
         /// The pinned sessions under it.
         sessions: usize,
@@ -275,10 +275,11 @@ pub struct Placement {
     /// The sessions no project contains, by machine and folder, the folder of
     /// the newest session first.
     pub unsorted: HashMap<MachineId, Vec<Folder>>,
-    /// The pinned sessions of each machine, in their pinned order: the Pinned
-    /// section shows them. They are in the lists above as well, which the main
-    /// pane of a worktree counts; the tree leaves them out of those lists.
-    pub pinned: HashMap<MachineId, Vec<usize>>,
+    /// The pinned sessions of every machine as one list, in their pinned order
+    /// (see [`pinned_order`]): the Pinned section shows them. They are in the
+    /// lists above as well, which the main pane of a worktree counts; the tree
+    /// leaves them out of those lists.
+    pub pinned: Vec<usize>,
     /// The live sessions, in the order they were started.
     pub live: Vec<LiveEntry>,
     /// The live sessions of each worktree, as places in `live`.
@@ -459,7 +460,7 @@ impl Placement {
     /// folder's ancestors, a handful of lookups. Inside every parent the
     /// pinned sessions go first, in their pinned order, then the rest
     /// newest-first (the snapshot already lists newest first, and the sort
-    /// is stable). The pinned sessions of a machine are also gathered in
+    /// is stable). The pinned sessions of every machine are also gathered in
     /// `pinned`, in their pinned order.
     pub fn compute(snapshot: &Snapshot) -> Self {
         let owners = owner_tables(snapshot);
@@ -467,11 +468,7 @@ impl Placement {
         let mut folders: HashMap<(&MachineId, String), usize> = HashMap::new();
         for (index, session) in snapshot.sessions.iter().enumerate() {
             if session.sort_order.is_some() {
-                placement
-                    .pinned
-                    .entry(session.machine_id.clone())
-                    .or_default()
-                    .push(index);
+                placement.pinned.push(index);
             }
             let Some(table) = owners.get(&session.machine_id) else {
                 continue;
@@ -524,9 +521,7 @@ impl Placement {
                 pinned_first(snapshot, &mut folder.sessions);
             }
         }
-        for places in placement.pinned.values_mut() {
-            places.sort_by_key(|place| snapshot.sessions[*place].sort_order);
-        }
+        placement.pinned = pinned_order(snapshot, std::mem::take(&mut placement.pinned));
         placement
     }
 
@@ -542,6 +537,31 @@ fn pinned_first(snapshot: &Snapshot, places: &mut [usize]) {
         let order = snapshot.sessions[*place].sort_order;
         (order.is_none(), order.unwrap_or(0))
     });
+}
+
+/// The pinned sessions `places` of every machine as the one list of the Pinned
+/// section, first row first: by pinned position, and sessions with the same
+/// position (positions written when each machine had a section of its own all
+/// start from zero) by the order of their machines in the sidebar, then as the
+/// snapshot lists them. Once the section is ordered by hand every position is
+/// written again as one list, and the machine no longer decides anything.
+pub fn pinned_order(snapshot: &Snapshot, mut places: Vec<usize>) -> Vec<usize> {
+    let machine_at = |place: usize| {
+        let machine = &snapshot.sessions[place].machine_id;
+        snapshot
+            .machines
+            .iter()
+            .position(|known| &known.id == machine)
+            .unwrap_or(usize::MAX)
+    };
+    places.sort_by_key(|place| {
+        (
+            snapshot.sessions[*place].sort_order,
+            machine_at(*place),
+            *place,
+        )
+    });
+    places
 }
 
 /// The sessions of `places` that a list of the tree shows under its parent: a
@@ -677,20 +697,30 @@ pub fn build_rows_filtered(
         expansion,
         merged: &placement.merged,
         shelved: &placement.shelved,
+        top: Vec::new(),
         rows: Vec::new(),
     };
     let headers = machine_headers(snapshot);
+    // The Pinned section comes first, above the machines, and gathers what
+    // every one of them has pinned. In a filtered tree, the pinned sessions
+    // of the worktrees the filter keeps.
+    let visible = filter.map(|filter| {
+        snapshot
+            .machines
+            .iter()
+            .flat_map(|machine| filtered_places(snapshot, placement, &machine.id, filter))
+            .collect::<HashSet<usize>>()
+    });
+    out.pinned(placement, visible.as_ref());
     for machine in &snapshot.machines {
         let id = NodeId::Machine(machine.id.clone());
         // Without its header a machine cannot be folded, so it is open.
         let open = !headers || expansion.is_open(&id.key(), true);
         let projects = by_machine.get(&machine.id).map_or(&[][..], Vec::as_slice);
         if let Some(filter) = filter {
-            // A filtered machine is its header, the pinned sessions the filter
-            // keeps, and the projects that match.
+            // A filtered machine is its header and the projects that match.
             out.push(id, &machine.id, 0, None, Kind::Machine(machine.clone()));
             let visible = filtered_places(snapshot, placement, &machine.id, filter);
-            out.pinned(placement, &machine.id, 1, Some(&visible));
             for entry in projects {
                 if let Some(matched) = filter.projects.get(&entry.project.id) {
                     out.project(entry, placement, now, Some(matched));
@@ -709,7 +739,6 @@ pub fn build_rows_filtered(
         if !open {
             continue;
         }
-        out.pinned(placement, &machine.id, 1, None);
         if projects.is_empty() {
             out.push(
                 NodeId::Open(machine.id.clone()),
@@ -749,18 +778,22 @@ pub fn build_rows_filtered(
         out.push(NodeId::NoMatch, &home, 1, None, Kind::NoMatch);
     }
     if headers {
-        return out.rows;
+        out.top.extend(out.rows);
+        return out.top;
     }
     // One machine: its header says nothing the window does not, so it is left
-    // out and its projects sit at the top level.
-    out.rows
-        .into_iter()
-        .filter(|row| !matches!(row.kind, Kind::Machine(_)))
-        .map(|row| Row {
-            depth: row.depth.saturating_sub(1),
-            ..row
-        })
-        .collect()
+    // out and its projects sit at the top level. The Pinned section is not
+    // under any machine and stays where it is.
+    out.top.extend(
+        out.rows
+            .into_iter()
+            .filter(|row| !matches!(row.kind, Kind::Machine(_)))
+            .map(|row| Row {
+                depth: row.depth.saturating_sub(1),
+                ..row
+            }),
+    );
+    out.top
 }
 
 /// Whether the machines get a header row: only when there is more than one
@@ -781,6 +814,9 @@ struct Rows<'a> {
     merged: &'a HashSet<SessionId>,
     /// The sessions on a shelf: their lists leave them out.
     shelved: &'a HashSet<SessionId>,
+    /// The Pinned section, above the machines and out of what a tree of one
+    /// machine lifts a level.
+    top: Vec<Row>,
     rows: Vec<Row>,
 }
 
@@ -945,21 +981,15 @@ impl Rows<'_> {
         }
     }
 
-    /// The Pinned section of a machine: its pinned sessions, in their pinned
-    /// order, above its projects. In a filtered tree, only the ones the filter
-    /// keeps (`visible`), and the section is open.
-    fn pinned(
-        &mut self,
-        placement: &Placement,
-        machine: &MachineId,
-        depth: u8,
-        visible: Option<&HashSet<usize>>,
-    ) {
+    /// The Pinned section: the pinned sessions of every machine, in their
+    /// pinned order, above everything else. In a filtered tree, only the ones
+    /// the filter keeps (`visible`), and the section is open. Its header and
+    /// each session carry the machine of the session (the header's is the
+    /// first one's), so what a row acts on is where the session is.
+    fn pinned(&mut self, placement: &Placement, visible: Option<&HashSet<usize>>) {
         let places: Vec<usize> = placement
             .pinned
-            .get(machine)
-            .into_iter()
-            .flatten()
+            .iter()
             .copied()
             .filter(|place| {
                 !placement
@@ -968,33 +998,34 @@ impl Rows<'_> {
             })
             .filter(|place| visible.is_none_or(|visible| visible.contains(place)))
             .collect();
-        if places.is_empty() {
+        let Some(first) = places.first() else {
             return;
-        }
-        let id = NodeId::Pinned(machine.clone());
+        };
+        let home = self.snapshot.sessions[*first].machine_id.clone();
+        let id = NodeId::Pinned;
         let filtered = visible.is_some();
         let open = filtered || self.expansion.is_open(&id.key(), true);
-        self.push(
+        self.top.push(Row {
             id,
-            machine,
-            depth,
-            (!filtered).then_some(open),
-            Kind::Pinned {
+            machine: home,
+            depth: 0,
+            open: (!filtered).then_some(open),
+            kind: Kind::Pinned {
                 sessions: places.len(),
             },
-        );
+        });
         if !open {
             return;
         }
         for place in places {
             let session = &self.snapshot.sessions[place];
-            self.push(
-                NodeId::Session(session.id.clone()),
-                machine,
-                depth + 1,
-                None,
-                Kind::Session(session.clone()),
-            );
+            self.top.push(Row {
+                id: NodeId::Session(session.id.clone()),
+                machine: session.machine_id.clone(),
+                depth: 1,
+                open: None,
+                kind: Kind::Session(session.clone()),
+            });
         }
     }
 
@@ -1282,28 +1313,57 @@ pub fn flatten(rows: Vec<Row>) -> (Vec<Row>, HashMap<String, String>) {
     (kept, branches)
 }
 
-/// Where each pinned session lives, by the key of its row: its project, with
-/// the worktree's folder after it when it is not the main checkout, or its
-/// folder when no project holds it. The Pinned section lifts sessions out of
-/// their projects, so the row says where they came from.
-pub fn pinned_places(snapshot: &Snapshot, placement: &Placement) -> HashMap<String, String> {
+/// One session of the Pinned section with what its row says of where it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedEntry {
+    /// The session, as a place in `Snapshot::sessions`.
+    pub place: usize,
+    /// Its identity.
+    pub session: SessionId,
+    /// The machine it is on.
+    pub machine: MachineId,
+    /// What that machine is called.
+    pub machine_name: String,
+    /// What its row says under its name: its project, with the worktree's
+    /// folder after it when it is not the main checkout, or its folder when no
+    /// project holds it.
+    pub place_label: String,
+    /// The worktree it lives in, when one holds it: the pull request mark of
+    /// the row is that worktree's.
+    pub worktree: Option<WorktreeId>,
+    /// Everything about where it is, for the tooltip: machine, project and
+    /// worktree (or the folder).
+    pub tip: String,
+}
+
+/// The Pinned section as one list, first row first: the pinned sessions of
+/// every machine in their pinned order (see [`pinned_order`]), each with the
+/// machine it runs on and the project and worktree it belongs to. The sessions
+/// on a shelf are in it too: the order of the section is whole, and the tree
+/// leaves them out where it draws it.
+pub fn pinned_entries(snapshot: &Snapshot, placement: &Placement) -> Vec<PinnedEntry> {
+    // Where each pinned session lives: its label, its worktree and the words
+    // of the tooltip after the machine.
+    let mut lives: HashMap<usize, (String, Option<WorktreeId>, String)> = HashMap::new();
     let pinned = |place: &usize| snapshot.sessions[*place].sort_order.is_some();
-    let key = |place: usize| NodeId::Session(snapshot.sessions[place].id.clone()).key();
-    let mut places = HashMap::new();
     for entry in &snapshot.projects {
         let name = &entry.project.name;
         for worktree in &entry.worktrees {
             let label = if worktree.is_main {
                 name.clone()
             } else {
-                format!("{name} · {}", folder_name(&worktree.path))
+                format!("{name} \u{b7} {}", folder_name(&worktree.path))
             };
+            let tip = format!("{name} \u{b7} {}", worktree_label(worktree));
             for place in placement
                 .of_worktree(&worktree.id)
                 .iter()
                 .filter(|p| pinned(p))
             {
-                places.insert(key(*place), label.clone());
+                lives.insert(
+                    *place,
+                    (label.clone(), Some(worktree.id.clone()), tip.clone()),
+                );
             }
         }
         let loose = placement
@@ -1312,15 +1372,44 @@ pub fn pinned_places(snapshot: &Snapshot, placement: &Placement) -> HashMap<Stri
             .into_iter()
             .flatten();
         for place in loose.filter(|p| pinned(p)) {
-            places.insert(key(*place), name.clone());
+            lives.insert(*place, (name.clone(), None, name.clone()));
         }
     }
     for folder in placement.unsorted.values().flatten() {
         for place in folder.sessions.iter().filter(|p| pinned(p)) {
-            places.insert(key(*place), folder_name(&folder.cwd).to_owned());
+            lives.insert(
+                *place,
+                (
+                    folder_name(&folder.cwd).to_owned(),
+                    None,
+                    folder.cwd.clone(),
+                ),
+            );
         }
     }
-    places
+    placement
+        .pinned
+        .iter()
+        .map(|place| {
+            let session = &snapshot.sessions[*place];
+            let machine_name = snapshot
+                .machine(&session.machine_id)
+                .map_or_else(|| session.machine_id.to_string(), |m| m.name.clone());
+            let (place_label, worktree, words) = lives.remove(place).unwrap_or_else(|| {
+                let folder = folder_name(&session.cwd).to_owned();
+                (folder, None, session.cwd.clone())
+            });
+            PinnedEntry {
+                place: *place,
+                session: session.id.clone(),
+                machine: session.machine_id.clone(),
+                tip: format!("{machine_name} \u{b7} {words}"),
+                machine_name,
+                place_label,
+                worktree,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1903,7 +1992,7 @@ mod tests {
     }
 
     #[test]
-    fn the_pinned_sessions_of_a_machine_are_gathered_in_their_pinned_order() {
+    fn the_pinned_sessions_are_gathered_in_their_pinned_order() {
         let mut second = session("second", "local", "/srv/web", 60);
         second.sort_order = Some(1);
         let mut first = session("first", "local", "/srv/api", 120);
@@ -1916,11 +2005,145 @@ mod tests {
         let placement = Placement::compute(&snapshot);
         let titles: Vec<&str> = placement
             .pinned
-            .values()
-            .flatten()
+            .iter()
             .map(|place| snapshot.sessions[*place].title.as_str())
             .collect();
         assert_eq!(titles, ["first", "second"]);
+    }
+
+    fn pin(session: Session, order: i64) -> Session {
+        Session {
+            sort_order: Some(order),
+            ..session
+        }
+    }
+
+    /// The titles of the Pinned section of `snapshot`, first row first.
+    fn pinned_titles(snapshot: &Snapshot) -> Vec<String> {
+        Placement::compute(snapshot)
+            .pinned
+            .iter()
+            .map(|place| snapshot.sessions[*place].title.clone())
+            .collect()
+    }
+
+    #[test]
+    fn the_pins_of_every_machine_are_one_list_in_their_pinned_order() {
+        let snapshot = fixture(vec![
+            pin(session("far-top", "box", "/srv/far", 5), 0),
+            pin(session("near-second", "local", "/srv/api", 6), 1),
+            pin(session("far-third", "box", "/srv/far", 7), 2),
+            pin(session("near-first", "local", "/srv/web", 8), 3),
+            session("plain", "local", "/srv/api", 1),
+        ]);
+        assert_eq!(
+            pinned_titles(&snapshot),
+            ["far-top", "near-second", "far-third", "near-first"],
+            "positions decide, whatever the machine"
+        );
+    }
+
+    #[test]
+    fn pins_written_per_machine_before_the_section_was_one_interleave_by_machine_order() {
+        // Each machine counted from zero: equal positions are told apart by
+        // the order of the machines in the sidebar (this one, then the box),
+        // and then by recency.
+        let snapshot = fixture(vec![
+            pin(session("box-0", "box", "/srv/far", 5), 0),
+            pin(session("box-1", "box", "/srv/far", 6), 1),
+            pin(session("here-0", "local", "/srv/api", 7), 0),
+            pin(session("here-0-older", "local", "/srv/web", 70), 0),
+            pin(session("here-1", "local", "/srv/api", 8), 1),
+        ]);
+        assert_eq!(
+            pinned_titles(&snapshot),
+            ["here-0", "here-0-older", "box-0", "here-1", "box-1"]
+        );
+    }
+
+    #[test]
+    fn the_pinned_entries_say_the_machine_the_project_and_the_worktree_of_each_pin() {
+        let mut snapshot = fixture(vec![
+            pin(session("on-main", "local", "/srv/api", 5), 0),
+            pin(session("on-x", "local", "/srv/api-worktrees/x", 6), 1),
+            pin(session("far", "box", "/home/dev/notes", 7), 2),
+            session("plain", "local", "/srv/web", 1),
+        ]);
+        snapshot.machines[0].name = "laptop".into();
+        snapshot.machines[1].name = "build box".into();
+        let entries = pinned_entries(&snapshot, &Placement::compute(&snapshot));
+        let said: Vec<(&str, &str, &str, &str)> = entries
+            .iter()
+            .map(|e| {
+                (
+                    e.session.as_str(),
+                    e.machine_name.as_str(),
+                    e.place_label.as_str(),
+                    e.tip.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            said,
+            [
+                ("on-main", "laptop", "api", "laptop \u{b7} api \u{b7} main"),
+                (
+                    "on-x",
+                    "laptop",
+                    "api \u{b7} x",
+                    "laptop \u{b7} api \u{b7} x"
+                ),
+                (
+                    "far",
+                    "build box",
+                    "notes",
+                    "build box \u{b7} /home/dev/notes"
+                ),
+            ]
+        );
+        assert_eq!(
+            entries[0].worktree,
+            Some(WorktreeId::from_string("api-main"))
+        );
+        assert_eq!(entries[1].worktree, Some(WorktreeId::from_string("api-x")));
+        assert_eq!(entries[2].worktree, None, "no project holds a loose folder");
+        assert_eq!(entries[2].machine, MachineId::from_string("box"));
+    }
+
+    #[test]
+    fn the_pinned_section_is_one_top_level_group_above_the_machines_with_every_machines_pins() {
+        let snapshot = fixture(vec![
+            pin(session("far", "box", "/srv/far", 5), 0),
+            pin(session("near", "local", "/srv/api", 6), 1),
+        ]);
+        let rows = rows_of(&snapshot, &Expansion::default());
+        let lines = outline(&rows);
+        assert_eq!(
+            lines[..3],
+            ["pinned (2)", "  session far", "  session near"],
+            "{lines:?}"
+        );
+        assert!(matches!(rows[3].kind, Kind::Machine(_)), "{lines:?}");
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("pinned (")).count(),
+            1,
+            "no group of pins left in any machine: {lines:?}"
+        );
+        // Each session row is on its own machine; the header is on the first's.
+        assert_eq!(rows[0].machine, MachineId::from_string("box"));
+        assert_eq!(rows[1].machine, MachineId::from_string("box"));
+        assert_eq!(rows[2].machine, MachineId::from_string("local"));
+    }
+
+    #[test]
+    fn a_shelved_pin_of_another_machine_is_not_in_the_section_either() {
+        let snapshot = fixture(vec![
+            pin(session("away", "box", "/srv/far", 5), 0),
+            pin(session("here", "local", "/srv/api", 6), 1),
+        ]);
+        let placement = shelved(&snapshot, &[("away", Shelf::Settled)], &[], now());
+        let lines = rows_on(&placement, &snapshot, &Expansion::everything());
+        assert!(lines.contains(&"pinned (1)".to_owned()), "{lines:?}");
     }
 
     #[test]
@@ -1964,12 +2187,17 @@ mod tests {
             pin("loose", "/home/me/notes", 2),
             session("plain", "local", "/srv/web", 1),
         ]);
-        let places = pinned_places(&snapshot, &Placement::compute(&snapshot));
-        let place = |key: &str| places.get(key).map(String::as_str);
-        assert_eq!(place("session:on-main"), Some("api"));
-        assert_eq!(place("session:on-x"), Some("api · x"));
-        assert_eq!(place("session:loose"), Some("notes"));
-        assert_eq!(place("session:plain"), None);
+        let entries = pinned_entries(&snapshot, &Placement::compute(&snapshot));
+        let place = |id: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.session.as_str() == id)
+                .map(|entry| entry.place_label.as_str())
+        };
+        assert_eq!(place("on-main"), Some("api"));
+        assert_eq!(place("on-x"), Some("api \u{b7} x"));
+        assert_eq!(place("loose"), Some("notes"));
+        assert_eq!(place("plain"), None);
     }
 
     #[test]
@@ -1978,11 +2206,8 @@ mod tests {
         pinned.sort_order = Some(0);
         let snapshot = fixture(vec![pinned, session("plain", "local", "/srv/api", 1)]);
         let lines = outline(&rows_of(&snapshot, &Expansion::everything()));
-        assert!(lines.contains(&"  pinned (1)".to_owned()), "{lines:?}");
-        assert!(
-            lines.contains(&"    session pinned".to_owned()),
-            "{lines:?}"
-        );
+        assert!(lines.contains(&"pinned (1)".to_owned()), "{lines:?}");
+        assert!(lines.contains(&"  session pinned".to_owned()), "{lines:?}");
         assert!(lines.contains(&"  project api (1)".to_owned()), "{lines:?}");
         assert_eq!(
             lines
@@ -2027,10 +2252,7 @@ mod tests {
             Some(&found),
         );
         let lines = outline(&rows);
-        assert!(
-            lines.contains(&"    session in-api".to_owned()),
-            "{lines:?}"
-        );
+        assert!(lines.contains(&"  session in-api".to_owned()), "{lines:?}");
         assert!(
             !lines.iter().any(|line| line.contains("in-web")),
             "{lines:?}"
@@ -2045,16 +2267,10 @@ mod tests {
         // Open by default, like a project; folded, it keeps only its header.
         let mut expansion = Expansion::default();
         let lines = outline(&rows_of(&snapshot, &expansion));
-        assert!(
-            lines.contains(&"    session pinned".to_owned()),
-            "{lines:?}"
-        );
-        expansion.set_open(
-            &NodeId::Pinned(MachineId::from_string("local")).key(),
-            false,
-        );
+        assert!(lines.contains(&"  session pinned".to_owned()), "{lines:?}");
+        expansion.set_open(&NodeId::Pinned.key(), false);
         let lines = outline(&rows_of(&snapshot, &expansion));
-        assert!(lines.contains(&"  pinned (1)".to_owned()), "{lines:?}");
+        assert!(lines.contains(&"pinned (1)".to_owned()), "{lines:?}");
         assert!(
             !lines.iter().any(|line| line.contains("session pinned")),
             "{lines:?}"
@@ -2568,7 +2784,7 @@ mod tests {
         let snapshot = fixture(vec![a, b]);
         let placement = shelved(&snapshot, &[("a", Shelf::Settled)], &[], now());
         let lines = rows_on(&placement, &snapshot, &Expansion::everything());
-        assert!(lines.contains(&"  pinned (1)".to_owned()), "{lines:?}");
+        assert!(lines.contains(&"pinned (1)".to_owned()), "{lines:?}");
         assert_eq!(
             lines.iter().filter(|l| l.contains("session a")).count(),
             1,
@@ -2576,7 +2792,8 @@ mod tests {
         );
         // The order the pin operations work on still holds both, so changing
         // it never unpins the session that is away.
-        let order: Vec<&str> = placement.pinned[&MachineId::from_string("local")]
+        let order: Vec<&str> = placement
+            .pinned
             .iter()
             .map(|place| snapshot.sessions[*place].id.as_str())
             .collect();

@@ -141,14 +141,14 @@ script is, and it is yours to stop. The service keeps the request until a
 window takes it, so with no window open it opens in the next one; only one
 window opens it.
 
-**Orchestrator's workers in the Den.** Each worker that is still Orchestrator's is a lion of
-the Den: how Orchestrator's status says it stands (working, asking, failed, done),
+**Orchestrator's workers in the Office.** Each worker that is still Orchestrator's is a lion of
+the Office: how Orchestrator's status says it stands (working, asking, failed, done),
 and, while it works, what its transcript says it does (the file it edits,
 the command it runs), as for any session. Opening the lion opens its card in
-Orchestrator's view. A paired phone's Den shows them too.
+Orchestrator's view. A paired phone's Office shows them too.
 
 The window joins Orchestrator's service whenever the service runs, without starting
-it, so that the Den and the terminals follow Orchestrator with Orchestrator's view closed.
+it, so that the Office and the terminals follow Orchestrator with Orchestrator's view closed.
 
 The sidebar's row shows how Orchestrator stands when it is not on screen: a dot
 while Orchestrator or a worker works, the waiting dot when one of them asks you
@@ -302,7 +302,7 @@ terminal above the agent, for you to give it. Leon runs no turn of it: Orchestra
 cannot tell it more, does not hear when it is done, and knows no cost of it
 (the record says "cost not known"). Orchestrator reads its work with `worktree_diff`,
 checks it with `worktree_check` and opens its pull request as for any worker.
-In the Den it is the terminal's lion.
+In the Office it is the terminal's lion.
 
 Orchestrator is never asked to poll. When a worker finishes, fails or asks something,
 Leon gathers the news for a few seconds and then wakes Orchestrator with it. If you

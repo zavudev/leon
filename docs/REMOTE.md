@@ -51,17 +51,17 @@ For Leon hosts it adds a third, opt-out-free but read-only primitive:
   of its Pinned section, as a field added at the end of the message: a peer
   that does not know it stops reading before it, and an answer that ends
   before it reads as no pins, so an older Leon on either side keeps working.
-  After the pins, in the same way, it says whether this host has a Den.
-* **who is in its Den** (`ShareDen`): the live agent sessions of that
+  After the pins, in the same way, it says whether this host has an Office.
+* **who is in its Office** (`ShareDen`): the live agent sessions of that
   computer and their sub-agents, each with what it is doing as the host's own
-  Den says it (a state tag and the plain fact: the file it edits, the command
+  Office says it (a state tag and the plain fact: the file it edits, the command
   as typed) and, where known, the `(agent, external_id)` of its session. The
-  Den is the window's, which alone sees the terminals: the answer is what the
+  Office is the window's, which alone sees the terminals: the answer is what the
   window last worked out, and that a device asked is what keeps it worked out
-  for the next twenty seconds while the Den is closed on that computer. So
+  for the next twenty seconds while the Office is closed on that computer. So
   the first answer after a while may hold nobody. The message is new, and a
   peer that does not know a message drops the connection: it is only sent to
-  a host whose `ShareState` answer said it has a Den.
+  a host whose `ShareState` answer said it has an Office.
 * **Orchestrator** (`King`, `KingClosed`): lines of Orchestrator's control protocol
   (`docs/KING.md`), passed through both ways between a device and Orchestrator's
   service on that computer. The host reads none of them: a session's first
@@ -71,7 +71,7 @@ For Leon hosts it adds a third, opt-out-free but read-only primitive:
   connection cannot be opened or closes, the device hears `KingClosed`, and
   its next line opens a new one. It adds no right, since the device already
   holds a terminal from which `leon orchestrator` says the same. Both the window's
-  host and `leon host` offer it, and say so after the Den in their
+  host and `leon host` offer it, and say so after the Office in their
   `ShareState` answer; a device sends no `King` line to a host that did not.
 
 Everything above those (git, probing, agents) is unchanged: a relay machine is

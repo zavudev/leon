@@ -132,7 +132,7 @@ pub const FLOORS: &[FloorStyle] = &[
 pub const WALLS: &[WallStyle] = &[
     WallStyle {
         id: "rock",
-        name: "Den rock",
+        name: "Cave rock",
         tone: tone(24., 22., -96., -52.),
     },
     WallStyle {

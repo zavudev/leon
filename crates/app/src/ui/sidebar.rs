@@ -90,6 +90,28 @@ fn spinner(colour: Hsla) -> AnyElement {
         .into_any_element()
 }
 
+/// Whether a project row shows the spinner of a running session itself: it is
+/// folded (`open` is `Some(false)`), so the sessions under it are out of
+/// sight, and one of them works. An open project shows the spinner on the
+/// row of the session that works, and one without children has none.
+pub fn project_spins(open: Option<bool>, working: bool) -> bool {
+    open == Some(false) && working
+}
+
+/// What the toggle of the inactive sessions says on hover: what pressing it
+/// does now, and the keys that do the same when it has any.
+pub fn inactive_toggle_tip(shown: bool) -> String {
+    let label = if shown {
+        "Hide inactive sessions"
+    } else {
+        "Show inactive sessions"
+    };
+    match keys::keys_label(Command::ToggleInactiveSessions) {
+        Some(keys) => format!("{label}  {keys}"),
+        None => label.to_owned(),
+    }
+}
+
 /// What a tool's tooltip says: what it does and the keys that do the same.
 pub fn tooltip_text(command: Command) -> String {
     match keys::keys_label(command) {
@@ -173,7 +195,7 @@ impl Shell {
             // The places that are always one step away, over the filter
             // and outside the tree's list.
             .child(self.render_nav(colours, cx))
-            .child(self.render_filter(colours))
+            .child(self.render_filter(colours, cx))
             .child(
                 div()
                     .flex_1()
@@ -245,9 +267,10 @@ impl Shell {
             ))
     }
 
-    /// The field above the tree that filters the projects. The cleaner, the
-    /// inactive sessions and the rest are in the machine's menu at the foot.
-    fn render_filter(&self, colours: &Palette) -> Div {
+    /// The field above the tree that filters the projects, and at its end the
+    /// button that shows or hides the sessions that are not active. The
+    /// cleaner and the rest are in the machine's menu at the foot.
+    fn render_filter(&self, colours: &Palette, cx: &mut Context<Self>) -> Div {
         let empty = self.filter_query.is_empty();
         div()
             .debug_selector(|| "sidebar-filter".into())
@@ -273,6 +296,46 @@ impl Shell {
                         .map(|text| key_cap(text, colours)),
                 )
             })
+            .child(self.inactive_toggle(colours, cx))
+    }
+
+    /// The compact button at the end of the filter row that shows or hides
+    /// the sessions that are not active (what the machine's menu did before):
+    /// an open eye in the accent while they are shown, a closed one while they
+    /// are hidden. Its tooltip says what pressing it does.
+    fn inactive_toggle(&self, colours: &Palette, cx: &mut Context<Self>) -> Stateful<Div> {
+        let shown = self.show_inactive;
+        let hover = colours.surface;
+        let tip: SharedString = inactive_toggle_tip(shown).into();
+        div()
+            .id("sidebar-show-inactive")
+            .debug_selector(|| "sidebar-show-inactive".into())
+            .flex_none()
+            .size(px(20.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(metrics::RADIUS())
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.toggle_show_inactive(cx);
+                cx.notify();
+            }))
+            .child(icon(
+                if shown {
+                    IconName::Eye
+                } else {
+                    IconName::EyeOff
+                },
+                px(14.),
+                if shown {
+                    colours.signal
+                } else {
+                    colours.text_muted
+                },
+            ))
     }
 
     /// The note over the foot that says how many worktrees the cleaner would
@@ -344,7 +407,6 @@ impl Shell {
             |machine| machine.name.to_lowercase(),
         );
         let tip: SharedString = tooltip_text(Command::Settings).into();
-        let (_, waits) = self.den_glance(cx);
         div()
             .debug_selector(|| "sidebar-tools".into())
             .flex_none()
@@ -389,15 +451,6 @@ impl Shell {
                             .text_color(colours.text_muted)
                             .child(name),
                     )
-                    // A lion of the Den that waits for the person says so
-                    // here, where the Den's menu item is.
-                    .when(waits, |this| {
-                        this.child(
-                            div()
-                                .debug_selector(|| "sidebar-den-waits".into())
-                                .child(activity_light(Activity::Waiting, colours)),
-                        )
-                    })
                     .child(icon(IconName::ChevronUp, px(12.), colours.text_faint)),
             )
             .child(
@@ -428,7 +481,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let row = self.rows.get(index)?;
-        // While the keyboard is on King's row the tree has no cursor.
+        // While the keyboard is on a row of the navigation (King, the Den) the
+        // tree has no cursor.
         let on = self.cursor == Some(index) && !self.on_nav_row();
         let focused = self.pane == Pane::Sidebar;
         let hover = colours.surface;
@@ -552,7 +606,7 @@ impl Shell {
         colours: &Palette,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let Some(tree_order) = self.tree_order(&row.kind, &row.machine) else {
+        let Some(tree_order) = self.tree_order(&row.kind) else {
             return base;
         };
         let order = tree_order.order;
@@ -727,6 +781,17 @@ impl Shell {
                                 .text_color(colours.text_faint),
                         )
                     })
+                    .when(
+                        project_spins(row.open, self.project_working(&project.id)),
+                        |this| {
+                            this.child(
+                                div()
+                                    .debug_selector(move || format!("tree-project-spinner-{index}"))
+                                    .flex_none()
+                                    .child(spinner(colours.success)),
+                            )
+                        },
+                    )
                     .child(self.dot(index, activity, colours))
                     .when(!flat, |this| this.child(count(sessions)))
                     .when(!deleting, |this| {
@@ -845,6 +910,16 @@ impl Shell {
                     .into(),
                     None => name,
                 };
+                // A pinned session is out of its project and machine: its
+                // row says which, and its tooltip says it whole.
+                let pinned_here = self
+                    .pinned_rows
+                    .get(&row.key())
+                    .filter(|_| pinned && !self.placement.shelved.contains(&session.id));
+                let name: SharedString = match pinned_here {
+                    Some(entry) => format!("{name}\n{}", entry.tip).into(),
+                    None => name,
+                };
                 base.tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
                     .child(self.pin_mark(index, pinned, colours, cx))
                     .child(
@@ -875,6 +950,19 @@ impl Shell {
                                 .child(session.title.clone()),
                             colours,
                         ),
+                    )
+                    // With several machines, the machine of a pinned session.
+                    .children(
+                        pinned_here
+                            .filter(|_| super::tree::machine_headers(&self.snapshot))
+                            .map(|entry| {
+                                mono(entry.machine_name.to_uppercase())
+                                    .debug_selector(move || format!("tree-machine-{index}"))
+                                    .flex_none()
+                                    .max_w(px(72.))
+                                    .truncate()
+                                    .text_color(colours.text_faint)
+                            }),
                     )
                     .children(account.as_deref().map(|account| {
                         mono(format::account_tag(account))
@@ -915,6 +1003,13 @@ impl Shell {
                             .into_any_element()
                     }))
                     .children(self.elsewhere_light(index, session, held.as_ref(), colours))
+                    // The pull request of the worktree a pinned session lives
+                    // in: merged, open, draft or closed.
+                    .children(
+                        pinned_here
+                            .and_then(|entry| entry.worktree.as_ref())
+                            .and_then(|worktree| self.pull_mark(index, worktree, colours)),
+                    )
                     .children(match running {
                         Some((id, state)) => {
                             let light = live_light(state, colours);
@@ -1279,6 +1374,32 @@ impl Shell {
             .fold(loose, Activity::most_urgent)
     }
 
+    /// Whether any session under a project works right now, in one of its
+    /// worktrees or loose in it. Not the project's [`Self::project_activity`]:
+    /// that one says the most urgent state, and a session that asks for an
+    /// answer outranks one that works, which is still running.
+    pub(super) fn project_working(&self, project: &leon_core::ProjectId) -> bool {
+        let Some(entry) = self.snapshot.project(project) else {
+            return false;
+        };
+        let loose = self
+            .placement
+            .live_in_project
+            .get(project)
+            .into_iter()
+            .flatten()
+            .copied();
+        let worktrees = entry.worktrees.iter().flat_map(|worktree| {
+            self.placement
+                .live_of_worktree(&worktree.id)
+                .iter()
+                .copied()
+        });
+        loose
+            .chain(worktrees)
+            .any(|place| self.session_activity(self.placement.live[place].id) == Activity::Working)
+    }
+
     /// The activity a row's dot shows, for the rows that have one.
     #[cfg(test)]
     #[cfg_attr(not(leon_posix_tests), allow(dead_code))] // used by the Unix-only tests
@@ -1354,32 +1475,31 @@ impl Shell {
     }
 
     /// The mark before a worktree's name: what its branch is. A branch icon
-    /// for a branch (stronger for the main worktree), GitHub's merge icon in
-    /// the accent — which no activity light wears, so a merged worktree never
-    /// reads as a running one — when its pull request is merged, and a commit
-    /// icon for a detached head. Its tooltip says it in words.
+    /// for a branch (stronger for the main worktree), and, when GitHub knows a
+    /// pull request of the branch, the icon of its state: GitHub's merge icon
+    /// in the accent (which no activity light wears, so a merged worktree
+    /// never reads as a running one), a pull request icon in green while it is
+    /// open, grey while it is a draft and red once it was closed without
+    /// merging. A detached head has a commit icon. The tooltip says it in
+    /// words, with the number of the pull request.
     ///
     /// Git alone cannot say a branch landed: a branch inside the base looks
-    /// the same whether its work merged or it never had any. So "merged" comes
-    /// from GitHub's record or from nowhere, and nothing is claimed for a
-    /// worktree nobody could ask about. What the model does not hold (commits
-    /// ahead or behind, uncommitted files, an open or draft pull request) is
-    /// not part of this mark: [`Self::checkout_mark`] draws it at the end of
-    /// the row.
+    /// the same whether its work merged or it never had any, and a squash
+    /// merge leaves the branch outside the base. So "merged" comes from
+    /// GitHub's record or from nowhere, and nothing is claimed for a worktree
+    /// nobody could ask about. What the pull request mark does not carry
+    /// (reviews, checks, commits ahead or behind, uncommitted files) is drawn
+    /// at the end of the row by [`Self::checkout_mark`].
     fn git_mark(
         &self,
         index: usize,
         worktree: &leon_core::Worktree,
         colours: &Palette,
     ) -> AnyElement {
-        let mark = GitMark::of(worktree);
-        let (name, colour) = match mark {
-            GitMark::Main => (IconName::GitBranch, colours.text),
-            GitMark::Branch => (IconName::GitBranch, colours.text_muted),
-            GitMark::Merged => (IconName::GitMerge, colours.signal),
-            GitMark::Detached => (IconName::GitCommitHorizontal, colours.text_muted),
-        };
-        let tip: SharedString = mark.tip(worktree).into();
+        let status = self.snapshot.status(&worktree.id);
+        let mark = GitMark::of(worktree, status);
+        let (name, colour) = mark.icon(colours);
+        let tip: SharedString = mark.tip(worktree, status).into();
         div()
             .flex_none()
             .size(px(16.))
@@ -1394,12 +1514,42 @@ impl Shell {
                     .flex_none()
                     .flex()
                     .items_center()
-                    .when(mark == GitMark::Merged, |this| {
-                        this.debug_selector(move || format!("tree-merged-{index}"))
+                    .when_some(mark.selector(), |this, prefix| {
+                        this.debug_selector(move || format!("{prefix}-{index}"))
                     })
                     .child(icon(name, px(13.), colour)),
             )
             .into_any_element()
+    }
+
+    /// The mark of the pull request of the worktree a pinned session lives in,
+    /// at the end of its row: the same icon and tooltip as on the worktree's
+    /// own row, because a pinned session is out of its worktree and its row
+    /// is the only place that says the work behind it was merged. Nothing
+    /// while GitHub knows no pull request of the branch.
+    fn pull_mark(
+        &self,
+        index: usize,
+        worktree: &leon_core::WorktreeId,
+        colours: &Palette,
+    ) -> Option<AnyElement> {
+        let (worktree, status) = self
+            .snapshot
+            .worktree(worktree)
+            .map(|found| (found, self.snapshot.status(&found.id)))?;
+        let mark = GitMark::of(worktree, status);
+        let prefix = mark.selector()?;
+        let (name, colour) = mark.icon(colours);
+        let tip: SharedString = mark.tip(worktree, status).into();
+        Some(
+            div()
+                .id(("pull-mark", index))
+                .debug_selector(move || format!("{prefix}-{index}"))
+                .flex_none()
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                .child(icon(name, px(12.), colour))
+                .into_any_element(),
+        )
     }
 
     /// The state of a worktree's checkout at the end of its row: the open
@@ -1454,34 +1604,91 @@ impl Shell {
 pub(super) enum GitMark {
     /// The repository's main worktree.
     Main,
-    /// A branch, nothing known of its pull request or it is not merged.
+    /// A branch, nothing known of its pull request.
     Branch,
     /// A branch whose pull request GitHub says is merged.
     Merged,
+    /// A branch with an open pull request.
+    Open,
+    /// A branch with an open pull request that is still a draft.
+    Draft,
+    /// A branch whose pull request was closed without merging.
+    Closed,
     /// A head that is on no branch.
     Detached,
 }
 
 impl GitMark {
-    pub(super) fn of(worktree: &leon_core::Worktree) -> Self {
-        if worktree.merged_pull_request == Some(true) {
-            Self::Merged
-        } else if worktree.is_main {
-            Self::Main
-        } else if worktree.branch.is_none() {
-            Self::Detached
-        } else {
-            Self::Branch
+    /// What `worktree` is, given what the store knows of its checkout. A
+    /// pull request wins over the branch it is of; merged wins over all.
+    pub(super) fn of(
+        worktree: &leon_core::Worktree,
+        status: Option<&leon_core::WorktreeStatus>,
+    ) -> Self {
+        use leon_core::PullState;
+        let pull = status.and_then(|status| status.pull_request.as_ref());
+        if worktree.merged_pull_request == Some(true)
+            || pull.is_some_and(|pull| pull.state == PullState::Merged)
+        {
+            return Self::Merged;
+        }
+        match pull {
+            Some(pull) if pull.state == PullState::Open && pull.draft => Self::Draft,
+            Some(pull) if pull.state == PullState::Open => Self::Open,
+            Some(pull) if pull.state == PullState::Closed => Self::Closed,
+            _ if worktree.is_main => Self::Main,
+            _ if worktree.branch.is_none() => Self::Detached,
+            _ => Self::Branch,
         }
     }
 
-    /// The tooltip: plain words about the branch.
-    pub(super) fn tip(self, worktree: &leon_core::Worktree) -> String {
+    /// The icon and its colour.
+    pub(super) fn icon(self, colours: &Palette) -> (IconName, Hsla) {
+        match self {
+            Self::Main => (IconName::GitBranch, colours.text),
+            Self::Branch => (IconName::GitBranch, colours.text_muted),
+            Self::Merged => (IconName::GitMerge, colours.signal),
+            Self::Open => (IconName::GitPullRequest, colours.success),
+            Self::Draft => (IconName::GitPullRequestDraft, colours.text_muted),
+            Self::Closed => (IconName::GitPullRequestClosed, colours.error),
+            Self::Detached => (IconName::GitCommitHorizontal, colours.text_muted),
+        }
+    }
+
+    /// The start of the selector of the icon when it says something about a
+    /// pull request, and none for the marks that say only what the branch is.
+    pub(super) fn selector(self) -> Option<&'static str> {
+        match self {
+            Self::Merged => Some("tree-merged"),
+            Self::Open => Some("tree-pr-open"),
+            Self::Draft => Some("tree-pr-draft"),
+            Self::Closed => Some("tree-pr-closed"),
+            Self::Main | Self::Branch | Self::Detached => None,
+        }
+    }
+
+    /// The tooltip: plain words about the branch and, when known, its pull
+    /// request: `PR #12 merged`.
+    pub(super) fn tip(
+        self,
+        worktree: &leon_core::Worktree,
+        status: Option<&leon_core::WorktreeStatus>,
+    ) -> String {
         let branch = worktree.branch.as_deref().unwrap_or("(no branch)");
+        let number = status
+            .and_then(|status| status.pull_request.as_ref())
+            .map(|pull| pull.number);
+        let pull = |state: &str| match number {
+            Some(number) => format!("PR #{number} {state}"),
+            None => format!("pull request {state}"),
+        };
         match self {
             Self::Main => format!("Main worktree \u{b7} {branch}"),
             Self::Branch => format!("Branch {branch}"),
-            Self::Merged => format!("Branch {branch} \u{b7} pull request merged"),
+            Self::Merged => format!("Branch {branch} \u{b7} {}", pull("merged")),
+            Self::Open => format!("Branch {branch} \u{b7} {}", pull("open")),
+            Self::Draft => format!("Branch {branch} \u{b7} {}", pull("draft")),
+            Self::Closed => format!("Branch {branch} \u{b7} {}", pull("closed")),
             Self::Detached => match worktree.head.as_deref() {
                 Some(head) => format!(
                     "Detached head at {}",
@@ -1515,6 +1722,20 @@ mod tests {
         assert_eq!(state_label(&MachineState::Offline("x".into())), "OFFLINE");
         assert_eq!(state_label(&MachineState::Unknown), "UNKNOWN");
         assert_eq!(state_label(&MachineState::Probing), "PROBING");
+    }
+
+    #[test]
+    fn only_a_folded_project_with_a_working_session_spins() {
+        assert!(project_spins(Some(false), true));
+        assert!(!project_spins(Some(true), true), "open: its rows show it");
+        assert!(!project_spins(None, true), "nothing under it to fold");
+        assert!(!project_spins(Some(false), false), "folded and quiet");
+    }
+
+    #[test]
+    fn the_inactive_toggle_says_what_pressing_it_does() {
+        assert!(inactive_toggle_tip(false).starts_with("Show inactive sessions"));
+        assert!(inactive_toggle_tip(true).starts_with("Hide inactive sessions"));
     }
 
     #[test]
@@ -1565,9 +1786,23 @@ mod tests {
         }
     }
 
+    fn pull(state: leon_core::PullState, draft: bool) -> leon_core::WorktreeStatus {
+        leon_core::WorktreeStatus {
+            pull_request: Some(leon_core::PullRequest {
+                number: 12,
+                state,
+                url: "https://github.com/zavudev/leon/pull/12".into(),
+                draft,
+                review: leon_core::Review::None,
+                checks: leon_core::Checks::None,
+            }),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn a_worktrees_git_mark_says_what_its_branch_is() {
-        let of = |worktree| GitMark::of(&worktree);
+        let of = |worktree| GitMark::of(&worktree, None);
         assert_eq!(of(worktree(Some("main"), true, None)), GitMark::Main);
         assert_eq!(of(worktree(Some("feat/x"), false, None)), GitMark::Branch);
         assert_eq!(
@@ -1582,8 +1817,44 @@ mod tests {
     }
 
     #[test]
+    fn the_state_of_the_pull_request_of_the_branch_picks_the_mark() {
+        use leon_core::PullState::{Closed, Merged, Open};
+        let w = worktree(Some("feat/x"), false, None);
+        let of = |status: leon_core::WorktreeStatus| GitMark::of(&w, Some(&status));
+        assert_eq!(of(pull(Open, false)), GitMark::Open);
+        assert_eq!(of(pull(Open, true)), GitMark::Draft);
+        assert_eq!(of(pull(Closed, false)), GitMark::Closed);
+        assert_eq!(of(pull(Merged, false)), GitMark::Merged);
+        // A draft that was merged or closed is no draft any more.
+        assert_eq!(of(pull(Merged, true)), GitMark::Merged);
+        assert_eq!(of(pull(Closed, true)), GitMark::Closed);
+        assert_eq!(of(leon_core::WorktreeStatus::default()), GitMark::Branch);
+        // The store's merged flag still says merged, whatever the status holds.
+        let flagged = worktree(Some("feat/x"), false, Some(true));
+        assert_eq!(
+            GitMark::of(&flagged, Some(&pull(Open, false))),
+            GitMark::Merged,
+            "merged wins"
+        );
+        // The main worktree on a branch with a pull request shows it too.
+        let main = worktree(Some("topic"), true, None);
+        assert_eq!(GitMark::of(&main, Some(&pull(Open, false))), GitMark::Open);
+    }
+
+    #[test]
+    fn only_the_marks_of_a_pull_request_have_a_selector_of_their_own() {
+        assert_eq!(GitMark::Merged.selector(), Some("tree-merged"));
+        assert_eq!(GitMark::Open.selector(), Some("tree-pr-open"));
+        assert_eq!(GitMark::Draft.selector(), Some("tree-pr-draft"));
+        assert_eq!(GitMark::Closed.selector(), Some("tree-pr-closed"));
+        for plain in [GitMark::Main, GitMark::Branch, GitMark::Detached] {
+            assert_eq!(plain.selector(), None);
+        }
+    }
+
+    #[test]
     fn the_git_mark_tooltip_is_plain_words() {
-        let tip = |w: leon_core::Worktree| GitMark::of(&w).tip(&w);
+        let tip = |w: leon_core::Worktree| GitMark::of(&w, None).tip(&w, None);
         assert_eq!(
             tip(worktree(Some("main"), true, None)),
             "Main worktree \u{b7} main"
@@ -1591,9 +1862,29 @@ mod tests {
         assert_eq!(tip(worktree(Some("feat/x"), false, None)), "Branch feat/x");
         assert_eq!(
             tip(worktree(Some("feat/x"), false, Some(true))),
-            "Branch feat/x \u{b7} pull request merged"
+            "Branch feat/x \u{b7} pull request merged",
+            "merged, with no number known yet"
         );
         assert_eq!(tip(worktree(None, false, None)), "Detached head at 0123456");
+    }
+
+    #[test]
+    fn the_tooltip_of_a_pull_request_mark_says_its_number_and_state() {
+        use leon_core::PullState::{Closed, Merged, Open};
+        let w = worktree(Some("feat/x"), false, None);
+        let tip = |status: leon_core::WorktreeStatus| {
+            GitMark::of(&w, Some(&status)).tip(&w, Some(&status))
+        };
+        assert_eq!(
+            tip(pull(Merged, false)),
+            "Branch feat/x \u{b7} PR #12 merged"
+        );
+        assert_eq!(tip(pull(Open, false)), "Branch feat/x \u{b7} PR #12 open");
+        assert_eq!(tip(pull(Open, true)), "Branch feat/x \u{b7} PR #12 draft");
+        assert_eq!(
+            tip(pull(Closed, false)),
+            "Branch feat/x \u{b7} PR #12 closed"
+        );
     }
 
     #[test]

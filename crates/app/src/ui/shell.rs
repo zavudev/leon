@@ -37,7 +37,7 @@ use super::tree::{
 };
 use super::workspace::Workspaces;
 use crate::elsewhere::{self, Found, OwnTerminal};
-use crate::engine::{Engine, Op, Removal, StatusKind};
+use crate::engine::{Engine, Op, Removal, StatusKind, Why};
 use crate::keys::{self, Command};
 use crate::launch::{self, System};
 use crate::settings::{self, AppearanceChoice};
@@ -295,6 +295,10 @@ pub struct Options {
     /// computer are listed for sessions running in another terminal; none for
     /// no timer (tests ask).
     pub elsewhere_poll: Option<Duration>,
+    /// How often the window looks at whether a project may ask GitHub for the
+    /// pull requests of its branches (the engine decides by `pull_poll`; the
+    /// look itself costs a lock); none for no timer (tests ask).
+    pub pull_request_poll: Option<Duration>,
     /// Whether the usage limits are read again on a timer (the setting names
     /// the interval). Tests turn it off.
     pub usage_timer: bool,
@@ -406,6 +410,7 @@ impl Default for Options {
             quit: Rc::new(|cx| cx.quit()),
             theme_poll: Some(crate::theme::watch::POLL),
             elsewhere_poll: Some(Duration::from_secs(5)),
+            pull_request_poll: Some(Duration::from_secs(5)),
             usage_timer: true,
             open_file: Rc::new(|cx, path| cx.open_with_system(path)),
             pick_key: Rc::new(super::connect::system_key_picker),
@@ -705,8 +710,11 @@ pub struct Shell {
     pub(super) sidebar_tree: bool,
     /// The words beside a session row, by row key: in the flat sidebar the
     /// branch of a session not on the main checkout, and in either sidebar
-    /// where a pinned session lives ([`tree::pinned_places`]).
+    /// where a pinned session lives ([`tree::pinned_entries`]).
     pub(super) row_branches: std::collections::HashMap<String, String>,
+    /// What the rows of the Pinned section say of where each session is, by
+    /// row key: its machine, project and worktree ([`tree::pinned_entries`]).
+    pub(super) pinned_rows: std::collections::HashMap<String, tree::PinnedEntry>,
     /// How many worktrees the cleaner would suggest removing, counted when
     /// the tree is rebuilt: what the note at the foot of the sidebar says.
     pub(super) sweep_suggested: usize,
@@ -735,6 +743,10 @@ pub struct Shell {
     pub(super) deleting: Option<(ProjectId, WorktreeId)>,
     /// The coarse timer of that look, while the window lives.
     elsewhere_ticker: Option<Task<()>>,
+    /// The timer that asks the engine, for the local projects, whether it is
+    /// time to read their pull requests again. It does not depend on any
+    /// terminal being live: a merge happens on GitHub, not in a terminal.
+    pull_request_ticker: Option<Task<()>>,
     /// Whether the window has the focus: the lion sleeps without it.
     pub(super) window_active: bool,
     /// A session ended with an error a moment ago: the lion shows it.
@@ -861,6 +873,9 @@ impl Shell {
                 this.window_active = window.is_window_active();
                 this.king_watch(cx);
                 if window.is_window_active() {
+                    // Back in front: what was merged while the person was
+                    // away is asked for now, not at the next half minute.
+                    this.check_pull_requests(Why::Event);
                     this.request_import(cx);
                     this.scan_elsewhere_now(true, cx);
                     // Back in front: a reading older than the interval is
@@ -1041,6 +1056,7 @@ impl Shell {
             show_inactive: settings::flag(cx, "sidebar_show_inactive"),
             sidebar_tree: settings::flag(cx, "sidebar_tree"),
             row_branches: std::collections::HashMap::new(),
+            pinned_rows: std::collections::HashMap::new(),
             sweep_suggested: 0,
             sidebar_spin: None,
             sweep_note_dismissed: 0,
@@ -1051,6 +1067,7 @@ impl Shell {
             merged_busy: false,
             deleting: None,
             elsewhere_ticker: None,
+            pull_request_ticker: None,
             window_active: window.is_window_active(),
             mark_error: false,
             mark_error_timer: None,
@@ -1064,6 +1081,7 @@ impl Shell {
         shell.load_logos(cx);
         shell.watch_themes(cx);
         shell.watch_elsewhere(window, cx);
+        shell.watch_pull_requests(cx);
         shell.usage_reload();
         shell.watch_usage(window, cx);
         shell.watch_updates(window, cx);
@@ -1105,6 +1123,36 @@ impl Shell {
                 self.engine
                     .submit(crate::engine::Op::Scan(machine.id.clone()));
             }
+        }
+    }
+
+    /// Starts the timer that keeps the merged and open marks of the sidebar
+    /// fresh: every `pull_request_poll` each local project is asked whether
+    /// it is time to read its pull requests again, with the cadence of the
+    /// window in front or behind (see `engine::pull_poll`).
+    fn watch_pull_requests(&mut self, cx: &mut Context<Self>) {
+        let Some(poll) = self.options.pull_request_poll else {
+            return;
+        };
+        self.pull_request_ticker = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(poll).await;
+            let alive = this.update(cx, |this, _| {
+                this.check_pull_requests(Why::Look {
+                    focused: this.window_active,
+                });
+            });
+            if alive.is_err() {
+                return;
+            }
+        }));
+    }
+
+    /// Asks the engine about the pull requests of every project of this
+    /// computer, for `why`. Local projects only: another machine would cost a
+    /// command over SSH each time.
+    pub(super) fn check_pull_requests(&self, why: Why) {
+        for project in self.local_projects() {
+            self.engine.check_pull_requests(project, why);
         }
     }
 
@@ -1395,8 +1443,17 @@ impl Shell {
         };
         // A pinned session is out of its project in either list: it says
         // where it lives instead.
-        self.row_branches
-            .extend(tree::pinned_places(&self.snapshot, &self.placement));
+        let pinned = tree::pinned_entries(&self.snapshot, &self.placement);
+        self.row_branches.extend(pinned.iter().map(|entry| {
+            (
+                tree::NodeId::Session(entry.session.clone()).key(),
+                entry.place_label.clone(),
+            )
+        }));
+        self.pinned_rows = pinned
+            .into_iter()
+            .map(|entry| (tree::NodeId::Session(entry.session.clone()).key(), entry))
+            .collect();
         // Every row is measured again, and the list stays where it was.
         let top = self.tree_scroll.logical_scroll_top();
         self.tree_scroll
@@ -1814,7 +1871,7 @@ impl Shell {
     // ----- the sidebar order -----------------------------------------------------
 
     /// The scope a row belongs to, with the list it is ordered in.
-    pub(super) fn tree_order(&self, kind: &Kind, machine: &MachineId) -> Option<TreeOrder> {
+    pub(super) fn tree_order(&self, kind: &Kind) -> Option<TreeOrder> {
         match kind {
             Kind::Project { project, .. } => {
                 let machine = project.machine_id.clone();
@@ -1844,40 +1901,32 @@ impl Shell {
                     .unwrap_or_default(),
             }),
             Kind::Session(session) => Some(TreeOrder {
-                order: Order::Session(session.id.clone(), SessionScope::Machine(machine.clone())),
-                rows: self
-                    .pinned_ids(machine)
-                    .into_iter()
-                    .map(NodeId::Session)
-                    .collect(),
+                order: Order::Session(session.id.clone(), SessionScope::Pinned),
+                rows: self.pinned_ids().into_iter().map(NodeId::Session).collect(),
             }),
             _ => None,
         }
     }
 
-    /// The sessions pinned on a machine, in their pinned order: the Pinned
-    /// section of the sidebar, top first.
-    pub(super) fn pinned_ids(&self, machine: &MachineId) -> Vec<SessionId> {
+    /// The sessions pinned on every machine, in their pinned order: the one
+    /// Pinned section of the sidebar, top first.
+    pub(super) fn pinned_ids(&self) -> Vec<SessionId> {
         self.placement
             .pinned
-            .get(machine)
-            .into_iter()
-            .flatten()
+            .iter()
             .map(|place| self.snapshot.sessions[*place].id.clone())
             .collect()
     }
 
-    /// Whether `session` is pinned on the machine of `scope`: the rows of the
-    /// Pinned section are the only ones a session can be dropped onto.
+    /// Whether `session` is pinned, for the scope of the Pinned section: its
+    /// rows are the only ones a session can be dropped onto.
     fn is_pinned_session(&self, session: &SessionId, scope: &SessionScope) -> bool {
         match scope {
-            SessionScope::Machine(machine) => {
-                self.placement.pinned.get(machine).is_some_and(|places| {
-                    places
-                        .iter()
-                        .any(|place| &self.snapshot.sessions[*place].id == session)
-                })
-            }
+            SessionScope::Pinned => self
+                .placement
+                .pinned
+                .iter()
+                .any(|place| &self.snapshot.sessions[*place].id == session),
             _ => false,
         }
     }
@@ -1896,7 +1945,7 @@ impl Shell {
             // A session can be dropped onto the Pinned section, so it can be
             // dragged once that section has a row to drop it on.
             Order::Session(_, scope) => match scope {
-                SessionScope::Machine(machine) => !self.pinned_ids(machine).is_empty(),
+                SessionScope::Pinned => !self.placement.pinned.is_empty(),
                 _ => false,
             },
         }
@@ -1955,10 +2004,10 @@ impl Shell {
                 }
             }
             (Order::Session(session, scope), Order::Session(target, _)) => {
-                let SessionScope::Machine(machine) = scope else {
+                if scope != SessionScope::Pinned {
                     return;
-                };
-                let pinned = self.pinned_ids(&machine);
+                }
+                let pinned = self.pinned_ids();
                 let done = if pinned.contains(&session) {
                     "Moved the session."
                 } else {
@@ -1968,7 +2017,7 @@ impl Shell {
                     return;
                 };
                 self.engine.submit(crate::engine::Op::PinSessions {
-                    parent: SessionScope::Machine(machine),
+                    parent: SessionScope::Pinned,
                     pinned: ordered,
                     done,
                 });
@@ -2013,10 +2062,9 @@ impl Shell {
                 worktree.id.clone(),
                 worktree.project_id.clone(),
             )),
-            Kind::Session(session) => Some(Order::Session(
-                session.id.clone(),
-                SessionScope::Machine(row.machine.clone()),
-            )),
+            Kind::Session(session) => {
+                Some(Order::Session(session.id.clone(), SessionScope::Pinned))
+            }
             _ => None,
         }
     }
@@ -2060,10 +2108,10 @@ impl Shell {
                 }
             }
             Order::Session(session, scope) => {
-                let SessionScope::Machine(machine) = scope else {
+                if *scope != SessionScope::Pinned {
                     return;
-                };
-                let pinned = self.pinned_ids(machine);
+                }
+                let pinned = self.pinned_ids();
                 let Some(at) = pinned.iter().position(|id| id == session) else {
                     self.engine.report(
                         crate::engine::StatusKind::Info,
@@ -2074,7 +2122,7 @@ impl Shell {
                 let next = tree::stepped_order(&pinned, at, delta);
                 if next != pinned {
                     self.engine.submit(crate::engine::Op::PinSessions {
-                        parent: SessionScope::Machine(machine.clone()),
+                        parent: SessionScope::Pinned,
                         pinned: next,
                         done: "Moved the session.",
                     });
@@ -2087,40 +2135,34 @@ impl Shell {
     /// of its list; unpinning sends it back to its place by recency. The
     /// other pins of the list stay, in their order.
     pub(super) fn pin_session_here(&mut self, pinned: bool, cx: &mut Context<Self>) {
-        let Some(Order::Session(session, SessionScope::Machine(machine))) = self.order_here()
-        else {
+        let Some(Order::Session(session, _)) = self.order_here() else {
             self.engine
                 .report(crate::engine::StatusKind::Info, "Select a session first.");
             return;
         };
-        self.pin_session(session, machine, pinned, cx);
+        self.pin_session(session, pinned, cx);
     }
 
-    /// Pins or unpins `session` among the pinned sessions of `machine`.
-    pub(super) fn pin_session(
-        &mut self,
-        session: SessionId,
-        machine: MachineId,
-        pinned: bool,
-        cx: &mut Context<Self>,
-    ) {
+    /// Pins or unpins `session` among the pinned sessions, whatever the
+    /// machine each of them is on.
+    pub(super) fn pin_session(&mut self, session: SessionId, pinned: bool, cx: &mut Context<Self>) {
         let rest: Vec<SessionId> = self
-            .pinned_ids(&machine)
+            .pinned_ids()
             .into_iter()
             .filter(|id| id != &session)
             .collect();
         // Unpinning can be undone: the section as it was is kept for the
         // banner.
         // Only a session that was pinned has anything to take back.
-        if !pinned && self.pinned_ids(&machine).contains(&session) {
-            let order = self.pinned_ids(&machine);
+        if !pinned && self.pinned_ids().contains(&session) {
+            let order = self.pinned_ids();
             let title = self
                 .snapshot
                 .sessions
                 .iter()
                 .find(|stored| stored.id == session)
                 .map_or_else(|| "the session".to_owned(), |stored| stored.title.clone());
-            self.offer_unpin_undo(machine.clone(), order, &title, cx);
+            self.offer_unpin_undo(order, &title, cx);
         }
         let (next, done) = if pinned {
             (
@@ -2131,7 +2173,7 @@ impl Shell {
             (rest, "Unpinned the session.")
         };
         self.engine.submit(crate::engine::Op::PinSessions {
-            parent: SessionScope::Machine(machine),
+            parent: SessionScope::Pinned,
             pinned: next,
             done,
         });
@@ -3635,13 +3677,13 @@ impl Shell {
         }
         match self.pane {
             Pane::Files => self.files_move(command),
-            // The navigation is over the tree: King, then the first row of
-            // the tree.
+            // The navigation is over the tree: King, the Den, then the first
+            // row of the tree.
             Pane::Sidebar if self.on_nav_row() => {
                 let nav = self.home.nav.unwrap_or(super::home::Nav::King);
                 match command {
                     C::Up | C::PageUp => self.home.nav = nav.step(true),
-                    C::Top => self.home.nav = Some(super::home::Nav::King),
+                    C::Top => self.home.nav = super::home::Nav::ALL.first().copied(),
                     C::Down | C::PageDown => match nav.step(false) {
                         Some(next) => self.home.nav = Some(next),
                         None => {
@@ -3658,14 +3700,15 @@ impl Shell {
                     _ => {}
                 }
             }
-            // Up from the first row of the tree is the last of them.
+            // Up from the first row of the tree is the last row of the
+            // navigation.
             Pane::Sidebar
                 if matches!(command, C::Up | C::PageUp)
                     && self
                         .cursor
                         .is_none_or(|at| Some(at) == tree::first(&self.rows)) =>
             {
-                self.home.nav = Some(super::home::Nav::King);
+                self.home.nav = super::home::Nav::ALL.last().copied();
             }
             Pane::Sidebar => {
                 let from = self.cursor.unwrap_or(0);

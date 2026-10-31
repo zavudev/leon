@@ -1729,10 +1729,10 @@ main pane. It never touches `LiveSessions`: a terminal is shown by
 `Main::Live(id)` and lives in `self.live` whatever the main pane shows, so
 going home closes nothing.
 
-The sidebar's navigation (`home::Nav`: Home, The Den) is drawn between the
+The sidebar's navigation (`home::Nav::ALL`: the Orchestrator, the Office) is drawn between the
 header and the filter, outside the tree's `uniform_list`, so neither the
 scroll nor the filter moves it. Its rows are built like a project's row
-(same height, columns, hover and cursor bar); the Den's closes with the count
+(same height, columns, hover and cursor bar); the Office's closes with the count
 of its lions and the waiting dot (`den_glance`). `HomeUi::nav` says the
 sidebar's cursor is on one of them (set by going there by any route, and by
 Up from the first row of the tree; `move_cursor_to` clears it), and the tree

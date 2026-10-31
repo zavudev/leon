@@ -104,7 +104,7 @@ export default function Den() {
   const asked = online.every((host) => shared[host.hostId] !== undefined);
 
   return (
-    <Screen kind="Den" title="The Den" back={false} bottomInset={false}>
+    <Screen kind="Office" title="The Office" back={false} bottomInset={false}>
       <View
         style={{
           flexDirection: 'row',
@@ -130,13 +130,13 @@ export default function Den() {
         ListEmptyComponent={
           <View style={{ padding: 16, gap: 8 }}>
             <Label tone="faint">
-              {online.length === 0 ? '[ No computer online ]' : withDen.length === 0 && asked ? '[ No den ]' : '[ Nobody here ]'}
+              {online.length === 0 ? '[ No computer online ]' : withDen.length === 0 && asked ? '[ No office ]' : '[ Nobody here ]'}
             </Label>
             <Txt tone="muted">
               {online.length === 0
-                ? 'The Den shows the agents that are live on your computers. None of them is reachable now.'
+                ? 'The Office shows the agents that are live on your computers. None of them is reachable now.'
                 : withDen.length === 0 && asked
-                  ? 'The computers that are online do not share a Den: it needs a newer Leon there, with Share this machine on.'
+                  ? 'The computers that are online do not share an Office: it needs a newer Leon there, with Share this machine on.'
                   : 'No agent is live on your computers. One that starts there walks in here.'}
             </Txt>
           </View>
