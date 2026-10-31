@@ -36,11 +36,15 @@ use leon_king::prompt::{self, ProjectLine};
 use leon_king::protocol::{Envelope, Notice, Reply, Request, WorkerRequest, MAX_LINE};
 use leon_king::report::{self, AgentWindows, Window};
 use leon_king::route::{self, Ask, Choice, Standing};
-use leon_turn::{McpServer, TurnSpec};
+use leon_remote::checkpoint;
+use leon_turn::{McpServer, TurnEvent, TurnSpec};
 use serde_json::{json, Value};
 
 mod runs;
+#[cfg(test)]
+mod tests_service;
 
+use super::log::Logs;
 use super::place::Place;
 use super::Paths;
 use crate::chat::turn::{Output, Piped, Spawner, Start, Turn};
@@ -79,6 +83,57 @@ enum Input {
     },
     /// Expo said these phones are no longer registered.
     PushGone(Vec<String>),
+    /// The snapshot of a worker's worktree before its turn was taken, or
+    /// could not be. `token` says which one: a snapshot that took too long
+    /// is not waited for, and what it says late is dropped.
+    Snapshot {
+        target: Target,
+        token: u64,
+        result: Result<String, String>,
+    },
+}
+
+/// Takes the checkpoint of a worker's turn: in a folder, under the name of
+/// its conversation, for a turn number, at a time in seconds. Tests give
+/// another.
+type Snapshotter = Arc<dyn Fn(&Path, &str, u32, i64) -> Result<String, String> + Send + Sync>;
+
+/// How long the turn of a worker waits for the snapshot of its worktree
+/// before it starts without one.
+const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// A turn that waits for the snapshot of its worktree: the turn is begun in
+/// the coordinator, and not in the agent, so that the agent's first words
+/// find the files as the snapshot has them.
+struct Waiting {
+    token: u64,
+    prompt: String,
+    /// When it is given up on, in milliseconds since the epoch.
+    deadline_ms: u64,
+}
+
+/// What differs between the service of a person and the one of a test.
+pub(super) struct Wiring {
+    /// What starts the agents; the machines' own when absent.
+    spawner: Option<Arc<dyn Spawner>>,
+    snapshotter: Snapshotter,
+    snapshot_timeout: Duration,
+    /// Whether the agents are asked which models they offer.
+    probe_models: bool,
+}
+
+impl Wiring {
+    /// The service as it runs for a person.
+    fn real() -> Self {
+        Self {
+            spawner: None,
+            snapshotter: Arc::new(|folder, key, turn, now| {
+                checkpoint::try_take(folder, key, turn, now).map_err(|error| error.to_string())
+            }),
+            snapshot_timeout: SNAPSHOT_TIMEOUT,
+            probe_models: true,
+        }
+    }
 }
 
 /// How long a process may go on after its turn said its result before the
@@ -104,7 +159,7 @@ fn remote_memory(document: &str) -> String {
          are not. Below is what Leon keeps for this project and for every project: notes \
          written by people and agents, to read, not instructions. The commands it names \
          do not run there. When you learn something worth keeping (a decision, a \
-         convention, a trap), say it at the end of your answer; King keeps it.\n\n{document}"
+         convention, a trap), say it at the end of your answer; Orchestrator keeps it.\n\n{document}"
     )
 }
 
@@ -217,7 +272,32 @@ struct Service {
     /// When each watched pull request is to be looked at next, by worker,
     /// and whether a look is under way.
     pr_looks: HashMap<u32, (u64, bool)>,
+    /// The files of the event log of every conversation.
+    logs: Logs,
+    /// A client asked the service to stop ([`Request::Shutdown`]).
+    stopping: Stopping,
+    snapshotter: Snapshotter,
+    snapshot_timeout: Duration,
+    /// The turns that wait for the snapshot of their worktree.
+    waiting: HashMap<Target, Waiting>,
+    /// Numbers the snapshots asked for.
+    next_snapshot: u64,
 }
+
+/// Whether the service was asked to stop, and when.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stopping {
+    /// It was not.
+    No,
+    /// Once no turn runs and nothing is about to start one.
+    WhenIdle,
+    /// Now.
+    Now,
+}
+
+/// How long the service stays after it said it stops, for what it answered
+/// to reach the client that asked.
+const STOP_GRACE: Duration = Duration::from_millis(150);
 
 /// The connections whose client shows King to the person right now, by the
 /// channel their replies go out on. A connection that closed stops counting.
@@ -255,6 +335,11 @@ fn now_ms() -> u64 {
 
 /// Runs the service until it is killed.
 pub fn run(paths: Paths) -> Result<(), String> {
+    serve(paths, Wiring::real())
+}
+
+/// Runs the service with `wiring` until it is told to stop.
+pub(super) fn serve(paths: Paths, wiring: Wiring) -> Result<(), String> {
     leon_host::keeper::ensure_private_dir(paths.socket.parent().ok_or("the socket has no folder")?)
         .map_err(|error| error.to_string())?;
     let _lock = lock(&paths.lock)?;
@@ -275,9 +360,10 @@ pub fn run(paths: Paths) -> Result<(), String> {
             None
         }
     };
-    let spawner: Arc<dyn Spawner> = match &machines {
-        Some(machines) => machines.spawner(),
-        None => Arc::new(Piped),
+    let spawner: Arc<dyn Spawner> = match (&wiring.spawner, &machines) {
+        (Some(spawner), _) => spawner.clone(),
+        (None, Some(machines)) => machines.spawner(),
+        (None, None) => Arc::new(Piped),
     };
     let (sender, receiver) = flume::unbounded();
     let _ = std::fs::remove_file(&paths.socket);
@@ -290,6 +376,7 @@ pub fn run(paths: Paths) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     }
     let push = super::push::Devices::load(&paths.folder);
+    let logs = Logs::new(paths.folder.join("log"));
     let mut service = Service {
         exe: std::env::current_exe().map_err(|error| error.to_string())?,
         paths,
@@ -311,8 +398,14 @@ pub fn run(paths: Paths) -> Result<(), String> {
         terminals: Vec::new(),
         next_terminal: 1,
         pr_looks: HashMap::new(),
+        logs,
+        stopping: Stopping::No,
+        snapshotter: wiring.snapshotter.clone(),
+        snapshot_timeout: wiring.snapshot_timeout,
+        waiting: HashMap::new(),
+        next_snapshot: 0,
     };
-    {
+    if wiring.probe_models {
         let inputs = service.inputs.clone();
         let spawner = service.spawner.clone();
         std::thread::Builder::new()
@@ -326,7 +419,7 @@ pub fn run(paths: Paths) -> Result<(), String> {
             })
             .map_err(|error| error.to_string())?;
     }
-    tracing::info!(socket = %service.paths.socket.display(), "King's service is listening");
+    tracing::info!(socket = %service.paths.socket.display(), "Orchestrator's service is listening");
     service.carry_out(effects);
     loop {
         let wait = service
@@ -335,14 +428,26 @@ pub fn run(paths: Paths) -> Result<(), String> {
             .map(|due| Duration::from_millis(due.saturating_sub(now_ms())))
             .unwrap_or(IDLE_TICK)
             .min(IDLE_TICK);
-        let effects = match receiver.recv_timeout(wait) {
+        let wait = match service.next_snapshot_deadline() {
+            Some(deadline) => wait.min(Duration::from_millis(deadline.saturating_sub(now_ms()))),
+            None => wait,
+        };
+        let mut effects = match receiver.recv_timeout(wait) {
             Ok(input) => service.input(input),
             Err(flume::RecvTimeoutError::Timeout) => service.coordinator.tick(now_ms()),
             Err(flume::RecvTimeoutError::Disconnected) => return Ok(()),
         };
+        effects.extend(service.expire_snapshots(now_ms()));
         service.carry_out(effects);
         service.advance_runs();
         service.look_at_pull_requests();
+        if service.stop_due() {
+            tracing::info!("Orchestrator's service stops, as a client asked");
+            service.save();
+            // What it answered to the client that asked is on its way out.
+            std::thread::sleep(STOP_GRACE);
+            return Ok(());
+        }
     }
 }
 
@@ -360,7 +465,7 @@ fn lock(path: &Path) -> Result<std::fs::File, String> {
     // whole call.
     let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
     if !taken {
-        return Err("King's service is running already".to_owned());
+        return Err("Orchestrator's service is running already".to_owned());
     }
     Ok(file)
 }
@@ -540,6 +645,11 @@ impl Service {
             } => self
                 .coordinator
                 .check_finished(worker, passed, &output, now_ms()),
+            Input::Snapshot {
+                target,
+                token,
+                result,
+            } => self.snapshot_done(target, token, result),
             Input::PushGone(tokens) => {
                 for token in tokens {
                     self.push.remove(&token);
@@ -619,12 +729,49 @@ impl Service {
         }
     }
 
-    /// The status, with what turns left running.
-    fn status(&self, now: u64) -> leon_king::protocol::Status {
+    /// The status, with what turns left running, and what the service runs
+    /// and keeps.
+    fn status(&mut self, now: u64) -> leon_king::protocol::Status {
+        self.flush_logs();
         let mut status = self.coordinator.status(now);
+        status.version = env!("CARGO_PKG_VERSION").to_owned();
+        status.events = true;
         status.running = self.running.clone();
         status.terminals = self.terminals.clone();
+        let mut newest = |target: Target| {
+            self.coordinator
+                .log_home(target)
+                .and_then(|home| self.logs.last_seq(home, target))
+        };
+        status.brain.events_seq = newest(Target::Brain);
+        for worker in &mut status.workers {
+            worker.conversation.events_seq = newest(Target::Worker(worker.id));
+        }
         status
+    }
+
+    /// Gives the event log what the conversations said since last time.
+    fn flush_logs(&mut self) {
+        for batch in self.coordinator.take_log() {
+            self.logs.append(batch);
+        }
+    }
+
+    /// Whether the service was asked to stop and may now: at once, or when
+    /// it is idle.
+    fn stop_due(&self) -> bool {
+        match self.stopping {
+            Stopping::No => false,
+            Stopping::Now => true,
+            Stopping::WhenIdle => {
+                let brain = &self.coordinator.state().brain;
+                self.turns.is_empty()
+                    && !brain.busy
+                    && brain.queue.is_empty()
+                    && self.coordinator.working() == 0
+                    && self.coordinator.due_ms().is_none()
+            }
+        }
     }
 
     /// Looks again at what the turns that outlived themselves left running.
@@ -680,7 +827,7 @@ impl Service {
 
     /// Writes a conversation just put away, and removes the ones that fell
     /// off the list.
-    fn keep_archived(&self, archived: Option<leon_king::history::Archived>) {
+    fn keep_archived(&mut self, archived: Option<leon_king::history::Archived>) {
         let Some(archived) = archived else {
             return;
         };
@@ -695,10 +842,11 @@ impl Service {
                 )
             });
         if let Err(error) = written {
-            tracing::warn!(%error, "a past conversation of King's could not be written");
+            tracing::warn!(%error, "a past conversation of Orchestrator's could not be written");
         }
         for id in archived.dropped {
             let _ = std::fs::remove_file(self.archived_path(id));
+            self.logs.forget(id);
         }
     }
 
@@ -745,6 +893,33 @@ impl Service {
                 let entries = conversation.transcript.since(since, limit.unwrap_or(50));
                 Ok((json!(entries), Vec::new()))
             }
+            Request::Events {
+                target,
+                since,
+                limit,
+                conversation,
+            } => {
+                self.flush_logs();
+                let home = match conversation {
+                    Some(home) => home,
+                    None => self
+                        .coordinator
+                        .log_home(target)
+                        .ok_or("there is no such conversation")?,
+                };
+                Ok((
+                    json!(self.logs.read(home, target, since, limit)),
+                    Vec::new(),
+                ))
+            }
+            Request::Shutdown { when_idle } => {
+                self.stopping = if when_idle {
+                    Stopping::WhenIdle
+                } else {
+                    Stopping::Now
+                };
+                done(Vec::new())
+            }
             Request::SetBrain {
                 agent,
                 model,
@@ -752,7 +927,7 @@ impl Service {
                 mode,
             } => {
                 if leon_turn::adapter(&agent).is_none() {
-                    return Err(format!("King cannot run on {agent:?}"));
+                    return Err(format!("Orchestrator cannot run on {agent:?}"));
                 }
                 let choice = Choice {
                     agent,
@@ -901,6 +1076,24 @@ impl Service {
                 reply,
             } => done(self.coordinator.answer(target, &question, &reply)?),
             Request::Interrupt { target } => done(self.coordinator.interrupt(target)?),
+            Request::Unqueue {
+                target,
+                index,
+                text,
+            } => {
+                let removed = self.coordinator.unqueue(target, index, &text)?;
+                let effects = if removed {
+                    vec![Effect::Changed]
+                } else {
+                    Vec::new()
+                };
+                Ok((json!({ "removed": removed }), effects))
+            }
+            Request::Steer {
+                target,
+                index,
+                text,
+            } => done(self.coordinator.steer(target, index, &text)?),
             Request::StopWorker { worker } => done(self.coordinator.stop_worker(worker, now)?),
             Request::Release { worker } => {
                 let (released, effects) = self.coordinator.release(worker, now)?;
@@ -939,7 +1132,7 @@ impl Service {
                 self.refresh_running();
                 if !self.running.iter().any(|process| process.pid == pid) {
                     return Err(format!(
-                        "process {pid} is not one a turn of King's or of a worker left running"
+                        "process {pid} is not one a turn of Orchestrator's or of a worker left running"
                     ));
                 }
                 super::linger::terminate(pid);
@@ -985,8 +1178,8 @@ impl Service {
                 Ok((
                     json!({
                         "phones": self.push.list().len(),
-                        "note": "King's notices reach it through Expo's push service while no \
-                                 client shows King.",
+                        "note": "Orchestrator's notices reach it through Expo's push service while no \
+                                 client shows Orchestrator.",
                     }),
                     Vec::new(),
                 ))
@@ -1003,7 +1196,7 @@ impl Service {
                 // King's tools run these here themselves; this is for the
                 // folders of other machines, and for nothing else.
                 if !matches!(program.as_str(), "git" | "gh") {
-                    return Err(format!("{program} is not run for King's tools"));
+                    return Err(format!("{program} is not run for Orchestrator's tools"));
                 }
                 let place = self.place(Some(&machine))?;
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -1107,20 +1300,49 @@ impl Service {
                 Effect::Changed => changed = true,
                 Effect::Start { target, prompt } => waiting.extend(self.start(target, &prompt)),
                 Effect::Act { target, action } => {
+                    // A turn that waits for its snapshot has no agent to
+                    // act on: stopping it ends it.
+                    if matches!(action, leon_turn::Action::Interrupt) {
+                        if let Some(ended) = self.cancel_waiting(target) {
+                            waiting.extend(ended);
+                            continue;
+                        }
+                    }
                     let Some(running) = self.turns.get_mut(&target) else {
                         continue;
+                    };
+                    // What is sent into the turn in the middle is said in the
+                    // conversation once the turn took it.
+                    let sent = match &action {
+                        leon_turn::Action::Prompt(text) => Some(text.clone()),
+                        _ => None,
                     };
                     match running.turn.act(action) {
                         Ok(events) => {
                             let now = now_ms();
+                            if let Some(text) = &sent {
+                                self.coordinator.said(target, text, now);
+                            }
                             for event in &events {
                                 waiting.extend(self.coordinator.event(target, event, now));
                             }
                         }
-                        Err(error) => tracing::warn!(?target, %error, "an action was refused"),
+                        Err(error) => {
+                            tracing::warn!(?target, %error, "an action was refused");
+                            // The agent takes nothing more while it works, or
+                            // the turn just ended: it is the next turn.
+                            if let Some(text) = sent {
+                                self.coordinator.requeue(target, text);
+                                changed = true;
+                            }
+                        }
                     }
                 }
                 Effect::Kill { target } => {
+                    if let Some(ended) = self.cancel_waiting(target) {
+                        waiting.extend(ended);
+                        continue;
+                    }
                     if let Some(running) = self.turns.get_mut(&target) {
                         running.turn.kill();
                     }
@@ -1130,6 +1352,9 @@ impl Service {
                 Effect::Board { task, status } => self.move_task(&task, &status),
             }
         }
+        // Before the clients are told the state changed: what they ask for
+        // then is written.
+        self.flush_logs();
         if changed {
             self.save();
             let notice = Notice::Changed {
@@ -1170,7 +1395,7 @@ impl Service {
                             let _ = inputs.send(Input::PushGone(gone));
                         }
                     }
-                    Err(error) => tracing::warn!(%error, "King's notice was not pushed"),
+                    Err(error) => tracing::warn!(%error, "Orchestrator's notice was not pushed"),
                 });
         }
         self.broadcast(&Notice::Notify { title, body, echo });
@@ -1184,12 +1409,170 @@ impl Service {
         let written = std::fs::write(&temporary, text)
             .and_then(|()| std::fs::rename(&temporary, &self.paths.state));
         if let Err(error) = written {
-            tracing::warn!(%error, "King's state could not be saved");
+            tracing::warn!(%error, "Orchestrator's state could not be saved");
         }
     }
 
     /// Starts a turn of `target`; what it leads to, if it cannot start.
+    /// What a worker's turn is to snapshot before it starts: its folder and
+    /// the turn's number, when it works in a git worktree on this computer.
+    fn snapshot_wanted(&self, target: Target) -> Option<(String, u32)> {
+        let Target::Worker(_) = target else {
+            return None;
+        };
+        let plan = self.coordinator.plan(target)?;
+        let cwd = plan.cwd?;
+        if !self.place(plan.machine.as_deref()).ok()?.is_here() {
+            return None;
+        }
+        checkpoint::in_worktree(Path::new(&cwd)).then_some((cwd, plan.turn))
+    }
+
+    /// Starts the turn of `target`, once the snapshot of its worktree is
+    /// asked for: it is taken on a thread of its own, so that no other
+    /// conversation or request waits for it, and the turn goes to the agent
+    /// when it is there ([`Self::snapshot_done`]) or when it has taken too
+    /// long ([`Self::expire_snapshots`]).
     fn start(&mut self, target: Target, prompt: &str) -> Vec<Effect> {
+        let (Some((cwd, turn)), Target::Worker(worker)) = (self.snapshot_wanted(target), target)
+        else {
+            return self.start_now(target, prompt);
+        };
+        let now = now_ms();
+        self.next_snapshot += 1;
+        let token = self.next_snapshot;
+        let home = self.coordinator.log_home(target);
+        let key = format!("king-{}-w{worker}", home.unwrap_or(0));
+        let (take, inputs) = (self.snapshotter.clone(), self.inputs.clone());
+        let spawned = std::thread::Builder::new()
+            .name("leon-king-snapshot".to_owned())
+            .spawn(move || {
+                let result = take(Path::new(&cwd), &key, turn, (now / 1000) as i64);
+                let _ = inputs.send(Input::Snapshot {
+                    target,
+                    token,
+                    result,
+                });
+            });
+        if let Err(error) = spawned {
+            self.coordinator.noted(
+                target,
+                &format!("No checkpoint was taken before this turn: {error}."),
+                now,
+            );
+            return self.start_now(target, prompt);
+        }
+        self.waiting.insert(
+            target,
+            Waiting {
+                token,
+                prompt: prompt.to_owned(),
+                deadline_ms: now + self.snapshot_timeout.as_millis() as u64,
+            },
+        );
+        Vec::new()
+    }
+
+    /// The snapshot of a worktree is taken or failed: the event log says
+    /// which, and the turn goes to the agent. A snapshot nobody waits for
+    /// any more (it took too long, or the turn was stopped) is dropped.
+    fn snapshot_done(
+        &mut self,
+        target: Target,
+        token: u64,
+        result: Result<String, String>,
+    ) -> Vec<Effect> {
+        if self
+            .waiting
+            .get(&target)
+            .is_none_or(|waiting| waiting.token != token)
+        {
+            return Vec::new();
+        }
+        let Some(waiting) = self.waiting.remove(&target) else {
+            return Vec::new();
+        };
+        let now = now_ms();
+        match result {
+            Ok(commit) => self.coordinator.checkpointed(target, &commit, now),
+            Err(why) => {
+                tracing::warn!(?target, %why, "a worktree was not snapshotted before a turn");
+                self.coordinator.noted(
+                    target,
+                    &format!(
+                        "No checkpoint was taken before this turn ({why}): what it changes \
+                         will not be listed."
+                    ),
+                    now,
+                );
+            }
+        }
+        self.start_now(target, &waiting.prompt)
+    }
+
+    /// When the first turn that waits for a snapshot is given up on.
+    fn next_snapshot_deadline(&self) -> Option<u64> {
+        self.waiting
+            .values()
+            .map(|waiting| waiting.deadline_ms)
+            .min()
+    }
+
+    /// Starts, without a checkpoint, the turns that waited too long for one.
+    fn expire_snapshots(&mut self, now: u64) -> Vec<Effect> {
+        let late: Vec<Target> = self
+            .waiting
+            .iter()
+            .filter(|(_, waiting)| waiting.deadline_ms <= now)
+            .map(|(target, _)| *target)
+            .collect();
+        let mut effects = Vec::new();
+        for target in late {
+            let Some(waiting) = self.waiting.remove(&target) else {
+                continue;
+            };
+            tracing::warn!(
+                ?target,
+                "a snapshot took too long; the turn goes without one"
+            );
+            self.coordinator.noted(
+                target,
+                &format!(
+                    "No checkpoint was taken before this turn: the snapshot took longer \
+                     than {} seconds. What it changes will not be listed.",
+                    self.snapshot_timeout.as_secs()
+                ),
+                now,
+            );
+            effects.extend(self.start_now(target, &waiting.prompt));
+        }
+        effects
+    }
+
+    /// The turn of `target` is stopped before it began: it ends as a turn
+    /// that was stopped, and what waited for its snapshot is dropped.
+    fn cancel_waiting(&mut self, target: Target) -> Option<Vec<Effect>> {
+        self.waiting.remove(&target)?;
+        let now = now_ms();
+        let mut effects = Vec::new();
+        for event in [
+            TurnEvent::Finished {
+                ok: false,
+                error: None,
+                cost_usd: None,
+                duration_ms: None,
+                interrupted: true,
+                denied_tools: Vec::new(),
+            },
+            TurnEvent::Exited { code: 0 },
+        ] {
+            effects.extend(self.coordinator.event(target, &event, now));
+        }
+        Some(effects)
+    }
+
+    /// Starts the agent's process for the turn of `target`.
+    fn start_now(&mut self, target: Target, prompt: &str) -> Vec<Effect> {
         let now = now_ms();
         let Some(plan) = self.coordinator.plan(target) else {
             return Vec::new();
@@ -1349,7 +1732,7 @@ impl Service {
             let path = self.paths.folder.join(name);
             if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
                 if let Err(error) = std::fs::write(&path, &text) {
-                    tracing::warn!(%error, "King's instructions could not be written");
+                    tracing::warn!(%error, "Orchestrator's instructions could not be written");
                 }
             }
         }
@@ -1564,7 +1947,7 @@ impl Service {
         let machines = self
             .machines
             .as_ref()
-            .ok_or("other machines cannot be reached from King's service")?;
+            .ok_or("other machines cannot be reached from Orchestrator's service")?;
         Ok(machines.place(found))
     }
 

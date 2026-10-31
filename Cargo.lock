@@ -4181,6 +4181,7 @@ dependencies = [
  "flume 0.11.1",
  "gpui-kit",
  "image",
+ "leon-conversation",
  "leon-core",
  "leon-den",
  "leon-history",
@@ -4214,6 +4215,17 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "winresource",
+]
+
+[[package]]
+name = "leon-conversation"
+version = "0.14.0"
+dependencies = [
+ "chrono",
+ "leon-core",
+ "leon-turn",
+ "regex",
+ "serde_json",
 ]
 
 [[package]]
@@ -4278,6 +4290,7 @@ dependencies = [
 name = "leon-king"
 version = "0.14.0"
 dependencies = [
+ "leon-conversation",
  "leon-turn",
  "serde",
  "serde_json",
@@ -4401,6 +4414,7 @@ dependencies = [
 name = "leon-turn"
 version = "0.14.0"
 dependencies = [
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",

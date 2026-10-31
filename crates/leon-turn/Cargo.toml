@@ -11,6 +11,7 @@ publish.workspace = true
 # With `preserve_order`: the arguments of a tool are shown in the order the
 # agent wrote them, and the same whether this crate is built alone (for the
 # phone) or with the workspace, where the desktop's dependencies turn it on.
+serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
 thiserror.workspace = true
 

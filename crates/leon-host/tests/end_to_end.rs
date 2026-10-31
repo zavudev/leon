@@ -665,7 +665,7 @@ async fn a_paired_client_sees_what_the_host_shares_of_itself() {
         den,
         king,
     } = client.share_state().await.unwrap();
-    assert!(!king, "this host has no King");
+    assert!(!king, "this host has no Orchestrator");
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0].root, "/srv/api");
     assert!(client

@@ -578,6 +578,9 @@ pub struct Shell {
     pub(super) tasks_ui: super::tasks_view::TasksUi,
     /// King Leon, as the window has it from King's service.
     pub(super) king_ui: super::king::KingUi,
+    /// The files the messages of conversations name, and whether they are
+    /// there.
+    pub(super) links: super::links::Links,
     pub(super) den: super::den_view::DenUi,
     /// Following the agents' transcripts for the sessions' lights.
     pub(super) status: super::transcript_watch::StatusUi,
@@ -977,6 +980,7 @@ impl Shell {
             usage: super::usage_view::UsageUi::default(),
             tasks_ui: super::tasks_view::TasksUi::default(),
             king_ui: super::king::KingUi::default(),
+            links: super::links::Links::default(),
             den: super::den_view::DenUi::default(),
             status: super::transcript_watch::StatusUi::default(),
             home: super::home::HomeUi::default(),
@@ -3293,7 +3297,7 @@ impl Shell {
                 None => return false,
             },
             C::ToggleChatDiff => match self.focused_chat() {
-                Some(id) => self.chat_diff_toggle(id, cx),
+                Some(id) => self.chat_diff_toggle(super::edits::Subject::Chat(id), cx),
                 None => return false,
             },
             C::SaveFile => self.save_file_here(window, cx),

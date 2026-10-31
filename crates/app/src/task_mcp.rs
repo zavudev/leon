@@ -133,7 +133,7 @@ pub fn tool_list() -> Value {
     let project = json!({
         "type": "string",
         "description": "The root folder of the project whose board it is, as the project list \
-                        gives it. Only for an agent that runs in no project (King Leon); \
+                        gives it. Only for an agent that runs in no project (the Orchestrator); \
                         others leave it out.",
     });
     let id = json!({
@@ -752,7 +752,10 @@ mod tests {
         assert_eq!(created["project"], "/srv/web");
         let id = created["id"].as_str().unwrap().to_owned();
         let (found, failed) = payload(&call(&mut server, "task_get", json!({ "id": id })));
-        assert!(!failed, "a task of another project is King's too: {found}");
+        assert!(
+            !failed,
+            "a task of another project is Orchestrator's too: {found}"
+        );
         let (listed, _) = payload(&call(
             &mut server,
             "task_list",

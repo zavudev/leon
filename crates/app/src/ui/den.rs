@@ -892,9 +892,9 @@ pub fn king_cubs(lion: &KingLion, reading: Option<&Reading>) -> Vec<Cub> {
         },
         WorkerState::Done | WorkerState::Paused => {
             let what = if lion.state == WorkerState::Done {
-                "Its turn is over; King reads it"
+                "Its turn is over; Orchestrator reads it"
             } else {
-                "Waits for King"
+                "Waits for Orchestrator"
             };
             match quiet_words(lion.quiet_for) {
                 Some(quiet) if lion.quiet_for.is_some_and(|quiet| quiet >= ASLEEP_AFTER) => {
@@ -915,7 +915,7 @@ pub fn king_cubs(lion: &KingLion, reading: Option<&Reading>) -> Vec<Cub> {
         state,
         level: pulse.map_or(0, level),
         detail: Some(format!(
-            "{detail} \u{b7} King's worker #{} \u{b7} {}",
+            "{detail} \u{b7} Orchestrator's worker #{} \u{b7} {}",
             lion.worker, lion.runs_on
         )),
         parent: None,
@@ -1200,7 +1200,7 @@ mod king_tests {
         assert_eq!(state(long_ago), Some(CubState::Asleep));
         let cub = &king_cubs(&lion(WorkerState::Working), None)[0];
         let detail = cub.detail.as_deref().unwrap_or_default();
-        assert!(detail.contains("King's worker #3"), "{detail}");
+        assert!(detail.contains("Orchestrator's worker #3"), "{detail}");
         assert!(detail.contains("codex gpt-5.6"), "{detail}");
     }
 }

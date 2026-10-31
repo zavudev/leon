@@ -92,7 +92,7 @@ export default function King() {
   }, [draft, hostId]);
 
   const renderItem = useCallback(
-    ({ item }: { item: Piece }) => <KingPiece piece={item} who="King" asker="You" agent={brain?.agent ?? ''} />,
+    ({ item }: { item: Piece }) => <KingPiece piece={item} who="Orchestrator" asker="You" agent={brain?.agent ?? ''} />,
     [brain?.agent],
   );
 
@@ -108,13 +108,13 @@ export default function King() {
 
   return (
     <Screen
-      kind="King"
+      kind="Orchestrator"
       title={host.hostName}
       subtitle={status ? `${runsOn(status.brain)} · ${spentLine(status)}` : undefined}
       bottomInset={false}>
       <ConnectionBanner
         hostId={hostId}
-        detail={busy ? 'King is working' : asks ? 'King asks you' : undefined}
+        detail={busy ? 'Orchestrator is working' : asks ? 'Orchestrator asks you' : undefined}
         detailLive={busy}
         detailWaits={asks}
       />
@@ -133,9 +133,9 @@ export default function King() {
       </View>
       {noKing ? (
         <View style={{ padding: 16, gap: 8 }}>
-          <Label tone="faint">[ No King ]</Label>
+          <Label tone="faint">[ No Orchestrator ]</Label>
           <Txt tone="muted">
-            This computer has no King to speak to. It needs a newer Leon there, with King set up.
+            This computer has no Orchestrator to speak to. It needs a newer Leon there, with Orchestrator set up.
           </Txt>
         </View>
       ) : tab === 'workers' ? (
@@ -163,7 +163,7 @@ export default function King() {
           {workers.length === 0 ? (
             <View style={{ paddingHorizontal: 16 }}>
               <Txt tone="muted">
-                {status ? 'King has no workers now. Ask it for something and it starts them.' : ' '}
+                {status ? 'Orchestrator has no workers now. Ask it for something and it starts them.' : ' '}
               </Txt>
             </View>
           ) : (
@@ -204,7 +204,7 @@ export default function King() {
                 ) : (
                   <View style={{ padding: 24, gap: 8 }}>
                     <Label tone="muted">[ Nothing said yet ]</Label>
-                    <Txt variant="strong">Tell King what you want done.</Txt>
+                    <Txt variant="strong">Tell Orchestrator what you want done.</Txt>
                     <Txt tone="muted">
                       It plans the work, gives it to workers on that computer, checks what they did,
                       and tells you here.
@@ -214,7 +214,7 @@ export default function King() {
               }
               ListFooterComponent={
                 busy ? (
-                  <Working word="King is working" color={agentColor(t, brain?.agent ?? '')} since={brain?.busySinceMs} />
+                  <Working word="Orchestrator is working" color={agentColor(t, brain?.agent ?? '')} since={brain?.busySinceMs} />
                 ) : null
               }
             />
@@ -225,7 +225,7 @@ export default function King() {
               <KingQuestionPanel
                 key={brain.questions[0]?.id}
                 questions={brain.questions}
-                who="King"
+                who="Orchestrator"
                 online={online}
                 onAnswer={answer}
               />
@@ -240,10 +240,10 @@ export default function King() {
                 {'>'}
               </Txt>
               <TextInput
-                accessibilityLabel="Message to King"
+                accessibilityLabel="Message to Orchestrator"
                 value={draft}
                 onChangeText={setDraft}
-                placeholder={online ? (busy ? 'Tell King more' : 'Ask King') : 'Not connected'}
+                placeholder={online ? (busy ? 'Tell Orchestrator more' : 'Ask Orchestrator') : 'Not connected'}
                 placeholderTextColor={t.textFaint}
                 selectionColor={t.signal}
                 cursorColor={t.signal}

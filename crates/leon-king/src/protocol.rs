@@ -55,6 +55,35 @@ pub enum Request {
         #[serde(default)]
         limit: Option<usize>,
     },
+    /// What a conversation did after `since`, record by record
+    /// ([`crate::log::Events`]): everything the window draws, where
+    /// [`Request::Transcript`] is what a phone reads. A conversation that
+    /// has no log answers with none.
+    Events {
+        /// Whose.
+        target: Target,
+        /// The last record the client has.
+        #[serde(default)]
+        since: Option<u64>,
+        /// At most this many records, the oldest after `since`; the reply
+        /// also stops at about [`crate::log::PAGE_BYTES`], and says whether
+        /// there are more.
+        #[serde(default)]
+        limit: Option<usize>,
+        /// Of this conversation of King's (a past one keeps its log); the
+        /// one now when absent.
+        #[serde(default)]
+        conversation: Option<u64>,
+    },
+    /// Stop the service: it saves what it has and exits, and the client
+    /// that asked starts another. With `when_idle` it waits until no turn is
+    /// running (a window that sees the service is of an older version asks
+    /// so, and is not left without King in the middle of an answer).
+    Shutdown {
+        /// Wait for the turns that run to end.
+        #[serde(default)]
+        when_idle: bool,
+    },
     /// Change the agent, model or effort King runs on.
     SetBrain {
         /// The agent's tag.
@@ -87,6 +116,26 @@ pub enum Request {
         /// The worker.
         worker: u32,
         /// The words.
+        text: String,
+    },
+    /// Take back a message that waits for the turn to end, when it is still
+    /// the one at that place: answered with `{"removed": true}` if it was.
+    Unqueue {
+        /// Whose.
+        target: Target,
+        /// Its place in what waits, from 0.
+        index: usize,
+        /// Its words.
+        text: String,
+    },
+    /// Send a message that waits into the turn in flight now, instead of at
+    /// its end, when it is still the one at that place.
+    Steer {
+        /// Whose.
+        target: Target,
+        /// Its place in what waits, from 0.
+        index: usize,
+        /// Its words.
         text: String,
     },
     /// Answer a question King or a worker waits on.
@@ -348,6 +397,14 @@ pub enum Notice {
 /// King and its workers, in short.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Status {
+    /// The version of Leon the service runs. A service of an older version
+    /// than a window's is asked to stop ([`Request::Shutdown`]); one that
+    /// does not say (before this field) is none.
+    #[serde(default)]
+    pub version: String,
+    /// The service keeps an event log and answers [`Request::Events`].
+    #[serde(default)]
+    pub events: bool,
     /// The number of King's conversation now: another one after the person
     /// started a new one or took up a past one.
     #[serde(default)]
@@ -430,14 +487,21 @@ pub struct ConversationStatus {
     /// When the turn in flight started, in milliseconds since the epoch.
     #[serde(default)]
     pub busy_since_ms: Option<u64>,
-    /// What waits for the turn to end.
+    /// How many messages wait for the turn to end.
     pub queued: usize,
+    /// What they say, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queue: Vec<String>,
     /// The questions it waits on, with how each may be answered.
     pub questions: Vec<Open>,
     /// What it cost.
     pub cost_usd: f64,
     /// The number of its newest entry.
     pub last_seq: Option<u64>,
+    /// The number of its newest record of the event log, when it has one.
+    /// Filled by the service.
+    #[serde(default)]
+    pub events_seq: Option<u64>,
 }
 
 /// A worker, in short.
@@ -550,6 +614,16 @@ mod tests {
                 budget_usd: None,
             },
             Request::RunCancel { run: 4 },
+            Request::Unqueue {
+                target: Target::Brain,
+                index: 0,
+                text: "x".to_owned(),
+            },
+            Request::Steer {
+                target: Target::Worker(1),
+                index: 1,
+                text: "y".to_owned(),
+            },
             Request::OpenTerminal {
                 cwd: "/code/api".to_owned(),
                 command: "bun run dev".to_owned(),
@@ -573,6 +647,67 @@ mod tests {
             let read: Envelope = serde_json::from_str(&line).unwrap();
             assert_eq!((read.id, read.request), (91, request));
         }
+    }
+
+    #[test]
+    fn events_are_asked_after_the_last_record_a_client_has() {
+        let line = r#"{"id":4,"op":"events","target":{"worker":2},"since":9,"limit":50}"#;
+        let envelope: Envelope = serde_json::from_str(line).unwrap();
+        assert_eq!(
+            envelope.request,
+            Request::Events {
+                target: Target::Worker(2),
+                since: Some(9),
+                limit: Some(50),
+                conversation: None
+            }
+        );
+        let first: Envelope =
+            serde_json::from_str(r#"{"id":5,"op":"events","target":"brain"}"#).unwrap();
+        assert_eq!(
+            first.request,
+            Request::Events {
+                target: Target::Brain,
+                since: None,
+                limit: None,
+                conversation: None
+            }
+        );
+        let past: Envelope =
+            serde_json::from_str(r#"{"id":5,"op":"events","target":"brain","conversation":3}"#)
+                .unwrap();
+        assert!(matches!(
+            past.request,
+            Request::Events {
+                conversation: Some(3),
+                ..
+            }
+        ));
+        let stop: Envelope = serde_json::from_str(r#"{"id":6,"op":"shutdown"}"#).unwrap();
+        assert_eq!(stop.request, Request::Shutdown { when_idle: false });
+        let later: Envelope =
+            serde_json::from_str(r#"{"id":6,"op":"shutdown","when_idle":true}"#).unwrap();
+        assert_eq!(later.request, Request::Shutdown { when_idle: true });
+    }
+
+    #[test]
+    fn a_status_from_a_service_before_the_log_still_reads_and_says_it_has_none() {
+        let old = r#"{
+            "brain": {"agent":"claude","model":null,"effort":null,"session_id":null,
+                      "busy":false,"queued":0,"questions":[],"cost_usd":0.0,"last_seq":3},
+            "workers": [], "news": 0, "spent_today_usd": 0.0, "daily_budget_usd": null
+        }"#;
+        let status: Status = serde_json::from_str(old).unwrap();
+        assert_eq!((status.version.as_str(), status.events), ("", false));
+        assert_eq!(status.brain.events_seq, None);
+        // What a new one says is what an old reader ignores.
+        let mut new = serde_json::to_value(&status).unwrap();
+        new["version"] = "1.2.3".into();
+        new["events"] = true.into();
+        new["brain"]["events_seq"] = 41.into();
+        let read: Status = serde_json::from_value(new).unwrap();
+        assert_eq!((read.version.as_str(), read.events), ("1.2.3", true));
+        assert_eq!(read.brain.events_seq, Some(41));
     }
 
     #[test]

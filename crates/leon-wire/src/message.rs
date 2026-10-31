@@ -640,7 +640,7 @@ impl Message {
                 Err(FrameError::OverLimit("error text"))
             }
             Message::King { line } if line.len() > MAX_KING_LINE || line.contains('\n') => {
-                Err(FrameError::OverLimit("King's line"))
+                Err(FrameError::OverLimit("Orchestrator's line"))
             }
             Message::KingClosed { reason } => bounded(reason),
             _ => Ok(()),
@@ -1189,7 +1189,7 @@ mod tests {
                 line: r#"{"id":1,"op":"status"}"#.into(),
             },
             Message::KingClosed {
-                reason: "King's service is not running".into(),
+                reason: "Orchestrator's service is not running".into(),
             },
         ] {
             let bytes = encode_frame(&message).unwrap();

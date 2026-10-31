@@ -40,8 +40,8 @@ function KingRow({ hostId }: { hostId: string }) {
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`King${busy ? ', working' : ''}${workers ? `, ${workers} ${workers === 1 ? 'worker' : 'workers'}` : ''}`}
-      accessibilityHint="Opens King: talk to it, and see its workers."
+      accessibilityLabel={`Orchestrator${busy ? ', working' : ''}${workers ? `, ${workers} ${workers === 1 ? 'worker' : 'workers'}` : ''}`}
+      accessibilityHint="Opens Orchestrator: talk to it, and see its workers."
       onPress={() => router.push({ pathname: '/host/[hostId]/king', params: { hostId } })}
       style={({ pressed }) => ({
         flexDirection: 'row',
@@ -61,7 +61,7 @@ function KingRow({ hostId }: { hostId: string }) {
       })}>
       <Feather name="award" size={20} color={t.signal} />
       <View style={{ flex: 1, gap: 3 }}>
-        <Txt variant="strong">King</Txt>
+        <Txt variant="strong">Orchestrator</Txt>
         <Txt variant="small" tone="faint" numberOfLines={1}>
           Tell it what to do; it runs the workers
         </Txt>

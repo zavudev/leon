@@ -3498,7 +3498,8 @@ fn remove_worktree(answers: &[String], world: &World) -> Outcome {
 fn king_brain(answers: &[String], world: &World) -> Outcome {
     let Some(king) = &world.king else {
         return Outcome::Refuse(
-            "King is not connected: open King's view (Ctrl+Shift+Alt+K) first.".to_owned(),
+            "Orchestrator is not connected: open Orchestrator's view (Ctrl+Shift+Alt+K) first."
+                .to_owned(),
         );
     };
     let own = |chosen: &str| (chosen != AGENTS_OWN).then(|| chosen.to_owned());
@@ -3515,7 +3516,7 @@ fn king_brain(answers: &[String], world: &World) -> Outcome {
                 }
             }
             choices(
-                "King runs on",
+                "Orchestrator runs on",
                 agents
                     .into_iter()
                     .map(|tag| {
@@ -3598,7 +3599,8 @@ fn king_brain(answers: &[String], world: &World) -> Outcome {
 fn king_mode(answers: &[String], world: &World) -> Outcome {
     let Some(king) = &world.king else {
         return Outcome::Refuse(
-            "King is not connected: open King's view (Ctrl+Shift+Alt+K) first.".to_owned(),
+            "Orchestrator is not connected: open Orchestrator's view (Ctrl+Shift+Alt+K) first."
+                .to_owned(),
         );
     };
     let modes: Vec<&KingMode> = king
@@ -3616,14 +3618,17 @@ fn king_mode(answers: &[String], world: &World) -> Outcome {
             .current(king.mode.is_none())];
             offered.extend(modes.iter().map(|mode| {
                 let detail = if mode.dangerous {
-                    format!("{} (never asks: King may do anything)", mode.description)
+                    format!(
+                        "{} (never asks: Orchestrator may do anything)",
+                        mode.description
+                    )
                 } else {
                     mode.description.clone()
                 };
                 Choice::new(mode.label.clone(), detail, mode.id.clone())
                     .current(king.mode.as_deref() == Some(mode.id.as_str()))
             }));
-            choices("King asks", offered, Custom::No)
+            choices("Orchestrator asks", offered, Custom::No)
         }
         [chosen, ..] => {
             if chosen != AGENTS_OWN && !modes.iter().any(|mode| mode.id == *chosen) {

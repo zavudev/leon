@@ -698,6 +698,26 @@ impl Harness {
         self.settle(cx);
     }
 
+    /// A click with the keys `modifiers` held.
+    #[cfg_attr(not(leon_posix_tests), allow(dead_code))]
+    fn mouse_with(
+        &self,
+        selector: String,
+        modifiers: gpui_kit::Modifiers,
+        cx: &mut TestAppContext,
+    ) {
+        let bounds = self
+            .bounds_of(selector.clone(), cx)
+            .unwrap_or_else(|| panic!("{selector} is not drawn"));
+        let mut visual = VisualTestContext::from_window(self.window.into(), cx);
+        let at = bounds.center();
+        let button = gpui_kit::MouseButton::Left;
+        visual.simulate_mouse_down(at, button, modifiers);
+        visual.simulate_mouse_up(at, button, modifiers);
+        visual.run_until_parked();
+        self.settle(cx);
+    }
+
     /// Opens the machine's menu at the foot of the sidebar with the mouse and
     /// clicks the item that runs `command`.
     fn pick_in_machine_menu(&self, command: crate::keys::Command, cx: &mut TestAppContext) {

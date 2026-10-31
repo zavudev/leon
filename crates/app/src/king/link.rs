@@ -20,7 +20,7 @@ pub trait Link: Send + Sync {
 
     /// [`Link::open`], only when the service runs: it is not started.
     fn join(&self) -> Result<Connection, String> {
-        Err("King's service is not running".to_owned())
+        Err("Orchestrator's service is not running".to_owned())
     }
 }
 
@@ -46,6 +46,35 @@ pub enum Heard {
     Notice(Notice),
     /// The line is gone; nothing more comes on it.
     Lost(String),
+}
+
+/// How the version of the service a window found compares with the window's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Skew {
+    /// The same, or the window cannot tell: nothing is done.
+    Same,
+    /// The service is older: the window asks it to stop and starts another.
+    Older,
+    /// The service is newer: it is never stopped for that.
+    Newer,
+}
+
+/// The service's version (`service`, as its status says it) against the
+/// window's. A service that says none (it is from before the status told
+/// its version) or something that is not a version is older; a window that
+/// does not know its own version never takes a service for older.
+pub fn skew(window: &str, service: &str) -> Skew {
+    use leon_update::version::parse_running;
+
+    let Some(window) = parse_running(window) else {
+        return Skew::Same;
+    };
+    match parse_running(service) {
+        None => Skew::Older,
+        Some(service) if service < window => Skew::Older,
+        Some(service) if service > window => Skew::Newer,
+        Some(_) => Skew::Same,
+    }
 }
 
 /// The control socket of this computer's service.
@@ -111,6 +140,36 @@ impl Socket {
             })
             .map_err(|error| error.to_string())?;
         Ok(Connection { ask, heard })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_older_or_unversioned_service_is_older_and_a_newer_one_is_left_alone() {
+        assert_eq!(skew("0.15.0", "0.14.0"), Skew::Older);
+        assert_eq!(skew("0.15.0", "0.14.9"), Skew::Older);
+        assert_eq!(skew("1.0.0", "0.99.99"), Skew::Older);
+        assert_eq!(skew("0.15.0", "0.15.0"), Skew::Same);
+        assert_eq!(skew("0.15.0", "0.15.1"), Skew::Newer);
+        assert_eq!(skew("0.15.0", "1.0.0"), Skew::Newer);
+        // A pre-release comes before its release.
+        assert_eq!(skew("0.15.0", "0.15.0-rc.1"), Skew::Older);
+        assert_eq!(skew("0.15.0-rc.1", "0.15.0"), Skew::Newer);
+    }
+
+    #[test]
+    fn a_service_that_says_no_version_counts_as_older() {
+        assert_eq!(skew("0.15.0", ""), Skew::Older);
+        assert_eq!(skew("0.15.0", "not a version"), Skew::Older);
+    }
+
+    #[test]
+    fn a_window_that_does_not_know_its_version_never_restarts_anything() {
+        assert_eq!(skew("", "0.1.0"), Skew::Same);
+        assert_eq!(skew("dev", ""), Skew::Same);
     }
 }
 

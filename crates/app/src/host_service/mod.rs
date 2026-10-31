@@ -27,7 +27,7 @@
 //! The host itself is `leon_host::cli`; this command only installs and watches
 //! it. Uninstalling leaves the pairings, the identity and the settings alone.
 //!
-//! `leon king service install | uninstall | status | logs` is the same
+//! `leon orchestrator service install | uninstall | status | logs` is the same
 //! command for King Leon's service ([`Program::King`]): King and its workers
 //! go on with the window closed, start at login and come back after a
 //! failure. It takes no relay and no name, which are the host's.
@@ -98,7 +98,7 @@ It works on Linux (a systemd user unit) and macOS (a launchd agent).
 Run `leon host` in a terminal instead.";
 
 const KING_UNSUPPORTED: &str = "\
-Running King as a background service is not supported on this system yet.
+Running Orchestrator as a background service is not supported on this system yet.
 It works on Linux (a systemd user unit) and macOS (a launchd agent).";
 
 const NOT_ROOT: &str = "\
@@ -106,7 +106,7 @@ The host service is installed for your own user and never as root: every device
 you pair would otherwise get a root shell. Run this command as yourself.";
 
 const KING_NOT_ROOT: &str = "\
-King's service is installed for your own user and never as root: the agents it
+Orchestrator's service is installed for your own user and never as root: the agents it
 starts would otherwise work as root. Run this command as yourself.";
 
 const SAFETY: &str = "\
@@ -115,21 +115,21 @@ on this computer. Pair only your own devices, and revoke any you lose
 (`leon host revoke`).";
 
 const KING_SAFETY: &str = "\
-The service runs as you: King and the agents it starts work with your rights,
-each worker in a worktree of its own. King never merges, never pushes to a
+The service runs as you: Orchestrator and the agents it starts work with your rights,
+each worker in a worktree of its own. Orchestrator never merges, never pushes to a
 default branch and never force-pushes.";
 
 fn king_usage() -> &'static str {
-    "Usage: leon king service install [--linger] [--data-dir <path>]\n       \
-     leon king service uninstall | status\n       \
-     leon king service logs [--lines <n>]\n\n\
-     Runs King Leon in the background of your own session, so that King and its\n\
+    "Usage: leon orchestrator service install [--linger] [--data-dir <path>]\n       \
+     leon orchestrator service uninstall | status\n       \
+     leon orchestrator service logs [--lines <n>]\n\n\
+     Runs the Orchestrator in the background of your own session, so that it and its\n\
      workers go on with the window closed: a systemd user unit on Linux, a\n\
      launchd agent on macOS. It never needs root.\n\n\
      Options:\n  \
-     --linger          (install, Linux) keep King running when you are logged out:\n                    \
+     --linger          (install, Linux) keep Orchestrator running when you are logged out:\n                    \
      runs `loginctl enable-linger` for your own user\n  \
-     --data-dir <path> The data folder King works from (default: Leon's data folder)\n  \
+     --data-dir <path> The data folder Orchestrator works from (default: Leon's data folder)\n  \
      --lines <n>       (logs) how many lines to show (default 100)\n  \
      -h, --help        Print this help"
 }
@@ -222,7 +222,9 @@ fn parse(args: impl IntoIterator<Item = String>, program: Program) -> Result<Req
         [other, ..] => return Err(format!("Unknown command {other:?}.")),
     };
     if program == Program::King && (request.relay.is_some() || request.name.is_some()) {
-        return Err("--relay and --name are the host's; King's service has neither.".into());
+        return Err(
+            "--relay and --name are the host's; Orchestrator's service has neither.".into(),
+        );
     }
     let installing = matches!(request.verb, Verb::Install { .. });
     if !installing && (request.relay.is_some() || request.name.is_some()) {
@@ -467,7 +469,7 @@ async fn install(
     out.push_str(&match program {
         Program::Host => format!("Files of the host: {}\n\n{SAFETY}\n", data_dir.display()),
         Program::King => format!(
-            "King's data folder: {}\n\n{KING_SAFETY}\n",
+            "Orchestrator's data folder: {}\n\n{KING_SAFETY}\n",
             data_dir.display()
         ),
     });
@@ -481,7 +483,7 @@ async fn install(
     }
     out.push_str(&match program {
         Program::Host => "\nNext: `leon host pair` prints a code for a device; `leon host service status` shows how it is doing.\n".to_owned(),
-        Program::King => format!("\nNext: `{command} status` asks King how it is doing; `{command} service status` shows the service.\n"),
+        Program::King => format!("\nNext: `{command} status` asks Orchestrator how it is doing; `{command} service status` shows the service.\n"),
     });
     let err: String = notes.iter().map(|note| format!("{note}\n")).collect();
     Outcome { code: 0, out, err }
@@ -542,7 +544,7 @@ async fn uninstall(environment: &Environment, runner: &impl Runner) -> Outcome {
         "{} untouched (in {}).\n",
         match layout.program {
             Program::Host => "Your paired devices, the identity and the settings are",
-            Program::King => "King's conversations, workers and settings are",
+            Program::King => "Orchestrator's conversations, workers and settings are",
         },
         environment.data_dir.display()
     ));
@@ -688,7 +690,7 @@ fn current_uid() -> u32 {
     }
 }
 
-/// Runs `leon host service ...` (or `leon king service ...`). Returns the
+/// Runs `leon host service ...` (or `leon orchestrator service ...`). Returns the
 /// process exit code.
 pub fn run(args: Vec<String>, default_data_dir: PathBuf, program: Program) -> i32 {
     let request = match parse(args, program) {

@@ -26,7 +26,7 @@ switching to one never restarts it.
 └──────────────────┴─────────────────────────────────────┘
 ```
 
-* **Sidebar**: King pinned at the top, then each project as a heading in
+* **Sidebar**: Orchestrator pinned at the top, then each project as a heading in
   spaced capitals with its sessions listed under it. A session that ran on a
   branch other than the main checkout has the branch beside its name. Live
   terminals are listed above the history with a status light; exited ones show
@@ -615,9 +615,9 @@ platform (see below).
 | Settings | `⌘,` | `Ctrl+,` |
 | Show usage | `⇧⌘U` | `Ctrl+Shift+Alt+U` |
 | Refresh usage now | palette only | palette only |
-| Open the King | `⌥⇧⌘K` | `Ctrl+Shift+Alt+K` |
-| Change the model King runs on… | palette only | palette only |
-| Change how much King asks… | palette only | palette only |
+| Open the Orchestrator | `⌥⇧⌘K` | `Ctrl+Shift+Alt+K` |
+| Change the model Orchestrator runs on… | palette only | palette only |
+| Change how much Orchestrator asks… | palette only | palette only |
 | Show the task board | `⇧⌘I` | `Ctrl+Shift+Alt+I` |
 | New task… | palette only | palette only |
 | Create worktree for the task… | palette only | palette only |

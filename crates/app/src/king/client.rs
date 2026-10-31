@@ -79,7 +79,7 @@ impl Client {
             match Self::dial(paths) {
                 Ok(client) => return Ok(client),
                 Err(error) if Instant::now() >= deadline => {
-                    return Err(format!("King's service did not start: {error}"))
+                    return Err(format!("Orchestrator's service did not start: {error}"))
                 }
                 Err(_) => std::thread::sleep(Duration::from_millis(100)),
             }
@@ -151,7 +151,7 @@ impl Reader {
             .read_line(&mut line)
             .map_err(|error| error.to_string())?;
         if read == 0 {
-            return Err("King's service closed the connection".to_owned());
+            return Err("Orchestrator's service closed the connection".to_owned());
         }
         let value: Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
         if value.get("notice").is_some() {
@@ -228,8 +228,8 @@ pub fn ask_and_print(paths: &Paths, request: Request, wait: bool) -> Result<(), 
         }
         if let Some(open) = status.brain.questions.first() {
             println!(
-                "\nKing waits on question {}. Answer it from the window, or tell it what to do \
-                 with `leon king say`.",
+                "\nOrchestrator waits on question {}. Answer it from the window, or tell it what to do \
+                 with `leon orchestrator say`.",
                 open.id
             );
             return Ok(());
@@ -270,7 +270,7 @@ fn print_entry(entry: &leon_king::transcript::Entry) {
 fn print_status(status: &Status) {
     let brain = &status.brain;
     println!(
-        "King: {}{}{}, {}",
+        "Orchestrator: {}{}{}, {}",
         brain.agent,
         brain
             .model

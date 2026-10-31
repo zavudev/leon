@@ -78,7 +78,7 @@ export async function enableKingPush(): Promise<string | undefined> {
   try {
     if (Platform.OS === 'android') {
       await Notifications.setNotificationChannelAsync(CHANNEL, {
-        name: 'King',
+        name: 'Orchestrator',
         importance: Notifications.AndroidImportance.DEFAULT,
       });
     }

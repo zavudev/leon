@@ -134,7 +134,7 @@ export function announceKing(hostId: string, title: string, body: string, echo: 
   if (echo && frontKing === hostId) return;
   buzz('king');
   made += 1;
-  useAlerts.setState({ toast: { key: made, kingOf: hostId, kind: 'king', title: title || 'King', line: body } });
+  useAlerts.setState({ toast: { key: made, kingOf: hostId, kind: 'king', title: title || 'Orchestrator', line: body } });
   clearTimeout(hide);
   hide = setTimeout(dismissToast, TOAST_MS);
 }
@@ -143,7 +143,7 @@ export function announceKing(hostId: string, title: string, body: string, echo: 
 export function announceKingRefusal(hostId: string, sentence: string): void {
   buzz('failed');
   made += 1;
-  useAlerts.setState({ toast: { key: made, kingOf: hostId, kind: 'failed', title: 'King refused', line: sentence } });
+  useAlerts.setState({ toast: { key: made, kingOf: hostId, kind: 'failed', title: 'Orchestrator refused', line: sentence } });
   clearTimeout(hide);
   hide = setTimeout(dismissToast, TOAST_MS);
 }

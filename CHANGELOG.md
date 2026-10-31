@@ -2,6 +2,68 @@
 
 ## [Unreleased]
 
+### Changed
+
+* King is now called the Orchestrator everywhere you see it: the sidebar entry, its
+  view and notices, the palette and settings text, the messages sent to the
+  agents, the documentation and the phone app. `leon orchestrator …` is the
+  command, and `leon king …` keeps working. Its data folder, `king.toml` and
+  its settings and action ids are unchanged.
+* King looks and behaves like the chat. Its conversation and its workers' are
+  drawn by the chat's own view, from the same data: the tools of a turn are
+  folded into one line each phrased as in the chat, edits show their diffs,
+  todos and plans are cards, code is highlighted, messages say when they were
+  said, and King's conversation uses the full width of the window.
+* A worker of King that works on this computer gets what a chat has for its
+  files: each of its turns ends with the changed-files card, a click opens
+  the panel of diffs beside it (for the turn, one file or every uncommitted
+  change; Escape closes it), and the foot of the worker has its branch and
+  the DIFF and GIT buttons. The service takes the snapshot of the worktree
+  before each turn of a worker, as a chat does, and the window counts what
+  the turn changed against it.
+* King's field has what the chat's has: Up and Down walk the prompts said
+  before (a worker's field its own), and what waits for the turn to end is
+  listed above the field with EDIT (back in the field), REMOVE and SEND NOW
+  (into the running turn).
+
+* The snapshot of a worker's worktree before its turn no longer holds the
+  service: it is taken on a thread of its own, and only that worker's turn
+  waits for it (the agent hears the prompt after it, so the snapshot is of the
+  files as they were), while every other conversation and request is served.
+  A snapshot that fails, or takes longer than 45 seconds, is left: the turn
+  goes without a checkpoint and the worker's conversation says so in a note,
+  and the window lists no changes for it rather than wrong ones. Stopping a
+  worker whose turn waits for its snapshot ends the turn, and a service asked
+  to stop when idle waits for it.
+
+### Added
+
+* Files named in an agent's message are links when they exist: a path in
+  plain text, in inline code or as the address of a Markdown link, relative
+  to the folder the conversation works in, absolute, `~/` or `file://`, with
+  an optional `:line` or `:line:col`. A click opens text in Leon's editor
+  and everything else (media, binaries, folders) with the system's program,
+  as web links open. Nothing is looked for on a conversation of another
+  machine, and what does not exist stays text.
+* The card of the changed files lists all its files on request: "+6 more" is
+  a button, "Show less" takes them away again. A click on a file of the card
+  or of the panel's list shows its diff; Cmd or Ctrl and click, a second
+  click, or the OPEN button of a hovered row opens the file itself (Leon's
+  editor for text, the system's program for media and binaries), and the
+  panel's pane has an OPEN FILE button.
+
+### Fixed
+
+* The panel of diffs listed its files two lines tall in rows of one line, so
+  that each row's folders were painted over the row before. A row is one
+  line now: the file name, then its folders dimmed and cut with an ellipsis,
+  with the whole path in its tooltip. When they do not fit the ellipsis is at
+  the start (`…/public/audio/`), so the folders nearest the file stay.
+* A file that is not text (a sound, a picture) said `+0 -0` in the card and
+  the panel and left the pane empty. It says "binary", and the pane says
+  "Binary file — not shown" with its size (or that it is gone) and a button
+  to open it.
+
 ## [0.14.0] - 2026-10-29
 
 ### Added

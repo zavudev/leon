@@ -49,6 +49,7 @@ leon-term.workspace = true
 leon-usage.workspace = true
 leon-memory.workspace = true
 leon-king.workspace = true
+leon-conversation.workspace = true
 leon-update.workspace = true
 # The unified agent protocol: how conversations in Leon's own interface are
 # driven (see `src/chat`).

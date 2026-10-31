@@ -106,7 +106,7 @@ impl Devices {
             return;
         };
         if let Err(error) = std::fs::write(&self.path, text) {
-            tracing::warn!(%error, "the phones for King's notices could not be saved");
+            tracing::warn!(%error, "the phones for Orchestrator's notices could not be saved");
         }
     }
 }

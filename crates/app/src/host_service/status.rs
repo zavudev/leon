@@ -338,7 +338,7 @@ fn devices_line(devices: &Result<Devices, String>) -> String {
     }
 }
 
-/// The text of `leon host service status` (and of `leon king service status`).
+/// The text of `leon host service status` (and of `leon orchestrator service status`).
 pub fn render(report: &Report) -> String {
     let mut lines = Vec::new();
     let command = report.program.command();
@@ -621,8 +621,8 @@ Devices:   2 paired, 1 revoked
         });
         let expected = "\
 Service:   installed (/home/ana/.config/systemd/user/leon-king.service)
-State:     failed. See `leon king service logs`.
-Starts:    at login. It stops when you log out of your last session; `leon king service install --linger` keeps it running
+State:     failed. See `leon orchestrator service logs`.
+Starts:    at login. It stops when you log out of your last session; `leon orchestrator service install --linger` keeps it running
 ";
         assert_eq!(text, expected);
     }

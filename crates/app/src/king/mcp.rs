@@ -889,7 +889,7 @@ impl<B: Backend> Server<B> {
             "ci": if watched {
                 "watched: you hear when it passes or fails"
             } else {
-                "not watched: King's service did not answer"
+                "not watched: Orchestrator's service did not answer"
             },
         }))
     }
@@ -904,7 +904,7 @@ fn initialize(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": { "tools": {} },
         "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "King Leon's tools: the projects Leon knows, the agents' usage, and \
+        "instructions": "The Orchestrator's tools: the projects Leon knows, the agents' usage, and \
             the workers you start, steer and stop. You are woken with news of your workers; \
             never poll them.",
     })

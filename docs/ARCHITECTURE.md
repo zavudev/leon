@@ -16,7 +16,8 @@ app (leon)  ── ui, engine, keys, theme, launch, memory, diagnose
  │   ├── leon-memory   the memory agents share: file, block, MCP (pure)
  │   ├── leon-update   updates from the GitHub releases (no window)
  │   ├── leon-turn     the unified agent protocol: every agent as the same turn (pure)
- │   ├── leon-king     King Leon, the coordinator: its state, router and instructions (pure)
+ │   ├── leon-conversation  a conversation as a list of things to draw: the reducer of the protocol's events (pure)
+ │   ├── leon-king     Orchestrator Leon, the coordinator: its state, router and instructions (pure)
  │   ├── leon-voice    dictation: speech models, the microphone, sound into text
  │   └── leon-core     the model and the SQLite store
 leon-remote ── leon-core
@@ -25,8 +26,9 @@ leon-usage ── leon-core, leon-remote
 leon-memory ── leon-core
 leon-update ── leon-remote (only for `spawn`)
 leon-mobile ── leon-link, leon-wire, leon-turn (the phone's library; not part of the app)
-leon-turn ── serde_json only (no other Leon crate)
-leon-king ── leon-turn
+leon-turn ── serde and serde_json only (no other Leon crate)
+leon-conversation ── leon-turn, leon-core (for `AgentId` only)
+leon-king ── leon-turn, leon-conversation (for its number formatting)
 leon-voice ── leon-update (its downloads); cpal and whisper.cpp behind `engine`
 leon-term ── gpui-kit only (no other Leon crate)
 leon-mark ── gpui-kit only (no other Leon crate)
@@ -37,14 +39,15 @@ leon-den ── gpui-kit and image only (no other Leon crate); wgpu behind `den3
 | --- | --- |
 | `leon-core` | Machines, projects, worktrees, sessions and messages, the shared memory's entries (`store/memory.rs`), the board's tasks (`store/tasks.rs`) and the `Store` (SQLite) with change notification. No UI, no processes. |
 | `leon-history` | Reads the history Claude Code, Codex and opencode keep on disk and turns it into sessions and messages. |
-| `leon-remote` | A `CommandSpec` says what to run and where; `run_on` and `interactive_on` place it on a machine (unchanged locally, `ssh` remotely, with shell quoting and optional connection sharing). Git worktree operations, the changed files and diffs of a checkout and the commit, push and pull request (`changes`, `ship`), how each agent starts and resumes, the machine probe and the connection checklist (`connect`, `diagnosis`) are built on it. A scripted runner makes all of it testable without a process. |
+| `leon-remote` | A `CommandSpec` says what to run and where; `run_on` and `interactive_on` place it on a machine (unchanged locally, `ssh` remotely, with shell quoting and optional connection sharing). Git worktree operations, the changed files and diffs of a checkout and the commit, push and pull request (`changes`, `ship`), the snapshots of a worktree before an agent's turn and the way back to them (`checkpoint`, used by the chat and by Orchestrator's service), how each agent starts and resumes, the machine probe and the connection checklist (`connect`, `diagnosis`) are built on it. A scripted runner makes all of it testable without a process. |
 | `leon-usage` | How much of each agent's limits is left. A provider-neutral model (`AgentUsage`: windows with a used percentage, a reset time and a length, or an explicit `Reason` why nothing is known; staleness is part of it), pure parsers for each source (`codex`, `claude`, `opencode`), the burn-rate `forecast`, the wording (`present`, `view`), `collect_machine` (one bounded command per machine through a `Runner`) and the opt-in `network` sources behind an `Http` trait. No UI. |
 | `leon-memory` | The memory agents share, without a disk or a process: `render` (the memory file: one markdown document within a hard size budget, every entry framed as data), `block` (the managed block of an instruction file: insert, replace, remove, byte-exact), `files` (which of `AGENTS.md`, `CLAUDE.md`, `GEMINI.md` get it), `mcp` (the MCP server as a JSON-RPC line in, a line out, over a `Backend` trait), `mcp_json` (the `leon-memory` entry of `.mcp.json`) and `scope` (the repository a folder is in, from git's own files, and the name of a memory file). The entries themselves are in `leon-core` (`store/memory.rs`). |
 | `leon-update` | Updates from the GitHub releases of this repository. `version` (which tags count, which is newer), `release` (the API's answer, the platform's file), `http` (an `Http` trait and the system `curl` behind it, with the host allow-list), `download` (redirects by hand, resumable, bounded), `checksums` (`SHA256SUMS`, constant-time), `package` (the program out of the dmg, tarball or zip, strictly), `trust` (the signature rules), `install` (where Leon is installed and the swap with its way back), `launch` (the hand-over, the watch, the confirmation, the rollback), `updater` (the state machine published over a watch channel) and `state` (what is kept). No UI; every system tool (`hdiutil`, `ditto`, `codesign`, PowerShell) is behind a `Tools` trait. |
 | `leon-wire` | The wire protocol: versioned length-prefixed frames, the application messages (run a command, terminals, re-attach) and the relay rendezvous messages. Pure (`postcard` over `serde`); every decoder is bounded and fuzz-style tested. |
 | `leon-link` | Everything that keeps a remote session private: identity, the short pairing code (SPAKE2 then Noise `XXpsk3`), the Noise `IK` session with fragmentation and rekeying, the device registry, the relay WebSocket adapter, the durable `Client` (reconnection, exact terminal re-attach) and, behind `test-support`, an in-process test relay. |
-| `leon-turn` | Leon's unified agent protocol: one conversation with a coding agent, the same whatever the agent is. `agents` (the catalogue: an `Adapter` per agent, and the `AgentSession` it makes, which says what to write and reads what is printed), `claude` (Claude Code's control protocol), `codex` (Codex's application server), `acp` (the Agent Client Protocol: one session for every agent that serves it, with a `Dialect` for where they differ) and `opencode`, `grok`, `cursor` (each one's command, dialect and what it offers), `events` (`TurnEvent`, the questions and their answers, and `Lines`, bytes to clean lines), `shell` (the login shell a command is started through) and `tag` (the names messages are acknowledged by). Pure: lines in, events and lines out; it starts no process and knows no transport. See "Conversations in Leon's own interface". |
-| `leon-king` | King Leon, the coordinator (see [KING.md](KING.md)), without a disk or a process: `config` (`king.toml`: the agent King runs on, the tiers of workers, the limits), `coordinator` (King's conversation and its workers as a state machine: what the person, King's tools and the agents' events do to it, answered with the effects the service carries out; the wake that gives King its workers' news), `route` (the agent a job goes to, from a tier or a named agent, the agents' usage and the day's spending), `transcript` (what a conversation said, kept short), `prompt` (King's instructions, a worker's, the wake message), `verify` (a worker's evidence: its project's check and its pull request's CI, read from `gh`), `run` (a task of the board carried out as its steps, in the order their needs say) and `protocol` (the control socket's messages). The service, the socket, King's MCP server, the processes that check a worktree and look at CI (`king/checks.rs`), what the service does for runs (`king/serve/runs.rs`) and the window's line to the service (`king/link.rs`) are the application's (`king/`); the window draws King in `ui/king.rs` and `ui/king_view.rs`. |
+| `leon-turn` | Leon's unified agent protocol: one conversation with a coding agent, the same whatever the agent is. `agents` (the catalogue: an `Adapter` per agent, and the `AgentSession` it makes, which says what to write and reads what is printed), `claude` (Claude Code's control protocol), `codex` (Codex's application server), `acp` (the Agent Client Protocol: one session for every agent that serves it, with a `Dialect` for where they differ) and `opencode`, `grok`, `cursor` (each one's command, dialect and what it offers), `events` (`TurnEvent`, serializable with the types it holds, the questions and their answers, and `Lines`, bytes to clean lines), `shell` (the login shell a command is started through) and `tag` (the names messages are acknowledged by). Pure: lines in, events and lines out; it starts no process and knows no transport. See "Conversations in Leon's own interface". |
+| `leon-conversation` | A conversation as a list of things to draw. `model` (`Conversation`, its `Item`s and the reducer that builds them from the events of `leon-turn`, `blocks`, `segments`, `diff_rows`), `phrase` (what a stretch of tools says of itself), `stamp` (when a message was said), `format` (counts, spans and speeds, spelled one way for the conversation's foot and for Orchestrator's report line), `harness` (what a program wrote in the person's name, read back as a note) and `handoff` (the tag of an agent switch). Pure: events in, data out; the app's `chat::model`, `chat::phrase`, `chat::stamp` and `chat::harness` re-export it. |
+| `leon-king` | Orchestrator, the coordinator (see [KING.md](KING.md)), without a disk or a process: `config` (`king.toml`: the agent Orchestrator runs on, the tiers of workers, the limits), `coordinator` (Orchestrator's conversation and its workers as a state machine: what the person, Orchestrator's tools and the agents' events do to it, answered with the effects the service carries out; the wake that gives Orchestrator its workers' news), `route` (the agent a job goes to, from a tier or a named agent, the agents' usage and the day's spending), `transcript` (what a conversation said, kept short, for a phone), `log` (the records of Orchestrator's event log: what the agents printed, what was asked, Leon's notes, with the limits that keep it short) and `follow` (a client's side of it: the records reduced into a `leon-conversation` `Conversation`, and the transcript's entries read as one for what has no log), `prompt` (Orchestrator's instructions, a worker's, the wake message), `verify` (a worker's evidence: its project's check and its pull request's CI, read from `gh`), `run` (a task of the board carried out as its steps, in the order their needs say) and `protocol` (the control socket's messages). The service (`king/serve.rs`; `serve` takes a `Wiring`, so a test runs it on a socket of its own with scripted agents and a snapshotter of its own: `king/serve/tests_service.rs`), the socket, Orchestrator's MCP server, the processes that check a worktree and look at CI (`king/checks.rs`), what the service does for runs (`king/serve/runs.rs`), the files of the event log (`king/log.rs`) and the window's line to the service (`king/link.rs`) are the application's (`king/`); the window draws Orchestrator in `ui/king.rs` and `ui/king_view.rs`, and what its conversations said with the view of the chat's (`ui/transcript.rs`, below). |
 | `leon-voice` | Dictation: `catalog` (the speech models, which serve a language, where each comes from and its checksum), `store` (the models on this computer: installed, download, remove), `audio` (channels, rate, loudness; pure), and behind the feature `engine` `capture` (the microphone, through cpal) and `engine::Whisper` (whisper.cpp). The application sees `engine::Engine` only. See "Conversations in Leon's own interface". |
 | `leon-mobile` | Leon for phones, exported with UniFFI (the React Native package in `mobile/modules/leon-link-native` is generated from it). The application itself is `mobile/` (Expo, TypeScript; see `mobile/README.md`): it reaches this crate only through `mobile/src/link`, and is outside the Cargo workspace. `mobile` (identity, pairing, connecting), `session` (shared state, transcripts, turns), `bridge` and `turn` (a host terminal as a two-way line to an agent, with acknowledgements that survive a replay), `agents` (the command of a turn in the owner's login shell) and `events` and `options` (the types of `leon-turn` as they cross to the application, declared again field for field so the exported interface does not move). The agents themselves are driven by `leon-turn`. A turn runs in a host terminal, so it streams, survives a dropped connection and can be re-attached; the host needs nothing new. |
 | `leon-pty` | The GPUI-free part of terminals: `SpawnSpec`, grid maths and `PtyProcess` (a child in a pseudo-terminal driven by channels). `leon-term` re-exports it. |
@@ -52,6 +55,57 @@ leon-den ── gpui-kit and image only (no other Leon crate); wgpu behind `den3
 | `leon-term` | A terminal for GPUI: `Terminal` (PTY, emulator, child) and `TerminalView` (the GPUI entity). Depends on `gpui-kit` and nothing of Leon; the application maps its own command type onto `SpawnSpec`. |
 | `leon-mark` | The Leon lion, always animated: `geometry` (the glare's four contours as point lists, exactly the owner's SVG at rest), `motion` (a pure, deterministic time-to-pose function: blink, glare, glance, breath, nose twitch, intro, and a `Mood` that biases them), `element` (`AnimatedMark`, a GPUI element painted from vector paths) and `svg` (the same gestures written as animated SVG for the web). Depends on `gpui-kit` and nothing of Leon. |
 | `app` (`leon`) | The window (`ui/`, with `panes.rs` and `workspace.rs` for the terminal layout and `menu.rs` for the context menu), the engine that keeps the store fresh (`engine.rs`), the one shortcut registry (`keys.rs`), the themes and their design tokens (`theme/`), what a live session runs (`launch.rs`), the hidden `--diagnose` run (`diagnose.rs`). |
+
+### Orchestrator's event log
+
+The service keeps one log per conversation it hosts, so that every client draws
+what the chat draws. Records (`leon_king::log::Record`: an agent's `TurnEvent`,
+what was `Prompt`ed, `News` of the workers, a `Notice`, a `Report`, or a
+`Legacy` transcript entry) are numbered from the first ever kept and appended
+as one JSON line to `<data>/king/log/<conversation>/brain.jsonl` or
+`worker-<n>.jsonl` (a worker's is in the folder of the conversation that
+started it). The service is the only writer; text deltas are not kept (the
+message that replaces them is); a line torn by a kill is cut off when the log
+is opened. A log keeps 4000 records or 4 MiB, a record at most 256 KiB, and is
+cut at a turn down to 75% when over (numbers go on); a reply holds at most 500
+records or 512 KiB (`more` says there are more). A conversation that was kept
+before logs is written into its log as `Legacy` records once.
+
+A worker that runs on this computer in a git worktree gets a checkpoint before
+each turn, taken by the service with the chat's own code
+(`leon_remote::checkpoint`, shared with `chat/checkpoint.rs`: a scratch
+index, `write-tree`, `commit-tree`, the ref
+`refs/leon/checkpoints/king-<conversation>-w<worker>/<turn>`). It is taken on a
+thread of its own (`king/serve.rs`: the turn waits in `Service::waiting` and
+goes to the agent when the snapshot is there, or without one after 45 s or
+when it fails, with a note in the log; no other request waits), so the agent
+never hears the prompt before it. The log says so
+with `Record::Checkpoint { commit }` after the prompt that began the turn;
+`follow::Followed::turns` keeps, for each turn the person or Orchestrator began, where
+it begins and its commit, and the window (`ui/edits.rs`) counts what the turn
+changed with `git diff --numstat` between two checkpoints. The changed-files
+card, the panel of diffs and the git cell (`ui/chat_diff.rs`,
+`ui/chat_git.rs`) are the chat's own: they take a `Subject` (a chat of a pane
+or a worker of Orchestrator) and find its items, folder and `Edits` through the
+shell. What waits for a turn to end travels in `ConversationStatus.queue`
+(the texts; `queued` is still its length), and `Request::Unqueue` and
+`Request::Steer` take a message back or send it into the running turn.
+
+The protocol adds `Request::Events { target, since, limit, conversation }`
+(records after `since`, of a past conversation when `conversation` is given),
+`Request::Shutdown { when_idle }`, and, all `#[serde(default)]` so old peers
+read and write the same lines, `Status.version`, `Status.events` and
+`ConversationStatus.events_seq`. The window is notified by the status, then
+pulls: it asks for the records after the last it has (`ui/king.rs` `wanted`),
+applies them with `follow::Followed` (a log cut past what it holds, or gone,
+makes it ask again from the start) and draws the resulting `Conversation`. A
+conversation the service keeps no log of (an older service, a past
+conversation from before logs) is read from `Request::Transcript` /
+`PastConversation` entries through `follow::legacy`. On connecting, a window
+whose version is newer than the service's (a service that says none counts as
+older) asks it to `Shutdown { when_idle: true }` and starts another when its
+line closes, once per window (`king::link::skew`); a newer service is never
+stopped.
 
 ## Connecting a machine
 
@@ -1462,6 +1516,8 @@ prompt was reached.
 
 ## Conversations in Leon's own interface (`leon-turn`, `chat/`, `ui/chat*.rs`)
 
+Files named in an agent's message are links when they exist: `chat/paths.rs` (pure) finds paths in Markdown text (plain words, inline code, link addresses; relative to the conversation's folder, absolute, `~/`, `file://`, with `:line:col`) and rewrites the ones that exist into `file://` links; `ui/links.rs` keeps what is known of them (looked at once, off the interface thread, never while drawing) and receives the click, which opens text in the editor and everything else through the same `open_url` the web links use. A conversation on another machine has none.
+
 In beta, behind the setting `agent_interface` (`terminal` by default, `chat`
 for Leon's own): a session of an agent is a conversation drawn by Leon, the
 same for every agent, instead of the agent's own program in a terminal.
@@ -1532,7 +1588,7 @@ and the machine is this computer, and `start_chat` then does what
 resumes it as a conversation the same way, with what was said before read from
 the store above what is said next.
 
-**What is drawn** (`ui/chat_view.rs`) is the brand's: the page's own
+**What is drawn** (`ui/chat_view.rs` for the pane, `ui/transcript.rs` for what a conversation said) is the brand's: the page's own
 background and hairlines rather than bubbles, mono capitals for labels, the
 accent kept for the one thing to do next. The person's words sit in a cell on
 the right; the agent's are Markdown on the page; the work between them is one

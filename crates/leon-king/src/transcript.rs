@@ -9,12 +9,18 @@
 //! ever kept, so that a client asks for what came after the last one it has,
 //! and the oldest go once there are more than [`KEPT`].
 //!
+//! Everything it is told also goes to its [`Journal`], for the event log
+//! (`crate::log`): the entries are what a phone reads, the log what the
+//! window draws.
+//!
 //! Pure: events in, entries out.
 
 use std::collections::VecDeque;
 
 use leon_turn::{QuestionKind, TurnEvent};
 use serde::{Deserialize, Serialize};
+
+use crate::log::{Journal, Out, Record};
 
 /// How many entries a transcript keeps.
 pub const KEPT: usize = 400;
@@ -66,17 +72,40 @@ pub struct Transcript {
     /// The answer being written, from deltas, until its whole text comes.
     #[serde(skip)]
     draft: String,
+    /// What the event log is to be given of it.
+    #[serde(skip)]
+    journal: Journal,
 }
 
 impl Transcript {
     /// A transcript that goes on from `entries`, as kept before.
     pub fn restored(entries: Vec<Entry>) -> Self {
         let next = entries.last().map_or(0, |entry| entry.seq + 1);
-        Self {
+        let mut transcript = Self {
             entries: entries.into(),
             next,
             draft: String::new(),
-        }
+            journal: Journal::default(),
+        };
+        transcript.seed_log();
+        transcript
+    }
+
+    /// Says that what it holds was kept before the event log: the log is
+    /// given those entries first, if it has none of its own yet.
+    pub fn seed_log(&mut self) {
+        self.journal.seed(self.entries());
+    }
+
+    /// What the event log is to be given: [`Out`]s, oldest first. A thought
+    /// that more may join stays until something else is said.
+    pub fn take_log(&mut self) -> Vec<Out> {
+        self.journal.take()
+    }
+
+    /// All of it, for a conversation that is over.
+    pub fn finish_log(&mut self) -> Vec<Out> {
+        self.journal.finish()
     }
 
     /// Every entry it keeps, oldest first.
@@ -91,13 +120,71 @@ impl Transcript {
 
     /// Keeps an entry.
     pub fn push(&mut self, kind: Kind, text: impl Into<String>, at_ms: u64) {
-        self.keep(kind, text.into(), None, at_ms);
+        let text = text.into();
+        let record = match kind {
+            Kind::Prompt => Record::Prompt {
+                text: text.clone(),
+                attachments: Vec::new(),
+                turn: true,
+            },
+            Kind::News => Record::News { text: text.clone() },
+            Kind::Agent => Record::Event {
+                event: TurnEvent::Text { text: text.clone() },
+            },
+            Kind::Tool | Kind::Question | Kind::Notice | Kind::Report => Record::Notice {
+                text: text.clone(),
+                ends_turn: false,
+            },
+        };
+        if self.keep(kind, text, None, at_ms) {
+            self.journal.record(record, at_ms);
+        }
+    }
+
+    /// Keeps what was asked of an agent that Leon runs no turns of (one in a
+    /// terminal).
+    pub fn push_said(&mut self, text: impl Into<String>, at_ms: u64) {
+        let text = text.into();
+        let record = Record::Prompt {
+            text: text.clone(),
+            attachments: Vec::new(),
+            turn: false,
+        };
+        if self.keep(Kind::Prompt, text, None, at_ms) {
+            self.journal.record(record, at_ms);
+        }
+    }
+
+    /// Keeps a notice that the turn in flight ended with: it was cut short,
+    /// or it never began.
+    pub fn push_end(&mut self, text: impl Into<String>, at_ms: u64) {
+        let text = text.into();
+        let record = Record::Notice {
+            text: text.clone(),
+            ends_turn: true,
+        };
+        if self.keep(Kind::Notice, text, None, at_ms) {
+            self.journal.record(record, at_ms);
+        }
+    }
+
+    /// Keeps that the worktree was snapshotted before the turn just begun:
+    /// not something said, so it is in the event log only.
+    pub fn push_checkpoint(&mut self, commit: impl Into<String>, at_ms: u64) {
+        self.journal.record(
+            Record::Checkpoint {
+                commit: commit.into(),
+            },
+            at_ms,
+        );
     }
 
     /// Keeps Leon's report under an answer: its line, and its facts.
     pub fn push_report(&mut self, report: crate::report::Report, at_ms: u64) {
         let text = crate::report::line(&report.facts());
-        self.keep(Kind::Report, text, Some(report), at_ms);
+        if self.keep(Kind::Report, text, Some(report.clone()), at_ms) {
+            self.journal.record(Record::Report { report }, at_ms);
+        }
     }
 
     fn keep(
@@ -106,9 +193,9 @@ impl Transcript {
         text: String,
         report: Option<crate::report::Report>,
         at_ms: u64,
-    ) {
+    ) -> bool {
         if text.trim().is_empty() {
-            return;
+            return false;
         }
         self.entries.push_back(Entry {
             seq: self.next,
@@ -121,30 +208,33 @@ impl Transcript {
         while self.entries.len() > KEPT {
             self.entries.pop_front();
         }
+        true
     }
 
     /// Keeps what an event says, if it says anything worth keeping.
     pub fn apply(&mut self, event: &TurnEvent, at_ms: u64) {
+        self.journal.event(event, at_ms, &self.draft);
         match event {
             TurnEvent::TextDelta { text } => self.draft.push_str(text),
             TurnEvent::Text { text } => {
                 self.draft.clear();
-                self.push(Kind::Agent, text.clone(), at_ms);
+                self.keep(Kind::Agent, text.clone(), None, at_ms);
             }
             TurnEvent::ToolUse { name, summary, .. } => {
                 let line = format!("{name}: {summary}");
-                self.push(Kind::Tool, cut(&line, TOOL_CHARS), at_ms);
+                self.keep(Kind::Tool, cut(&line, TOOL_CHARS), None, at_ms);
             }
             TurnEvent::ToolResult {
                 ok: false, summary, ..
             } => {
                 let line = format!("failed: {summary}");
-                self.push(Kind::Tool, cut(&line, TOOL_CHARS), at_ms);
+                self.keep(Kind::Tool, cut(&line, TOOL_CHARS), None, at_ms);
             }
             TurnEvent::Question { id, kind } => {
-                self.push(
+                self.keep(
                     Kind::Question,
                     format!("[{id}] {}", question_text(kind)),
+                    None,
                     at_ms,
                 );
             }
@@ -156,16 +246,28 @@ impl Transcript {
             } => {
                 if !self.draft.is_empty() {
                     let draft = std::mem::take(&mut self.draft);
-                    self.push(Kind::Agent, draft, at_ms);
+                    self.keep(Kind::Agent, draft, None, at_ms);
                 }
                 if *interrupted {
-                    self.push(Kind::Notice, "The turn was stopped.", at_ms);
+                    self.keep(
+                        Kind::Notice,
+                        "The turn was stopped.".to_owned(),
+                        None,
+                        at_ms,
+                    );
                 } else if !ok {
                     let why = error.as_deref().unwrap_or("the agent gave no reason");
-                    self.push(Kind::Notice, format!("The turn failed: {why}"), at_ms);
+                    self.keep(Kind::Notice, format!("The turn failed: {why}"), None, at_ms);
                 }
             }
-            TurnEvent::Gone => self.push(Kind::Notice, "The turn no longer exists.", at_ms),
+            TurnEvent::Gone => {
+                self.keep(
+                    Kind::Notice,
+                    "The turn no longer exists.".to_owned(),
+                    None,
+                    at_ms,
+                );
+            }
             _ => {}
         }
     }
@@ -243,8 +345,16 @@ pub fn question_text(kind: &QuestionKind) -> String {
             })
             .collect::<Vec<_>>()
             .join(" "),
-        QuestionKind::Plan { plan } => format!("It planned and asks to start:\n{plan}"),
+        QuestionKind::Plan { plan } => format!("{PLAN_LEAD}{plan}"),
     }
+}
+
+/// What the text of a plan's question says before the plan itself.
+const PLAN_LEAD: &str = "It planned and asks to start:\n";
+
+/// The plan a question's text carries, when it is the question of a plan.
+pub fn plan_of(text: &str) -> Option<&str> {
+    text.strip_prefix(PLAN_LEAD)
 }
 
 /// At most `most` characters of `text`, with an ellipsis when cut.
@@ -270,6 +380,15 @@ mod tests {
             denied_tools: Vec::new(),
             interrupted: false,
         }
+    }
+
+    #[test]
+    fn a_plans_question_gives_the_plan_back() {
+        let kind = QuestionKind::Plan {
+            plan: "1. Do it".to_owned(),
+        };
+        assert_eq!(plan_of(&question_text(&kind)), Some("1. Do it"));
+        assert_eq!(plan_of("May it use Bash?"), None);
     }
 
     #[test]

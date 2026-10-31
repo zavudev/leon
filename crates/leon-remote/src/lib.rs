@@ -36,6 +36,7 @@
 
 pub mod agent;
 pub mod changes;
+pub mod checkpoint;
 pub mod command;
 pub mod connect;
 pub mod diagnosis;

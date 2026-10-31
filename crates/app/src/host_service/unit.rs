@@ -21,12 +21,13 @@ use std::path::{Path, PathBuf};
 pub enum Program {
     /// `leon host`: this computer for the devices the person paired.
     Host,
-    /// `leon king serve`: King Leon and its workers, without the window.
+    /// `leon orchestrator serve` (also `leon king serve`): the Orchestrator and its workers, without the window.
     King,
 }
 
 impl Program {
-    /// The word of Leon's command line: `leon host`, `leon king`.
+    /// The word of Leon's command line: `leon host`, `leon king` (the
+    /// Orchestrator's old name, which units and logs keep).
     pub fn word(self) -> &'static str {
         match self {
             Self::Host => "host",
@@ -34,9 +35,13 @@ impl Program {
         }
     }
 
-    /// The command for people: `leon host`, `leon king`.
+    /// The command for people: `leon host`, `leon orchestrator`.
     pub fn command(self) -> String {
-        format!("{} {}", crate::product::SLUG, self.word())
+        let word = match self {
+            Self::Host => self.word(),
+            Self::King => "orchestrator",
+        };
+        format!("{} {}", crate::product::SLUG, word)
     }
 
     /// The systemd user unit's file name.
@@ -51,7 +56,7 @@ impl Program {
     fn description(self) -> &'static str {
         match self {
             Self::Host => "Leon host: shares this computer with the devices you paired",
-            Self::King => "King Leon: answers for every project and runs its workers",
+            Self::King => "Orchestrator: answers for every project and runs its workers",
         }
     }
 }
@@ -236,11 +241,11 @@ pub fn systemd_unit(service: &Service) -> String {
             )
         })
         .unwrap_or_default();
-    let word = service.program.word();
+    let invocation = service.program.command();
     let description = service.program.description();
     format!(
         "\
-# Written by `leon {word} service install`; `leon {word} service uninstall` removes it.
+# Written by `{invocation} service install`; `{invocation} service uninstall` removes it.
 [Unit]
 Description={description}
 StartLimitIntervalSec=0
@@ -299,12 +304,12 @@ pub fn launchd_plist(service: &Service, label: &str, log: &Path) -> String {
         })
         .unwrap_or_default();
     let log = xml(&log.to_string_lossy());
-    let word = service.program.word();
+    let invocation = service.program.command();
     format!(
         "\
 <?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<!-- Written by `leon {word} service install`; `leon {word} service uninstall` removes it. -->
+<!-- Written by `{invocation} service install`; `{invocation} service uninstall` removes it. -->
 <plist version=\"1.0\">
 <dict>
     <key>Label</key>
@@ -481,9 +486,9 @@ WantedBy=default.target
     #[test]
     fn kings_unit_serves_king_from_the_data_directory_and_carries_the_path() {
         let expected = "\
-# Written by `leon king service install`; `leon king service uninstall` removes it.
+# Written by `leon orchestrator service install`; `leon orchestrator service uninstall` removes it.
 [Unit]
-Description=King Leon: answers for every project and runs its workers
+Description=Orchestrator: answers for every project and runs its workers
 StartLimitIntervalSec=0
 
 [Service]

@@ -41,7 +41,7 @@ A task can be a **step** of another: it names its **parent**, and the steps
 of the same task it **needs** done before it can start. Neither crosses a
 board; a task is never its own parent or step, and needs never go round in a
 circle. Deleting a task leaves its steps steps of nothing and drops it from
-what others need. King carries a task out as its steps in that order: a
+what others need. Orchestrator carries a task out as its steps in that order: a
 [run](KING.md#runs-a-task-carried-out-as-its-steps), started from the card
 (`r`, or **Run its steps** in its drawer, which lists the steps and how the
 run goes).
@@ -90,7 +90,7 @@ nothing. Dropping a card where it already is changes nothing.
 | `e` | Open the card's details beside the columns, or close them |
 | `n` | Open the panel for a new task, in the cursor's column, with the title ready to type |
 | `s` | Sync with GitHub now, or ask to turn it on |
-| `a` | Give the card to the King (also a button of the details): King's view opens, and King is told the task, its project and its id, and works it (see [KING.md](KING.md)) |
+| `a` | Give the card to the Orchestrator (also a button of the details): Orchestrator's view opens, and Orchestrator is told the task, its project and its id, and works it (see [KING.md](KING.md)) |
 | `d` | Finish the card |
 | `p` | Raise its priority: none, low, medium, high, urgent, none |
 | `g` | Switch between the project's board and the global one |
@@ -298,7 +298,7 @@ agent was started in (`CLAUDE_PROJECT_DIR` when the client sets it).
 No tool deletes a task: an agent that no longer wants one cancels it, and
 removing for good is `leon task rm`, the person's.
 
-`leon task mcp --anywhere` is the server King Leon is given: King runs in no
+`leon task mcp --anywhere` is the server Orchestrator is given: Orchestrator runs in no
 project, so every board is its own, and `task_create`, `task_list` and
 `task_search` take `project`, the root folder of the project whose board it
 is. Every task's JSON names its board's `project`.

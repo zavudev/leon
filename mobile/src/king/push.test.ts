@@ -10,14 +10,14 @@ const HOSTS: PushHost[] = [
   { hostId: 'd', online: true, king: true },
 ];
 
-describe("King's notices while closed", () => {
+describe("Orchestrator's notices while closed", () => {
   test('the requests', () => {
     expect(pushRegisterRequest(TOKEN, ' Pixel 9 ')).toEqual({ op: 'push_register', token: TOKEN, name: 'Pixel 9' });
     expect(pushRegisterRequest(TOKEN, '  ')).toEqual({ op: 'push_register', token: TOKEN, name: 'phone' });
     expect(pushForgetRequest(TOKEN)).toEqual({ op: 'push_forget', token: TOKEN });
   });
 
-  test('on, each computer with a King that can be asked is told the token once', () => {
+  test('on, each computer with an Orchestrator that can be asked is told the token once', () => {
     const work = pushWork({ on: true, token: TOKEN, forgetting: [], hosts: HOSTS, told: {} });
     expect(work).toEqual([
       { hostId: 'a', intent: 'register' },
@@ -48,7 +48,7 @@ describe("King's notices while closed", () => {
     expect(pushWork({ on: true, forgetting: ['a'], hosts: HOSTS, told: {} })).toEqual([]);
   });
 
-  test("a pressed notice opens the King it names, else the first computer with one", () => {
+  test("a pressed notice opens the Orchestrator it names, else the first computer with one", () => {
     const hosts = [
       { hostId: 'x', king: false },
       { hostId: 'y', king: true },

@@ -94,7 +94,7 @@ impl Nav {
     pub fn label(self) -> &'static str {
         match self {
             Nav::Home => "Home",
-            Nav::King => "The King",
+            Nav::King => "The Orchestrator",
             Nav::Tasks => "Tasks",
             Nav::Den => "The Den",
         }

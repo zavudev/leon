@@ -17,6 +17,8 @@
 //! * [`door`]: the host's way to the service, for a paired device's lines
 //!   to King;
 //! * [`link`]: the window's line to the service;
+//! * [`log`]: the files of the event log the service keeps of every
+//!   conversation;
 //! * this file: where everything lives, and `leon king …` itself.
 //!
 //! See `docs/KING.md`.
@@ -33,6 +35,8 @@ pub mod door;
 #[cfg(unix)]
 pub mod linger;
 pub mod link;
+#[cfg(unix)]
+pub mod log;
 #[cfg(unix)]
 pub mod mcp;
 #[cfg(unix)]
@@ -122,7 +126,9 @@ pub fn intercept(arguments: &[String]) -> Option<(Option<PathBuf>, Vec<String>)>
     let mut rest = arguments;
     loop {
         match rest {
-            [first, tail @ ..] if first == "king" => return Some((data_dir, tail.to_vec())),
+            [first, tail @ ..] if first == "orchestrator" || first == "king" => {
+                return Some((data_dir, tail.to_vec()))
+            }
             [first, value, tail @ ..] if first == "--data-dir" => {
                 data_dir = Some(PathBuf::from(value));
                 rest = tail;
@@ -136,35 +142,36 @@ pub fn intercept(arguments: &[String]) -> Option<(Option<PathBuf>, Vec<String>)>
     }
 }
 
-/// What `leon king` says to `--help`.
+/// What `leon orchestrator` (or `leon king`) says to `--help`.
 pub fn usage() -> String {
-    "King Leon: one agent that answers for every project and runs other agents.\n\n\
+    "Orchestrator: one agent that answers for every project and runs other agents.\n\n\
      Usage:\n  \
-       leon king say <words…>        say something to King and print its answer\n  \
-       leon king status              King and its workers\n  \
-       leon king log [worker]        what King, or a worker, said lately\n  \
-       leon king new                 put King's conversation away and start a new one\n  \
-       leon king history [n]         King's past conversations, or what one said\n  \
-       leon king resume <n>          take a past conversation up again\n  \
-       leon king start <title> --prompt <text> [--project <name>] [--tier <tier>]\n  \
-       \x20                            [--agent <agent> --model <model>] [--research | --plan]\n  \
-       leon king tell <worker> <words…>\n  \
-       leon king stop <worker>\n  \
-       leon king release <worker>    take a worker over: King lets it go\n  \
-       leon king answer [--worker <n>] <question> <choice> [reason…]\n  \
-       leon king run <task> [--parallel <n>] [--budget <usd>]\n  \
-       \x20                            carry out a task of the board as its steps\n  \
-       leon king run continue <run> [words…]\n  \
-       leon king run cancel <run>\n  \
-       leon king brain <agent> [model] [effort]\n  \
-       leon king config [--defaults] the configuration in force (king.toml over the defaults)\n  \
-       leon king serve               run the service in the foreground\n  \
-       leon king service install | uninstall | status | logs\n  \
-       \x20                            run the service in the background of your session,\n  \
-       \x20                            so King goes on with the window closed\n  \
-       leon king mcp                 King's tools, for the agent King runs on\n\n\
+       leon orchestrator say <words…>        say something to Orchestrator and print its answer\n  \
+       leon orchestrator status              Orchestrator and its workers\n  \
+       leon orchestrator log [worker]        what Orchestrator, or a worker, said lately\n  \
+       leon orchestrator new                 put Orchestrator's conversation away and start a new one\n  \
+       leon orchestrator history [n]         Orchestrator's past conversations, or what one said\n  \
+       leon orchestrator resume <n>          take a past conversation up again\n  \
+       leon orchestrator start <title> --prompt <text> [--project <name>] [--tier <tier>]\n  \
+       \x20                                    [--agent <agent> --model <model>] [--research | --plan]\n  \
+       leon orchestrator tell <worker> <words…>\n  \
+       leon orchestrator stop <worker>\n  \
+       leon orchestrator release <worker>    take a worker over: Orchestrator lets it go\n  \
+       leon orchestrator answer [--worker <n>] <question> <choice> [reason…]\n  \
+       leon orchestrator run <task> [--parallel <n>] [--budget <usd>]\n  \
+       \x20                                    carry out a task of the board as its steps\n  \
+       leon orchestrator run continue <run> [words…]\n  \
+       leon orchestrator run cancel <run>\n  \
+       leon orchestrator brain <agent> [model] [effort]\n  \
+       leon orchestrator config [--defaults] the configuration in force (king.toml over the defaults)\n  \
+       leon orchestrator serve               run the service in the foreground\n  \
+       leon orchestrator service install | uninstall | status | logs\n  \
+       \x20                                    run the service in the background of your session,\n  \
+       \x20                                    so Orchestrator goes on with the window closed\n  \
+       leon orchestrator mcp                 Orchestrator's tools, for the agent Orchestrator runs on\n\n\
      The service starts by itself when a command needs it. Its settings are\n\
-     king.toml in Leon's data folder; see docs/KING.md.\n"
+     king.toml in Leon's data folder; see docs/ORCHESTRATOR.md.\n\
+     `leon king` still works as the old name of this command.\n"
         .to_owned()
 }
 
@@ -383,7 +390,7 @@ pub fn run(data_dir: Option<PathBuf>, arguments: Vec<String>) -> i32 {
     {
         let _ = (command, data_dir);
         eprintln!(
-            "{} king: King's service runs on macOS and Linux only, for now.",
+            "{} orchestrator: Orchestrator's service runs on macOS and Linux only, for now.",
             product::SLUG
         );
         1
@@ -413,7 +420,7 @@ pub fn run(data_dir: Option<PathBuf>, arguments: Vec<String>) -> i32 {
         match outcome {
             Ok(()) => 0,
             Err(error) => {
-                eprintln!("{} king: {error}", product::SLUG);
+                eprintln!("{} orchestrator: {error}", product::SLUG);
                 1
             }
         }

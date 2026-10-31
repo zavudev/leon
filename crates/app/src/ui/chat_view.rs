@@ -16,30 +16,28 @@
 //! * a question is a framed cell above the field, in the accent.
 
 use gpui_kit::component::input::Textarea;
-use gpui_kit::component::text::TextView;
 use gpui_kit::prelude::*;
 use gpui_kit::{
     div, AnyElement, ClickEvent, Context, Div, FontWeight, MouseDownEvent, SharedString, Stateful,
 };
-use leon_turn::{
-    ChangeKind, ChoiceQuestion, DiffLine, FileChange, LineKind, PermissionChoice, PermissionEffect,
-    QuestionKind,
-};
+use leon_turn::{ChoiceQuestion, PermissionChoice, PermissionEffect, QuestionKind};
 
 use super::chat::Chat;
 use super::chat_find::Mark;
 use super::chat_menu::MenuKind;
 use super::chat_rewind::Files;
+use super::edits::Subject;
 use super::live::LiveId;
 use super::shell::Shell;
-use super::widgets::{attached_files, key_cap, led, mark, mono, with_latest, Lion};
-use crate::chat::model::{
-    blocks, cost_text, diff_rows, duration_text, segments, todo_title, work_label, Block, Item,
-    Level, Phase, Question, Row, Segment, Tone, Tool,
+use super::transcript::{
+    code_cell, column, plan_card, question_frame, status_line, Folder, Ids, Speaker, Surface,
+    Transcript,
 };
+use super::widgets::{attached_files, key_cap, led, mark, mono, with_latest, Lion};
+use crate::chat::model::{blocks, cost_text, duration_text, Block, Item, Level, Phase, Question};
 use crate::format;
 use crate::icons::{agent_icon, icon, IconName};
-use crate::theme::{fonts, metrics, px, Palette, DIFF_TINT};
+use crate::theme::{fonts, metrics, px, Palette};
 
 impl Shell {
     /// The leaf of a conversation, with the accent outline when it is the
@@ -63,7 +61,7 @@ impl Shell {
             .iter()
             .map(|question| self.chat_question(id, chat, question, colours, cx))
             .collect::<Vec<_>>();
-        let panel = self.chat_diff_panel(id, chat, colours, cx);
+        let panel = self.chat_diff_panel(Subject::Chat(id), colours, cx);
         let find = self.chat_find_bar(id, chat, colours, cx);
         let column_of_chat = div()
             .relative()
@@ -83,16 +81,16 @@ impl Shell {
                     .gap(px(8.))
                     .children(questions)
                     .children(self.chat_rewind_cell(id, chat, colours, cx))
-                    .children(self.chat_git_cell(id, chat, colours, cx))
+                    .children(self.chat_git_cell(Subject::Chat(id), colours, cx))
                     .children(self.chat_menu(id, chat, colours, cx))
                     .child(self.chat_composer(id, chat, colours, cx))
                     .child(chat_foot(
                         id,
                         chat,
                         [
-                            self.chat_branch_label(id, chat, colours),
+                            self.chat_branch_label(Subject::Chat(id), colours),
                             self.chat_pull_request(id, chat, colours, cx),
-                            Some(self.chat_git_button(id, chat, colours, cx)),
+                            Some(self.chat_git_button(Subject::Chat(id), colours, cx)),
                         ],
                         colours,
                     )),
@@ -210,11 +208,43 @@ impl Shell {
     ) -> AnyElement {
         let items = &chat.conversation.items;
         let running = chat.conversation.running();
+        let speaker = |at: usize| {
+            let who = crate::chat::model::agent_at(items, at, chat.agent);
+            Speaker {
+                agent: Some(who),
+                label: if who == chat.agent {
+                    answered_by(chat)
+                } else {
+                    // Said by the agent before a switch: the model in use now
+                    // is not its.
+                    crate::chat::complete::answered_by(None, format::agent_tag(who))
+                },
+            }
+        };
+        // What is done with the words of the person: put them back to change
+        // them, or say them again.
+        let said_actions =
+            |shell: &Shell, at: usize, group: SharedString, cx: &mut Context<Shell>| {
+                chat.can_rewind(at)
+                    .then(|| shell.chat_said_actions(id, at, group, colours, cx))
+            };
+        let transcript = Transcript {
+            ids: chat_ids(id),
+            surface: Surface::Chat(id),
+            folds: &chat.folds,
+            folder: chat.machine.is_local().then_some(Folder {
+                cwd: Some(chat.cwd.as_str()),
+            }),
+            speaker: &speaker,
+            said_actions: Some(&said_actions),
+        };
         // The list is the scrolling element itself, so that each of its
         // children can be scrolled to (the first one is the space above it,
         // and the gap after the last is the space below).
         let mut list = vec![div().flex_none().h(px(4.)).into_any_element()];
-        let cards = chat.cards();
+        let cards = chat
+            .edits
+            .cards(items, &chat.cwd, running || chat.launching);
         let found = chat.found();
         let marked =
             super::chat_find::marks(&found, chat.find.as_ref().map_or(0, |bar| bar.current));
@@ -228,9 +258,9 @@ impl Shell {
                 Block::Work { .. } => None,
             };
             let drawn = match block {
-                Block::Single(at) => self.chat_item(id, at, &items[at], chat, colours, cx),
+                Block::Single(at) => self.transcript_item(&transcript, at, &items[at], colours, cx),
                 Block::Work { from, to, live } => {
-                    self.chat_work(id, chat, from, &items[from..to], live, colours, cx)
+                    self.transcript_work(&transcript, from, &items[from..to], live, colours, cx)
                 }
             };
             list.push(
@@ -254,7 +284,7 @@ impl Shell {
                     div()
                         .flex_none()
                         .w_full()
-                        .child(self.chat_changed_card(id, chat, *turn, stats, colours, cx))
+                        .child(self.chat_changed_card(Subject::Chat(id), *turn, stats, colours, cx))
                         .into_any_element(),
                 );
             }
@@ -283,589 +313,6 @@ impl Shell {
         )
     }
 
-    /// A message or a notice.
-    fn chat_item(
-        &self,
-        id: LiveId,
-        at: usize,
-        item: &Item,
-        chat: &Chat,
-        colours: &Palette,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        match item {
-            // What the person said reads as a command typed at a prompt:
-            // the accent's `>` and a bar of it down the left.
-            Item::User { text, at: said_at } => {
-                let (words, files) = super::king::split_attached(text);
-                let group = SharedString::from(format!("chat-said-{}-{at}", id.0));
-                div()
-                    .debug_selector(move || format!("chat-user-{}-{at}", id.0))
-                    .group(group.clone())
-                    .w_full()
-                    .min_w_0()
-                    .flex()
-                    .gap(px(10.))
-                    .py(px(2.))
-                    .pl(px(12.))
-                    .border_l_2()
-                    .border_color(colours.signal)
-                    .font_family(fonts::mono())
-                    .font_features(fonts::mono_features())
-                    .child(div().flex_none().text_color(colours.signal).child(">"))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.))
-                            .text_color(colours.text)
-                            // Selected and copied like the agent's answers;
-                            // the list of paths the agent reads is not shown
-                            // as text: the files are below.
-                            .child(gpui_kit::base::SelectableText::new(
-                                SharedString::from(format!("chat-{}-said-{at}", id.0)),
-                                words,
-                            ))
-                            .children(self.chat_sent_files(id, at, &files, colours, cx)),
-                    )
-                    .children(self.chat_time(id, at, *said_at, colours))
-                    .children(
-                        chat.can_rewind(at)
-                            .then(|| self.chat_said_actions(id, at, group, colours, cx)),
-                    )
-                    .into_any_element()
-            }
-            Item::Agent {
-                text, at: said_at, ..
-            } => {
-                let (lines, palette) = (id.0, *colours);
-                let who = crate::chat::model::agent_at(&chat.conversation.items, at, chat.agent);
-                div()
-                    .debug_selector(move || format!("chat-agent-{}-{at}", id.0))
-                    .w_full()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(agent_icon(who, px(12.), colours))
-                            .child(
-                                mono(if who == chat.agent {
-                                    answered_by(chat)
-                                } else {
-                                    // Said by the agent before a switch: the
-                                    // model in use now is not its.
-                                    crate::chat::complete::answered_by(None, format::agent_tag(who))
-                                })
-                                .text_color(colours.text_faint),
-                            )
-                            .child(div().flex_1())
-                            .children(self.chat_time(id, at, *said_at, colours)),
-                    )
-                    .child(
-                        div().w_full().min_w_0().text_color(colours.text).child(
-                            TextView::markdown(
-                                SharedString::from(format!("chat-{}-message-{at}", id.0)),
-                                SharedString::from(super::chat_code::normalize(text).into_owned()),
-                            )
-                            .selectable(true)
-                            .code_block_actions(move |block, _, _| {
-                                super::chat_code::corner(
-                                    format!("chat-code-{lines}-{at}"),
-                                    block.lang().as_deref(),
-                                    block.code(),
-                                    &palette,
-                                )
-                            }),
-                        ),
-                    )
-                    .into_any_element()
-            }
-            Item::Todos(todos) => self.chat_todos(id, at, todos, colours),
-            Item::Notice { tone, text } => div()
-                .debug_selector(move || format!("chat-notice-{}-{at}", id.0))
-                .w_full()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(led(match tone {
-                    Tone::Plain => colours.text_faint,
-                    Tone::Bad => colours.error,
-                }))
-                .child(
-                    div()
-                        .min_w_0()
-                        .text_size(metrics::TEXT_SMALL())
-                        .text_color(match tone {
-                            Tone::Plain => colours.text_muted,
-                            Tone::Bad => colours.error,
-                        })
-                        .child(text.clone()),
-                )
-                .into_any_element(),
-            // A rule with the switch said on it: what is above is the first
-            // agent's, what is below the second's.
-            Item::Switched { from, to } => {
-                let rule = || div().flex_1().h(px(1.)).bg(colours.border);
-                div()
-                    .debug_selector(move || format!("chat-switch-{}-{at}", id.0))
-                    .w_full()
-                    .py(px(6.))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(rule())
-                    .child(
-                        mono(switched_said(*from, *to))
-                            .flex_none()
-                            .text_color(colours.text_faint),
-                    )
-                    .child(rule())
-                    .into_any_element()
-            }
-            // Work is drawn by `chat_work`.
-            Item::Thought { .. } | Item::Tool(_) => div().into_any_element(),
-        }
-    }
-
-    /// When a message was said, small and muted, at the end of its line:
-    /// the time of day, and the date when it was not today.
-    fn chat_time(
-        &self,
-        id: LiveId,
-        at: usize,
-        said: Option<i64>,
-        colours: &Palette,
-    ) -> Option<AnyElement> {
-        let said = said?;
-        let words = crate::chat::stamp::label(
-            said,
-            self.now().timestamp(),
-            crate::chat::stamp::local_offset(said),
-        );
-        (!words.is_empty()).then(|| {
-            div()
-                .debug_selector(move || format!("chat-time-{}-{at}", id.0))
-                .flex_none()
-                .font_family(fonts::mono())
-                .font_features(fonts::mono_features())
-                .text_size(metrics::TEXT_LABEL())
-                .text_color(colours.text_faint)
-                .child(words)
-                .into_any_element()
-        })
-    }
-
-    /// The agent's list of things to do, as a compact card: a mark for how
-    /// far each one is, the one it is on in the accent, the done ones struck
-    /// and muted, and how many are done in the title.
-    fn chat_todos(
-        &self,
-        id: LiveId,
-        at: usize,
-        todos: &[leon_turn::Todo],
-        colours: &Palette,
-    ) -> AnyElement {
-        use leon_turn::TodoStatus;
-        let row = |n: usize, todo: &leon_turn::Todo| {
-            let (sign, text) = match todo.status {
-                TodoStatus::Completed => (
-                    icon(IconName::Check, px(12.), colours.success).into_any_element(),
-                    colours.text_faint,
-                ),
-                TodoStatus::InProgress => (
-                    mono(super::king_view::spinner_frame())
-                        .text_color(colours.signal)
-                        .into_any_element(),
-                    colours.text,
-                ),
-                TodoStatus::Pending => (
-                    icon(IconName::Circle, px(12.), colours.text_faint).into_any_element(),
-                    colours.text_muted,
-                ),
-            };
-            div()
-                .debug_selector(move || format!("chat-todo-{}-{at}-{n}", id.0))
-                .flex()
-                .items_start()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(14.))
-                        .h(px(18.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(sign),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(metrics::TEXT_SMALL())
-                        .text_color(text)
-                        .when(todo.status == TodoStatus::InProgress, |this| {
-                            this.font_weight(FontWeight::SEMIBOLD)
-                        })
-                        .when(todo.status == TodoStatus::Completed, |this| {
-                            this.line_through()
-                        })
-                        .child(todo.text.clone()),
-                )
-        };
-        div()
-            .debug_selector(move || format!("chat-todos-{}-{at}", id.0))
-            .w_full()
-            .min_w_0()
-            .p(px(10.))
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .rounded(metrics::RADIUS())
-            .border_1()
-            .border_color(colours.border)
-            .bg(colours.surface)
-            .child(
-                mono(todo_title(todos).to_uppercase())
-                    .debug_selector(move || format!("chat-todos-title-{}-{at}", id.0))
-                    .text_color(colours.text_muted),
-            )
-            .children(todos.iter().enumerate().map(|(n, todo)| row(n, todo)))
-            .into_any_element()
-    }
-
-    /// A stretch of work, as the terminal draws it: what is not an edit
-    /// folds into a muted line that says what it did, and every edit stands
-    /// out of it with its diff.
-    #[allow(clippy::too_many_arguments)]
-    fn chat_work(
-        &self,
-        id: LiveId,
-        chat: &Chat,
-        from: usize,
-        items: &[Item],
-        live: bool,
-        colours: &Palette,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let parts = segments(items);
-        let last = parts.len().saturating_sub(1);
-        let mut out = div().w_full().min_w_0().flex().flex_col().gap(px(2.));
-        for (n, part) in parts.into_iter().enumerate() {
-            out = out.child(match part {
-                Segment::Edit(at) => match &items[at] {
-                    Item::Tool(tool) => self.chat_edit(id, chat, tool, colours, cx),
-                    _ => div().into_any_element(),
-                },
-                Segment::Run { from: a, to: b } => self.chat_run(
-                    id,
-                    chat,
-                    from + a,
-                    &items[a..b],
-                    live && n == last,
-                    colours,
-                    cx,
-                ),
-            });
-        }
-        out.into_any_element()
-    }
-
-    /// Thoughts and tools that change no file: one line that says what they
-    /// did, and under it, when it is open, each of them.
-    #[allow(clippy::too_many_arguments)]
-    fn chat_run(
-        &self,
-        id: LiveId,
-        chat: &Chat,
-        from: usize,
-        items: &[Item],
-        live: bool,
-        colours: &Palette,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        // Open while it happens; folded once the conversation moved on,
-        // unless it was opened by hand (and the other way round while live).
-        let toggled = chat.open_work.contains(&from);
-        let open = live != toggled;
-        let last = items.iter().rev().find_map(|item| match item {
-            Item::Tool(tool) => Some(format!("{} {}", tool.name, tool.summary)),
-            _ => None,
-        });
-        let hover = colours.surface_2;
-        let tools = || {
-            items.iter().filter_map(|item| match item {
-                Item::Tool(tool) => Some(tool),
-                _ => None,
-            })
-        };
-        let run_light = if tools().any(|tool| matches!(&tool.outcome, Some(o) if !o.ok)) {
-            colours.error
-        } else if tools().any(|tool| tool.outcome.is_none()) && live {
-            colours.signal
-        } else {
-            colours.text_faint
-        };
-        let head = div()
-            .id(SharedString::from(format!("chat-work-{}-{from}", id.0)))
-            .debug_selector(move || format!("chat-work-{}-{from}", id.0))
-            .h(px(24.))
-            .px(px(6.))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .rounded(metrics::RADIUS())
-            .cursor_pointer()
-            .hover(move |style| style.bg(hover))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.chat_toggle_work(id, from, cx);
-            }))
-            .child(icon(
-                if open {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                },
-                px(12.),
-                colours.text_faint,
-            ))
-            .child(led(run_light))
-            .child(mono(work_label(items)).text_color(colours.text_muted))
-            .when(!open, |this| {
-                this.children(last.map(|last| {
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .font_family(fonts::mono())
-                        .text_size(metrics::TEXT_SMALL())
-                        .text_color(colours.text_faint)
-                        .child(last)
-                }))
-            });
-        // Open, the work is a framed block of the drawing: its corners are
-        // marked, in the accent while it happens.
-        let mut body = div()
-            .relative()
-            .px(px(12.))
-            .py(px(8.))
-            .border_1()
-            .border_color(colours.border)
-            .flex()
-            .flex_col()
-            .gap(px(2.))
-            .children(if live {
-                super::lines::focus_ticks("chat-work", colours)
-            } else {
-                super::lines::frame_ticks("chat-work", colours)
-            });
-        if open {
-            for (offset, item) in items.iter().enumerate() {
-                body = body.child(match item {
-                    Item::Tool(tool) => self.chat_tool(id, chat, tool, colours, cx),
-                    Item::Thought { text } => div()
-                        .debug_selector(move || format!("chat-thought-{}-{}", id.0, from + offset))
-                        .py(px(4.))
-                        .min_w_0()
-                        .italic()
-                        .text_size(metrics::TEXT_SMALL())
-                        .text_color(colours.text_muted)
-                        .child(text.trim().to_owned())
-                        .into_any_element(),
-                    _ => div().into_any_element(),
-                });
-            }
-        }
-        div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap(px(2.))
-            .child(head)
-            .when(open, |this| this.child(body))
-            .into_any_element()
-    }
-
-    /// One tool: its light, its name and what with; under it, when asked,
-    /// everything it was given and everything that came back.
-    fn chat_tool(
-        &self,
-        id: LiveId,
-        chat: &Chat,
-        tool: &Tool,
-        colours: &Palette,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let open = chat.open_tools.contains(&tool.id);
-        let light = match &tool.outcome {
-            None => colours.signal,
-            Some(outcome) if outcome.ok => colours.success,
-            Some(_) => colours.error,
-        };
-        let name = tool.id.clone();
-        let key = tool.id.clone();
-        let hover = colours.surface_2;
-        let result = tool
-            .outcome
-            .as_ref()
-            .map(|outcome| outcome.summary.clone())
-            .filter(|summary| !summary.is_empty());
-        let detail = [
-            tool.detail.as_str(),
-            tool.outcome
-                .as_ref()
-                .map_or("", |outcome| outcome.detail.as_str()),
-        ]
-        .into_iter()
-        .filter(|part| !part.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-        let has_detail = !detail.is_empty();
-        div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .id(SharedString::from(format!("chat-tool-{}-{name}", id.0)))
-                    .debug_selector(move || format!("chat-tool-{}-{name}", id.0))
-                    .h(px(24.))
-                    .px(px(6.))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .rounded(metrics::RADIUS())
-                    .when(has_detail, |this| {
-                        this.cursor_pointer()
-                            .hover(move |style| style.bg(hover))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.chat_toggle_tool(id, &key, cx);
-                            }))
-                    })
-                    .child(led(light))
-                    .child(mono(tool.name.to_uppercase()).text_color(colours.text))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .font_family(fonts::mono())
-                            .text_size(metrics::TEXT_SMALL())
-                            .text_color(colours.text_muted)
-                            .child(tool.summary.clone()),
-                    )
-                    .children(result.map(|result| {
-                        div()
-                            .flex_none()
-                            .max_w(px(260.))
-                            .truncate()
-                            .text_size(metrics::TEXT_SMALL())
-                            .text_color(colours.text_faint)
-                            .child(result)
-                    })),
-            )
-            .when(open && has_detail, |this| {
-                this.child(code_cell(&detail, colours).ml(px(14.)).my(px(4.)))
-            })
-            .into_any_element()
-    }
-
-    /// A tool that changes files, as the terminal draws it: for each file a
-    /// line of what was done to it and how much, and under it, open unless
-    /// it was folded by hand, the diff.
-    fn chat_edit(
-        &self,
-        id: LiveId,
-        chat: &Chat,
-        tool: &Tool,
-        colours: &Palette,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let open = !chat.open_tools.contains(&tool.id);
-        let light = match &tool.outcome {
-            None => colours.signal,
-            Some(outcome) if outcome.ok => colours.success,
-            Some(_) => colours.error,
-        };
-        let hover = colours.surface_2;
-        let failure = tool
-            .outcome
-            .as_ref()
-            .filter(|outcome| !outcome.ok)
-            .map(|outcome| {
-                if outcome.detail.trim().is_empty() {
-                    outcome.summary.clone()
-                } else {
-                    outcome.detail.clone()
-                }
-            })
-            .filter(|said| !said.trim().is_empty());
-        let mut out = div().w_full().min_w_0().flex().flex_col();
-        for (at, change) in tool.changes.iter().enumerate() {
-            let key = tool.id.clone();
-            let name = if at == 0 {
-                format!("chat-tool-{}-{}", id.0, tool.id)
-            } else {
-                format!("chat-tool-{}-{}-{at}", id.0, tool.id)
-            };
-            out = out
-                .child(
-                    div()
-                        .id(SharedString::from(name.clone()))
-                        .debug_selector(move || name.clone())
-                        .h(px(24.))
-                        .px(px(6.))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .rounded(metrics::RADIUS())
-                        .cursor_pointer()
-                        .hover(move |style| style.bg(hover))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.chat_toggle_tool(id, &key, cx);
-                        }))
-                        .child(led(light))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .font_family(fonts::mono())
-                                .text_size(metrics::TEXT_SMALL())
-                                .text_color(colours.text_muted)
-                                .child(format!("{} ", change_verb(change.kind)))
-                                .child(
-                                    div()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(colours.text)
-                                        .child(change.path.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_color(colours.text_faint)
-                                        .child(format!(" ({})", change_counts(change))),
-                                ),
-                        ),
-                )
-                .when(open, |this| {
-                    this.child(diff_block(&tool.id, at, id, change, colours))
-                });
-        }
-        out.when_some(failure, |this, said| {
-            this.child(code_cell(&said, colours).ml(px(14.)).my(px(4.)))
-        })
-        .into_any_element()
-    }
-
     /// What the agent asks, with the ways to answer it.
     fn chat_question(
         &self,
@@ -876,29 +323,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let asked = question.id.clone();
-        let frame = |label: &str| {
-            let name = asked.clone();
-            div()
-                .debug_selector(move || format!("chat-question-{}-{name}", id.0))
-                .w_full()
-                .min_w_0()
-                .p(px(12.))
-                .flex()
-                .flex_col()
-                .gap(px(10.))
-                .rounded(metrics::RADIUS())
-                .border_1()
-                .border_color(colours.signal)
-                .bg(colours.surface)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(led(colours.signal))
-                        .child(mono(format!("[ {label} ]")).text_color(colours.signal)),
-                )
-        };
+        let ids = chat_ids(id);
+        let frame = |label: &str| question_frame(&ids, &asked, label, colours);
         match &question.kind {
             QuestionKind::Permission {
                 tool,
@@ -1005,68 +431,10 @@ impl Shell {
             QuestionKind::Plan { plan } => {
                 let start = asked.clone();
                 let keep = asked.clone();
-                let palette = *colours;
-                let copied = plan.clone();
-                let hover = colours.surface_2;
                 // A plan is a document to read before it is approved: the
-                // frame names it, the plan itself sits in a page of its own
-                // (as long as it needs, up to a scroll), and what it says can
-                // be copied.
-                frame("PROPOSED PLAN")
-                    .debug_selector(move || format!("chat-plan-card-{}", id.0))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("chat-plan-{}", id.0)))
-                            .debug_selector(move || format!("chat-plan-page-{}", id.0))
-                            .max_h(px(360.))
-                            .overflow_y_scroll()
-                            .min_w_0()
-                            .px(px(12.))
-                            .py(px(8.))
-                            .rounded(metrics::RADIUS())
-                            .border_1()
-                            .border_color(colours.border)
-                            .bg(colours.background)
-                            .child(
-                                TextView::markdown(
-                                    SharedString::from(format!("chat-{}-plan", id.0)),
-                                    SharedString::from(
-                                        super::chat_code::normalize(plan).into_owned(),
-                                    ),
-                                )
-                                .selectable(true)
-                                .code_block_actions(
-                                    move |block, _, _| {
-                                        super::chat_code::corner(
-                                            format!("chat-plan-code-{}", id.0),
-                                            block.lang().as_deref(),
-                                            block.code(),
-                                            &palette,
-                                        )
-                                    },
-                                ),
-                            ),
-                    )
-                    .child(
-                        div().flex().child(
-                            div()
-                                .id(SharedString::from(format!("chat-plan-copy-{}", id.0)))
-                                .debug_selector(move || format!("chat-plan-copy-{}", id.0))
-                                .h(px(20.))
-                                .px(px(6.))
-                                .flex()
-                                .items_center()
-                                .rounded(metrics::RADIUS())
-                                .cursor_pointer()
-                                .hover(move |style| style.bg(hover))
-                                .child(mono("COPY PLAN").text_color(colours.text_muted))
-                                .on_click(move |_: &ClickEvent, _, cx| {
-                                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
-                                        copied.clone(),
-                                    ));
-                                }),
-                        ),
-                    )
+                // frame names it, the plan itself sits in a page of its own,
+                // and what it says can be copied.
+                plan_card(frame("PROPOSED PLAN"), &ids, plan, colours)
                     .child(reason_field(&chat.reason, colours))
                     .child(
                         div()
@@ -1424,80 +792,6 @@ impl Shell {
 }
 
 impl Shell {
-    /// The files that went with a message: a picture as a thumbnail, any
-    /// other file as a chip with its name. Each opens in the system's viewer
-    /// when clicked.
-    fn chat_sent_files(
-        &self,
-        id: LiveId,
-        at: usize,
-        files: &[std::path::PathBuf],
-        colours: &Palette,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if files.is_empty() {
-            return None;
-        }
-        let tiles = files.iter().enumerate().map(|(place, file)| {
-            if super::widgets::is_image(file) {
-                return super::widgets::thumbnail(
-                    file,
-                    px(96.),
-                    format!("chat-sent-image-{}-{at}-{place}", id.0),
-                    cx,
-                );
-            }
-            let opened = file.clone();
-            let hover = colours.surface_2;
-            div()
-                .id(SharedString::from(format!(
-                    "chat-sent-file-{}-{at}-{place}",
-                    id.0
-                )))
-                .debug_selector(move || format!("chat-sent-file-{}-{at}-{place}", id.0))
-                .flex_none()
-                .max_w(px(220.))
-                .h(px(28.))
-                .px(px(8.))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .rounded(metrics::RADIUS())
-                .border_1()
-                .border_color(colours.border)
-                .cursor_pointer()
-                .hover(move |style| style.bg(hover))
-                .child(icon(IconName::File, px(12.), colours.text_muted))
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(metrics::TEXT_SMALL())
-                        .text_color(colours.text_muted)
-                        .child(
-                            file.file_name()
-                                .map(|name| name.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| file.display().to_string()),
-                        ),
-                )
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    let open = this.options.open_file.clone();
-                    open(cx, &opened);
-                }))
-                .into_any_element()
-        });
-        Some(
-            div()
-                .w_full()
-                .min_w_0()
-                .flex()
-                .flex_wrap()
-                .gap(px(6.))
-                .children(tiles)
-                .into_any_element(),
-        )
-    }
-
     /// The messages that wait for the turn to end, one row each above the
     /// field: what was said (its first line), and what can be done with it.
     /// Edit puts it back in the field, remove drops it, and send now tells
@@ -1788,15 +1082,8 @@ fn answered_by(chat: &Chat) -> String {
     )
 }
 
-/// The column every part of a conversation sits in: the whole width of the
-/// pane, so code and tables keep their lines on any screen.
-fn column() -> Div {
-    div().w_full().min_w_0().flex().flex_col()
-}
-
 /// What the agent is doing, under the last thing it did, while a turn is in
-/// flight: a spinner that turns while it works, as King's does, and how long
-/// the turn has gone on (`now` in milliseconds since the epoch).
+/// flight (`now` in milliseconds since the epoch).
 fn chat_status(id: LiveId, chat: &Chat, now: u64, colours: &Palette) -> Option<AnyElement> {
     let (light, words) = match chat.conversation.phase() {
         Phase::Idle => return None,
@@ -1804,29 +1091,19 @@ fn chat_status(id: LiveId, chat: &Chat, now: u64, colours: &Palette) -> Option<A
         Phase::Working => (None, "WORKING"),
         Phase::Asking => (Some(colours.warning), "WAITING FOR YOUR ANSWER"),
     };
-    let sign = match light {
-        Some(light) => led(light).into_any_element(),
-        None => mono(super::king_view::spinner_frame())
-            .debug_selector(move || format!("chat-spinner-{}", id.0))
-            .text_color(colours.signal)
-            .into_any_element(),
-    };
-    Some(
-        div()
-            .debug_selector(move || format!("chat-status-{}", id.0))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(sign)
-            .child(mono(words).text_color(colours.text_muted))
-            .children(chat.since.map(|since| {
-                mono(leon_king::report::span(
-                    (now.saturating_sub(since) / 1000) as i64,
-                ))
-                .text_color(colours.text_faint)
-            }))
-            .into_any_element(),
-    )
+    Some(status_line(
+        &chat_ids(id),
+        light,
+        words,
+        chat.since,
+        now,
+        colours,
+    ))
+}
+
+/// The names of the parts of the conversation of a pane.
+fn chat_ids(id: LiveId) -> Ids {
+    Ids::new("chat", id.0.to_string())
 }
 
 /// The line under the field: the agent, the folder, and what the
@@ -1960,158 +1237,6 @@ fn folder_name(path: &str) -> String {
     }
 }
 
-/// How many lines of a diff are drawn before the rest is counted.
-const DIFF_LINES: usize = 200;
-
-/// What was done to a file, as a verb.
-fn change_verb(kind: ChangeKind) -> &'static str {
-    match kind {
-        ChangeKind::Created => "Created",
-        ChangeKind::Updated => "Updated",
-        ChangeKind::Deleted => "Deleted",
-    }
-}
-
-/// How many lines came and went, as the header says it: "+3 -1", "+12".
-fn change_counts(change: &FileChange) -> String {
-    match change.kind {
-        ChangeKind::Created => format!("+{}", change.added()),
-        ChangeKind::Deleted => format!("-{}", change.removed()),
-        ChangeKind::Updated => format!("+{} -{}", change.added(), change.removed()),
-    }
-}
-
-/// The lines of the change of one file as a diff: a gutter with the number
-/// of each line where the agent said it (the new file's for kept and added
-/// lines, the old's for removed ones), the `+` or `-`, and the text; the
-/// added lines on the success tint and the removed ones on the error's.
-fn diff_block(tool: &str, at: usize, id: LiveId, change: &FileChange, colours: &Palette) -> Div {
-    let width = change
-        .lines()
-        .flat_map(|line| [line.old, line.new])
-        .flatten()
-        .max()
-        .map_or(0, |most| most.to_string().len());
-    let number = |line: &DiffLine| match line.kind {
-        LineKind::Removed => line.old,
-        _ => line.new,
-    };
-    let (rows, hidden) = diff_rows(change, DIFF_LINES);
-    let mut lines = div().flex().flex_col();
-    for row in rows {
-        let Row::Line(line) = row else {
-            lines = lines.child(
-                div()
-                    .px(px(8.))
-                    .text_color(colours.text_faint)
-                    .child("\u{22ef}"),
-            );
-            continue;
-        };
-        let (sign_colour, band, sign) = match line.kind {
-            LineKind::Added => (
-                colours.success,
-                Some(colours.success.opacity(DIFF_TINT)),
-                "+",
-            ),
-            LineKind::Removed => (colours.error, Some(colours.error.opacity(DIFF_TINT)), "-"),
-            LineKind::Context => (colours.text_faint, None, " "),
-        };
-        lines = lines.child(
-            div()
-                .flex()
-                .min_h(px(16.))
-                .px(px(8.))
-                .gap(px(8.))
-                .text_color(colours.text)
-                .when_some(band, |row, band| row.bg(band))
-                .when(width > 0, |row| {
-                    row.child(
-                        div()
-                            .flex_none()
-                            .w(px(width as f32 * 8.))
-                            .flex()
-                            .justify_end()
-                            .text_color(colours.text_faint)
-                            .child(number(line).map(|n| n.to_string()).unwrap_or_default()),
-                    )
-                })
-                .child(div().flex_none().text_color(sign_colour).child(sign))
-                .child(div().flex_1().min_w_0().child(if line.text.is_empty() {
-                    " ".to_owned()
-                } else {
-                    line.text.clone()
-                })),
-        );
-    }
-    let selector = if at == 0 {
-        format!("chat-diff-{}-{tool}", id.0)
-    } else {
-        format!("chat-diff-{}-{tool}-{at}", id.0)
-    };
-    div()
-        .debug_selector(move || selector.clone())
-        .min_w_0()
-        .ml(px(14.))
-        .my(px(4.))
-        .py(px(4.))
-        .rounded(metrics::RADIUS())
-        .bg(colours.surface_2)
-        .overflow_hidden()
-        .font_family(fonts::mono())
-        .font_features(fonts::mono_features())
-        .text_size(metrics::TEXT_SMALL())
-        .child(lines)
-        .when(hidden > 0, |this| {
-            this.child(
-                div()
-                    .px(px(8.))
-                    .pt(px(2.))
-                    .text_color(colours.text_faint)
-                    .child(format!("\u{2026} {hidden} more lines")),
-            )
-        })
-}
-
-/// Text as the agent wrote it, in a cell: mono, on the raised surface, as
-/// tall as it needs up to a few lines and scrolling beyond.
-fn code_cell(text: &str, colours: &Palette) -> Div {
-    let mut lines = div().flex().flex_col();
-    for line in text.lines() {
-        let colour = if line.starts_with("+ ") {
-            colours.success
-        } else if line.starts_with("- ") {
-            colours.error
-        } else {
-            colours.text_muted
-        };
-        lines = lines.child(
-            div()
-                .min_h(px(16.))
-                .text_color(colour)
-                .child(if line.is_empty() {
-                    " ".to_owned()
-                } else {
-                    line.to_owned()
-                }),
-        );
-    }
-    div()
-        .min_w_0()
-        .max_h(px(240.))
-        .overflow_hidden()
-        .px(px(10.))
-        .py(px(8.))
-        .rounded(metrics::RADIUS())
-        .border_1()
-        .border_color(colours.border)
-        .bg(colours.surface_2)
-        .font_family(fonts::mono())
-        .font_features(fonts::mono_features())
-        .text_size(metrics::TEXT_SMALL())
-        .child(lines)
-}
-
 /// The field for what to do instead, in its own hairline box.
 pub(super) fn reason_field(
     state: &gpui_kit::Entity<gpui_kit::component::input::InputState>,
@@ -2148,8 +1273,19 @@ pub(super) fn button(
     look: Look,
     colours: &Palette,
 ) -> Stateful<Div> {
+    button_tagged(selector, &id.0.to_string(), label, look, colours)
+}
+
+/// A button whose selector ends with `tag`: the conversation's.
+pub(super) fn button_tagged(
+    selector: impl Into<SharedString>,
+    tag: &str,
+    label: impl Into<SharedString>,
+    look: Look,
+    colours: &Palette,
+) -> Stateful<Div> {
     let selector: SharedString = selector.into();
-    let name = format!("{selector}-{}", id.0);
+    let name = format!("{selector}-{tag}");
     let hover = colours.surface_2;
     let base = div()
         .id(SharedString::from(name.clone()))
@@ -2216,15 +1352,6 @@ fn chip(
             colours.text_muted
         }))
         .child(icon(IconName::ChevronDown, px(10.), colours.text_faint))
-}
-
-/// What the rule of a switch of agents says.
-pub(super) fn switched_said(from: leon_core::AgentId, to: leon_core::AgentId) -> String {
-    format!(
-        "Switched from {} to {} \u{b7} context handed off",
-        format::agent_name(from),
-        format::agent_name(to)
-    )
 }
 
 /// How much of an "always allow" rule its button shows.
