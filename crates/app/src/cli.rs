@@ -138,7 +138,7 @@ pub struct Options {
     pub theme: Option<AppearanceChoice>,
     /// The theme for this run, over the saved one.
     pub theme_name: Option<ThemeId>,
-    /// Open on the Den.
+    /// Open on the Office.
     pub den: bool,
     /// Open on the board of tasks.
     pub tasks: bool,
@@ -153,7 +153,7 @@ pub fn usage() -> String {
          --data-dir <path>              Keep the database and settings here\n  \
          --theme <light|dark|system>    Use this appearance for this run\n  \
          --theme-name <id>              Use this theme for this run: {names}, or a user theme's id\n  \
-         --den                          Open on The Den\n  \
+         --den                          Open on The Office\n  \
          --tasks                        Open on the board of tasks\n  \
          -h, --help                     Print this help\n  \
          -V, --version                  Print the version",

@@ -110,7 +110,7 @@ pub fn list(folder: Option<&Path>) -> Vec<DenChoice> {
         let broken = loaded
             .notes
             .first()
-            .is_some_and(|note| note.starts_with("This is not a den"));
+            .is_some_and(|note| note.starts_with("This is not a room"));
         own.push(DenChoice {
             id: id.to_owned(),
             name: if broken {
@@ -119,7 +119,7 @@ pub fn list(folder: Option<&Path>) -> Vec<DenChoice> {
                 loaded.layout.name.clone()
             },
             detail: if broken {
-                "This file is not a den.".to_owned()
+                "This file is not a room.".to_owned()
             } else {
                 format!(
                     "Yours \u{b7} {} by {} \u{b7} {} pieces",
@@ -158,7 +158,7 @@ pub fn resolve(folder: Option<&Path>, id: &str) -> (String, Loaded) {
             if loaded
                 .notes
                 .first()
-                .is_some_and(|note| note.starts_with("This is not a den"))
+                .is_some_and(|note| note.starts_with("This is not a room"))
             {
                 loaded.notes[0] = format!("{id}.json: {}", loaded.notes[0]);
                 return (OFFICE.to_owned(), loaded);
@@ -170,7 +170,7 @@ pub fn resolve(folder: Option<&Path>, id: &str) -> (String, Loaded) {
             Loaded {
                 layout: default_layout(),
                 notes: vec![format!(
-                    "There is no den called `{id}`: The office is used instead."
+                    "There is no room called `{id}`: The office is used instead."
                 )],
             },
         ),
@@ -183,7 +183,7 @@ pub fn write(folder: &Path, id: &str, layout: &DenLayout) -> io::Result<PathBuf>
     if !valid_id(id) || is_prefab(id) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("`{id}` cannot be the name of a den's file"),
+            format!("`{id}` cannot be the name of a room's file"),
         ));
     }
     std::fs::create_dir_all(folder)?;
@@ -283,12 +283,12 @@ mod tests {
         assert_eq!((id.as_str(), &loaded.layout), ("office", &default_layout()));
         assert_eq!(
             loaded.notes,
-            ["There is no den called `attic`: The office is used instead."]
+            ["There is no room called `attic`: The office is used instead."]
         );
         std::fs::write(folder.join("attic.json"), "{ not json").unwrap();
         let (id, loaded) = resolve(Some(folder), "attic");
         assert_eq!((id.as_str(), &loaded.layout), ("office", &default_layout()));
-        assert!(loaded.notes[0].starts_with("attic.json: This is not a den"));
+        assert!(loaded.notes[0].starts_with("attic.json: This is not a room"));
         // A den with a mistake in it is still that den, with a note.
         std::fs::write(
             folder.join("attic.json"),
@@ -341,7 +341,7 @@ mod tests {
                 ("zebra", "Zebra crossing", true)
             ]
         );
-        assert_eq!(all[built_in.len() + 1].detail, "This file is not a den.");
+        assert_eq!(all[built_in.len() + 1].detail, "This file is not a room.");
         assert!(all[built_in.len()]
             .detail
             .starts_with("Yours \u{b7} 20 by 15"));

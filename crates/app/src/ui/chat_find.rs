@@ -77,7 +77,13 @@ impl Chat {
                     Block::Work { from, to, .. } => (*from, *to),
                 })
                 .collect();
-        let cards: Vec<usize> = self.cards().iter().map(|(at, ..)| *at).collect();
+        let going = self.conversation.running() || self.launching;
+        let cards: Vec<usize> = self
+            .edits
+            .cards(&self.conversation.items, &self.cwd, going)
+            .iter()
+            .map(|(at, ..)| *at)
+            .collect();
         child_of_items(&blocks, &cards)
     }
 

@@ -362,7 +362,7 @@ impl DenLayout {
             Err(error) => Loaded {
                 layout: fallback.clone(),
                 notes: vec![format!(
-                    "This is not a den ({error}): {} is used instead.",
+                    "This is not a room ({error}): {} is used instead.",
                     fallback.name
                 )],
             },
@@ -374,13 +374,13 @@ impl DenLayout {
         let mut notes = Vec::new();
         if self.version > VERSION {
             notes.push(format!(
-                "The den was written by a newer Leon (format {}): what this one does not know is left out.",
+                "The room was written by a newer Leon (format {}): what this one does not know is left out.",
                 self.version
             ));
         }
         self.version = VERSION;
         if self.name.trim().is_empty() {
-            self.name = "Den".to_owned();
+            self.name = "Room".to_owned();
         }
         let (cols, rows) = (
             self.cols.clamp(MIN_COLS, MAX_COLS),

@@ -322,7 +322,7 @@ fn an_empty_den_asks_for_nothing_once_it_has_said_so() {
     let den = den(&[]);
     let frame = den.frame(at(LATER));
     assert!(frame.actors.is_empty());
-    assert_eq!(frame.said.rows, vec!["The den is quiet. Too quiet."]);
+    assert_eq!(frame.said.rows, vec!["The office is quiet. Too quiet."]);
     assert_eq!(frame.wake, Wake::Never);
 }
 

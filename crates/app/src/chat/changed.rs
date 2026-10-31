@@ -17,16 +17,7 @@ use leon_turn::{FileChange, LineKind};
 use super::model::{Item, Tool};
 use super::rewind::Mark;
 
-/// One file a turn changed, and by how much.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Stat {
-    /// The file, from the root of the worktree where that is known.
-    pub path: String,
-    /// Lines that came.
-    pub added: usize,
-    /// Lines that went.
-    pub removed: usize,
-}
+pub use leon_remote::checkpoint::Stat;
 
 /// The path as the worktree at `root` names it: an agent writes the whole
 /// path of a file, a card wants the part below the worktree.
@@ -63,6 +54,7 @@ pub fn stats_of<'a>(changes: impl IntoIterator<Item = &'a FileChange>, root: &st
                 path,
                 added: change.added(),
                 removed: change.removed(),
+                binary: false,
             }),
         }
     }
@@ -228,28 +220,11 @@ pub fn diff_lines(change: &FileChange) -> Vec<DiffLine> {
     lines
 }
 
-/// Reads `git diff --numstat -z`: `added TAB removed TAB path NUL` for each
-/// file, `-` for both when it is not text.
-pub fn parse_numstat(raw: &str) -> Vec<Stat> {
-    raw.split('\0')
-        .filter_map(|record| {
-            let mut parts = record.trim_start_matches('\n').splitn(3, '\t');
-            let added = parts.next()?;
-            let removed = parts.next()?;
-            let path = parts.next().filter(|path| !path.is_empty())?;
-            Some(Stat {
-                path: path.to_owned(),
-                added: added.parse().unwrap_or(0),
-                removed: removed.parse().unwrap_or(0),
-            })
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::chat::rewind::Memory;
+    use leon_remote::checkpoint::parse_numstat;
     use leon_turn::FileChange;
 
     fn mark(item: usize, turn: u32) -> Mark {
@@ -275,12 +250,14 @@ mod tests {
                 Stat {
                     path: "src/a.rs".into(),
                     added: 2,
-                    removed: 3
+                    removed: 3,
+                    binary: false
                 },
                 Stat {
                     path: "b.rs".into(),
                     added: 3,
-                    removed: 0
+                    removed: 0,
+                    binary: false
                 },
             ]
         );
@@ -320,12 +297,14 @@ mod tests {
                 Stat {
                     path: "src/a.rs".into(),
                     added: 3,
-                    removed: 1
+                    removed: 1,
+                    binary: false
                 },
                 Stat {
                     path: "img/logo.png".into(),
                     added: 0,
-                    removed: 0
+                    removed: 0,
+                    binary: true
                 },
             ]
         );
@@ -386,6 +365,7 @@ mod tests {
             path: path.into(),
             added,
             removed: 0,
+            binary: false,
         }
     }
 
@@ -415,6 +395,7 @@ mod tests {
                 path: "src/a.rs".into(),
                 added: 1,
                 removed: 1,
+                binary: false,
             },
         ];
         // Git's count, for the file the tool named.
@@ -423,7 +404,8 @@ mod tests {
             [Stat {
                 path: "src/a.rs".into(),
                 added: 1,
-                removed: 1
+                removed: 1,
+                binary: false
             }]
         );
         // Before git has counted, what the tool said.
@@ -432,7 +414,8 @@ mod tests {
             [Stat {
                 path: "src/a.rs".into(),
                 added: 1,
-                removed: 1
+                removed: 1,
+                binary: false
             }]
         );
     }

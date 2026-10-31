@@ -567,7 +567,7 @@ impl Shell {
                     .child(chip(
                         "project-ask-king",
                         icon(IconName::Crown, px(12.), colours.signal).into_any_element(),
-                        "ask king to plan it",
+                        "ask the orchestrator to plan it",
                         super::sidebar::tooltip_text(Command::ShowKing),
                         Box::new(|this, window, cx| {
                             this.run_command(Command::ShowKing, window, cx);

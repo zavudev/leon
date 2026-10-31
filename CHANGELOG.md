@@ -2,6 +2,105 @@
 
 ## [Unreleased]
 
+### Added
+
+* The Office has a row in the sidebar, under the Orchestrator's row and over the filter, with
+  its paw icon: a click, or `Enter` with the cursor on it, opens the Office.
+  The row is the selected one while the Office is open, the arrow keys walk
+  the Orchestrator, the Office and then the tree, and it says how many lions there are
+  and, with a light, that one waits for you. It replaces the light that the
+  machine's button at the foot showed for the same thing; the Office is still
+  in that menu, in the palette and on its chord.
+* The sessions pinned on every machine are one `Pinned` section at the top of
+  the sidebar, above the machines, and the one pinned last is first. Each row
+  says the machine it runs on (a badge, when there are several machines) and
+  its project under the title, and its tooltip says machine, project and
+  worktree whole. Pinning, unpinning, dragging, moving with the keyboard and
+  undoing an unpin work on the one list. Pins made before keep their place:
+  positions that were per machine are read side by side, machine by machine,
+  until the section is ordered by hand once.
+
+* Files named in an agent's message are links when they exist: a path in
+  plain text, in inline code or as the address of a Markdown link, relative
+  to the folder the conversation works in, absolute, `~/` or `file://`, with
+  an optional `:line` or `:line:col`. A click opens text in Leon's editor
+  and everything else (media, binaries, folders) with the system's program,
+  as web links open. Nothing is looked for on a conversation of another
+  machine, and what does not exist stays text.
+* The card of the changed files lists all its files on request: "+6 more" is
+  a button, "Show less" takes them away again. A click on a file of the card
+  or of the panel's list shows its diff; Cmd or Ctrl and click, a second
+  click, or the OPEN button of a hovered row opens the file itself (Leon's
+  editor for text, the system's program for media and binaries), and the
+  panel's pane has an OPEN FILE button.
+
+### Changed
+
+* King is now called the Orchestrator everywhere you see it: the sidebar entry, its
+  view and notices, the palette and settings text, the messages sent to the
+  agents, the documentation and the phone app. `leon orchestrator …` is the
+  command, and `leon king …` keeps working. Its data folder, `king.toml` and
+  its settings and action ids are unchanged.
+* The Orchestrator looks and behaves like the chat. Its conversation and its
+  workers' are drawn by the chat's own view, from the same data: the tools of a turn are
+  folded into one line each phrased as in the chat, edits show their diffs,
+  todos and plans are cards, code is highlighted, messages say when they were
+  said, and the Orchestrator's conversation uses the full width of the window.
+* A worker of the Orchestrator that works on this computer gets what a chat has for its
+  files: each of its turns ends with the changed-files card, a click opens
+  the panel of diffs beside it (for the turn, one file or every uncommitted
+  change; Escape closes it), and the foot of the worker has its branch and
+  the DIFF and GIT buttons. The service takes the snapshot of the worktree
+  before each turn of a worker, as a chat does, and the window counts what
+  the turn changed against it.
+* The Orchestrator's field has what the chat's has: Up and Down walk the prompts said
+  before (a worker's field its own), and what waits for the turn to end is
+  listed above the field with EDIT (back in the field), REMOVE and SEND NOW
+  (into the running turn).
+* The snapshot of a worker's worktree before its turn no longer holds the
+  service: it is taken on a thread of its own, and only that worker's turn
+  waits for it (the agent hears the prompt after it, so the snapshot is of the
+  files as they were), while every other conversation and request is served.
+  A snapshot that fails, or takes longer than 45 seconds, is left: the turn
+  goes without a checkpoint and the worker's conversation says so in a note,
+  and the window lists no changes for it rather than wrong ones. Stopping a
+  worker whose turn waits for its snapshot ends the turn, and a service asked
+  to stop when idle waits for it.
+
+* The Den is now called **the Office** wherever you read its name: the sidebar
+  row, the view's title, the View menu and the palette (**Open the Office**,
+  **Edit the Office**, **Show the keys of the Office**), the settings
+  (**Narrator in the Office**, **Sessions running elsewhere in the Office**,
+  **The Office in 2.5D**), the messages and the phone app. The setting that
+  picks the room is now titled **Room**, and its commands are **Choose a
+  room…**, **Save the room as…**, **Rename the room…**, **Delete the room…**
+  and **Open rooms folder**. Nothing you have set changes: the settings keys,
+  the `--den` option, the `dens` folder and the room ids are the same.
+* The merged and open marks of the worktrees are found sooner. GitHub is asked
+  by a timer of the window itself, every 30 seconds while the window is in
+  front and every 5 minutes while it is not, and at once when the window comes
+  back to the front, when a worktree's head or branch moves, when an agent's
+  turn ends and after a pull request is opened from Leon. It no longer waits
+  for a terminal to be running. One question (two `gh pr list` calls that run
+  together, the heavy checks and reviews only for the open pull requests)
+  gives every state of every branch. Without `gh`, signed out or offline, a
+  project backs off up to 15 minutes and nothing is said.
+* The button that shows or hides the inactive sessions moved from the menu of
+  the machine at the foot of the sidebar to the end of the filter field at the
+  top, beside the key that opens it, as an eye with a tooltip.
+
+### Fixed
+
+* The panel of diffs listed its files two lines tall in rows of one line, so
+  that each row's folders were painted over the row before. A row is one
+  line now: the file name, then its folders dimmed and cut with an ellipsis,
+  with the whole path in its tooltip. When they do not fit the ellipsis is at
+  the start (`…/public/audio/`), so the folders nearest the file stay.
+* A file that is not text (a sound, a picture) said `+0 -0` in the card and
+  the panel and left the pane empty. It says "binary", and the pane says
+  "Binary file — not shown" with its size (or that it is gone) and a button
+  to open it.
+
 ## [0.14.0] - 2026-10-29
 
 ### Added

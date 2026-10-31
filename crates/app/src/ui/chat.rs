@@ -16,7 +16,7 @@
 //! for the agents the protocol knows. Everything else starts in a terminal as
 //! before.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
@@ -28,13 +28,14 @@ use leon_turn::{
 };
 
 use super::activity::Activity;
-use super::chat_diff::DiffPanel;
 use super::chat_git::GitCell;
 use super::chat_menu::Menu;
 use super::chat_rewind::Rewinding;
+use super::edits::{Edits, Subject};
 use super::live::{LiveId, LiveState};
 use super::shell::{Main, Pane, Shell};
 use super::terminals::Place;
+use super::transcript::Folds;
 use super::tree;
 use crate::chat::checkpoint;
 use crate::chat::model::{Conversation, Phase};
@@ -82,12 +83,6 @@ pub fn title_by_agent(
     })
 }
 
-/// How long the checkpoints of a chat that was never closed are kept, in
-/// seconds: a crash leaves them behind.
-const CHECKPOINTS_KEPT_SECS: i64 = 30 * 24 * 60 * 60;
-/// How many checkpoints a chat keeps: the newest.
-const CHECKPOINTS_PER_CHAT: usize = 200;
-
 /// What the agent a conversation went on with is told of what came before,
 /// and whether it has been yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,10 +116,8 @@ pub struct Chat {
     pub scroll: ScrollHandle,
     /// Files sent with what is said next: images pasted, as files.
     pub attached: Vec<std::path::PathBuf>,
-    /// The stretches of work opened by hand, by the index of their first item.
-    pub open_work: HashSet<usize>,
-    /// The tools whose detail is shown, by id.
-    pub open_tools: HashSet<String>,
+    /// What was opened or folded by hand: stretches of work and tools.
+    pub folds: Folds,
     /// What is picked of a question with options and not sent yet: by the
     /// question's id and the id of one of its questions.
     pub picks: HashMap<(String, String), Vec<String>>,
@@ -158,8 +151,10 @@ pub struct Chat {
     /// Names its checkpoints in the repository of its folder: unlike its id
     /// in the window, no other run of Leon makes the same.
     pub key: String,
-    /// Where each of its turns began, for going back to before one.
-    pub marks: Vec<Mark>,
+    /// What it did to its worktree: where each of its turns began (for going
+    /// back to before one), what each changed, the panel of diffs beside it
+    /// and the steps that take the changes away.
+    pub edits: Edits,
     /// The number the next turn's checkpoint is made under.
     pub next_turn: u32,
     /// The turn is being made ready: its checkpoint is being taken, and the
@@ -171,20 +166,9 @@ pub struct Chat {
     pub find: Option<super::chat_find::Find>,
     /// Where the bar's words are written.
     pub find_input: Entity<InputState>,
-    /// The panel of diffs beside it, when open.
-    pub diff: Option<DiffPanel>,
     /// Where the person is in the prompts they sent before, while browsing
     /// them with the arrows in the field.
     pub recall: Option<super::chat_recall::Recall>,
-    /// Counts the readings of the panel, so an answer that is no longer the
-    /// latest is dropped.
-    pub diff_reads: u64,
-    /// What each turn changed, as git counted it between the snapshots of
-    /// the worktree, by the turn's number. A turn without an entry is
-    /// counted from what its tools said.
-    pub measured: HashMap<u32, Vec<crate::chat::changed::Stat>>,
-    /// Its branch and the steps that take its changes away.
-    pub git: GitCell,
     /// The other agents it can go on with (installed on its machine, and
     /// driven by the protocol), as last looked up: asking the machine takes
     /// a look for each program, so it is when the list is about to be
@@ -255,7 +239,7 @@ impl Chat {
             || self.reason.focus_handle(cx).is_focused(window)
             || self.filter.focus_handle(cx).is_focused(window)
             || self.find_input.focus_handle(cx).is_focused(window)
-            || self.git.typing(window, cx)
+            || self.edits.git.typing(window, cx)
     }
 
     /// Whether a turn's process is still there.
@@ -427,8 +411,7 @@ impl Shell {
                 reason,
                 scroll: ScrollHandle::new(),
                 attached: Vec::new(),
-                open_work: HashSet::new(),
-                open_tools: HashSet::new(),
+                folds: Folds::default(),
                 picks: HashMap::new(),
                 mode: None,
                 model: None,
@@ -447,17 +430,13 @@ impl Shell {
                     (self.options.now)().timestamp_millis().max(0),
                     id.0
                 ),
-                marks: Vec::new(),
+                edits: Edits::new(GitCell::new(window, cx)),
                 next_turn: 1,
                 launching: false,
                 rewinding: None,
                 find: None,
                 find_input,
-                diff: None,
                 recall: None,
-                diff_reads: 0,
-                measured: HashMap::new(),
-                git: GitCell::new(window, cx),
                 switchable: Vec::new(),
                 handoff: None,
                 turn: None,
@@ -833,7 +812,7 @@ impl Shell {
         chat.conversation.sent_at(&prompt, now);
         let turn = chat.next_turn;
         chat.next_turn += 1;
-        chat.marks.push(Mark {
+        chat.edits.marks.push(Mark {
             item: chat.conversation.items.len().saturating_sub(1),
             turn,
             checkpoint: None,
@@ -853,11 +832,7 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             let commit = cx
                 .background_spawn(async move {
-                    let repo = checkpoint::Repo::of(std::path::Path::new(&cwd))?;
-                    repo.forget_older_than(now - CHECKPOINTS_KEPT_SECS, &key);
-                    let commit = repo.capture(&key, turn).ok()?;
-                    repo.keep_newest(&key, CHECKPOINTS_PER_CHAT);
-                    Some(commit)
+                    checkpoint::take(std::path::Path::new(&cwd), &key, turn, now)
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -865,7 +840,7 @@ impl Shell {
                     return;
                 };
                 chat.launching = false;
-                if let Some(mark) = chat.marks.iter_mut().find(|mark| mark.turn == turn) {
+                if let Some(mark) = chat.edits.marks.iter_mut().find(|mark| mark.turn == turn) {
                     mark.checkpoint = commit;
                 }
                 this.chat_launch(id, prompt, cx);
@@ -1096,7 +1071,7 @@ impl Shell {
         // What the turn changed, counted in the worktree, for the card at its
         // end.
         if finished {
-            self.chat_measure(id, cx);
+            self.chat_measure(Subject::Chat(id), cx);
             self.chat_title(id, cx);
         }
         cx.notify();
@@ -1378,26 +1353,6 @@ impl Shell {
         }
     }
 
-    /// Opens or folds a stretch of work.
-    pub(super) fn chat_toggle_work(&mut self, id: LiveId, from: usize, cx: &mut Context<Self>) {
-        if let Some(chat) = self.chats.get_mut(&id) {
-            if !chat.open_work.remove(&from) {
-                chat.open_work.insert(from);
-            }
-            cx.notify();
-        }
-    }
-
-    /// Shows or hides the detail of a tool.
-    pub(super) fn chat_toggle_tool(&mut self, id: LiveId, tool: &str, cx: &mut Context<Self>) {
-        if let Some(chat) = self.chats.get_mut(&id) {
-            if !chat.open_tools.remove(tool) {
-                chat.open_tools.insert(tool.to_owned());
-            }
-            cx.notify();
-        }
-    }
-
     /// The person looks at a conversation: what its agent last did is seen,
     /// and its field has the keyboard.
     pub(super) fn chat_shown(&mut self, id: LiveId, window: &mut Window, cx: &mut Context<Self>) {
@@ -1485,14 +1440,14 @@ impl Shell {
             let open = self
                 .chats
                 .get(&id)
-                .map(|chat| (chat.diff.is_some(), chat.git.open));
+                .map(|chat| (chat.edits.diff.is_some(), chat.edits.git.open));
             match open {
                 Some((true, _)) => {
-                    self.chat_diff_close(id, cx);
+                    self.chat_diff_close(Subject::Chat(id), cx);
                     return true;
                 }
                 Some((false, true)) => {
-                    self.chat_git_close(id, cx);
+                    self.chat_git_close(Subject::Chat(id), cx);
                     return true;
                 }
                 _ => {}

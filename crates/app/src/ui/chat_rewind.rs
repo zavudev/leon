@@ -53,7 +53,7 @@ pub enum Files {
 impl Chat {
     /// The turn the person's words at `at` began, if that is what they are.
     pub fn mark_at(&self, at: usize) -> Option<&Mark> {
-        self.marks.iter().find(|mark| mark.item == at)
+        self.edits.marks.iter().find(|mark| mark.item == at)
     }
 
     /// Whether the message at `at` can be gone back to: it began a turn,
@@ -178,7 +178,7 @@ impl Shell {
             agent: crate::format::agent_name(chat.agent).to_owned(),
             memory: mark.memory.clone(),
             session: chat.conversation.session_id.clone(),
-            turns: rewind::turns_reached(&chat.conversation.items, &chat.marks, asked.at),
+            turns: rewind::turns_reached(&chat.conversation.items, &chat.edits.marks, asked.at),
             projects: self.engine.prefs().roots.claude_projects,
             cwd: chat.cwd.clone(),
             start: Start {
@@ -257,20 +257,21 @@ impl Shell {
                 handoff.sent_in = None;
             }
         }
-        chat.marks.retain(|mark| mark.item < asked.at);
+        chat.edits.marks.retain(|mark| mark.item < asked.at);
         // The turns that are gone have nothing to count, and a panel that
         // showed one has nothing to show.
-        let kept: Vec<u32> = chat.marks.iter().map(|mark| mark.turn).collect();
-        chat.measured.retain(|turn, _| kept.contains(turn));
+        let kept: Vec<u32> = chat.edits.marks.iter().map(|mark| mark.turn).collect();
+        chat.edits.measured.retain(|turn, _| kept.contains(turn));
         if chat
+            .edits
             .diff
             .as_ref()
             .is_some_and(|panel| matches!(panel.source, super::chat_diff::Source::Turn(turn) if !kept.contains(&turn)))
         {
-            chat.diff = None;
-            chat.diff_reads += 1;
+            chat.edits.diff = None;
+            chat.edits.diff_reads += 1;
         }
-        chat.open_work.retain(|from| *from < asked.at);
+        chat.folds.work.retain(|from| *from < asked.at);
         chat.conversation.rewind(asked.at, done.session);
         if new_session {
             // The history has no row for a session that was just made.

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/leon-mark",
     "crates/leon-turn",
+    "crates/leon-conversation",
     "crates/leon-voice",
     "crates/leon-den",
     "crates/leon-core",
@@ -45,6 +46,7 @@ leon-wire = { path = "crates/leon-wire" }
 leon-link = { path = "crates/leon-link" }
 leon-update = { path = "crates/leon-update" }
 leon-turn = { path = "crates/leon-turn" }
+leon-conversation = { path = "crates/leon-conversation" }
 leon-voice = { path = "crates/leon-voice", default-features = false }
 
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }

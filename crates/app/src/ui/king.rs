@@ -17,10 +17,19 @@
 //! of King's is in the sidebar.
 //!
 //! **Reading.** The window asks the service for the status and for what
-//! each conversation said after the last entry it has, and is told whenever
-//! anything changes: every notice carries the new status, and a
-//! conversation with entries the window does not have yet is asked for them
-//! ([`wanted`]). Nothing is read on a timer.
+//! each conversation did after the last record of its event log it has
+//! ([`Request::Events`]), and is told whenever anything changes: every
+//! notice carries the new status, and a conversation with records the
+//! window does not have yet is asked for them ([`wanted`]). Nothing is read
+//! on a timer. The records are reduced into the same conversation the chat
+//! of the window holds (`leon_conversation`), so King draws what the chat
+//! draws. A conversation the service keeps no log of (a service of an older
+//! version, a past conversation from before there were logs) is read from
+//! its transcript's entries instead.
+//!
+//! **Versions.** A service of an older version than the window's is asked
+//! to stop when no turn runs ([`Request::Shutdown`]) and started again, once
+//! per window ([`skew`]); one that is newer is left alone.
 //!
 //! The drawing is `king_view.rs`.
 
@@ -29,38 +38,69 @@ use std::collections::{HashMap, HashSet};
 use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::prelude::*;
 use gpui_kit::{Context, Entity, ScrollHandle, Subscription, Task, Window};
+use leon_conversation::model::Conversation;
 use leon_core::{AgentId, MachineId};
 use leon_king::coordinator::{Form, Open, Reply as Answer, Target};
+use leon_king::follow::{self, Applied, Followed};
 use leon_king::history::Past;
-use leon_king::protocol::{Entries, Notice, Request, Status, TerminalAsk};
-use leon_king::transcript::{Entry, KEPT};
+use leon_king::log::Events;
+use leon_king::protocol::{ConversationStatus, Entries, Notice, Request, Status, TerminalAsk};
+use leon_king::report::Report;
+use leon_king::transcript::{Entry, Kind, KEPT};
 use serde_json::Value;
 
+use super::chat_git::GitCell;
+use super::chat_recall::{self, Recall};
+use super::edits::{Edits, Subject};
 use super::home::Nav;
 use super::shell::{Main, Pane, Shell};
 use super::steps::{KingInfo, KingMode, KingModel};
 use super::terminals::Place;
+use super::transcript::Folds;
 use crate::engine::StatusKind;
-use crate::king::link::Heard;
+use crate::king::link::{skew, Heard, Skew};
 use crate::launch::Launch;
 
-/// What a conversation said, as far as the window has it.
+/// What a conversation said, as far as the window has it: the records of
+/// the service's event log, reduced into the conversation the chat holds
+/// ([`Followed`]) or, for one the service keeps no log of, its transcript's
+/// entries read as one ([`follow::legacy`]).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Feed {
-    /// Its entries, oldest first.
+    /// What the records of the log say.
+    pub followed: Followed,
+    /// The entries of the transcript, while there is no log.
     pub entries: Vec<Entry>,
+    /// What the entries say.
+    legacy: Conversation,
     /// A request for what came after the last one is on its way.
     pub asking: bool,
 }
 
 impl Feed {
-    /// The number of the newest entry the window has.
+    /// What is drawn: the log's conversation when the service has a log of
+    /// it, else the transcript's.
+    pub fn conversation(&self) -> &Conversation {
+        if self.followed.has_log() {
+            &self.followed.conversation
+        } else {
+            &self.legacy
+        }
+    }
+
+    /// The number of the newest record of the log the window has.
+    pub fn last_record(&self) -> Option<u64> {
+        self.followed.last()
+    }
+
+    /// The number of the newest entry of the transcript the window has.
     pub fn last(&self) -> Option<u64> {
         self.entries.last().map(|entry| entry.seq)
     }
 
-    /// Adds what the service sent: only what comes after what is there, so
-    /// that an answer that crossed another is never kept twice.
+    /// Adds what the service sent of the transcript: only what comes after
+    /// what is there, so that an answer that crossed another is never kept
+    /// twice.
     pub fn add(&mut self, entries: Entries) {
         let last = self.last();
         self.entries.extend(
@@ -72,27 +112,89 @@ impl Feed {
             let extra = self.entries.len() - KEPT;
             self.entries.drain(..extra);
         }
+        self.legacy = follow::legacy(&self.entries);
+    }
+
+    /// Adds what the service sent of the log. The transcript is not needed
+    /// once there is a log.
+    pub fn apply(&mut self, events: &Events) -> Applied {
+        let applied = self.followed.apply(events);
+        if self.followed.has_log() && !self.entries.is_empty() {
+            self.entries.clear();
+            self.legacy = Conversation::new();
+        }
+        applied
+    }
+
+    /// The facts of the report whose note is the item at `at`.
+    pub fn report_at(&self, at: usize) -> Option<&Report> {
+        if !self.followed.has_log() {
+            return None;
+        }
+        self.followed
+            .reports
+            .iter()
+            .find(|(place, _)| *place == at)
+            .map(|(_, report)| report)
+    }
+
+    /// Leon's newest report under an answer.
+    pub fn latest_report(&self) -> Option<&Report> {
+        if self.followed.has_log() {
+            return self.followed.reports.last().map(|(_, report)| report);
+        }
+        self.entries
+            .iter()
+            .rev()
+            .filter(|entry| entry.kind == Kind::Report)
+            .find_map(|entry| entry.report.as_ref())
     }
 }
 
-/// Which conversations have entries the window does not have yet and is
-/// not already asking for: King's always, a worker's while its card is open.
-pub fn wanted(status: &Status, brain: &Feed, open: Option<(u32, &Feed)>) -> Vec<Target> {
-    let behind = |newest: Option<u64>, feed: &Feed| {
-        !feed.asking && newest.is_some() && newest != feed.last()
-    };
+/// Where the window gets what it lacks of a conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pull {
+    /// The records of its event log.
+    Events,
+    /// The entries of its transcript: the service keeps no log of it.
+    Transcript,
+}
+
+/// Whether a conversation has something the window lacks and is not already
+/// asking for, and where from.
+fn behind(status: &Status, conversation: &ConversationStatus, feed: &Feed) -> Option<Pull> {
+    if feed.asking {
+        return None;
+    }
+    if status.events {
+        match conversation.events_seq {
+            Some(newest) => return (feed.last_record() != Some(newest)).then_some(Pull::Events),
+            // The log the window follows is not there any more: asking is
+            // how it finds out.
+            None if feed.last_record().is_some() => return Some(Pull::Events),
+            None => {}
+        }
+    }
+    (conversation.last_seq.is_some() && conversation.last_seq != feed.last())
+        .then_some(Pull::Transcript)
+}
+
+/// Which conversations have something the window does not have yet and is
+/// not already asking for, and where it comes from: King's always, a
+/// worker's while its card is open.
+pub fn wanted(status: &Status, brain: &Feed, open: Option<(u32, &Feed)>) -> Vec<(Target, Pull)> {
     let mut targets = Vec::new();
-    if behind(status.brain.last_seq, brain) {
-        targets.push(Target::Brain);
+    if let Some(pull) = behind(status, &status.brain, brain) {
+        targets.push((Target::Brain, pull));
     }
     if let Some((id, feed)) = open {
-        let newest = status
+        let pull = status
             .workers
             .iter()
             .find(|worker| worker.id == id)
-            .and_then(|worker| worker.conversation.last_seq);
-        if behind(newest, feed) {
-            targets.push(Target::Worker(id));
+            .and_then(|worker| behind(status, &worker.conversation, feed));
+        if let Some(pull) = pull {
+            targets.push((Target::Worker(id), pull));
         }
     }
     targets
@@ -324,6 +426,10 @@ enum Asked {
     Status,
     /// Entries of a conversation.
     Transcript(Target),
+    /// Records of a conversation's event log.
+    Events(Target),
+    /// Records of a past conversation's event log.
+    PastEvents(u64),
     /// A worker the person takes over.
     Release(u32),
     /// The models the agents offer.
@@ -338,6 +444,9 @@ enum Asked {
     Run,
     /// A terminal King asked for, this window's to open.
     Terminal,
+    /// A message that waited is taken back to be changed: its words go in
+    /// the field if it was still waiting.
+    Unqueued(Target, String),
     /// Anything else: only a refusal is said.
     Done,
 }
@@ -360,6 +469,9 @@ pub struct KingUi {
     pub brain: Feed,
     /// The conversations of the workers whose card was opened.
     pub workers: HashMap<u32, Feed>,
+    /// What the workers whose card was opened did to their worktrees: the
+    /// turns, what they changed, the panel of diffs and the git cell.
+    pub edits: HashMap<u32, Edits>,
     /// The worker whose card is open.
     pub open: Option<u32>,
     /// Where the person speaks to King.
@@ -370,8 +482,14 @@ pub struct KingUi {
     pub scroll: ScrollHandle,
     /// The scroll of the open worker's conversation.
     pub worker_scroll: ScrollHandle,
-    /// The runs of tools opened by hand, by the number of their first entry.
-    pub open_tools: HashSet<(Target, u64)>,
+    /// Where the person is in the prompts they sent before, in each field,
+    /// while browsing them with the arrows.
+    pub recall: HashMap<Target, Recall>,
+    /// What the person opened or folded by hand in each conversation: its
+    /// stretches of work and its tools.
+    pub folds: HashMap<Target, Folds>,
+    /// The news of the workers opened by hand, by the index of their note.
+    pub open_news: HashSet<(Target, u64)>,
     /// The models the agents of this computer offer, as the service found
     /// them: what King can be moved to.
     pub models: Vec<KingModel>,
@@ -384,7 +502,15 @@ pub struct KingUi {
     /// (pasted images among them), shown over the field and sent with it.
     pub attached: HashMap<Target, Vec<std::path::PathBuf>>,
     /// A past conversation on screen instead of the one now, read only.
-    pub viewing: Option<(Past, Vec<Entry>)>,
+    pub viewing: Option<(Past, Feed)>,
+    /// The past conversation asked for, until it is on screen.
+    past_wanted: Option<u64>,
+    /// The service was asked to stop for being older than the window: its
+    /// line closing is the restart.
+    restarting: bool,
+    /// That was asked already: once per window, so that an older service
+    /// that keeps coming back is not asked again and again.
+    skew_asked: bool,
     /// What the service was last told: the person is looking at King here.
     pub(super) watching: bool,
     /// The last thing King's service had for the person.
@@ -412,16 +538,22 @@ impl Default for KingUi {
             status: None,
             brain: Feed::default(),
             workers: HashMap::new(),
+            edits: HashMap::new(),
             open: None,
             input: None,
             worker_input: None,
             scroll: ScrollHandle::new(),
             worker_scroll: ScrollHandle::new(),
-            open_tools: HashSet::new(),
+            recall: HashMap::new(),
+            folds: HashMap::new(),
+            open_news: HashSet::new(),
             models: Vec::new(),
             modes: Vec::new(),
             history: None,
             viewing: None,
+            past_wanted: None,
+            restarting: false,
+            skew_asked: false,
             attached: HashMap::new(),
             watching: false,
             note: None,
@@ -440,14 +572,6 @@ impl KingUi {
     /// Whether the line to the service is open.
     pub fn connected(&self) -> bool {
         self.link.is_some()
-    }
-
-    /// The feed of whichever conversation `target` is.
-    pub fn feed(&self, target: Target) -> Option<&Feed> {
-        match target {
-            Target::Brain => Some(&self.brain),
-            Target::Worker(id) => self.workers.get(&id),
-        }
     }
 }
 
@@ -597,13 +721,13 @@ impl Shell {
             TextareaState::new(window, cx)
                 .auto_grow(1, 10)
                 .submit_on_enter(true)
-                .placeholder("Ask King anything: a question, a feature, a review")
+                .placeholder("Ask Orchestrator anything: a question, a feature, a review")
         });
         let worker_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 6)
                 .submit_on_enter(true)
-                .placeholder("Tell this worker something; King hears you stepped in")
+                .placeholder("Tell this worker something; Orchestrator hears you stepped in")
         });
         let to_king = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { shift: false, .. } = event {
@@ -674,7 +798,8 @@ impl Shell {
         }
         let Some(link) = self.options.king.clone() else {
             if start {
-                self.king_ui.error = Some("King is not available in this window.".to_owned());
+                self.king_ui.error =
+                    Some("Orchestrator is not available in this window.".to_owned());
             }
             return;
         };
@@ -694,7 +819,7 @@ impl Shell {
                 .await;
             let heard = match opened {
                 Ok(connection) => {
-                    tracing::info!(started = start, "on the line to King's service");
+                    tracing::info!(started = start, "on the line to Orchestrator's service");
                     let heard = connection.heard;
                     let ok = this.update(cx, |this, cx| {
                         this.king_ui.connecting = false;
@@ -723,7 +848,7 @@ impl Shell {
                 }
                 Err(error) => {
                     if !start {
-                        tracing::debug!(%error, "King's service is not there to join");
+                        tracing::debug!(%error, "Orchestrator's service is not there to join");
                     }
                     this.update(cx, |this, cx| {
                         this.king_ui.connecting = false;
@@ -759,7 +884,7 @@ impl Shell {
         let tag = self.king_ui.next_tag;
         self.king_ui.next_tag += 1;
         if link.send((tag, request)).is_err() {
-            self.king_lost("The line to King's service closed.".to_owned(), cx);
+            self.king_lost("The line to Orchestrator's service closed.".to_owned(), cx);
             return;
         }
         self.king_ui.asked.insert(tag, asked);
@@ -778,7 +903,22 @@ impl Shell {
     /// What the service said.
     fn king_heard(&mut self, said: Heard, window: &mut Window, cx: &mut Context<Self>) {
         match said {
-            Heard::Lost(why) => self.king_lost(format!("King's service went away: {why}"), cx),
+            // The service stopped for being older than the window: it comes
+            // back as this window's version.
+            Heard::Lost(_) if std::mem::take(&mut self.king_ui.restarting) => {
+                self.king_ui.link = None;
+                self.king_ui.reader = None;
+                self.king_ui.asked.clear();
+                self.king_ui.watching = false;
+                tracing::info!(
+                    "Orchestrator's service stopped for an older version; starting it again"
+                );
+                self.king_connect(window, cx);
+                cx.notify();
+            }
+            Heard::Lost(why) => {
+                self.king_lost(format!("Orchestrator's service went away: {why}"), cx)
+            }
             Heard::Notice(Notice::Changed { status }) => self.king_status(*status, cx),
             // What the conversation shows already is not said twice.
             Heard::Notice(Notice::Notify { echo: true, .. }) => {}
@@ -805,10 +945,13 @@ impl Shell {
     ) {
         match (asked, result) {
             (Asked::Status, Ok(value)) => {
-                if let Ok(status) = serde_json::from_value(value) {
+                if let Ok(status) = serde_json::from_value::<Status>(value) {
+                    self.king_check_version(&status, cx);
                     self.king_status(status, cx);
                 }
             }
+            (Asked::Events(target), result) => self.king_events(target, result, cx),
+            (Asked::PastEvents(id), result) => self.king_past_events(id, result, cx),
             (Asked::Transcript(target), result) => {
                 let entries: Entries = result
                     .ok()
@@ -847,14 +990,22 @@ impl Shell {
                     .history
                     .as_ref()
                     .and_then(|list| list.iter().find(|past| past.id == id).cloned());
-                if let (Some(past), Ok(entries)) = (past, serde_json::from_value(value)) {
-                    self.king_ui.viewing = Some((past, entries));
+                let entries = serde_json::from_value::<Entries>(value);
+                if let (Some(past), Ok(entries), true) =
+                    (past, entries, self.king_ui.past_wanted == Some(id))
+                {
+                    // From before there were logs: the entries are all of it.
+                    let mut feed = Feed::default();
+                    feed.add(entries);
+                    self.king_ui.viewing = Some((past, feed));
+                    self.king_ui.past_wanted = None;
                     self.king_ui.scroll.scroll_to_bottom();
                 }
                 cx.notify();
             }
             (Asked::Resumed, Ok(_)) => {
                 self.king_ui.viewing = None;
+                self.king_ui.past_wanted = None;
                 self.king_ask(Request::Conversations, Asked::Conversations, cx);
                 cx.notify();
             }
@@ -876,7 +1027,12 @@ impl Shell {
             }
             // Another window took it first.
             (Asked::Terminal, Err(error)) => {
-                tracing::debug!(%error, "a terminal King asked for is not this window's");
+                tracing::debug!(%error, "a terminal Orchestrator asked for is not this window's");
+            }
+            (Asked::Unqueued(target, text), Ok(value)) => {
+                if value["removed"].as_bool() == Some(true) {
+                    self.king_put_back(target, &text, window, cx);
+                }
             }
             (Asked::Models, Ok(value)) => {
                 self.king_ui.models = models_of(&value);
@@ -884,8 +1040,10 @@ impl Shell {
                 cx.notify();
             }
             (_, Err(error)) => {
-                self.engine
-                    .report(StatusKind::Error, format!("King's service: {error}"));
+                self.engine.report(
+                    StatusKind::Error,
+                    format!("Orchestrator's service: {error}"),
+                );
                 cx.notify();
             }
             (Asked::Done, Ok(_)) => {}
@@ -900,8 +1058,9 @@ impl Shell {
         let before = self.king_ui.status.as_ref().map(|now| now.conversation);
         if before.is_some_and(|before| before != status.conversation) {
             self.king_ui.brain = Feed::default();
+            self.king_ui.folds.remove(&Target::Brain);
             self.king_ui
-                .open_tools
+                .open_news
                 .retain(|(target, _)| *target != Target::Brain);
             self.king_ui.scroll.scroll_to_bottom();
             if self.king_ui.history.is_some() {
@@ -931,6 +1090,10 @@ impl Shell {
             }
         }
         self.king_ui.status = Some(status);
+        // A worker that stopped working has its last turn counted.
+        if let Some(open) = self.king_ui.open {
+            self.king_count(open, cx);
+        }
         self.king_spin(cx);
         cx.notify();
     }
@@ -952,7 +1115,7 @@ impl Shell {
         let Some(kind) = agent else {
             self.engine.report(
                 StatusKind::Info,
-                format!("King opened a terminal: {}", ask.title),
+                format!("Orchestrator opened a terminal: {}", ask.title),
             );
             self.start_live_first(
                 &ask.command,
@@ -973,7 +1136,7 @@ impl Shell {
         self.engine.report(
             StatusKind::Info,
             format!(
-                "King started {} in a terminal: {}",
+                "Orchestrator started {} in a terminal: {}",
                 kind.as_str(),
                 ask.title
             ),
@@ -990,7 +1153,7 @@ impl Shell {
         }
         let shown = format!(
             "printf '%s\\n\\n' {}",
-            leon_remote::sh_quote_typed(&format!("King's task:\n\n{}", ask.command))
+            leon_remote::sh_quote_typed(&format!("Orchestrator's task:\n\n{}", ask.command))
         );
         self.start_live_first(
             &shown,
@@ -1045,32 +1208,214 @@ impl Shell {
         }));
     }
 
-    /// Asks for the entries the window does not have.
+    /// Asks for what the window does not have: the records of the log, or
+    /// the entries of the transcript where there is no log.
     fn king_fetch(&mut self, status: &Status, cx: &mut Context<Self>) {
         let open = self
             .king_ui
             .open
             .and_then(|id| self.king_ui.workers.get(&id).map(|feed| (id, feed)));
-        for target in wanted(status, &self.king_ui.brain, open) {
-            let since = self.king_ui.feed(target).and_then(Feed::last);
-            match target {
-                Target::Brain => self.king_ui.brain.asking = true,
-                Target::Worker(id) => {
-                    if let Some(feed) = self.king_ui.workers.get_mut(&id) {
-                        feed.asking = true;
-                    }
+        for (target, pull) in wanted(status, &self.king_ui.brain, open) {
+            let feed = match target {
+                Target::Brain => Some(&mut self.king_ui.brain),
+                Target::Worker(id) => self.king_ui.workers.get_mut(&id),
+            };
+            let Some(feed) = feed else {
+                continue;
+            };
+            feed.asking = true;
+            let (request, asked) = match pull {
+                Pull::Events => (
+                    Request::Events {
+                        target,
+                        since: feed.last_record(),
+                        limit: None,
+                        conversation: None,
+                    },
+                    Asked::Events(target),
+                ),
+                Pull::Transcript => (
+                    Request::Transcript {
+                        target,
+                        since: feed.last(),
+                        limit: Some(KEPT),
+                    },
+                    Asked::Transcript(target),
+                ),
+            };
+            self.king_ask(request, asked, cx);
+        }
+    }
+
+    /// The records of a conversation's log the service sent.
+    fn king_events(
+        &mut self,
+        target: Target,
+        result: Result<Value, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let scroll = match target {
+            Target::Brain => self.king_ui.scroll.clone(),
+            Target::Worker(_) => self.king_ui.worker_scroll.clone(),
+        };
+        let follow = at_end(&scroll);
+        let feed = match target {
+            Target::Brain => Some(&mut self.king_ui.brain),
+            Target::Worker(id) => self.king_ui.workers.get_mut(&id),
+        };
+        let Some(feed) = feed else {
+            return;
+        };
+        feed.asking = false;
+        let events = result.and_then(|value| {
+            serde_json::from_value::<Events>(value).map_err(|error| error.to_string())
+        });
+        let events = match events {
+            Ok(events) => events,
+            // Asked again with the next notice, not now: a service that
+            // refuses would be asked in a loop.
+            Err(error) => {
+                self.engine.report(
+                    StatusKind::Error,
+                    format!("Orchestrator's service: {error}"),
+                );
+                cx.notify();
+                return;
+            }
+        };
+        let before = feed.last_record();
+        let reset = feed.apply(&events) == Applied::Reset;
+        let progressed = reset || feed.last_record() != before;
+        if reset {
+            // What was open was of records that are gone.
+            self.king_ui.folds.remove(&target);
+            self.king_ui.open_news.retain(|(shown, _)| *shown != target);
+        }
+        if let Target::Worker(id) = target {
+            if let (Some(feed), Some(edits)) = (
+                self.king_ui.workers.get(&id),
+                self.king_ui.edits.get_mut(&id),
+            ) {
+                if feed.followed.has_log() {
+                    edits.follow(&feed.followed, reset);
                 }
             }
+            self.king_count(id, cx);
+        }
+        if follow {
+            scroll.scroll_to_bottom();
+        }
+        // More may have come while this was on its way, or the log has more
+        // pages than one. A reply that added nothing is not asked again
+        // before the next notice: a log that says less than the status would
+        // be asked in a loop.
+        if progressed {
+            if let Some(status) = self.king_ui.status.clone() {
+                self.king_fetch(&status, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Counts, in the worker's worktree, what its turns changed that are not
+    /// counted yet: the card at the end of a turn says it.
+    fn king_count(&mut self, id: u32, cx: &mut Context<Self>) {
+        let subject = Subject::Worker(id);
+        let Some(scene) = self.scene(subject) else {
+            return;
+        };
+        let jobs = self
+            .edits(subject)
+            .map(|edits| edits.to_count(scene.going))
+            .unwrap_or_default();
+        if !jobs.is_empty() {
+            self.measure_between(subject, jobs, cx);
+        }
+    }
+
+    /// A page of the records of a past conversation's log. A conversation
+    /// the service has no log of is read from its entries.
+    fn king_past_events(&mut self, id: u64, result: Result<Value, String>, cx: &mut Context<Self>) {
+        if self.king_ui.past_wanted != Some(id) {
+            return;
+        }
+        let events = result.and_then(|value| {
+            serde_json::from_value::<Events>(value).map_err(|error| error.to_string())
+        });
+        let Ok(events) = events else {
+            self.king_ui.past_wanted = None;
+            self.engine.report(
+                StatusKind::Error,
+                "Orchestrator's service could not read that conversation.",
+            );
+            cx.notify();
+            return;
+        };
+        let held = self
+            .king_ui
+            .viewing
+            .take()
+            .filter(|(past, _)| past.id == id);
+        if events.last_seq.is_none() && held.is_none() {
             self.king_ask(
-                Request::Transcript {
-                    target,
-                    since,
-                    limit: Some(KEPT),
-                },
-                Asked::Transcript(target),
+                Request::PastConversation { conversation: id },
+                Asked::Past(id),
                 cx,
             );
+            return;
         }
+        let past = held.as_ref().map(|(past, _)| past.clone()).or_else(|| {
+            self.king_ui
+                .history
+                .as_ref()
+                .and_then(|list| list.iter().find(|past| past.id == id).cloned())
+        });
+        let Some(past) = past else {
+            self.king_ui.past_wanted = None;
+            return;
+        };
+        let mut feed = held.map(|(_, feed)| feed).unwrap_or_default();
+        feed.apply(&events);
+        let since = feed.last_record();
+        self.king_ui.viewing = Some((past, feed));
+        if events.more {
+            self.king_ask(
+                Request::Events {
+                    target: Target::Brain,
+                    since,
+                    limit: None,
+                    conversation: Some(id),
+                },
+                Asked::PastEvents(id),
+                cx,
+            );
+        } else {
+            self.king_ui.past_wanted = None;
+            self.king_ui.scroll.scroll_to_bottom();
+        }
+        cx.notify();
+    }
+
+    /// Asks the service to stop when it is of an older version than the
+    /// window, once: it is started again when its line closes. A newer
+    /// service is never asked, and one that cannot be told apart is not
+    /// either.
+    fn king_check_version(&mut self, status: &Status, cx: &mut Context<Self>) {
+        if self.king_ui.skew_asked {
+            return;
+        }
+        match skew(crate::product::VERSION, &status.version) {
+            Skew::Older => {}
+            Skew::Same | Skew::Newer => return,
+        }
+        tracing::info!(
+            service = %status.version,
+            window = crate::product::VERSION,
+            "Orchestrator's service is older than this window: asking it to stop when idle"
+        );
+        self.king_ui.skew_asked = true;
+        self.king_ui.restarting = true;
+        self.king_ask(Request::Shutdown { when_idle: true }, Asked::Done, cx);
     }
 
     /// What the person wrote to King is said to it.
@@ -1101,7 +1446,7 @@ impl Shell {
             self.king_connect(window, cx);
             self.engine.report(
                 StatusKind::Error,
-                "King's service is not connected yet; what you wrote is still there.",
+                "Orchestrator's service is not connected yet; what you wrote is still there.",
             );
             cx.notify();
             return;
@@ -1273,7 +1618,7 @@ impl Shell {
             Ok(()) => self.king_ui.attached.entry(target).or_default().push(path),
             Err(error) => self.engine.report(
                 StatusKind::Error,
-                format!("The image could not be kept for King: {error}."),
+                format!("The image could not be kept for Orchestrator: {error}."),
             ),
         }
         cx.notify();
@@ -1370,6 +1715,12 @@ impl Shell {
                 _ => {}
             }
         }
+        // Up and Down in a field walk the prompts sent before.
+        if let Some(target) = self.king_typing_in(window, cx) {
+            if self.king_recall_key(target, stroke, window, cx) {
+                return true;
+            }
+        }
         // A paste with an image on the clipboard: the image, as a file.
         let paste = stroke.key == "v"
             && !stroke.modifiers.alt
@@ -1438,6 +1789,26 @@ impl Shell {
             self.king_back_to_now(cx);
             return true;
         }
+        // What is open beside a worker's conversation (the diffs, the git
+        // cell) closes before anything is stopped.
+        if let Some(id) = self.king_ui.open {
+            let open = self
+                .king_ui
+                .edits
+                .get(&id)
+                .map(|edits| (edits.diff.is_some(), edits.git.open));
+            match open {
+                Some((true, _)) => {
+                    self.chat_diff_close(Subject::Worker(id), cx);
+                    return true;
+                }
+                Some((false, true)) => {
+                    self.chat_git_close(Subject::Worker(id), cx);
+                    return true;
+                }
+                _ => {}
+            }
+        }
         match self.king_ui.open {
             Some(id) if busy(Target::Worker(id)) => self.king_interrupt(Target::Worker(id), cx),
             Some(_) => self.king_close_worker(window, cx),
@@ -1447,9 +1818,188 @@ impl Shell {
         true
     }
 
+    /// What waits for the turn of `target` to end, as the service last said.
+    pub(super) fn king_queue(&self, target: Target) -> Vec<String> {
+        let Some(status) = self.king_ui.status.as_ref() else {
+            return Vec::new();
+        };
+        match target {
+            Target::Brain => status.brain.queue.clone(),
+            Target::Worker(id) => status
+                .workers
+                .iter()
+                .find(|worker| worker.id == id)
+                .map(|worker| worker.conversation.queue.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Up or Down in the field of `target`: the prompts said in its
+    /// conversation, where that applies (see `chat_recall`). `true` when the
+    /// key was taken; otherwise the field moves its caret as it always did.
+    fn king_recall_key(
+        &mut self,
+        target: Target,
+        stroke: &gpui_kit::Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(older) = chat_recall::direction(stroke) else {
+            return false;
+        };
+        let Some(field) = self.king_field(target) else {
+            return false;
+        };
+        // A question the person is answering, or the list of speech models,
+        // has the arrows.
+        let asking = self
+            .king_ui
+            .status
+            .as_ref()
+            .is_some_and(|status| match target {
+                Target::Brain => !status.brain.questions.is_empty() || self.king_ui.voices,
+                Target::Worker(id) => status
+                    .workers
+                    .iter()
+                    .any(|worker| worker.id == id && !worker.conversation.questions.is_empty()),
+            });
+        if asking {
+            return false;
+        }
+        let feed = match target {
+            Target::Brain => Some(&self.king_ui.brain),
+            Target::Worker(id) => self.king_ui.workers.get(&id),
+        };
+        let prompts = feed.map_or_else(Vec::new, |feed| {
+            chat_recall::history(&feed.conversation().items)
+        });
+        let (text, caret) = {
+            let input = field.read(cx);
+            (input.value().to_string(), input.cursor())
+        };
+        let attached = self
+            .king_ui
+            .attached
+            .get(&target)
+            .cloned()
+            .unwrap_or_default();
+        let mut recall = self.king_ui.recall.remove(&target);
+        let put = chat_recall::step(&mut recall, &text, caret, older, &prompts, &attached);
+        if let Some(recall) = recall {
+            self.king_ui.recall.insert(target, recall);
+        }
+        let Some((words, files)) = put else {
+            return false;
+        };
+        if files.is_empty() {
+            self.king_ui.attached.remove(&target);
+        } else {
+            self.king_ui.attached.insert(target, files);
+        }
+        field.update(cx, |input, cx| {
+            input.set_value(words.clone(), window, cx);
+            input.set_selected_range(words.len()..words.len(), cx);
+        });
+        cx.notify();
+        true
+    }
+
+    /// Takes back the message at `index` of what waits for the turn of
+    /// `target` to end, and puts it in the field to be changed and sent
+    /// again, once the service says it was still waiting.
+    pub(super) fn king_queue_edit(
+        &mut self,
+        target: Target,
+        index: usize,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.king_ask(
+            Request::Unqueue {
+                target,
+                index,
+                text: text.clone(),
+            },
+            Asked::Unqueued(target, text),
+            cx,
+        );
+    }
+
+    /// Drops the message at `index` of what waits for the turn of `target`.
+    pub(super) fn king_queue_remove(
+        &mut self,
+        target: Target,
+        index: usize,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.king_ask(
+            Request::Unqueue {
+                target,
+                index,
+                text,
+            },
+            Asked::Done,
+            cx,
+        );
+    }
+
+    /// Sends the message at `index` of what waits into the turn of `target`
+    /// now, instead of at its end.
+    pub(super) fn king_queue_steer(
+        &mut self,
+        target: Target,
+        index: usize,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.king_ask(
+            Request::Steer {
+                target,
+                index,
+                text,
+            },
+            Asked::Done,
+            cx,
+        );
+    }
+
+    /// A message taken back from the queue goes in the field of `target`,
+    /// with its files, under what is written there already.
+    fn king_put_back(
+        &mut self,
+        target: Target,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(field) = self.king_field(target) else {
+            return;
+        };
+        let (words, files) = split_attached(text);
+        let attached = self.king_ui.attached.entry(target).or_default();
+        for file in files {
+            if !attached.contains(&file) {
+                attached.push(file);
+            }
+        }
+        let typed = field.read(cx).value().to_string();
+        let value = if typed.trim().is_empty() {
+            words
+        } else {
+            format!("{typed}\n{words}")
+        };
+        field.update(cx, |input, cx| {
+            input.set_value(value, window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
     /// Puts King's conversation away and starts a new one.
     pub(super) fn king_new_conversation(&mut self, cx: &mut Context<Self>) {
         self.king_ui.viewing = None;
+        self.king_ui.past_wanted = None;
         self.king_ask(Request::NewConversation, Asked::Done, cx);
         cx.notify();
     }
@@ -1470,16 +2020,35 @@ impl Shell {
 
     /// Shows what a past conversation said, in place of the one now.
     pub(super) fn king_view_past(&mut self, id: u64, cx: &mut Context<Self>) {
-        self.king_ask(
-            Request::PastConversation { conversation: id },
-            Asked::Past(id),
-            cx,
-        );
+        self.king_ui.past_wanted = Some(id);
+        let logged = self
+            .king_ui
+            .status
+            .as_ref()
+            .is_some_and(|status| status.events);
+        let (request, asked) = if logged {
+            (
+                Request::Events {
+                    target: Target::Brain,
+                    since: None,
+                    limit: None,
+                    conversation: Some(id),
+                },
+                Asked::PastEvents(id),
+            )
+        } else {
+            (
+                Request::PastConversation { conversation: id },
+                Asked::Past(id),
+            )
+        };
+        self.king_ask(request, asked, cx);
     }
 
     /// Back to the conversation now.
     pub(super) fn king_back_to_now(&mut self, cx: &mut Context<Self>) {
         self.king_ui.viewing = None;
+        self.king_ui.past_wanted = None;
         self.king_ui.scroll.scroll_to_bottom();
         cx.notify();
     }
@@ -1506,6 +2075,10 @@ impl Shell {
     ) {
         self.king_ui.open = Some(id);
         self.king_ui.workers.entry(id).or_default();
+        self.king_ui
+            .edits
+            .entry(id)
+            .or_insert_with(|| Edits::new(GitCell::new(window, cx)));
         self.king_ui.worker_scroll.scroll_to_bottom();
         if let Some(status) = self.king_ui.status.clone() {
             self.king_fetch(&status, cx);
@@ -1607,7 +2180,7 @@ impl Shell {
         let (Some(kind), false) = (agent, cwd.is_empty()) else {
             self.engine.report(
                 StatusKind::Error,
-                "King let the worker go, but did not say where it works.",
+                "Orchestrator let the worker go, but did not say where it works.",
             );
             cx.notify();
             return;
@@ -1643,8 +2216,10 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
-    use leon_king::protocol::{ConversationStatus, WorkerStatus};
-    use leon_king::transcript::Kind;
+    use leon_conversation::model::Item;
+    use leon_king::log::{Logged, Record};
+    use leon_king::protocol::WorkerStatus;
+    use leon_turn::TurnEvent;
 
     use super::*;
 
@@ -1684,14 +2259,18 @@ mod tests {
             busy: false,
             busy_since_ms: None,
             queued: 0,
+            queue: Vec::new(),
             questions: Vec::new(),
             cost_usd: 0.0,
             last_seq,
+            events_seq: None,
         }
     }
 
     fn status(brain: Option<u64>, workers: &[(u32, Option<u64>)]) -> Status {
         Status {
+            version: String::new(),
+            events: false,
             conversation: 0,
             brain: conversation(brain),
             workers: workers
@@ -1840,6 +2419,47 @@ mod tests {
         assert_eq!(step_card(&ids, Some(9), true), Some(7));
     }
 
+    /// The status of a service that keeps logs: `brain` and each worker's
+    /// number is that of the newest record of its log.
+    fn logged(brain: Option<u64>, workers: &[(u32, Option<u64>)]) -> Status {
+        let mut status = status(brain, &[]);
+        status.events = true;
+        status.brain.events_seq = brain;
+        status.workers = self::status(None, workers).workers;
+        for (worker, (_, newest)) in status.workers.iter_mut().zip(workers) {
+            worker.conversation.events_seq = *newest;
+        }
+        status
+    }
+
+    fn record(seq: u64, record: Record) -> Logged {
+        Logged {
+            seq,
+            at_ms: 1_000 * seq,
+            record,
+        }
+    }
+
+    fn said(seq: u64, text: &str) -> Logged {
+        record(
+            seq,
+            Record::Prompt {
+                text: text.into(),
+                attachments: Vec::new(),
+                turn: true,
+            },
+        )
+    }
+
+    fn page(records: Vec<Logged>) -> Events {
+        Events {
+            conversation: 0,
+            last_seq: records.last().map(|logged| logged.seq),
+            events: records,
+            more: false,
+        }
+    }
+
     #[test]
     fn a_feed_keeps_only_what_comes_after_what_it_has() {
         let mut feed = Feed::default();
@@ -1861,7 +2481,10 @@ mod tests {
         // Nothing said yet: nothing to ask.
         assert!(wanted(&status(None, &[]), &brain, None).is_empty());
         // King said something the window does not have.
-        assert_eq!(wanted(&status(Some(3), &[]), &brain, None), [Target::Brain]);
+        assert_eq!(
+            wanted(&status(Some(3), &[]), &brain, None),
+            [(Target::Brain, Pull::Transcript)]
+        );
         // Being asked for already: not twice.
         brain.asking = true;
         assert!(wanted(&status(Some(3), &[]), &brain, None).is_empty());
@@ -1874,9 +2497,118 @@ mod tests {
         assert!(wanted(&now, &brain, None).is_empty());
         assert_eq!(
             wanted(&now, &brain, Some((2, &worker))),
-            [Target::Worker(2)]
+            [(Target::Worker(2), Pull::Transcript)]
         );
         // A worker that is gone is not asked about.
         assert!(wanted(&now, &brain, Some((9, &worker))).is_empty());
+    }
+
+    #[test]
+    fn a_service_with_a_log_is_asked_for_records_and_one_without_for_entries() {
+        let brain = Feed::default();
+        let now = logged(Some(7), &[(2, Some(3))]);
+        let worker = Feed::default();
+        assert_eq!(
+            wanted(&now, &brain, Some((2, &worker))),
+            [
+                (Target::Brain, Pull::Events),
+                (Target::Worker(2), Pull::Events)
+            ]
+        );
+        // Up to date, by the number of the newest record, not of the entry.
+        let mut brain = Feed::default();
+        brain.apply(&page(vec![said(6, "a"), said(7, "b")]));
+        assert!(wanted(&now, &brain, None).is_empty());
+        let later = logged(Some(8), &[]);
+        assert_eq!(
+            wanted(&later, &brain, None),
+            [(Target::Brain, Pull::Events)]
+        );
+        // A conversation with entries and no log (the service never wrote
+        // one for it) is read from its transcript, while the service says
+        // it keeps logs.
+        let mut old = logged(None, &[]);
+        old.brain.last_seq = Some(4);
+        assert_eq!(
+            wanted(&old, &Feed::default(), None),
+            [(Target::Brain, Pull::Transcript)]
+        );
+        // The log the window follows is gone: asking tells it so.
+        assert_eq!(
+            wanted(&logged(None, &[]), &brain, None),
+            [(Target::Brain, Pull::Events)]
+        );
+    }
+
+    #[test]
+    fn a_feed_draws_the_log_once_there_is_one_and_the_entries_before() {
+        let mut feed = Feed::default();
+        feed.add(vec![entry(0), entry(1)]);
+        assert_eq!(feed.conversation().items.len(), 2, "the entries, read");
+        assert!(!feed.followed.has_log());
+        feed.apply(&page(vec![
+            said(0, "hello"),
+            record(
+                1,
+                Record::Event {
+                    event: TurnEvent::Text { text: "hi".into() },
+                },
+            ),
+        ]));
+        assert!(feed.entries.is_empty(), "the transcript is not kept twice");
+        assert_eq!(feed.last_record(), Some(1));
+        assert!(matches!(
+            feed.conversation().items.as_slice(),
+            [Item::User { .. }, Item::Agent { .. }]
+        ));
+    }
+
+    #[test]
+    fn a_log_cut_past_what_the_feed_has_is_asked_again_from_the_start() {
+        let mut feed = Feed::default();
+        feed.apply(&page(vec![said(0, "a"), said(1, "b")]));
+        assert_eq!(feed.apply(&page(vec![said(9, "c")])), Applied::Reset);
+        assert_eq!(feed.last_record(), None);
+        assert!(feed.conversation().items.is_empty());
+        // And it is asked for: the status says the log is there.
+        assert_eq!(
+            wanted(&logged(Some(9), &[]), &feed, None),
+            [(Target::Brain, Pull::Events)]
+        );
+    }
+
+    #[test]
+    fn the_newest_report_is_the_logs_or_the_transcripts() {
+        let mut feed = Feed::default();
+        let report = |spent: f64| Report {
+            spent_today_usd: spent,
+            ..Report::default()
+        };
+        let mut old = entry(0);
+        old.kind = Kind::Report;
+        old.report = Some(report(1.0));
+        feed.add(vec![old]);
+        assert_eq!(feed.latest_report().map(|r| r.spent_today_usd), Some(1.0));
+        feed.apply(&page(vec![
+            said(0, "a"),
+            record(
+                1,
+                Record::Report {
+                    report: report(2.0),
+                },
+            ),
+            said(2, "b"),
+            record(
+                3,
+                Record::Report {
+                    report: report(3.0),
+                },
+            ),
+        ]));
+        assert_eq!(feed.latest_report().map(|r| r.spent_today_usd), Some(3.0));
+        // Each report is its note's: item 1 and item 3.
+        assert_eq!(feed.report_at(1).map(|r| r.spent_today_usd), Some(2.0));
+        assert!(feed.report_at(2).is_none());
+        assert_eq!(feed.report_at(3).map(|r| r.spent_today_usd), Some(3.0));
     }
 }

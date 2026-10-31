@@ -1,85 +1,40 @@
 //! Drawing King's view: King's conversation on the left, its workers on the
 //! right.
 //!
-//! The conversation is drawn as the window's own conversations are
-//! (`chat_view.rs`): the person's words in a cell on the right, King's as
-//! Markdown on the page, the tools between them folded into one line, a
-//! question framed in the accent above the field, and Leon's report of each
-//! answer in small mono under it. A worker's card, opened, draws its
-//! conversation the same way in the right column, with what can be done to
-//! the worker over it.
+//! The conversation is drawn by the view the window's own conversations are
+//! (`transcript.rs`): the words, the work folded into a line, the todos, the
+//! plan. King adds Leon's report of each answer in small mono under it, its
+//! news of the workers, and a question framed in the accent above the field.
+//! A worker's card, opened, draws its conversation the same way in the right
+//! column, with what can be done to the worker over it.
 
 use gpui_kit::component::input::Textarea;
-use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::prelude::*;
 use gpui_kit::{div, AnyElement, ClickEvent, Context, Div, FontWeight, SharedString, Stateful};
+use leon_conversation::model::{blocks, Block, Item};
 use leon_core::AgentId;
 use leon_king::coordinator::{Open, Target, WorkerState};
 use leon_king::history::Past;
 use leon_king::protocol::{ConversationStatus, Status, WorkerStatus};
 use leon_king::report::{count, span, Report};
 use leon_king::run::RunState;
-use leon_king::transcript::{Entry, Kind};
 use leon_king::verify::{self, CheckState, Ci};
 
 use super::activity::Activity;
 use super::chat_voice::Field;
-use super::king::{picks, Pick, Tone};
+use super::edits::Subject;
+use super::king::{picks, Feed, Pick, Tone};
 use super::shell::Shell;
+use super::transcript::{
+    column, plan_card, question_frame, status_line, Folder, Folds, Ids, Speaker, Surface,
+    Transcript,
+};
 use super::widgets::{activity_dot, attached_files, led, mark, mono, with_latest, Lion};
 use crate::icons::{agent_icon, icon, IconName};
 use crate::theme::{fonts, metrics, px, Palette};
 
-/// The widest King's conversation gets.
-const COLUMN: f32 = 760.;
-
 /// How wide the column of the workers is.
 const WORKERS: f32 = 380.;
-
-/// The line height of an answer, in lines of its text: answers are long,
-/// and read rather than glanced at.
-const ANSWER_LINE: f32 = 1.65;
-
-/// How an answer's Markdown is laid out: more room between paragraphs and
-/// lists than a chat's, and headings that mark a section without shouting.
-fn answer_style() -> TextViewStyle {
-    TextViewStyle::default()
-        .paragraph_gap(gpui_kit::rems(1.2))
-        .heading_font_size(|level, base| match level {
-            1 => base * 1.45,
-            2 => base * 1.3,
-            3 => base * 1.15,
-            _ => base * 1.05,
-        })
-}
-
-/// How many tools of a folded run are named under it when it is open.
-const TOOLS_SHOWN: usize = 40;
-
-/// A run of entries as they are drawn: one entry, or tools in a row.
-enum Piece<'a> {
-    One(&'a Entry),
-    Tools(&'a [Entry]),
-}
-
-/// The entries, with each run of tools made one piece.
-fn pieces(entries: &[Entry]) -> Vec<Piece<'_>> {
-    let mut pieces = Vec::new();
-    let mut at = 0;
-    while at < entries.len() {
-        if entries[at].kind == Kind::Tool {
-            let from = at;
-            while at < entries.len() && entries[at].kind == Kind::Tool {
-                at += 1;
-            }
-            pieces.push(Piece::Tools(&entries[from..at]));
-        } else {
-            pieces.push(Piece::One(&entries[at]));
-            at += 1;
-        }
-    }
-    pieces
-}
 
 /// The dot of a worker's card.
 pub(super) fn worker_activity(state: WorkerState) -> Activity {
@@ -130,17 +85,6 @@ fn spent(status: &Status) -> String {
         Some(budget) => format!("${:.2} of ${budget:.2} today", status.spent_today_usd),
         None => format!("${:.2} today", status.spent_today_usd),
     }
-}
-
-/// The column every part of King's conversation sits in.
-fn column() -> Div {
-    div()
-        .w_full()
-        .max_w(px(COLUMN))
-        .mx_auto()
-        .min_w_0()
-        .flex()
-        .flex_col()
 }
 
 /// The frames of the spinner of a turn in flight.
@@ -241,13 +185,13 @@ impl Shell {
                     spent(status)
                 )
             }
-            None if ui.connecting => "Reaching King's service…".to_owned(),
+            None if ui.connecting => "Reaching Orchestrator's service…".to_owned(),
             None => ui
                 .error
                 .clone()
                 .unwrap_or_else(|| "Not connected".to_owned()),
         };
-        ("King", "The King".to_owned(), meta)
+        ("Orchestrator", "The Orchestrator".to_owned(), meta)
     }
 
     /// How King stands, for the sidebar's row: its dot and how many workers
@@ -291,8 +235,8 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .child(match &ui.viewing {
-                        Some((_, entries)) => self.king_timeline(Target::Brain, entries, c, cx),
-                        None => self.king_timeline(Target::Brain, &ui.brain.entries, c, cx),
+                        Some((_, feed)) => self.king_timeline(Target::Brain, feed, c, cx),
+                        None => self.king_timeline(Target::Brain, &ui.brain, c, cx),
                     })
                     .child(match &ui.viewing {
                         Some((past, _)) => column()
@@ -340,6 +284,10 @@ impl Shell {
                             .into_any_element(),
                     }),
             )
+            .children(
+                ui.open
+                    .and_then(|id| self.chat_diff_panel(Subject::Worker(id), c, cx)),
+            )
             .child(
                 div()
                     .debug_selector(|| "king-side".into())
@@ -371,11 +319,7 @@ impl Shell {
                     // report on King's answers has it.
                     .children(
                         ui.brain
-                            .entries
-                            .iter()
-                            .rev()
-                            .filter(|entry| entry.kind == Kind::Report)
-                            .find_map(|entry| entry.report.as_ref())
+                            .latest_report()
                             .map(|report| usage_panel(report, c)),
                     ),
             )
@@ -387,17 +331,17 @@ impl Shell {
         let ui = &self.king_ui;
         let (title, line) = if ui.connecting {
             (
-                "Reaching King…",
-                "Starting King's service if it is not running. It keeps working with the window \
+                "Reaching Orchestrator…",
+                "Starting Orchestrator's service if it is not running. It keeps working with the window \
                  closed."
                     .to_owned(),
             )
         } else {
             (
-                "King is not connected",
-                ui.error
-                    .clone()
-                    .unwrap_or_else(|| "The window has not reached King's service.".to_owned()),
+                "Orchestrator is not connected",
+                ui.error.clone().unwrap_or_else(|| {
+                    "The window has not reached Orchestrator's service.".to_owned()
+                }),
             )
         };
         div()
@@ -438,95 +382,137 @@ impl Shell {
             .into_any_element()
     }
 
-    /// What a conversation said, oldest first, scrolling.
+    /// What a conversation said, oldest first, scrolling: drawn as the
+    /// window's conversations are (`transcript.rs`), with King's report under
+    /// an answer and its news of the workers where it came.
     fn king_timeline(
         &self,
         target: Target,
-        entries: &[Entry],
+        feed: &Feed,
         c: &Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let key = key_of(target);
         let worker = matches!(target, Target::Worker(_));
-        let since = match target {
-            Target::Brain => self
+        let items = &feed.conversation().items;
+        let found = match target {
+            Target::Brain => None,
+            Target::Worker(id) => self
                 .king_ui
                 .status
                 .as_ref()
-                .and_then(|status| status.brain.busy_since_ms),
-            Target::Worker(id) => self.king_ui.status.as_ref().and_then(|status| {
-                status
-                    .workers
-                    .iter()
-                    .find(|worker| worker.id == id)
-                    .and_then(|worker| worker.conversation.busy_since_ms)
-            }),
+                .and_then(|status| status.workers.iter().find(|worker| worker.id == id))
+                .map(|worker| &worker.conversation),
         };
-        let (scroll, busy, agent) = match target {
-            Target::Brain => (
-                &self.king_ui.scroll,
-                self.king_ui
-                    .status
-                    .as_ref()
-                    .is_some_and(|status| status.brain.busy),
-                None,
-            ),
-            Target::Worker(id) => {
-                let found = self
-                    .king_ui
-                    .status
-                    .as_ref()
-                    .and_then(|status| status.workers.iter().find(|worker| worker.id == id));
+        let (since, busy, scroll, agent) = match target {
+            Target::Brain => {
+                let brain = self.king_ui.status.as_ref().map(|status| &status.brain);
                 (
-                    &self.king_ui.worker_scroll,
-                    found.is_some_and(|worker| worker.conversation.busy),
-                    found.and_then(|worker| AgentId::parse(&worker.conversation.agent)),
+                    brain.and_then(|brain| brain.busy_since_ms),
+                    brain.is_some_and(|brain| brain.busy),
+                    &self.king_ui.scroll,
+                    None,
                 )
             }
+            Target::Worker(_) => (
+                found.and_then(|conversation| conversation.busy_since_ms),
+                found.is_some_and(|conversation| conversation.busy),
+                &self.king_ui.worker_scroll,
+                found.and_then(|conversation| AgentId::parse(&conversation.agent)),
+            ),
         };
-        let mut list = if worker {
-            div().w_full().min_w_0().flex().flex_col()
-        } else {
-            column()
-        }
-        .px(px(16.))
-        .pt(px(18.))
-        .pb(px(12.))
-        .gap(px(12.));
-        if entries.is_empty() && !busy {
+        let speaker = |_: usize| Speaker {
+            agent,
+            label: agent.map_or_else(|| "ORCHESTRATOR".to_owned(), |agent| agent.tag().to_owned()),
+        };
+        let none = Folds::default();
+        // King's own folder is the service's: only absolute paths count for
+        // it. A worker's is where it works, when that is this computer.
+        let scene = match target {
+            Target::Brain => None,
+            Target::Worker(id) => self.scene(Subject::Worker(id)),
+        };
+        let folder = match target {
+            Target::Brain => Some(Folder { cwd: None }),
+            Target::Worker(_) => scene.as_ref().map(|scene| Folder {
+                cwd: Some(scene.cwd),
+            }),
+        };
+        let transcript = Transcript {
+            ids: Ids::new("king", key.clone()),
+            surface: Surface::King(target),
+            folds: self.king_ui.folds.get(&target).unwrap_or(&none),
+            folder,
+            speaker: &speaker,
+            said_actions: None,
+        };
+        let mut list = column().px(px(16.)).pt(px(18.)).pb(px(12.)).gap(px(12.));
+        if items.is_empty() && !busy {
             list = list.child(self.king_empty(worker, c, cx));
         }
-        for piece in pieces(entries) {
-            list = list.child(match piece {
-                Piece::One(entry) if entry.kind == Kind::News => {
-                    self.king_news(target, entry, c, cx)
+        // A worker's turns that changed files each end with a card.
+        let cards = match target {
+            Target::Worker(id) => {
+                match (
+                    self.scene(Subject::Worker(id)),
+                    self.edits(Subject::Worker(id)),
+                ) {
+                    (Some(scene), Some(edits)) => edits.cards(scene.items, scene.cwd, scene.going),
+                    _ => Vec::new(),
                 }
-                Piece::One(entry) => king_entry(target, entry, agent, c),
-                Piece::Tools(run) => self.king_tools(target, run, c, cx),
+            }
+            Target::Brain => Vec::new(),
+        };
+        for block in blocks(items, busy) {
+            let end = match block {
+                Block::Single(at) => at + 1,
+                Block::Work { to, .. } => to,
+            };
+            list = list.child(match block {
+                Block::Single(at) => match &items[at] {
+                    // Leon's line under an answer: drawn by its facts.
+                    Item::Notice { .. } if feed.report_at(at).is_some() => report_strip(
+                        target,
+                        at as u64,
+                        feed.report_at(at).unwrap_or(&Report::default()),
+                        c,
+                    ),
+                    // What Leon told King of its workers.
+                    Item::Notice { text, .. } if text.starts_with("[Leon]") => {
+                        self.king_news(target, at, text, c, cx)
+                    }
+                    item => self.transcript_item(&transcript, at, item, c, cx),
+                },
+                Block::Work { from, to, live } => {
+                    self.transcript_work(&transcript, from, &items[from..to], live, c, cx)
+                }
             });
+            if let Target::Worker(id) = target {
+                for (_, turn, stats) in cards.iter().filter(|(at, ..)| *at == end) {
+                    list = list.child(self.chat_changed_card(
+                        Subject::Worker(id),
+                        *turn,
+                        stats,
+                        c,
+                        cx,
+                    ));
+                }
+            }
         }
         if busy {
-            list = list.child(
-                div()
-                    .debug_selector({
-                        let key = key.clone();
-                        move || format!("king-busy-{key}")
-                    })
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    // It turns while the turn goes on, and says for how long.
-                    .child(mono(spinner_frame()).text_color(c.signal))
-                    .child(
-                        mono(if worker { "WORKING" } else { "KING IS WORKING" })
-                            .text_color(c.text_muted),
-                    )
-                    .children(since.map(|since| {
-                        let now = (self.options.now)().timestamp_millis().max(0) as u64;
-                        mono(span((now.saturating_sub(since) / 1000) as i64))
-                            .text_color(c.text_faint)
-                    })),
-            );
+            let now = (self.options.now)().timestamp_millis().max(0) as u64;
+            list = list.child(status_line(
+                &transcript.ids,
+                None,
+                if worker {
+                    "WORKING"
+                } else {
+                    "ORCHESTRATOR IS WORKING"
+                },
+                since,
+                now,
+                c,
+            ));
         }
         let latest = format!("king-latest-{key}");
         let scrolling = div()
@@ -563,7 +549,7 @@ impl Shell {
                     .text_size(px(18.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(c.text)
-                    .child("What should King do?"),
+                    .child("What should Orchestrator do?"),
             )
             .child(
                 div()
@@ -572,7 +558,7 @@ impl Shell {
                     .text_color(c.text_muted)
                     .text_size(metrics::TEXT_SMALL())
                     .child(
-                        "King answers for every project. It reads to answer short questions, and \
+                        "Orchestrator answers for every project. It reads to answer short questions, and \
                          gives the long work to other agents in worktrees of their own: the \
                          cheapest that can do it, the best ones for plans. It commits, pushes and \
                          opens pull requests; it never merges.",
@@ -581,110 +567,21 @@ impl Shell {
             .into_any_element()
     }
 
-    /// A run of tools: one line that says how many, and each of them when it
-    /// is opened.
-    fn king_tools(
-        &self,
-        target: Target,
-        run: &[Entry],
-        c: &Palette,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let first = run.first().map_or(0, |entry| entry.seq);
-        let open = self.king_ui.open_tools.contains(&(target, first));
-        let key = key_of(target);
-        let last = run
-            .last()
-            .map(|entry| entry.text.clone())
-            .unwrap_or_default();
-        let hover = c.surface_2;
-        let label = match run.len() {
-            1 => "1 TOOL".to_owned(),
-            many => format!("{many} TOOLS"),
-        };
-        let head = div()
-            .id(SharedString::from(format!("king-tools-{key}-{first}")))
-            .debug_selector({
-                let key = key.clone();
-                move || format!("king-tools-{key}-{first}")
-            })
-            .h(px(22.))
-            .px(px(6.))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .rounded(metrics::RADIUS())
-            .cursor_pointer()
-            .hover(move |style| style.bg(hover))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                let at = (target, first);
-                if !this.king_ui.open_tools.remove(&at) {
-                    this.king_ui.open_tools.insert(at);
-                }
-                cx.notify();
-            }))
-            .child(icon(
-                if open {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                },
-                px(12.),
-                c.text_faint,
-            ))
-            .child(mono(label).text_color(c.text_muted))
-            .when(!open, |this| {
-                this.child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .font_family(fonts::mono())
-                        .text_size(metrics::TEXT_SMALL())
-                        .text_color(c.text_faint)
-                        .child(last),
-                )
-            });
-        let mut block = div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap(px(2.))
-            .child(head);
-        if open {
-            let skip = run.len().saturating_sub(TOOLS_SHOWN);
-            for entry in &run[skip..] {
-                block = block.child(
-                    div()
-                        .pl(px(26.))
-                        .min_w_0()
-                        .truncate()
-                        .font_family(fonts::mono())
-                        .text_size(metrics::TEXT_SMALL())
-                        .text_color(c.text_muted)
-                        .child(entry.text.clone()),
-                );
-            }
-        }
-        block.into_any_element()
-    }
-
     /// What Leon told King of its workers: its first line, and the rest
     /// when it is opened.
     fn king_news(
         &self,
         target: Target,
-        entry: &Entry,
+        at: usize,
+        text: &str,
         c: &Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let seq = entry.seq;
-        let open = self.king_ui.open_tools.contains(&(target, seq));
+        let seq = at as u64;
+        let open = self.king_ui.open_news.contains(&(target, seq));
         let key = key_of(target);
         let hover = c.surface_2;
-        let mut lines = entry
-            .text
+        let mut lines = text
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.starts_with("[Leon]"));
         let first = lines
@@ -705,8 +602,8 @@ impl Shell {
             .hover(move |style| style.bg(hover))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 let at = (target, seq);
-                if !this.king_ui.open_tools.remove(&at) {
-                    this.king_ui.open_tools.insert(at);
+                if !this.king_ui.open_news.remove(&at) {
+                    this.king_ui.open_news.insert(at);
                 }
                 cx.notify();
             }))
@@ -751,7 +648,7 @@ impl Shell {
                         .min_w_0()
                         .text_size(metrics::TEXT_SMALL())
                         .text_color(c.text_muted)
-                        .child(entry.text.trim_start_matches("[Leon] ").to_owned()),
+                        .child(text.trim_start_matches("[Leon] ").to_owned()),
                 )
             })
             .into_any_element()
@@ -778,7 +675,7 @@ impl Shell {
                 };
                 if let Some(id) = deciding {
                     answers = answers
-                        .child(mono("KING DECIDES").text_color(c.text_faint))
+                        .child(mono("ORCHESTRATOR DECIDES").text_color(c.text_faint))
                         .child(div().flex_1())
                         .child(
                             button(
@@ -833,44 +730,31 @@ impl Shell {
                         ),
                     );
                 }
-                div()
-                    .debug_selector({
-                        let key = key.clone();
-                        let id = open.id.clone();
-                        move || format!("king-question-{key}-{id}")
-                    })
-                    .w_full()
-                    .min_w_0()
-                    .px(px(12.))
-                    .py(px(10.))
-                    .rounded(metrics::RADIUS())
-                    .border_1()
-                    .border_color(c.signal)
-                    .bg(c.surface)
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child(
-                        mono(match target {
-                            Target::Brain => "ASKS YOU".to_owned(),
-                            Target::Worker(id) => {
-                                match self.king_ui.status.as_ref().and_then(|status| {
-                                    status.workers.iter().find(|worker| worker.id == id)
-                                }) {
-                                    Some(worker) => format!("WORKER #{id} ASKS · {}", worker.title)
-                                        .to_uppercase(),
-                                    None => format!("WORKER #{id} ASKS"),
+                let ids = Ids::new("king", key.clone());
+                let label =
+                    match target {
+                        Target::Brain => "ASKS YOU".to_owned(),
+                        Target::Worker(id) => {
+                            match self.king_ui.status.as_ref().and_then(|status| {
+                                status.workers.iter().find(|worker| worker.id == id)
+                            }) {
+                                Some(worker) => {
+                                    format!("WORKER #{id} ASKS · {}", worker.title).to_uppercase()
                                 }
+                                None => format!("WORKER #{id} ASKS"),
                             }
-                        })
-                        .w_full()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(c.signal),
-                    )
-                    .child(div().min_w_0().text_color(c.text).child(open.text.clone()))
-                    .child(answers)
-                    .into_any_element()
+                        }
+                    };
+                let frame = question_frame(&ids, &open.id, &label, c);
+                match leon_king::transcript::plan_of(&open.text) {
+                    // A plan is read as a document, as the chat shows it.
+                    Some(plan) => plan_card(frame, &ids, plan, c),
+                    None => {
+                        frame.child(div().min_w_0().text_color(c.text).child(open.text.clone()))
+                    }
+                }
+                .child(answers)
+                .into_any_element()
             })
             .collect()
     }
@@ -1089,6 +973,7 @@ impl Shell {
             .border_1()
             .border_color(c.elevated_border)
             .bg(c.surface)
+            .children(self.king_queue_list(Target::Brain, c, cx))
             .children(self.king_attached(Target::Brain, c, cx))
             .children(self.king_ui.input.as_ref().map(|input| {
                 div()
@@ -1167,7 +1052,7 @@ impl Shell {
                     .text_size(metrics::TEXT_SMALL())
                     .text_color(c.text_faint)
                     .child(
-                        "No workers. King starts them for long work, each in a worktree of its \
+                        "No workers. Orchestrator starts them for long work, each in a worktree of its \
                          own; they show here, not in the sidebar, until you take one over.",
                     ),
             );
@@ -1239,7 +1124,7 @@ impl Shell {
         for process in &status.running {
             let pid = process.pid;
             let whose = match process.of {
-                Target::Brain => "KING".to_owned(),
+                Target::Brain => "ORCHESTRATOR".to_owned(),
                 Target::Worker(id) => format!("#{id}"),
             };
             rows = rows.child(
@@ -1771,12 +1656,7 @@ impl Shell {
     ) -> AnyElement {
         let id = worker.id;
         let target = Target::Worker(id);
-        let entries = self
-            .king_ui
-            .workers
-            .get(&id)
-            .map(|feed| feed.entries.as_slice())
-            .unwrap_or_default();
+        let feed = self.king_ui.workers.get(&id).cloned().unwrap_or_default();
         let busy = worker.conversation.busy;
         let mut actions = div().flex().flex_wrap().items_center().gap(px(6.));
         if busy {
@@ -1889,7 +1769,7 @@ impl Shell {
                     )
                     .child(actions),
             )
-            .child(self.king_timeline(target, entries, c, cx))
+            .child(self.king_timeline(target, &feed, c, cx))
             .child(
                 div()
                     .flex_none()
@@ -1900,6 +1780,8 @@ impl Shell {
                     .gap(px(8.))
                     .children(self.king_questions(target, &worker.conversation.questions, c, cx))
                     .children(self.king_attached(target, c, cx))
+                    .children(self.chat_git_cell(Subject::Worker(id), c, cx))
+                    .children(self.king_queue_list(target, c, cx))
                     .child(
                         div()
                             .debug_selector(move || format!("king-worker-composer-{id}"))
@@ -1936,9 +1818,147 @@ impl Shell {
                                         this.king_tell_worker(window, cx);
                                     })),
                             ),
-                    ),
+                    )
+                    .children(self.king_foot(id, c, cx)),
             )
             .into_any_element()
+    }
+
+    /// The messages that wait for the turn of `target` to end, one row each
+    /// above its field, as the chat shows them: what was said (its first
+    /// line), and what can be done with it. Edit puts it back in the field,
+    /// remove drops it, and send now tells the running turn instead of
+    /// waiting for its end.
+    fn king_queue_list(
+        &self,
+        target: Target,
+        c: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let queue = self.king_queue(target);
+        if queue.is_empty() {
+            return None;
+        }
+        let key = key_of(target);
+        let action = |part: &'static str, label: &'static str, index: usize| {
+            let hover = c.surface_2;
+            let name = format!("king-queue-{part}-{key}-{index}");
+            div()
+                .id(SharedString::from(name.clone()))
+                .debug_selector(move || name.clone())
+                .flex_none()
+                .h(px(20.))
+                .px(px(6.))
+                .flex()
+                .items_center()
+                .rounded(metrics::RADIUS())
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover))
+                .child(mono(label).text_color(c.text_muted))
+        };
+        let rows = queue.into_iter().enumerate().map(|(index, text)| {
+            let (words, files) = super::king::split_attached(&text);
+            let first = words
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("")
+                .to_owned();
+            let shown = if files.is_empty() {
+                first
+            } else {
+                format!("{first}  ({} attached)", files.len())
+            };
+            let item = format!("king-queue-item-{key}-{index}");
+            let (for_edit, for_remove, for_steer) = (text.clone(), text.clone(), text);
+            div()
+                .debug_selector(move || item.clone())
+                .w_full()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(mono(format!("{}", index + 1)).text_color(c.text_faint))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(metrics::TEXT_SMALL())
+                        .text_color(c.text_muted)
+                        .child(shown),
+                )
+                .child(action("edit", "EDIT", index).on_click(cx.listener(
+                    move |this, _: &ClickEvent, _, cx| {
+                        this.king_queue_edit(target, index, for_edit.clone(), cx);
+                    },
+                )))
+                .child(action("remove", "REMOVE", index).on_click(cx.listener(
+                    move |this, _: &ClickEvent, _, cx| {
+                        this.king_queue_remove(target, index, for_remove.clone(), cx);
+                    },
+                )))
+                .child(action("steer", "SEND NOW", index).on_click(cx.listener(
+                    move |this, _: &ClickEvent, _, cx| {
+                        this.king_queue_steer(target, index, for_steer.clone(), cx);
+                    },
+                )))
+        });
+        Some(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .pb(px(4.))
+                .border_b_1()
+                .border_color(c.border)
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    /// The line under a worker's field: the branch of its worktree, and the
+    /// buttons that open the diffs and the git cell. Only for a worker on
+    /// this computer.
+    fn king_foot(&self, id: u32, c: &Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let subject = Subject::Worker(id);
+        self.scene(subject)?;
+        let open = self
+            .edits(subject)
+            .is_some_and(|edits| edits.diff.is_some());
+        let hover = c.surface_2;
+        let diff = div()
+            .id(SharedString::from(format!("king-diff-{id}")))
+            .debug_selector(move || format!("king-diff-{id}"))
+            .flex_none()
+            .h(px(20.))
+            .px(px(6.))
+            .flex()
+            .items_center()
+            .rounded(metrics::RADIUS())
+            .border_1()
+            .border_color(if open { c.signal } else { c.border })
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.chat_diff_toggle(subject, cx);
+            }))
+            .child(mono("DIFF").text_color(c.text_muted));
+        Some(
+            div()
+                .debug_selector(move || format!("king-foot-{id}"))
+                .px(px(2.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .children(self.chat_branch_label(subject, c))
+                .child(div().flex_1())
+                .child(diff)
+                .child(self.chat_git_button(subject, c, cx))
+                .into_any_element(),
+        )
     }
 }
 
@@ -2146,169 +2166,9 @@ fn usage_panel(report: &Report, c: &Palette) -> AnyElement {
     panel.into_any_element()
 }
 
-/// One entry that is not a tool.
-fn king_entry(target: Target, entry: &Entry, agent: Option<AgentId>, c: &Palette) -> AnyElement {
-    let key = key_of(target);
-    let seq = entry.seq;
-    let selector = move |kind: &'static str| {
-        let key = key.clone();
-        move || format!("king-{kind}-{key}-{seq}")
-    };
-    match entry.kind {
-        Kind::Prompt => div()
-            .debug_selector(selector("prompt"))
-            .w_full()
-            .flex()
-            .justify_end()
-            .child(
-                div()
-                    .max_w(gpui_kit::relative(0.86))
-                    .min_w_0()
-                    .px(px(12.))
-                    .py(px(8.))
-                    .rounded(metrics::RADIUS())
-                    .border_1()
-                    .border_color(c.border)
-                    .bg(c.surface)
-                    .text_color(c.text)
-                    .child(entry.text.clone()),
-            )
-            .into_any_element(),
-        Kind::Agent => div()
-            .debug_selector(selector("agent"))
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(match agent {
-                        Some(agent) => agent_icon(agent, px(12.), c).into_any_element(),
-                        None => icon(IconName::Crown, px(12.), c.signal).into_any_element(),
-                    })
-                    .child(
-                        mono(match agent {
-                            Some(agent) => agent.tag().to_owned(),
-                            None => "KING".to_owned(),
-                        })
-                        .text_color(c.text_faint),
-                    ),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .text_color(c.text)
-                    .line_height(gpui_kit::relative(ANSWER_LINE))
-                    .child(
-                        TextView::markdown(
-                            SharedString::from(format!("king-{}-message-{seq}", key_of(target))),
-                            entry.text.clone(),
-                        )
-                        .style(answer_style())
-                        .selectable(true),
-                    ),
-            )
-            .into_any_element(),
-        Kind::Question => div()
-            .debug_selector(selector("asked"))
-            .w_full()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(led(c.signal))
-            .child(
-                div()
-                    .min_w_0()
-                    .text_size(metrics::TEXT_SMALL())
-                    .text_color(c.text_muted)
-                    .child(entry.text.clone()),
-            )
-            .into_any_element(),
-        Kind::Notice => div()
-            .debug_selector(selector("notice"))
-            .w_full()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(led(c.text_faint))
-            .child(
-                div()
-                    .min_w_0()
-                    .text_size(metrics::TEXT_SMALL())
-                    .text_color(c.text_muted)
-                    .child(entry.text.clone()),
-            )
-            .into_any_element(),
-        // Leon's report under an answer: tokens, speed, cost, what is left.
-        Kind::Report if entry.report.is_some() => report_strip(
-            target,
-            seq,
-            entry.report.as_ref().unwrap_or(&Report::default()),
-            c,
-        ),
-        Kind::Report => div()
-            .debug_selector(selector("report"))
-            .w_full()
-            .min_w_0()
-            .pl(px(18.))
-            .border_l_1()
-            .border_color(c.border)
-            .flex()
-            .flex_col()
-            .children(entry.text.lines().map(|line| {
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .font_family(fonts::mono())
-                    .text_size(metrics::TEXT_SMALL())
-                    .text_color(c.text_faint)
-                    .child(line.to_owned())
-            }))
-            .into_any_element(),
-        // Drawn by `king_tools` and `king_news`.
-        Kind::Tool | Kind::News => div().into_any_element(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn entry(seq: u64, kind: Kind) -> Entry {
-        Entry {
-            seq,
-            at_ms: 0,
-            kind,
-            text: String::new(),
-            report: None,
-        }
-    }
-
-    #[test]
-    fn tools_in_a_row_are_one_piece() {
-        let entries = [
-            entry(0, Kind::Prompt),
-            entry(1, Kind::Tool),
-            entry(2, Kind::Tool),
-            entry(3, Kind::Agent),
-            entry(4, Kind::Tool),
-        ];
-        let shape: Vec<usize> = pieces(&entries)
-            .iter()
-            .map(|piece| match piece {
-                Piece::One(_) => 1,
-                Piece::Tools(run) => run.len() * 10,
-            })
-            .collect();
-        assert_eq!(shape, [1, 20, 1, 10]);
-    }
 
     #[test]
     fn a_conversation_says_what_it_runs_on() {
@@ -2321,9 +2181,11 @@ mod tests {
             busy: false,
             busy_since_ms: None,
             queued: 0,
+            queue: Vec::new(),
             questions: Vec::new(),
             cost_usd: 0.0,
             last_seq: None,
+            events_seq: None,
         };
         assert_eq!(runs_on(&conversation), "CLAUDE CODE OPUS HIGH");
         let unknown = ConversationStatus {

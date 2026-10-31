@@ -11,6 +11,7 @@
 
 use std::collections::VecDeque;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::change::FileChange;
@@ -28,13 +29,15 @@ const WRITTEN_LINES: usize = 40;
 const NOISE_LINES: usize = 6;
 
 /// What happens during a turn, as a chat shows it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum TurnEvent {
     /// The agent's conversation exists. `session_id` is what a later turn
     /// passes as `resume_id` to continue it.
     Started {
         /// The id the agent gave the conversation.
         session_id: String,
+        #[serde(default)]
         /// The model answering, when the agent says.
         model: Option<String>,
     },
@@ -65,6 +68,7 @@ pub enum TurnEvent {
         name: String,
         /// One line saying what with: the command, the file, the query.
         summary: String,
+        #[serde(default)]
         /// What the line leaves out: the whole command, the change of a file
         /// as removed (`- `) and added (`+ `) lines under its path, or the
         /// arguments one per line. Empty when the summary says it all.
@@ -78,6 +82,7 @@ pub enum TurnEvent {
         ok: bool,
         /// One line of what came back.
         summary: String,
+        #[serde(default)]
         /// Everything that came back, as text: the output, the listing, the
         /// error. Empty when the summary says it all.
         detail: String,
@@ -89,6 +94,7 @@ pub enum TurnEvent {
     ToolChange {
         /// The id of its [`TurnEvent::ToolUse`].
         id: String,
+        #[serde(default)]
         /// The files, in the order they were changed.
         changes: Vec<FileChange>,
     },
@@ -97,14 +103,19 @@ pub enum TurnEvent {
     Finished {
         /// Whether the agent says it succeeded.
         ok: bool,
+        #[serde(default)]
         /// What went wrong, when it did not.
         error: Option<String>,
+        #[serde(default)]
         /// What the turn cost, when the agent says.
         cost_usd: Option<f64>,
+        #[serde(default)]
         /// How long it took, when the agent says.
         duration_ms: Option<u64>,
+        #[serde(default)]
         /// Tools the agent wanted and the permission mode refused.
         denied_tools: Vec<String>,
+        #[serde(default)]
         /// The person stopped it (an interrupt); `ok` is then
         /// false without anything having gone wrong.
         interrupted: bool,
@@ -119,6 +130,7 @@ pub enum TurnEvent {
     /// `TodoWrite`, Codex's plan updates, an ACP agent's plan. Each one is the
     /// whole list and replaces the one before it.
     Todos {
+        #[serde(default)]
         /// The entries, in the order the agent keeps them.
         todos: Vec<Todo>,
     },
@@ -169,7 +181,7 @@ pub enum TurnEvent {
 }
 
 /// One entry of the agent's list of things to do.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Todo {
     /// What is to be done.
     pub text: String,
@@ -178,7 +190,8 @@ pub struct Todo {
 }
 
 /// How far an entry of the agent's list is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
     /// Not started.
     Pending,
@@ -201,7 +214,8 @@ impl TodoStatus {
 }
 
 /// The tokens of a turn, as the agent counts them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Tokens {
     /// Read by the model, cached reads included.
     pub input: u64,
@@ -226,7 +240,8 @@ impl Tokens {
 }
 
 /// What an agent asks the person.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum QuestionKind {
     /// May it use this tool, this way?
     Permission {
@@ -234,17 +249,21 @@ pub enum QuestionKind {
         tool: String,
         /// One line saying what with: the command, the file.
         summary: String,
+        #[serde(default)]
         /// Everything it would pass to the tool, as text, for whoever wants
         /// to read it before answering.
         detail: String,
+        #[serde(default)]
         /// Why it has to ask, when the agent says.
         reason: Option<String>,
+        #[serde(default)]
         /// What may be answered; one of them goes back in
         /// [`Answer::Permission`].
         choices: Vec<PermissionChoice>,
     },
     /// One or more questions with options to pick from.
     Choices {
+        #[serde(default)]
         /// The questions, to be answered together.
         questions: Vec<ChoiceQuestion>,
     },
@@ -256,7 +275,8 @@ pub enum QuestionKind {
 }
 
 /// What a way of answering a permission question does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PermissionEffect {
     /// Allows this one use.
     AllowOnce,
@@ -267,7 +287,7 @@ pub enum PermissionEffect {
 }
 
 /// One way of answering a permission question.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionChoice {
     /// What goes back in [`Answer::Permission`].
     pub id: String,
@@ -275,63 +295,75 @@ pub struct PermissionChoice {
     pub effect: PermissionEffect,
     /// Words for it.
     pub label: String,
+    #[serde(default)]
     /// How far an "always" reaches (this session, this project, everywhere),
     /// when the agent says.
     pub scope: Option<String>,
+    #[serde(default)]
     /// Whether the agent reads a reason given with it ([`Answer::Permission`]).
     /// Without it, what to do instead is said as the next message.
     pub takes_reason: bool,
 }
 
 /// One question with options.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChoiceQuestion {
     /// Names the question in [`ChoiceAnswer`].
     pub id: String,
+    #[serde(default)]
     /// A word or two saying what it is about, when the agent gives one.
     pub header: Option<String>,
     /// The question.
     pub question: String,
+    #[serde(default)]
     /// What can be picked.
     pub options: Vec<ChoiceOption>,
+    #[serde(default)]
     /// Whether several may be picked.
     pub multi_select: bool,
+    #[serde(default)]
     /// Whether an answer in the person's own words is accepted.
     pub allow_other: bool,
 }
 
 /// One thing that can be picked.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChoiceOption {
     /// What is picked; it goes back in [`ChoiceAnswer`].
     pub label: String,
+    #[serde(default)]
     /// What picking it means, when the agent says.
     pub description: Option<String>,
 }
 
 /// The answer to one [`ChoiceQuestion`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChoiceAnswer {
     /// The question's id.
     pub question_id: String,
+    #[serde(default)]
     /// The labels picked.
     pub labels: Vec<String>,
+    #[serde(default)]
     /// An answer in the person's own words, with or instead of labels.
     pub other: Option<String>,
 }
 
 /// What the person answers to a [`TurnEvent::Question`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Answer {
     /// To [`QuestionKind::Permission`].
     Permission {
         /// The id of the [`PermissionChoice`] taken.
         choice_id: String,
+        #[serde(default)]
         /// Why not, with a refusal; the agent reads it.
         reason: Option<String>,
     },
     /// To [`QuestionKind::Choices`]: one answer per question.
     Choices {
+        #[serde(default)]
         /// The answers.
         answers: Vec<ChoiceAnswer>,
     },
@@ -339,6 +371,7 @@ pub enum Answer {
     Plan {
         /// Start working, or keep planning.
         approve: bool,
+        #[serde(default)]
         /// What to change, when it should keep planning.
         feedback: Option<String>,
     },
@@ -1612,5 +1645,304 @@ mod tests {
         reader.data(&bytes);
         reader.data(b"\x1b");
         reader.data(b"\x1b[\n\x1b]\n{\"type\":\"result\"}\n");
+    }
+}
+
+/// The events as data on a wire or on disk: every type an event holds
+/// serializes, and reads back what a later version added without failing.
+#[cfg(test)]
+mod serde_tests {
+    use super::*;
+    use crate::change::{ChangeKind, DiffLine, Hunk, LineKind};
+    use serde_json::json;
+
+    fn round_trip(event: &TurnEvent) {
+        let text = serde_json::to_string(event).expect("serializes");
+        let back: TurnEvent = serde_json::from_str(&text).expect("deserializes");
+        assert_eq!(&back, event, "{text}");
+    }
+
+    fn sample_change() -> FileChange {
+        FileChange {
+            path: "src/lib.rs".into(),
+            kind: ChangeKind::Updated,
+            hunks: vec![Hunk {
+                lines: vec![
+                    DiffLine {
+                        kind: LineKind::Context,
+                        text: "fn a() {}".into(),
+                        old: Some(1),
+                        new: Some(1),
+                    },
+                    DiffLine {
+                        kind: LineKind::Removed,
+                        text: "old".into(),
+                        old: Some(2),
+                        new: None,
+                    },
+                    DiffLine {
+                        kind: LineKind::Added,
+                        text: "new".into(),
+                        old: None,
+                        new: Some(2),
+                    },
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn every_kind_of_event_survives_a_round_trip() {
+        let events = vec![
+            TurnEvent::Started {
+                session_id: "s1".into(),
+                model: Some("claude-opus".into()),
+            },
+            TurnEvent::Started {
+                session_id: "s2".into(),
+                model: None,
+            },
+            TurnEvent::TextDelta { text: "he".into() },
+            TurnEvent::Text {
+                text: "hello".into(),
+            },
+            TurnEvent::Thought { text: "hmm".into() },
+            TurnEvent::ToolUse {
+                id: "t1".into(),
+                name: "Bash".into(),
+                summary: "ls".into(),
+                detail: String::new(),
+            },
+            TurnEvent::ToolResult {
+                id: "t1".into(),
+                ok: false,
+                summary: "no".into(),
+                detail: "boom".into(),
+            },
+            TurnEvent::ToolChange {
+                id: "t2".into(),
+                changes: vec![sample_change()],
+            },
+            TurnEvent::Finished {
+                ok: false,
+                error: Some("bad".into()),
+                cost_usd: Some(0.25),
+                duration_ms: Some(4120),
+                denied_tools: vec!["Bash".into()],
+                interrupted: true,
+            },
+            TurnEvent::Usage {
+                tokens: Tokens {
+                    input: 10,
+                    cached_input: 4,
+                    output: 6,
+                    reasoning: 2,
+                    context_window: Some(200_000),
+                    context_used: None,
+                },
+            },
+            TurnEvent::Todos {
+                todos: vec![
+                    Todo {
+                        text: "one".into(),
+                        status: TodoStatus::Pending,
+                    },
+                    Todo {
+                        text: "two".into(),
+                        status: TodoStatus::InProgress,
+                    },
+                    Todo {
+                        text: "three".into(),
+                        status: TodoStatus::Completed,
+                    },
+                ],
+            },
+            TurnEvent::Question {
+                id: "q1".into(),
+                kind: QuestionKind::Permission {
+                    tool: "Bash".into(),
+                    summary: "rm".into(),
+                    detail: "rm -rf x".into(),
+                    reason: Some("destructive".into()),
+                    choices: vec![
+                        PermissionChoice {
+                            id: "once".into(),
+                            effect: PermissionEffect::AllowOnce,
+                            label: "Allow".into(),
+                            scope: None,
+                            takes_reason: false,
+                        },
+                        PermissionChoice {
+                            id: "always".into(),
+                            effect: PermissionEffect::AllowAlways,
+                            label: "Always".into(),
+                            scope: Some("project".into()),
+                            takes_reason: false,
+                        },
+                        PermissionChoice {
+                            id: "no".into(),
+                            effect: PermissionEffect::Deny,
+                            label: "Deny".into(),
+                            scope: None,
+                            takes_reason: true,
+                        },
+                    ],
+                },
+            },
+            TurnEvent::Question {
+                id: "q2".into(),
+                kind: QuestionKind::Choices {
+                    questions: vec![ChoiceQuestion {
+                        id: "c1".into(),
+                        header: Some("Style".into()),
+                        question: "Which?".into(),
+                        options: vec![ChoiceOption {
+                            label: "A".into(),
+                            description: Some("the first".into()),
+                        }],
+                        multi_select: true,
+                        allow_other: true,
+                    }],
+                },
+            },
+            TurnEvent::Question {
+                id: "q3".into(),
+                kind: QuestionKind::Plan {
+                    plan: "# Plan".into(),
+                },
+            },
+            TurnEvent::QuestionResolved { id: "q1".into() },
+            TurnEvent::ModeChanged {
+                mode: "plan".into(),
+            },
+            TurnEvent::ModeRefused {
+                mode: "auto".into(),
+                reason: "no".into(),
+            },
+            TurnEvent::Disconnected,
+            TurnEvent::Reconnected,
+            TurnEvent::Gap,
+            TurnEvent::Exited { code: 1 },
+            TurnEvent::Gone,
+        ];
+        for event in &events {
+            round_trip(event);
+        }
+    }
+
+    #[test]
+    fn answers_survive_a_round_trip() {
+        let answers = vec![
+            Answer::Permission {
+                choice_id: "no".into(),
+                reason: Some("not now".into()),
+            },
+            Answer::Choices {
+                answers: vec![ChoiceAnswer {
+                    question_id: "c1".into(),
+                    labels: vec!["A".into()],
+                    other: Some("or this".into()),
+                }],
+            },
+            Answer::Plan {
+                approve: false,
+                feedback: Some("smaller".into()),
+            },
+        ];
+        for answer in answers {
+            let text = serde_json::to_string(&answer).expect("serializes");
+            let back: Answer = serde_json::from_str(&text).expect("deserializes");
+            assert_eq!(back, answer, "{text}");
+        }
+    }
+
+    #[test]
+    fn an_event_is_a_tagged_object_in_snake_case() {
+        let value = serde_json::to_value(TurnEvent::ToolUse {
+            id: "t1".into(),
+            name: "Read".into(),
+            summary: "a".into(),
+            detail: String::new(),
+        })
+        .expect("serializes");
+        assert_eq!(value["type"], "tool_use");
+        let value = serde_json::to_value(TurnEvent::QuestionResolved { id: "q".into() })
+            .expect("serializes");
+        assert_eq!(value["type"], "question_resolved");
+        let value = serde_json::to_value(TurnEvent::Gone).expect("serializes");
+        assert_eq!(value, json!({ "type": "gone" }));
+    }
+
+    #[test]
+    fn a_field_a_later_version_added_is_ignored() {
+        let event: TurnEvent = serde_json::from_value(json!({
+            "type": "tool_result",
+            "id": "t1",
+            "ok": true,
+            "summary": "done",
+            "detail": "",
+            "added_later": { "anything": [1, 2, 3] },
+        }))
+        .expect("an unknown field is tolerated");
+        assert_eq!(
+            event,
+            TurnEvent::ToolResult {
+                id: "t1".into(),
+                ok: true,
+                summary: "done".into(),
+                detail: String::new(),
+            }
+        );
+        let change: FileChange = serde_json::from_value(json!({
+            "path": "a",
+            "kind": "created",
+            "hunks": [{ "lines": [{
+                "kind": "added", "text": "x", "old": null, "new": 1, "extra": true,
+            }], "extra": 1 }],
+            "extra": "x",
+        }))
+        .expect("an unknown field is tolerated");
+        assert_eq!(change.added(), 1);
+    }
+
+    #[test]
+    fn what_an_old_writer_left_out_reads_as_empty() {
+        let event: TurnEvent = serde_json::from_value(json!({ "type": "finished", "ok": true }))
+            .expect("optional fields may be missing");
+        assert_eq!(
+            event,
+            TurnEvent::Finished {
+                ok: true,
+                error: None,
+                cost_usd: None,
+                duration_ms: None,
+                denied_tools: Vec::new(),
+                interrupted: false,
+            }
+        );
+        let event: TurnEvent =
+            serde_json::from_value(json!({ "type": "started", "session_id": "s" }))
+                .expect("the model may be missing");
+        assert_eq!(
+            event,
+            TurnEvent::Started {
+                session_id: "s".into(),
+                model: None
+            }
+        );
+        let event: TurnEvent = serde_json::from_value(json!({
+            "type": "usage",
+            "tokens": { "input": 3 },
+        }))
+        .expect("counts may be missing");
+        assert_eq!(
+            event,
+            TurnEvent::Usage {
+                tokens: Tokens {
+                    input: 3,
+                    ..Tokens::default()
+                }
+            }
+        );
     }
 }

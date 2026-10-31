@@ -50,6 +50,7 @@ use crate::files::{self, FileContent, FileEntry, FileError, FileRevision, GitMar
 use crate::project::{self, ProjectState};
 
 mod changes;
+mod pull_poll;
 mod task_sync;
 pub use changes::{CommitRequest, ShipReport, ShipRequest};
 
@@ -60,18 +61,11 @@ const DISCOVERY_PARALLELISM: usize = 8;
 /// How many of a machine's sessions a scan reads to tie processes to them.
 const SCAN_SESSIONS: usize = 50_000;
 
-/// The least time between two questions to GitHub about one project. The
-/// answers are kept in the store, so asking again sooner would only spend the
-/// person's rate limit.
-const GITHUB_ASK_EVERY: Duration = Duration::from_secs(60);
-
-/// How many open pull requests one question asks for.
+/// How many open pull requests one question asks for (with their reviews and
+/// checks, the heavy part of the answer).
 const OPEN_PULL_REQUESTS: usize = 100;
 
-/// Whether a project last asked GitHub at `last` may ask again at `now`.
-fn github_due(last: Option<Instant>, now: Instant) -> bool {
-    last.is_none_or(|last| now.saturating_duration_since(last) >= GITHUB_ASK_EVERY)
-}
+pub(crate) use pull_poll::Why;
 
 /// How long a search of a machine's files may take before it is given up.
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -697,9 +691,10 @@ struct Inner {
     /// where its usage is not collected and its processes are listed with
     /// PowerShell. Decided once from the platform; only tests change it.
     local_posix_shell: std::sync::atomic::AtomicBool,
-    /// When each project last asked GitHub about its pull requests, so that a
-    /// refresh, the timer and a new worktree together ask once a minute.
-    github_asked: Mutex<HashMap<ProjectId, Instant>>,
+    /// When each project last asked GitHub about its pull requests, and how
+    /// many questions in a row failed, so that a refresh, the timer, a focus
+    /// and a new worktree together ask as often as `pull_poll` allows.
+    github_asked: Mutex<HashMap<ProjectId, pull_poll::Asked>>,
     /// The runner of commands that may take minutes (a commit with its hooks,
     /// a push, an agent asked for a message); the usual one stops a command
     /// after thirty seconds. The usual runner serves when none was set.
@@ -2262,7 +2257,8 @@ impl Engine {
         // it, finding it again), so it is also when the sidebar gets to know
         // the state of each checkout and what GitHub says: the pull requests
         // included, which the timer asks for far less often.
-        self.probe_github(&project).await?;
+        self.probe_github(&project, Why::Look { focused: true })
+            .await?;
         Ok(count)
     }
 
@@ -2297,11 +2293,16 @@ impl Engine {
         if !same {
             self.inner.store.replace_worktrees(project_id, listed)?;
         }
-        // The timer that watches a project's worktrees reads the checkouts
-        // but does not also leave the machine for GitHub;
-        // `check_pull_requests` does, on its own slower cadence.
+        // The timer that watches a project's worktrees reads the checkouts and
+        // leaves the machine for GitHub only when something moved (a head, a
+        // branch, a new worktree): that is when a pull request may have been
+        // opened or merged. `check_pull_requests` asks on its own cadence.
         self.refresh_checkouts(&project).await?;
-        self.probe_merged(&project, false).await
+        if same {
+            Ok(())
+        } else {
+            self.probe_github(&project, Why::Event).await
+        }
     }
 
     /// [`Self::refresh_checkouts`] for a refresh the person asked for: quiet,
@@ -2345,95 +2346,135 @@ impl Engine {
         Ok(())
     }
 
-    /// Asks GitHub about the pull requests of `project`, merged and open,
-    /// unless it was asked less than [`GITHUB_ASK_EVERY`] ago.
-    async fn probe_github(&self, project: &Project) -> Result<(), EngineError> {
-        let due = {
-            let mut asked = self
-                .inner
-                .github_asked
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let now = Instant::now();
-            let due = github_due(asked.get(&project.id).copied(), now);
-            if due {
-                asked.insert(project.id.clone(), now);
-            }
-            due
-        };
-        if !due {
+    /// Asks GitHub about the pull requests of `project`, of every state, when
+    /// `why` makes it time (see [`pull_poll::due`]); otherwise it does nothing.
+    async fn probe_github(&self, project: &Project, why: Why) -> Result<(), EngineError> {
+        if !self.github_due(&project.id, why) {
             return Ok(());
         }
-        // One reading of the remote serves both questions.
-        let on_github = if self
-            .inner
-            .store
-            .worktrees(&project.id)?
-            .iter()
-            .any(|w| w.branch.is_some())
-        {
-            let machine = self.inner.store.machine(&project.machine_id)?;
-            let runner = SharedRunner(self.inner.runner.clone());
-            Some(
-                self.origin_is_github(&runner, &machine, &self.ssh(), &project.root)
-                    .await,
-            )
-        } else {
-            None
-        };
-        self.probe_merged_on(project, true, on_github).await?;
-        self.probe_open_pull_requests(project, on_github).await
+        self.ask_github(project).await
     }
 
-    /// Asks GitHub for the open pull requests of the repository and stores,
-    /// as the GitHub half of each worktree's status, the one of its branch
-    /// (or none). One question for the whole project. When GitHub cannot be
-    /// asked (not a GitHub repository, no `gh`, not signed in, offline) every
-    /// worktree keeps what it had, and nothing is said.
-    async fn probe_open_pull_requests(
-        &self,
-        project: &Project,
-        on_github: Option<bool>,
-    ) -> Result<(), EngineError> {
+    /// [`Engine::probe_github`] whatever the cadence: a pull request was just
+    /// opened by a ship, and the person is waiting to see it.
+    async fn probe_github_now(&self, project: &Project) -> Result<(), EngineError> {
+        self.github_reserve(&project.id);
+        self.ask_github(project).await
+    }
+
+    /// Whether `project` may ask GitHub now, for `why`; when it may, the
+    /// moment is noted before the question runs, so two callers at once ask
+    /// once.
+    fn github_due(&self, project: &ProjectId, why: Why) -> bool {
+        let mut asked = self
+            .inner
+            .github_asked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let last = asked.get(project).copied();
+        let now = Instant::now();
+        if !pull_poll::due(last, now, why) {
+            return false;
+        }
+        asked.insert(project.clone(), pull_poll::after_question(last, now, false));
+        true
+    }
+
+    /// Notes that `project` is asking now, keeping the failures it had.
+    fn github_reserve(&self, project: &ProjectId) {
+        let mut asked = self
+            .inner
+            .github_asked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let last = asked.get(project).copied();
+        let kept = last.map_or(0, |last| last.failures);
+        asked.insert(
+            project.clone(),
+            pull_poll::Asked {
+                at: Instant::now(),
+                failures: kept,
+            },
+        );
+    }
+
+    /// Asks, and notes whether GitHub answered, for the backoff.
+    async fn ask_github(&self, project: &Project) -> Result<(), EngineError> {
+        let outcome = self.read_pull_requests(project).await;
+        let failed = !matches!(outcome, Ok(true));
+        let mut asked = self
+            .inner
+            .github_asked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let last = asked.get(&project.id).copied();
+        asked.insert(
+            project.id.clone(),
+            pull_poll::after_question(last, last.map_or_else(Instant::now, |last| last.at), failed),
+        );
+        outcome.map(|_| ())
+    }
+
+    /// Asks GitHub for the pull requests of the repository, whatever their
+    /// state, and stores, for every worktree, the one of its branch (or none)
+    /// as the GitHub half of its status, and whether it was merged for what
+    /// reads `merged_pull_request`. One question for the whole project (two
+    /// calls of `gh` at the same time, see
+    /// [`Github::branch_pull_requests`]).
+    ///
+    /// `Ok(true)` when GitHub answered. `Ok(false)` when it could not be asked
+    /// (not a GitHub repository, no `gh`, not signed in, offline): every
+    /// worktree keeps what it had, and nothing is said. A worktree whose
+    /// branch is not among the newest pull requests asked for reads as having
+    /// none.
+    ///
+    /// Git is deliberately not asked whether a branch is merged: a branch
+    /// inside the base looks the same whether its work landed there or it
+    /// never had any, and a squash merge leaves the branch outside the base
+    /// altogether. The honest answer is the one GitHub recorded.
+    async fn read_pull_requests(&self, project: &Project) -> Result<bool, EngineError> {
         let worktrees = self.inner.store.worktrees(&project.id)?;
         if worktrees.iter().all(|worktree| worktree.branch.is_none()) {
-            return Ok(());
+            return Ok(true);
         }
         let machine = self.inner.store.machine(&project.machine_id)?;
         let runner = SharedRunner(self.inner.runner.clone());
         let ssh = self.ssh();
-        let on_github = match on_github {
-            Some(known) => known,
-            None => {
-                self.origin_is_github(&runner, &machine, &ssh, &project.root)
-                    .await
-            }
-        };
-        if !on_github {
-            return Ok(());
-        }
-        let open = match Github::new(&runner, &machine, &ssh)
-            .open_pull_requests(&project.root, OPEN_PULL_REQUESTS)
+        if !self
+            .origin_is_github(&runner, &machine, &ssh, &project.root)
             .await
         {
-            Ok(Some(open)) => open,
-            Ok(None) => return Ok(()),
+            return Ok(false);
+        }
+        let found = match Github::new(&runner, &machine, &ssh)
+            .branch_pull_requests(&project.root, OPEN_PULL_REQUESTS, github::DEFAULT_LIMIT)
+            .await
+        {
+            Ok(Some(found)) => found,
+            Ok(None) => return Ok(false),
             Err(error) => {
-                tracing::debug!(%error, "could not read the open pull requests");
-                return Ok(());
+                tracing::debug!(%error, "could not read the pull requests");
+                return Ok(false);
             }
         };
         for worktree in &worktrees {
-            let found = worktree
-                .branch
+            let Some(branch) = &worktree.branch else {
+                continue;
+            };
+            let pull_request = found.get(branch).cloned();
+            let merged = pull_request
                 .as_ref()
-                .and_then(|branch| open.get(branch))
-                .cloned();
+                .is_some_and(|pull_request| pull_request.state == leon_core::PullState::Merged);
             self.inner
                 .store
-                .update_worktree_status(&worktree.id, |status| status.pull_request = found)?;
+                .update_worktree_status(&worktree.id, |status| {
+                    status.pull_request = pull_request
+                })?;
+            if !worktree.is_main {
+                self.inner.store.set_merged(&worktree.id, Some(merged))?;
+            }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Whether the `origin` of the repository at `root` is on GitHub.
@@ -2457,113 +2498,41 @@ impl Engine {
         }
     }
 
-    /// Asks GitHub what is merged and writes it on the worktrees whose answer
-    /// changed. One question for the whole repository, and `pull_requests`
-    /// says whether this is one of the moments worth leaving the machine for:
-    /// GitHub is asked when somebody is looking at the project and on its own
-    /// slower cadence, not on the timer that lists worktrees.
-    ///
-    /// Git is deliberately not asked: a branch inside the base looks the same
-    /// whether its work landed there or it never had any, so the honest
-    /// answer is only the one GitHub recorded.
-    ///
-    /// Quiet on failure: a project whose repository cannot be asked keeps what
-    /// it already knew, and a worktree nobody could ask about stays "not
-    /// known".
-    async fn probe_merged(
-        &self,
-        project: &Project,
-        pull_requests: bool,
-    ) -> Result<(), EngineError> {
-        self.probe_merged_on(project, pull_requests, None).await
-    }
-
-    /// [`Engine::probe_merged`] for a caller that already knows whether the
-    /// origin is on GitHub (`Some`), so the remote is read once for both
-    /// questions.
-    async fn probe_merged_on(
-        &self,
-        project: &Project,
-        pull_requests: bool,
-        on_github: Option<bool>,
-    ) -> Result<(), EngineError> {
-        let worktrees = self.inner.store.worktrees(&project.id)?;
-        // Nothing but the main worktree: there is no pull request that could
-        // be merged, so GitHub is not asked about this project.
-        if !pull_requests || worktrees.iter().all(|worktree| worktree.is_main) {
-            return Ok(());
-        }
-        let machine = self.inner.store.machine(&project.machine_id)?;
-        let runner = SharedRunner(self.inner.runner.clone());
-        let ssh = self.ssh();
-        let merged: Option<HashSet<String>> = self
-            .merged_pull_requests(&runner, &machine, &ssh, &project.root, on_github)
-            .await;
-
-        for worktree in worktrees.iter().filter(|worktree| !worktree.is_main) {
-            let Some(branch) = worktree.branch.clone() else {
-                continue;
-            };
-            let merged = merged
-                .as_ref()
-                .map_or(worktree.merged_pull_request, |merged| {
-                    Some(merged.contains(&branch))
-                });
-            self.inner.store.set_merged(&worktree.id, merged)?;
-        }
-        Ok(())
-    }
-
-    /// The branches whose pull request GitHub says is merged, or `None` when
-    /// the repository is not on GitHub, `gh` is not there, or the answer says
-    /// nothing about the branches.
-    async fn merged_pull_requests(
-        &self,
-        runner: &SharedRunner,
-        machine: &Machine,
-        ssh: &SshOptions,
-        root: &str,
-        on_github: Option<bool>,
-    ) -> Option<HashSet<String>> {
-        let on_github = match on_github {
-            Some(known) => known,
-            None => self.origin_is_github(runner, machine, ssh, root).await,
-        };
-        if !on_github {
-            return None;
-        }
-        match Github::new(runner, machine, ssh)
-            .merged_pull_request_branches(root, github::DEFAULT_LIMIT)
-            .await
-        {
-            Ok(Some(branches)) => Some(branches.into_iter().collect()),
-            Ok(None) => None,
-            Err(error) => {
-                tracing::debug!(%error, "could not read the merged pull requests");
-                None
-            }
-        }
-    }
-
-    /// Asks GitHub, for the pull requests of `project`, as often as a sidebar
-    /// with live terminals is worth it. The same quiet rules as
+    /// Asks GitHub for the pull requests of `project` when `why` makes it time
+    /// (see [`pull_poll::due`]). The same quiet rules as
     /// [`Engine::check_worktrees`].
-    pub fn check_pull_requests(&self, project: ProjectId) -> JoinHandle<()> {
+    pub fn check_pull_requests(&self, project: ProjectId, why: Why) -> JoinHandle<()> {
         let engine = self.clone();
         self.inner.handle.spawn(async move {
+            // The cadence is looked at before the project is read: a timer
+            // that fires every few seconds costs a lock, not a query.
+            if !engine.github_would_ask(&project, why) {
+                return;
+            }
             let Ok(project) = engine.inner.store.project(&project) else {
                 return;
             };
-            if let Err(error) = engine.probe_github(&project).await {
+            if let Err(error) = engine.probe_github(&project, why).await {
                 tracing::debug!(%error, "could not check the pull requests");
             }
         })
     }
 
-    /// Asks GitHub at once for the open pull requests of `project`, whatever
-    /// the once-a-minute allowance: a turn just ended, and its agent may have
-    /// opened one. The worktrees are read first, for a branch just made.
-    /// Quiet, as [`Engine::check_pull_requests`].
+    /// Whether [`pull_poll::due`] lets `project` ask for `why` now, without
+    /// noting anything.
+    fn github_would_ask(&self, project: &ProjectId, why: Why) -> bool {
+        let asked = self
+            .inner
+            .github_asked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        pull_poll::due(asked.get(project).copied(), Instant::now(), why)
+    }
+
+    /// Asks GitHub as soon as [`pull_poll::EVENT_GAP`] allows, for the
+    /// pull requests of `project`: a turn just ended, and its agent may have
+    /// opened or merged one. The worktrees are read first, for a branch just
+    /// made. Quiet, as [`Engine::check_pull_requests`].
     pub fn check_open_pull_requests(&self, project: ProjectId) -> JoinHandle<()> {
         let engine = self.clone();
         self.inner.handle.spawn(async move {
@@ -2573,7 +2542,7 @@ impl Engine {
             let Ok(project) = engine.inner.store.project(&project) else {
                 return;
             };
-            if let Err(error) = engine.probe_open_pull_requests(&project, None).await {
+            if let Err(error) = engine.probe_github(&project, Why::Event).await {
                 tracing::debug!(%error, "could not check the pull requests");
             }
         })
@@ -3566,8 +3535,11 @@ impl Engine {
                     // long as nobody did.
                     match store.project(&id) {
                         Ok(project) => {
-                            if let Err(error) = self.probe_merged(&project, true).await {
-                                tracing::debug!(%error, "could not check the merged pull requests");
+                            if let Err(error) = self
+                                .probe_github(&project, Why::Look { focused: true })
+                                .await
+                            {
+                                tracing::debug!(%error, "could not check the pull requests");
                             }
                         }
                         Err(error) => tracing::warn!(%root, %error, "could not read the project"),
@@ -4619,32 +4591,76 @@ branch refs/heads/feature/login
         engine.status().expect("a status was reported")
     }
 
+    /// How many `gh` calls the runner has seen.
+    fn gh_count(rig: &Rig) -> usize {
+        rig.runner
+            .calls()
+            .iter()
+            .filter(|call| call.program == "gh")
+            .count()
+    }
+
     #[tokio::test]
-    async fn github_is_asked_when_somebody_looks_and_not_when_the_timer_watches() {
+    async fn the_timer_leaves_for_github_when_a_worktree_moved_and_not_when_nothing_did() {
         let rig = rig(ScriptedRunner::new()
+            // The first look finds worktrees nobody knew: a new branch may
+            // have a pull request, so GitHub is asked about it.
             .reply(Output::ok(LISTING))
             .reply(Output::ok("## main\n"))
             .reply(Output::ok("## feature/login\n"))
-            .reply(Output::ok("git@github.com:zavudev/leon.git\n"))
+            .reply(Output::ok(ORIGIN))
             .reply(Output::ok("[]"))
-            .reply(Output::ok("[]")));
+            .reply(Output::ok("[]"))
+            // The second finds them as they were.
+            .reply(Output::ok(LISTING))
+            .reply(Output::ok("## main\n"))
+            .reply(Output::ok("## feature/login\n")));
         let project = local_project(&rig.store);
         rig.engine
             .check_worktrees(project.id.clone())
             .await
             .unwrap();
-        assert!(
-            rig.runner.calls().iter().all(|call| call.program != "gh"),
-            "the timer that watches worktrees does not leave the machine: {:?}",
-            rig.runner.calls()
-        );
+        assert_eq!(gh_count(&rig), 2, "{:?}", rig.runner.calls());
         rig.engine
-            .check_pull_requests(project.id.clone())
+            .check_worktrees(project.id.clone())
             .await
             .unwrap();
-        assert!(
-            rig.runner.calls().iter().any(|call| call.program == "gh"),
-            "the slower cadence does ask, and keeps the worktrees it found"
+        assert_eq!(
+            gh_count(&rig),
+            2,
+            "nothing moved, so the timer that watches worktrees stays on the machine"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_head_that_moved_asks_github_at_once_after_a_pause_and_a_still_head_does_not() {
+        let rig = rig(ScriptedRunner::new());
+        let project = project_with_worktrees(&rig.store);
+        // A commit moved the head of the linked worktree.
+        let moved = LISTING.replace(&"2".repeat(40), &"3".repeat(40));
+        rig.runner.queue(Output::ok(moved));
+        rig.runner.queue(Output::ok("## main\n"));
+        rig.runner.queue(Output::ok("## feature/login\n"));
+        rig.runner.queue(Output::ok(ORIGIN));
+        rig.runner.queue(Output::ok("[]"));
+        rig.runner.queue(Output::ok("[]"));
+        // The project asked GitHub long enough ago for an event to be due.
+        rig.engine.inner.github_asked.lock().unwrap().insert(
+            project.id.clone(),
+            pull_poll::Asked {
+                at: Instant::now() - pull_poll::EVENT_GAP - Duration::from_secs(1),
+                failures: 0,
+            },
+        );
+        rig.engine
+            .check_worktrees(project.id.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            gh_count(&rig),
+            2,
+            "the head moved: {:?}",
+            rig.runner.calls()
         );
     }
 
@@ -4658,17 +4674,6 @@ branch refs/heads/feature/login
     }
 
     const ORIGIN: &str = "git@github.com:zavudev/leon.git\n";
-
-    #[test]
-    fn github_is_asked_again_only_after_a_minute() {
-        let start = Instant::now();
-        assert!(github_due(None, start), "never asked is due");
-        assert!(!github_due(Some(start), start));
-        assert!(!github_due(Some(start), start + Duration::from_secs(59)));
-        assert!(github_due(Some(start), start + Duration::from_secs(60)));
-        // A clock that went back is not a reason to ask.
-        assert!(!github_due(Some(start + Duration::from_secs(5)), start));
-    }
 
     #[tokio::test]
     async fn the_timer_reads_the_state_of_every_checkout_and_still_leaves_github_alone() {
@@ -4731,12 +4736,14 @@ branch refs/heads/feature/login
                 "headRefName":"feature/login","isDraft":false,
                 "reviewDecision":"APPROVED","statusCheckRollup":[
                   {"status":"COMPLETED","conclusion":"SUCCESS"}]}]"#,
-            )));
+            ))
+            .reply(Output::ok("[]")));
         let project = project_with_worktrees(&rig.store);
         rig.store
             .update_worktree_status(&worktree_of(&rig.store, &project.id, "main"), |status| {
                 status.pull_request = Some(leon_core::PullRequest {
                     number: 1,
+                    state: leon_core::PullState::Open,
                     url: String::new(),
                     draft: false,
                     review: leon_core::Review::None,
@@ -4744,10 +4751,7 @@ branch refs/heads/feature/login
                 })
             })
             .unwrap();
-        rig.engine
-            .probe_open_pull_requests(&project, None)
-            .await
-            .unwrap();
+        rig.engine.probe_github_now(&project).await.unwrap();
         let linked = status_of(&rig.store, &project.id, "feature/login");
         let pull_request = linked
             .pull_request
@@ -4769,6 +4773,7 @@ branch refs/heads/feature/login
     async fn when_github_cannot_be_asked_every_worktree_keeps_what_it_had() {
         let known = leon_core::PullRequest {
             number: 7,
+            state: leon_core::PullState::Open,
             url: "https://github.com/zavudev/leon/pull/7".into(),
             draft: true,
             review: leon_core::Review::None,
@@ -4794,10 +4799,7 @@ branch refs/heads/feature/login
             rig.store
                 .update_worktree_status(&linked, |status| status.pull_request = Some(known.clone()))
                 .unwrap();
-            rig.engine
-                .probe_open_pull_requests(&project, None)
-                .await
-                .unwrap();
+            rig.engine.probe_github_now(&project).await.unwrap();
             assert_eq!(
                 status_of(&rig.store, &project.id, "feature/login").pull_request,
                 Some(known.clone())
@@ -4806,33 +4808,79 @@ branch refs/heads/feature/login
     }
 
     #[tokio::test]
-    async fn github_is_asked_once_a_minute_per_project_whoever_asks() {
+    async fn github_is_asked_at_the_pace_the_poll_allows_whoever_asks() {
         let rig = rig(ScriptedRunner::new()
             .reply(Output::ok(ORIGIN))
             .reply(Output::ok("[]"))
+            .reply(Output::ok("[]"))
             .reply(Output::ok(ORIGIN))
+            .reply(Output::ok("[]"))
             .reply(Output::ok("[]")));
         let project = project_with_worktrees(&rig.store);
+        let look = Why::Look { focused: true };
         rig.engine
-            .check_pull_requests(project.id.clone())
+            .check_pull_requests(project.id.clone(), look)
             .await
             .unwrap();
         let asked = rig.runner.calls().len();
         assert_eq!(
-            rig.runner
-                .calls()
-                .iter()
-                .filter(|call| call.program == "gh")
-                .count(),
+            gh_count(&rig),
             2,
-            "the merged ones and the open ones"
+            "the open ones with their details and every state"
         );
         rig.engine
-            .check_pull_requests(project.id.clone())
+            .check_pull_requests(project.id.clone(), look)
             .await
             .unwrap();
-        rig.engine.probe_github(&project).await.unwrap();
-        assert_eq!(rig.runner.calls().len(), asked, "a minute has not passed");
+        rig.engine.probe_github(&project, look).await.unwrap();
+        rig.engine
+            .check_pull_requests(project.id.clone(), Why::Event)
+            .await
+            .unwrap();
+        assert_eq!(
+            rig.runner.calls().len(),
+            asked,
+            "neither a look nor an event right after a question asks again"
+        );
+        // Some time later an event asks, long before a look in front would.
+        rig.engine.inner.github_asked.lock().unwrap().insert(
+            project.id.clone(),
+            pull_poll::Asked {
+                at: Instant::now() - pull_poll::EVENT_GAP - Duration::from_secs(1),
+                failures: 0,
+            },
+        );
+        rig.engine
+            .check_pull_requests(project.id.clone(), look)
+            .await
+            .unwrap();
+        assert_eq!(
+            rig.runner.calls().len(),
+            asked,
+            "a look waits for its half minute"
+        );
+        rig.engine
+            .check_pull_requests(project.id.clone(), Why::Event)
+            .await
+            .unwrap();
+        assert_eq!(gh_count(&rig), 4, "an event asks");
+    }
+
+    #[tokio::test]
+    async fn a_question_gh_cannot_answer_backs_the_project_off() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok(ORIGIN))
+            .reply(Output::failed(4, "run gh auth login"))
+            .reply(Output::failed(4, "run gh auth login")));
+        let project = project_with_worktrees(&rig.store);
+        rig.engine.probe_github_now(&project).await.unwrap();
+        let failures = rig.engine.inner.github_asked.lock().unwrap()[&project.id].failures;
+        assert_eq!(failures, 1);
+        assert!(
+            !rig.engine
+                .github_would_ask(&project.id, Why::Look { focused: true }),
+            "a look in front waits after a failure too"
+        );
     }
 
     #[tokio::test]
@@ -4896,7 +4944,7 @@ branch refs/heads/feature/login
         // witness, so git is only asked where the remote comes from.
         let rig = rig(ScriptedRunner::new().reply(Output::ok("git@github.com:zavudev/leon.git\n")));
         let project = project_with_worktrees(&rig.store);
-        rig.engine.probe_merged(&project, true).await.unwrap();
+        rig.engine.probe_github_now(&project).await.unwrap();
         assert_eq!(
             merged_by_branch(&rig.store, &project.id)[1].1,
             None,
@@ -4917,19 +4965,45 @@ branch refs/heads/feature/login
         // base, so git cannot see the merge at all, and only GitHub can.
         let rig = rig(ScriptedRunner::new()
             .reply(Output::ok("git@github.com:zavudev/leon.git\n"))
-            .reply(Output::ok(r#"[{"headRefName":"feature/login"}]"#)));
+            .reply(Output::ok("[]"))
+            .reply(Output::ok(MERGED_LOGIN)));
         let project = project_with_worktrees(&rig.store);
-        rig.engine.probe_merged(&project, true).await.unwrap();
+        rig.engine.probe_github_now(&project).await.unwrap();
         assert_eq!(merged_by_branch(&rig.store, &project.id)[1].1, Some(true));
+        let stored = status_of(&rig.store, &project.id, "feature/login")
+            .pull_request
+            .expect("the merged pull request is the branch's");
+        assert_eq!(stored.number, 9);
+        assert_eq!(stored.state, leon_core::PullState::Merged);
+    }
+
+    /// What `gh pr list --state all` prints for a merged pull request of the
+    /// linked worktree's branch.
+    const MERGED_LOGIN: &str = r#"[{"number":9,"url":"https://github.com/zavudev/leon/pull/9","headRefName":"feature/login","state":"MERGED","isDraft":false}]"#;
+
+    #[tokio::test]
+    async fn a_closed_pull_request_is_stored_and_is_not_merged() {
+        let rig = rig(ScriptedRunner::new()
+            .reply(Output::ok("git@github.com:zavudev/leon.git\n"))
+            .reply(Output::ok("[]"))
+            .reply(Output::ok(MERGED_LOGIN.replace("MERGED", "CLOSED"))));
+        let project = project_with_worktrees(&rig.store);
+        rig.engine.probe_github_now(&project).await.unwrap();
+        assert_eq!(merged_by_branch(&rig.store, &project.id)[1].1, Some(false));
+        let stored = status_of(&rig.store, &project.id, "feature/login")
+            .pull_request
+            .unwrap();
+        assert_eq!(stored.state, leon_core::PullState::Closed);
     }
 
     #[tokio::test]
     async fn a_pull_request_that_is_open_is_not_merged() {
         let rig = rig(ScriptedRunner::new()
             .reply(Output::ok("git@github.com:zavudev/leon.git\n"))
+            .reply(Output::ok("[]"))
             .reply(Output::ok("[]")));
         let project = project_with_worktrees(&rig.store);
-        rig.engine.probe_merged(&project, true).await.unwrap();
+        rig.engine.probe_github_now(&project).await.unwrap();
         assert_eq!(merged_by_branch(&rig.store, &project.id)[1].1, Some(false));
     }
 
@@ -4937,7 +5011,7 @@ branch refs/heads/feature/login
     async fn a_repository_that_is_not_on_github_is_not_asked_about() {
         let rig = rig(ScriptedRunner::new().reply(Output::ok("git@gitlab.com:zavudev/leon.git\n")));
         let project = project_with_worktrees(&rig.store);
-        rig.engine.probe_merged(&project, true).await.unwrap();
+        rig.engine.probe_github_now(&project).await.unwrap();
         assert_eq!(
             merged_by_branch(&rig.store, &project.id)[1].1,
             None,
@@ -4956,7 +5030,7 @@ branch refs/heads/feature/login
             source: std::io::Error::other("no git"),
         }));
         let project = project_with_worktrees(&rig.store);
-        rig.engine.probe_merged(&project, true).await.unwrap();
+        rig.engine.probe_github_now(&project).await.unwrap();
         assert_eq!(
             merged_by_branch(&rig.store, &project.id)[1].1,
             None,
@@ -4975,7 +5049,7 @@ branch refs/heads/feature/login
                 Some(true),
             )
             .unwrap();
-        rig.engine.probe_merged(&project, true).await.unwrap();
+        rig.engine.probe_github_now(&project).await.unwrap();
         assert_eq!(
             merged_by_branch(&rig.store, &project.id)[1].1,
             Some(true),
@@ -4987,9 +5061,10 @@ branch refs/heads/feature/login
     async fn the_state_survives_a_restart_and_is_not_written_again_unchanged() {
         let rig = rig(ScriptedRunner::new()
             .reply(Output::ok("git@github.com:zavudev/leon.git\n"))
-            .reply(Output::ok(r#"[{"headRefName":"feature/login"}]"#)));
+            .reply(Output::ok("[]"))
+            .reply(Output::ok(MERGED_LOGIN)));
         let project = project_with_worktrees(&rig.store);
-        rig.engine.probe_merged(&project, true).await.unwrap();
+        rig.engine.probe_github_now(&project).await.unwrap();
         let worktree = rig
             .store
             .worktrees(&project.id)

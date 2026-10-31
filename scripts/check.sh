@@ -187,7 +187,7 @@ step "generated docs are current" \
 # dependency can be checked without that target's C toolchain (SQLite and ring
 # need one), so the rest is named as skipped, never failed.
 pure_crates="leon-wire leon-pty leon-turn"
-c_crates="leon-core leon-history leon-remote leon-usage leon-link leon-host leon-mobile leon-term leon-mark leon (C dependencies or GPUI)"
+c_crates="leon-core leon-conversation leon-history leon-remote leon-usage leon-link leon-host leon-mobile leon-term leon-mark leon (C dependencies or GPUI)"
 installed=$(rustup target list --installed 2>/dev/null || true)
 host=$(rustc -vV | sed -n 's/^host: //p')
 for target in x86_64-unknown-linux-gnu x86_64-pc-windows-msvc; do

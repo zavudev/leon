@@ -96,7 +96,7 @@ fn what_the_person_says_starts_kings_turn_or_waits_for_it_to_end() {
     assert!(starts(&effects).is_empty());
     assert!(effects.iter().any(|effect| matches!(
         effect,
-        Effect::Notify { title, body, .. } if title == "King answered" && body == "zavu too."
+        Effect::Notify { title, body, .. } if title == "Orchestrator answered" && body == "zavu too."
     )));
     assert!((king.spent_today(4) - 0.5).abs() < 1e-9);
 }
@@ -196,7 +196,7 @@ fn a_worker_that_asks_is_news_and_kings_answer_reaches_it() {
             "q1",
             &Reply {
                 choice: Some("deny".into()),
-                text: Some("King pushes, not you.".into()),
+                text: Some("Orchestrator pushes, not you.".into()),
                 ..Reply::default()
             },
         )
@@ -209,7 +209,7 @@ fn a_worker_that_asks_is_news_and_kings_answer_reaches_it() {
                 "q1".into(),
                 Answer::Permission {
                     choice_id: "no".into(),
-                    reason: Some("King pushes, not you.".into())
+                    reason: Some("Orchestrator pushes, not you.".into())
                 }
             )
         }]
@@ -1087,4 +1087,509 @@ fn a_worker_in_a_terminal_gets_no_turn_and_cannot_be_told_more() {
     king.check_finished(id, true, "ok", 3_000);
     let record = king.record();
     assert_eq!((record[0].did_well, record[0].cost_usd), (1, None));
+}
+
+/// The events of King's turns and of a worker's, in a fixed order, with
+/// every kind of thing a transcript keeps. The phone and the remote read
+/// `Transcript` as these bytes, so what the event log (`crate::log`) does
+/// beside it must never change them.
+fn golden_run() -> Coordinator {
+    use crate::report::{Report, TurnStats};
+    use leon_turn::{ChoiceOption, ChoiceQuestion, Tokens};
+
+    let mut king = Coordinator::new(config());
+    let at = |event: TurnEvent, t: u64, king: &mut Coordinator| {
+        king.event(Target::Brain, &event, t);
+    };
+    king.say("What is the state of leon?", 1_000);
+    at(
+        TurnEvent::Started {
+            session_id: "s-1".into(),
+            model: Some("opus".into()),
+        },
+        1_001,
+        &mut king,
+    );
+    at(TurnEvent::Thought { text: "hm".into() }, 1_002, &mut king);
+    at(
+        TurnEvent::TextDelta {
+            text: "Look".into(),
+        },
+        1_003,
+        &mut king,
+    );
+    at(
+        TurnEvent::TextDelta { text: "ing".into() },
+        1_004,
+        &mut king,
+    );
+    at(
+        TurnEvent::Text {
+            text: "Looking.".into(),
+        },
+        1_005,
+        &mut king,
+    );
+    at(
+        TurnEvent::ToolUse {
+            id: "t1".into(),
+            name: "Bash".into(),
+            summary: "cargo test".into(),
+            detail: "cargo test --all".into(),
+        },
+        1_006,
+        &mut king,
+    );
+    at(
+        TurnEvent::ToolResult {
+            id: "t1".into(),
+            ok: true,
+            summary: "ok".into(),
+            detail: "all green".into(),
+        },
+        1_007,
+        &mut king,
+    );
+    at(
+        TurnEvent::ToolResult {
+            id: "t2".into(),
+            ok: false,
+            summary: "exit 1".into(),
+            detail: String::new(),
+        },
+        1_008,
+        &mut king,
+    );
+    at(
+        TurnEvent::Usage {
+            tokens: Tokens {
+                input: 1_200,
+                output: 300,
+                ..Tokens::default()
+            },
+        },
+        1_009,
+        &mut king,
+    );
+    at(
+        TurnEvent::Question {
+            id: "q1".into(),
+            kind: QuestionKind::Choices {
+                questions: vec![ChoiceQuestion {
+                    id: "c1".into(),
+                    header: None,
+                    question: "Which one?".into(),
+                    options: vec![
+                        ChoiceOption {
+                            label: "a".into(),
+                            description: None,
+                        },
+                        ChoiceOption {
+                            label: "b".into(),
+                            description: Some("the other".into()),
+                        },
+                    ],
+                    multi_select: false,
+                    allow_other: false,
+                }],
+            },
+        },
+        1_010,
+        &mut king,
+    );
+    at(
+        TurnEvent::QuestionResolved { id: "q1".into() },
+        1_011,
+        &mut king,
+    );
+    at(finished(true, 0.5), 1_012, &mut king);
+    at(TurnEvent::Exited { code: 0 }, 1_013, &mut king);
+    king.annotate(
+        Target::Brain,
+        Report {
+            turn: Some(TurnStats {
+                input: 1_200,
+                output: 300,
+                duration_ms: 12_000,
+                ..TurnStats::default()
+            }),
+            spent_today_usd: 0.5,
+            ..Report::default()
+        },
+        1_014,
+    );
+    // A turn whose answer was only ever a draft, and that failed.
+    king.say("Again.", 2_000);
+    at(
+        TurnEvent::TextDelta {
+            text: "Half".into(),
+        },
+        2_001,
+        &mut king,
+    );
+    at(
+        TurnEvent::Finished {
+            ok: false,
+            error: Some("rate limited".into()),
+            cost_usd: None,
+            duration_ms: None,
+            denied_tools: Vec::new(),
+            interrupted: false,
+        },
+        2_002,
+        &mut king,
+    );
+    at(TurnEvent::Exited { code: 1 }, 2_003, &mut king);
+    // A worker, stopped by the person.
+    let (id, _) = king.start_worker(spec("fix"), 3_000).unwrap();
+    let worker = Target::Worker(id);
+    king.event(
+        worker,
+        &TurnEvent::Text {
+            text: "On it.".into(),
+        },
+        3_001,
+    );
+    king.event(
+        worker,
+        &TurnEvent::ToolUse {
+            id: "w1".into(),
+            name: "Edit".into(),
+            summary: "src/lib.rs".into(),
+            detail: String::new(),
+        },
+        3_002,
+    );
+    king.event(
+        worker,
+        &TurnEvent::Finished {
+            ok: false,
+            error: None,
+            cost_usd: None,
+            duration_ms: None,
+            denied_tools: Vec::new(),
+            interrupted: true,
+        },
+        3_003,
+    );
+    king.event(worker, &TurnEvent::Exited { code: 0 }, 3_004);
+    king.failed_to_start(worker, "no such agent", 3_005);
+    king
+}
+
+/// `Transcript`'s reply for King, as the phone and the remote were given it
+/// before the event log existed.
+const GOLDEN_BRAIN: &str = r#"[{"seq":0,"at_ms":1000,"kind":"prompt","text":"What is the state of leon?"},{"seq":1,"at_ms":1005,"kind":"agent","text":"Looking."},{"seq":2,"at_ms":1006,"kind":"tool","text":"Bash: cargo test"},{"seq":3,"at_ms":1008,"kind":"tool","text":"failed: exit 1"},{"seq":4,"at_ms":1010,"kind":"question","text":"[q1] Which one? Options: a | b."},{"seq":5,"at_ms":1014,"kind":"report","text":"This answer: 1.5k tokens (read 1.2k, 0 cached · wrote 300) · 25 tok/s · 12s\nToday: 0 tokens (Orchestrator 0, workers 0) · $0.50\nUsage windows: none read yet (open Leon's usage meters once)","report":{"turn":{"input":1200,"cached_input":0,"output":300,"duration_ms":12000,"cost_usd":null},"workers_today":{"input":0,"cached_input":0,"output":0},"king_today":{"input":0,"cached_input":0,"output":0},"spent_today_usd":0.5,"budget_usd":null,"usage":[]}},{"seq":6,"at_ms":2000,"kind":"prompt","text":"Again."},{"seq":7,"at_ms":2002,"kind":"agent","text":"Half"},{"seq":8,"at_ms":2002,"kind":"notice","text":"The turn failed: rate limited"}]"#;
+
+/// The same for the worker of [`golden_run`].
+const GOLDEN_WORKER: &str = r#"[{"seq":0,"at_ms":3000,"kind":"prompt","text":"do fix"},{"seq":1,"at_ms":3001,"kind":"agent","text":"On it."},{"seq":2,"at_ms":3002,"kind":"tool","text":"Edit: src/lib.rs"},{"seq":3,"at_ms":3003,"kind":"notice","text":"The turn was stopped."},{"seq":4,"at_ms":3005,"kind":"notice","text":"The agent could not be started: no such agent"}]"#;
+
+#[test]
+fn the_transcript_clients_read_is_byte_for_byte_what_it_always_was() {
+    let king = golden_run();
+    let id = king.state().workers.keys().next().copied().unwrap();
+    let json = |target| {
+        serde_json::to_string(
+            &king
+                .conversation(target)
+                .unwrap()
+                .transcript
+                .since(None, 50),
+        )
+        .unwrap()
+    };
+    assert_eq!(json(Target::Brain), GOLDEN_BRAIN);
+    assert_eq!(json(Target::Worker(id)), GOLDEN_WORKER);
+}
+
+/// What `take_log` gave, numbered the way the service numbers it, as the
+/// records of one log.
+fn numbered(batches: &[Batch], of: Target, home: u64) -> Vec<crate::log::Logged> {
+    let mut seq = 0;
+    let mut logged = Vec::new();
+    for batch in batches
+        .iter()
+        .filter(|batch| batch.target == of && batch.conversation == home)
+    {
+        for out in &batch.items {
+            match out {
+                crate::log::Out::Seed(entries) => {
+                    for entry in entries {
+                        logged.push(crate::log::Logged {
+                            seq,
+                            at_ms: entry.at_ms,
+                            record: crate::log::Record::Legacy {
+                                entry: entry.clone(),
+                            },
+                        });
+                        seq += 1;
+                    }
+                }
+                crate::log::Out::Record { at_ms, record } => {
+                    logged.push(crate::log::Logged {
+                        seq,
+                        at_ms: *at_ms,
+                        record: record.clone(),
+                    });
+                    seq += 1;
+                }
+            }
+        }
+    }
+    logged
+}
+
+fn followed(logged: Vec<crate::log::Logged>) -> crate::follow::Followed {
+    let mut followed = crate::follow::Followed::default();
+    followed.apply(&crate::log::Events {
+        conversation: 0,
+        last_seq: logged.last().map(|logged| logged.seq),
+        events: logged,
+        more: false,
+    });
+    followed
+}
+
+#[test]
+fn the_event_log_holds_what_the_transcript_leaves_out() {
+    use leon_conversation::model::Item;
+    let mut king = golden_run();
+    let id = *king.state().workers.keys().next().unwrap();
+    let batches = king.take_log();
+    assert!(king.take_log().is_empty(), "taken once");
+    assert!(batches.iter().all(|batch| batch.conversation == 0));
+
+    let brain = followed(numbered(&batches, Target::Brain, 0));
+    let items = &brain.conversation.items;
+    // The person's words, what it thought, the whole message (not the
+    // deltas), the tool with how it went, and the end of the second turn.
+    assert!(matches!(&items[0], Item::User { text, .. } if text == "What is the state of leon?"));
+    assert!(matches!(&items[1], Item::Thought { text } if text == "hm"));
+    assert!(matches!(&items[2], Item::Agent { text, streaming: false, .. } if text == "Looking."));
+    let Item::Tool(tool) = &items[3] else {
+        panic!("{:?}", items[3]);
+    };
+    assert_eq!(
+        (tool.name.as_str(), tool.detail.as_str()),
+        ("Bash", "cargo test --all")
+    );
+    assert_eq!(
+        tool.outcome.as_ref().map(|o| o.detail.as_str()),
+        Some("all green")
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| matches!(item, Item::Agent { text, .. } if text == "Half"),),
+        "a draft left at the end is the message"
+    );
+    assert!(matches!(
+        items.last(),
+        Some(Item::Notice { text, .. }) if text == "rate limited"
+    ));
+    assert_eq!(brain.conversation.cost_usd, Some(0.5));
+    assert!(!brain.conversation.running());
+
+    let worker = followed(numbered(&batches, Target::Worker(id), 0));
+    assert!(!worker.conversation.running());
+    assert!(matches!(
+        worker.conversation.items.last(),
+        Some(Item::Notice { text, .. }) if text.contains("could not be started")
+    ));
+}
+
+#[test]
+fn what_waits_for_the_turn_to_end_is_taken_back_or_sent_into_the_turn() {
+    let mut king = Coordinator::new(config());
+    king.say("first", 1);
+    king.say("second", 2);
+    king.say("third", 3);
+    let waiting = |king: &Coordinator| king.status(4).brain.queue;
+    assert_eq!(waiting(&king), ["second", "third"]);
+    assert_eq!(king.status(4).brain.queued, 2);
+
+    // Taken back only while it is still the message at that place.
+    assert_eq!(king.unqueue(Target::Brain, 0, "third"), Ok(false));
+    assert_eq!(king.unqueue(Target::Brain, 9, "third"), Ok(false));
+    assert_eq!(king.unqueue(Target::Brain, 0, "second"), Ok(true));
+    assert_eq!(waiting(&king), ["third"]);
+
+    // Sent now: out of the queue, to the turn in flight.
+    let effects = king.steer(Target::Brain, 0, "third").unwrap();
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Act { target: Target::Brain, action: leon_turn::Action::Prompt(text) }
+            if text == "third"
+    )));
+    assert!(waiting(&king).is_empty());
+    assert!(king.steer(Target::Brain, 0, "third").is_err(), "gone");
+
+    // Once the turn took it, it was said in the conversation; if it did not
+    // it waits again, first.
+    king.said(Target::Brain, "third", 6);
+    king.say("fourth", 7);
+    king.requeue(Target::Brain, "fifth".into());
+    assert_eq!(waiting(&king), ["fifth", "fourth"]);
+    let batches = king.take_log();
+    let brain = followed(numbered(&batches, Target::Brain, 0));
+    assert!(brain.conversation.items.iter().any(|item| matches!(
+        item,
+        leon_conversation::model::Item::User { text, .. } if text == "third"
+    )));
+
+    // With no turn in flight there is nothing to send it into.
+    let mut idle = Coordinator::new(config());
+    idle.say("a", 1);
+    answer(&mut idle, Target::Brain, "done", 2);
+    assert!(idle.steer(Target::Brain, 0, "a").is_err());
+}
+
+#[test]
+fn a_workers_queue_is_taken_back_like_kings_and_a_stranger_is_refused() {
+    let mut king = Coordinator::new(config());
+    let (id, _) = king.start_worker(spec("fix-login"), 10).unwrap();
+    king.tell_worker(id, "more", 11).unwrap();
+    let queue = |king: &Coordinator| king.status(12).workers[0].conversation.queue.clone();
+    assert_eq!(queue(&king), ["more"]);
+    assert_eq!(king.unqueue(Target::Worker(id), 0, "more"), Ok(true));
+    assert!(queue(&king).is_empty());
+    assert!(king.unqueue(Target::Worker(99), 0, "more").is_err());
+}
+
+#[test]
+fn a_workers_checkpoint_is_logged_after_the_prompt_of_its_turn() {
+    let mut king = Coordinator::new(config());
+    let (id, _) = king.start_worker(spec("fix-login"), 10).unwrap();
+    let target = Target::Worker(id);
+    assert_eq!(king.plan(target).unwrap().turn, 0);
+    king.checkpointed(target, "abc123", 11);
+    answer(&mut king, target, "Done.", 20);
+    assert_eq!(king.plan(target).unwrap().turn, 1, "one turn is behind it");
+
+    let batches = king.take_log();
+    let worker = followed(numbered(&batches, target, 0));
+    assert_eq!(worker.turns.len(), 1);
+    assert_eq!(worker.turns[0].checkpoint.as_deref(), Some("abc123"));
+    assert!(matches!(
+        &worker.conversation.items[worker.turns[0].item],
+        leon_conversation::model::Item::User { .. }
+    ));
+}
+
+#[test]
+fn a_conversation_put_away_hands_over_its_log_before_the_new_one_begins() {
+    let mut king = Coordinator::new(config());
+    king.say("first", 1);
+    answer(&mut king, Target::Brain, "one", 2);
+    king.event(
+        Target::Brain,
+        &TurnEvent::Thought {
+            text: "late".into(),
+        },
+        3,
+    );
+    let (archived, _) = king.new_conversation(10).unwrap();
+    assert!(archived.is_some());
+    king.say("second", 11);
+    let batches = king.take_log();
+    let homes: Vec<(Target, u64)> = batches
+        .iter()
+        .map(|batch| (batch.target, batch.conversation))
+        .collect();
+    assert_eq!(homes, [(Target::Brain, 0), (Target::Brain, 1)]);
+    let first = followed(numbered(&batches, Target::Brain, 0));
+    assert_eq!(
+        first.conversation.items.len(),
+        3,
+        "{:?}",
+        first.conversation.items
+    );
+    let second = followed(numbered(&batches, Target::Brain, 1));
+    assert_eq!(second.conversation.items.len(), 1);
+}
+
+#[test]
+fn a_worker_keeps_its_log_where_it_began_when_the_conversation_goes_on() {
+    let mut config = config();
+    config.limits.compact_at_tokens = 1_000;
+    let mut king = Coordinator::new(config);
+    king.say("go", 0);
+    king.start_worker(spec("a"), 0).unwrap();
+    king.event(
+        Target::Brain,
+        &TurnEvent::Usage {
+            tokens: leon_turn::Tokens {
+                input: 5_000,
+                ..Default::default()
+            },
+        },
+        1,
+    );
+    answer(&mut king, Target::Brain, "ok", 2);
+    king.compact_if_long(3).expect("put away");
+    assert_eq!(king.worker(1).unwrap().started_in, Some(1));
+    assert_eq!(king.log_home(Target::Worker(1)), Some(0));
+    assert_eq!(king.log_home(Target::Brain), Some(1));
+    assert_eq!(king.log_home(Target::Worker(9)), None);
+    // And it is the same after what was saved comes back.
+    let state: State = serde_json::from_str(&serde_json::to_string(king.state()).unwrap()).unwrap();
+    let (king, _) = Coordinator::restored(config_with_compaction(), state, 9);
+    assert_eq!(king.log_home(Target::Worker(1)), Some(0));
+}
+
+fn config_with_compaction() -> Config {
+    let mut config = config();
+    config.limits.compact_at_tokens = 1_000;
+    config
+}
+
+#[test]
+fn what_was_kept_before_the_log_is_its_first_record_and_the_interruption_its_next() {
+    use crate::log::{Out, Record};
+    let mut king = Coordinator::new(config());
+    king.say("start", 5_000);
+    king.start_worker(spec("a"), 5_000).unwrap();
+    let state: State = serde_json::from_str(&serde_json::to_string(king.state()).unwrap()).unwrap();
+    let (mut king, _) = Coordinator::restored(config(), state, 100_000);
+    let batches = king.take_log();
+    let brain = &batches
+        .iter()
+        .find(|batch| batch.target == Target::Brain)
+        .unwrap()
+        .items;
+    let Out::Seed(entries) = &brain[0] else {
+        panic!("{brain:?}");
+    };
+    assert_eq!(entries[0].text, "start");
+    assert!(matches!(
+        &brain[1],
+        Out::Record { record: Record::Notice { ends_turn: true, text }, .. }
+            if text.contains("interrupted")
+    ));
+    let worker = batches
+        .iter()
+        .find(|batch| batch.target == Target::Worker(1))
+        .unwrap();
+    assert!(matches!(worker.items[0], Out::Seed(_)));
+    assert_eq!(worker.conversation, 0);
+}
+
+#[test]
+fn what_was_asked_of_an_agent_in_a_terminal_begins_no_turn() {
+    let mut king = Coordinator::new(config());
+    let kimi = WorkerSpec {
+        terminal: true,
+        choice: Choice {
+            agent: "kimi".into(),
+            model: None,
+            effort: None,
+            tier: None,
+        },
+        ..spec("schema")
+    };
+    king.start_worker(kimi, 0).unwrap();
+    let batches = king.take_log();
+    let worker = followed(numbered(&batches, Target::Worker(1), 0));
+    assert_eq!(worker.conversation.items.len(), 1);
+    assert!(!worker.conversation.running());
 }

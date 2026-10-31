@@ -18,15 +18,15 @@ exposed to React Native by [`modules/leon-link-native`](modules/leon-link-native
 
 | Path | What |
 | --- | --- |
-| `src/app` | the screens (Expo Router): computers, pairing (type, paste or scan the computer's QR; `leon://pair?code=…&relay=…` opens it filled in), chats of a computer, new chat, chat, King of a computer and its workers, settings |
+| `src/app` | the screens (Expo Router): computers, pairing (type, paste or scan the computer's QR; `leon://pair?code=…&relay=…` opens it filled in), chats of a computer, new chat, chat, Orchestrator of a computer and its workers, settings |
 | `src/link` | the only code that touches the native module: `types.ts` (plain values), `native.ts` (the bindings behind them), `errors.ts` (what to tell the person) |
-| `src/chat` | pure logic with tests: turn events to chat rows, the chat list, merging a shared transcript, the Den's lions |
-| `src/king` | pure logic with tests: King's status, notices and conversations read from its JSON, merged by number |
-| `src/store` | `app.ts` (settings, paired computers, chats; persisted), `runtime.ts` (connections, turns in flight, messages), `king.ts` (King of each computer while its screen is open), `alerts.ts` and `background.ts` (telling the person, in front and behind) |
+| `src/chat` | pure logic with tests: turn events to chat rows, the chat list, merging a shared transcript, the Office's lions |
+| `src/king` | pure logic with tests: Orchestrator's status, notices and conversations read from its JSON, merged by number |
+| `src/store` | `app.ts` (settings, paired computers, chats; persisted), `runtime.ts` (connections, turns in flight, messages), `king.ts` (Orchestrator of each computer while its screen is open), `alerts.ts` and `background.ts` (telling the person, in front and behind) |
 | `src/theme`, `src/ui` | the Leon theme from [`brand/tokens.md`](../brand/tokens.md) and the few components built on it |
 | `modules/leon-link-native` | the generated Turbo Module around the Rust crate |
 | `modules/leon-background` | Android only: the foreground service that keeps the link behind other apps, and the notifications |
-| `assets` | icon and splash, rendered from `brand/logo/final`; `assets/den`, the Den's lions in 2.5D, drawn by the desktop's renderer (`cargo run -p leon-den --features den3d --example den_lions_png -- mobile/assets/den`) |
+| `assets` | icon and splash, rendered from `brand/logo/final`; `assets/den`, the Office's lions in 2.5D, drawn by the desktop's renderer (`cargo run -p leon-den --features den3d --example den_lions_png -- mobile/assets/den`) |
 
 Built with Expo SDK 57 (React Native 0.86, New Architecture), Expo Router,
 Zustand, FlashList, react-native-keyboard-controller and
@@ -112,7 +112,7 @@ bun run doctor    # expo-doctor
 The unit tests cover the logic that has no screen: the reducer from turn
 events to chat rows (streaming, a whole message replacing its draft, tools,
 refused tools, a finish the library made up, a replayed turn, a gap), the chat
-list, the transcript merge and what King's service answers. They run with
+list, the transcript merge and what Orchestrator's service answers. They run with
 `bun test` and never load the native module, which screens reach only through
 `src/link`.
 

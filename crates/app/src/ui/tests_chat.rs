@@ -1096,6 +1096,7 @@ fn the_pull_request_of_a_conversations_branch_is_in_its_foot_and_opens(cx: &mut 
         .update_worktree_status(&worktree.id, |status| {
             status.pull_request = Some(leon_core::PullRequest {
                 number: 565,
+                state: leon_core::PullState::Open,
                 url: "https://github.com/zavudev/zavu/pull/565".into(),
                 draft: false,
                 review: leon_core::Review::None,
@@ -1435,7 +1436,11 @@ fn edit_from_here_cuts_the_conversation_and_puts_the_words_back_in_the_field(
         let chat = &shell.chats[&LiveId(1)];
         assert_eq!(chat.conversation.session_id, None);
         assert_eq!(chat.conversation.phase(), Phase::Idle);
-        assert_eq!(chat.marks.len(), 1, "the turn that is gone has no mark");
+        assert_eq!(
+            chat.edits.marks.len(),
+            1,
+            "the turn that is gone has no mark"
+        );
         assert!(chat.rewinding.is_none());
     });
     // Nothing was sent: the words wait in the field to be changed.
@@ -1562,7 +1567,7 @@ fn a_turn_in_a_repository_is_snapshotted_before_the_agent_starts_and_the_files_c
     assert_eq!(turns(&h).len(), 1);
     let (key, commit) = h.shell(cx, |shell| {
         let chat = &shell.chats[&LiveId(1)];
-        (chat.key.clone(), chat.marks[0].checkpoint.clone())
+        (chat.key.clone(), chat.edits.marks[0].checkpoint.clone())
     });
     let commit = commit.expect("the files were kept");
     assert_eq!(
@@ -1725,6 +1730,7 @@ fn edited(h: &Harness, cx: &mut TestAppContext, prompt: &str) {
 fn panel_scope(h: &Harness, cx: &mut TestAppContext) -> Option<crate::ui::chat_diff::Scope> {
     h.shell(cx, |shell| {
         shell.chats[&LiveId(1)]
+            .edits
             .diff
             .as_ref()
             .map(|panel| panel.scope())
@@ -1769,7 +1775,7 @@ fn a_turn_that_changed_files_ends_with_a_card_that_opens_the_diffs_beside_it(
     // The other file's diff replaces it.
     click(&h, cx, "chat-diff-file-1-1");
     h.shell(cx, |shell| {
-        let panel = shell.chats[&LiveId(1)].diff.as_ref().unwrap();
+        let panel = shell.chats[&LiveId(1)].edits.diff.as_ref().unwrap();
         assert_eq!(panel.selected.as_deref(), Some("b.rs"));
     });
 
@@ -1846,7 +1852,7 @@ fn the_panel_shows_a_single_file_or_everything_uncommitted(cx: &mut TestAppConte
     assert_eq!(panel_scope(&h, cx), Some(Scope::File));
     assert!(!h.shows_dynamic("chat-diff-file-1-0".into(), cx), "no list");
     h.shell(cx, |shell| {
-        let panel = shell.chats[&LiveId(1)].diff.as_ref().unwrap();
+        let panel = shell.chats[&LiveId(1)].edits.diff.as_ref().unwrap();
         assert_eq!(panel.selected.as_deref(), Some("b.rs"));
     });
     // The turn's files again.
@@ -1861,7 +1867,7 @@ fn the_panel_shows_a_single_file_or_everything_uncommitted(cx: &mut TestAppConte
     h.settle(cx);
     assert_eq!(panel_scope(&h, cx), Some(Scope::All));
     h.shell(cx, |shell| {
-        let panel = shell.chats[&LiveId(1)].diff.as_ref().unwrap();
+        let panel = shell.chats[&LiveId(1)].edits.diff.as_ref().unwrap();
         let files: Vec<&str> = panel
             .all
             .iter()
@@ -1903,7 +1909,7 @@ fn what_a_command_changed_in_a_repository_is_counted_from_its_snapshots(cx: &mut
     exits(&h, cx, 0);
     wait_until(&h, cx, "the count of turn 1", |h, cx| {
         h.shell(cx, |shell| {
-            shell.chats[&LiveId(1)].measured.contains_key(&1)
+            shell.chats[&LiveId(1)].edits.measured.contains_key(&1)
         })
     });
     let stats = h.shell(cx, |shell| shell.chats[&LiveId(1)].turn_stats(1));
@@ -1918,6 +1924,7 @@ fn what_a_command_changed_in_a_repository_is_counted_from_its_snapshots(cx: &mut
         h.shell(cx, |shell| {
             matches!(
                 shell.chats[&LiveId(1)]
+                    .edits
                     .diff
                     .as_ref()
                     .map(|panel| &panel.diff),
@@ -1927,7 +1934,7 @@ fn what_a_command_changed_in_a_repository_is_counted_from_its_snapshots(cx: &mut
     });
     assert!(h.shows_dynamic("chat-diff-line-0".into(), cx));
     h.shell(cx, |shell| {
-        let panel = shell.chats[&LiveId(1)].diff.as_ref().unwrap();
+        let panel = shell.chats[&LiveId(1)].edits.diff.as_ref().unwrap();
         assert_eq!(panel.selected.as_deref(), Some("a.txt"));
         let crate::ui::changes::DiffState::Ready(leon_remote::FileDiff::Lines(lines)) = &panel.diff
         else {
@@ -1941,7 +1948,7 @@ fn what_a_command_changed_in_a_repository_is_counted_from_its_snapshots(cx: &mut
     exits(&h, cx, 0);
     wait_until(&h, cx, "the count of turn 2", |h, cx| {
         h.shell(cx, |shell| {
-            shell.chats[&LiveId(1)].measured.contains_key(&2)
+            shell.chats[&LiveId(1)].edits.measured.contains_key(&2)
         })
     });
     assert_eq!(
@@ -1969,7 +1976,7 @@ fn a_file_a_background_process_wrote_during_a_turn_that_only_talked_is_no_card(
     exits(&h, cx, 0);
     wait_until(&h, cx, "the count of turn 1", |h, cx| {
         h.shell(cx, |shell| {
-            shell.chats[&LiveId(1)].measured.contains_key(&1)
+            shell.chats[&LiveId(1)].edits.measured.contains_key(&1)
         })
     });
     assert_eq!(
@@ -2040,7 +2047,9 @@ fn git_calls(h: &Harness) -> Vec<String> {
 }
 
 fn write_message(h: &Harness, cx: &mut TestAppContext, text: &str) {
-    let field = h.shell(cx, |shell| shell.chats[&LiveId(1)].git.message.clone());
+    let field = h.shell(cx, |shell| {
+        shell.chats[&LiveId(1)].edits.git.message.clone()
+    });
     cx.update_window(h.window.into(), |_, window, cx| {
         field.update(cx, |field, cx| field.set_value(text.to_owned(), window, cx));
     })
@@ -2060,7 +2069,7 @@ fn the_git_cell_commits_and_pushes_with_the_same_commands_as_the_changes_tab(
     open_git_cell(&h, cx, STATUS);
     assert!(h.shows_dynamic("chat-git-cell-1".into(), cx));
     h.shell(cx, |shell| {
-        let git = &shell.chats[&LiveId(1)].git;
+        let git = &shell.chats[&LiveId(1)].edits.git;
         assert_eq!(git.files.as_ref().map(Vec::len), Some(3));
         assert_eq!(git.branch.as_deref(), Some("trunk"));
     });
@@ -2069,7 +2078,7 @@ fn the_git_cell_commits_and_pushes_with_the_same_commands_as_the_changes_tab(
     click(&h, cx, "chat-git-commit-1");
     assert_eq!(git_calls(&h).len(), before, "nothing ran");
     h.shell(cx, |shell| {
-        let outcome = shell.chats[&LiveId(1)].git.outcome.as_ref().unwrap();
+        let outcome = shell.chats[&LiveId(1)].edits.git.outcome.as_ref().unwrap();
         assert!(!outcome.ok);
         assert_eq!(outcome.title, "Write a commit message first.");
     });
@@ -2094,7 +2103,7 @@ fn the_git_cell_commits_and_pushes_with_the_same_commands_as_the_changes_tab(
     assert!(ran[2].contains("status"), "{ran:?}");
     assert_eq!(ran[3], "git push");
     h.shell(cx, |shell| {
-        let git = &shell.chats[&LiveId(1)].git;
+        let git = &shell.chats[&LiveId(1)].edits.git;
         let outcome = git.outcome.as_ref().unwrap();
         assert!(outcome.ok, "{}: {}", outcome.title, outcome.text);
         assert_eq!(outcome.title, "Committed and pushed");
@@ -2102,6 +2111,7 @@ fn the_git_cell_commits_and_pushes_with_the_same_commands_as_the_changes_tab(
     });
     assert_eq!(
         cx.update(|cx| h.shell.read(cx).chats[&LiveId(1)]
+            .edits
             .git
             .message
             .read(cx)
@@ -2144,7 +2154,7 @@ fn the_git_cell_pulls_with_a_fast_forward_only_and_says_why_when_it_cannot(
         "{ran:?}"
     );
     h.shell(cx, |shell| {
-        let git = &shell.chats[&LiveId(1)].git;
+        let git = &shell.chats[&LiveId(1)].edits.git;
         let outcome = git.outcome.as_ref().unwrap();
         assert!(outcome.ok, "{}: {}", outcome.title, outcome.text);
         assert_eq!(outcome.title, "Pulled");
@@ -2165,7 +2175,7 @@ fn the_git_cell_pulls_with_a_fast_forward_only_and_says_why_when_it_cannot(
     h.settle(cx);
     assert_eq!(git_calls(&h)[before + 1], "git pull --ff-only");
     h.shell(cx, |shell| {
-        let outcome = shell.chats[&LiveId(1)].git.outcome.as_ref().unwrap();
+        let outcome = shell.chats[&LiveId(1)].edits.git.outcome.as_ref().unwrap();
         assert!(!outcome.ok);
         assert_eq!(outcome.title, "The pull failed");
         assert!(outcome.text.contains("fast-forward"), "{}", outcome.text);
@@ -2246,7 +2256,7 @@ fn opening_a_pull_request_from_the_cell_shows_it_in_the_chip_of_the_foot(cx: &mu
         .unwrap_or_else(|| panic!("{ran:?}"));
     assert!(pr.contains("Fix the tabs") && pr.contains("main"), "{pr}");
     h.shell(cx, |shell| {
-        let outcome = shell.chats[&LiveId(1)].git.outcome.as_ref().unwrap();
+        let outcome = shell.chats[&LiveId(1)].edits.git.outcome.as_ref().unwrap();
         assert!(outcome.ok, "{}: {}", outcome.title, outcome.text);
         assert_eq!(
             outcome.url.as_deref(),

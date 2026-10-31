@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Brain, Config};
 use crate::history::{self, Archived, Past};
+use crate::log::Out;
 use crate::prompt;
 use crate::protocol::{ConversationStatus, Status, WorkerStatus};
 use crate::record::{self, Outcome};
@@ -313,6 +314,11 @@ pub struct Worker {
     /// takes its workers along.
     #[serde(default)]
     pub started_in: Option<u64>,
+    /// The conversation of King's whose folder of the event log holds its
+    /// log: the one it started in, and it stays there when the conversation
+    /// goes on in a new one ([`Worker::started_in`] moves, this does not).
+    #[serde(default)]
+    pub log_in: Option<u64>,
     /// The last run of its project's check in its worktree.
     #[serde(default)]
     pub check: Option<Check>,
@@ -421,6 +427,9 @@ pub struct Plan {
     pub machine: Option<String>,
     /// The instructions it is given beside its own, for a worker.
     pub instructions: Option<String>,
+    /// How many turns it had before this one: what names the snapshot of
+    /// its worktree taken before the turn.
+    pub turn: u32,
 }
 
 /// King and its workers.
@@ -428,6 +437,21 @@ pub struct Plan {
 pub struct Coordinator {
     config: Config,
     state: State,
+    /// What conversations put away said and the event log has not been given
+    /// yet ([`Coordinator::take_log`]). Not saved: the service writes it
+    /// before the next thing it does.
+    retired: Vec<Batch>,
+}
+
+/// What a conversation has to give the event log.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Batch {
+    /// Whose.
+    pub target: Target,
+    /// The King conversation whose folder holds the log.
+    pub conversation: u64,
+    /// What it is given, oldest first.
+    pub items: Vec<Out>,
 }
 
 impl Coordinator {
@@ -445,6 +469,7 @@ impl Coordinator {
         let configured = Some(config.brain.clone());
         Self {
             config,
+            retired: Vec::new(),
             state: State {
                 brain,
                 workers: BTreeMap::new(),
@@ -500,7 +525,22 @@ impl Coordinator {
                 );
             }
         }
-        let mut coordinator = Self { config, state };
+        for worker in state.workers.values_mut() {
+            if worker.log_in.is_none() {
+                worker.log_in = worker.started_in;
+            }
+        }
+        let mut coordinator = Self {
+            config,
+            state,
+            retired: Vec::new(),
+        };
+        // What they said before there was an event log: it is the log's
+        // first record when it has none.
+        coordinator.state.brain.transcript.seed_log();
+        for worker in coordinator.state.workers.values_mut() {
+            worker.conversation.transcript.seed_log();
+        }
         let interrupted = "The turn was interrupted: Leon's service stopped.";
         if coordinator.state.brain.busy {
             coordinator.state.brain.busy = false;
@@ -509,7 +549,7 @@ impl Coordinator {
                 .state
                 .brain
                 .transcript
-                .push(Kind::Notice, interrupted, now_ms);
+                .push_end(interrupted, now_ms);
         }
         let mut news = Vec::new();
         let steps: Vec<u32> = coordinator
@@ -525,18 +565,12 @@ impl Coordinator {
                 // A step's worker goes on by itself: King need not hear.
                 worker.conversation.busy = false;
                 worker.conversation.questions.clear();
-                worker
-                    .conversation
-                    .transcript
-                    .push(Kind::Notice, interrupted, now_ms);
+                worker.conversation.transcript.push_end(interrupted, now_ms);
                 going_on.push(worker.id);
             } else if worker.conversation.busy {
                 worker.conversation.busy = false;
                 worker.conversation.questions.clear();
-                worker
-                    .conversation
-                    .transcript
-                    .push(Kind::Notice, interrupted, now_ms);
+                worker.conversation.transcript.push_end(interrupted, now_ms);
                 worker.state = WorkerState::Failed;
                 worker.updated_ms = now_ms;
                 news.push(News {
@@ -638,7 +672,9 @@ impl Coordinator {
         now_ms: u64,
     ) -> Result<(Option<Archived>, Vec<Effect>), String> {
         if self.state.brain.busy {
-            return Err("King is in a turn; stop it or wait for it to end first".to_owned());
+            return Err(
+                "Orchestrator is in a turn; stop it or wait for it to end first".to_owned(),
+            );
         }
         let archived = self.archive(now_ms);
         self.state.conversation = self.next_conversation();
@@ -655,7 +691,9 @@ impl Coordinator {
         now_ms: u64,
     ) -> Result<(Option<Archived>, Vec<Effect>), String> {
         if self.state.brain.busy {
-            return Err("King is in a turn; stop it or wait for it to end first".to_owned());
+            return Err(
+                "Orchestrator is in a turn; stop it or wait for it to end first".to_owned(),
+            );
         }
         let at = self
             .state
@@ -709,7 +747,7 @@ impl Coordinator {
             Kind::Notice,
             format!(
                 "Leon put the conversation away: its last turn read {} tokens, and every turn \
-                 reads all of it again. It is in HISTORY (\"{}\"); King goes on here, told \
+                 reads all of it again. It is in HISTORY (\"{}\"); Orchestrator goes on here, told \
                  where it left off.",
                 crate::report::count(read),
                 archived.past.title
@@ -717,6 +755,46 @@ impl Coordinator {
             now_ms,
         );
         Some(archived)
+    }
+
+    /// What the conversations said since the last call, for the event log
+    /// ([`crate::log`]): the ones put away first, then King's, then each
+    /// worker's. A thought that more may join stays until something else
+    /// is said.
+    pub fn take_log(&mut self) -> Vec<Batch> {
+        let mut batches = std::mem::take(&mut self.retired);
+        let brain = self.state.brain.transcript.take_log();
+        if !brain.is_empty() {
+            batches.push(Batch {
+                target: Target::Brain,
+                conversation: self.state.conversation,
+                items: brain,
+            });
+        }
+        for worker in self.state.workers.values_mut() {
+            let items = worker.conversation.transcript.take_log();
+            if !items.is_empty() {
+                batches.push(Batch {
+                    target: Target::Worker(worker.id),
+                    conversation: worker.log_in.or(worker.started_in).unwrap_or(0),
+                    items,
+                });
+            }
+        }
+        batches
+    }
+
+    /// The King conversation whose folder holds `target`'s event log: the
+    /// one now for King, the one it started in for a worker.
+    pub fn log_home(&self, target: Target) -> Option<u64> {
+        match target {
+            Target::Brain => Some(self.state.conversation),
+            Target::Worker(id) => self
+                .state
+                .workers
+                .get(&id)
+                .map(|worker| worker.log_in.or(worker.started_in).unwrap_or(0)),
+        }
     }
 
     /// The past conversations, newest last.
@@ -728,8 +806,18 @@ impl Coordinator {
     fn archive(&mut self, now_ms: u64) -> Option<Archived> {
         let brain = &mut self.state.brain;
         let session_id = brain.session_id.take();
-        let transcript = std::mem::take(&mut brain.transcript);
+        let mut transcript = std::mem::take(&mut brain.transcript);
         brain.questions.clear();
+        // What it said and was not written yet is its log's, not the new
+        // conversation's.
+        let items = transcript.finish_log();
+        if !items.is_empty() {
+            self.retired.push(Batch {
+                target: Target::Brain,
+                conversation: self.state.conversation,
+                items,
+            });
+        }
         if transcript.is_empty() {
             return None;
         }
@@ -774,11 +862,16 @@ impl Coordinator {
             busy: conversation.busy,
             busy_since_ms: conversation.busy.then_some(conversation.turn_started_ms),
             queued: conversation.queue.len(),
+            queue: conversation.queue.iter().cloned().collect(),
             questions: conversation.questions.clone(),
             cost_usd: conversation.cost_usd,
             last_seq: conversation.transcript.last_seq(),
+            events_seq: None,
         };
         Status {
+            // The service says what it runs and keeps.
+            version: String::new(),
+            events: false,
             conversation: self.state.conversation,
             brain: summary(&self.state.brain),
             workers: self
@@ -840,7 +933,16 @@ impl Coordinator {
             cwd,
             machine,
             instructions,
+            turn: conversation.turns,
         })
+    }
+
+    /// The service snapshotted `target`'s worktree before the turn it is
+    /// starting: the event log says so, after the prompt that began it.
+    pub fn checkpointed(&mut self, target: Target, commit: &str, now_ms: u64) {
+        if let Some(conversation) = self.conversation_mut(target) {
+            conversation.transcript.push_checkpoint(commit, now_ms);
+        }
     }
 
     /// The person says something to King.
@@ -901,7 +1003,7 @@ impl Coordinator {
             // terminal.
             conversation
                 .transcript
-                .push(Kind::Prompt, spec.prompt.trim().to_owned(), now_ms);
+                .push_said(spec.prompt.trim().to_owned(), now_ms);
         } else {
             conversation.queue.push_back(spec.prompt);
         }
@@ -919,6 +1021,7 @@ impl Coordinator {
             started_ms: now_ms,
             updated_ms: now_ms,
             started_in: Some(self.state.conversation),
+            log_in: Some(self.state.conversation),
             check: None,
             pull_request: None,
         };
@@ -956,6 +1059,73 @@ impl Coordinator {
         let mut effects = vec![Effect::Changed];
         effects.extend(self.next_turn(Target::Worker(id), now_ms));
         Ok(effects)
+    }
+
+    /// Takes back the message at `index` of what waits for `target`'s turn to
+    /// end, when it says `text`: a message that went in the meantime is not
+    /// another one's. Whether it was taken.
+    pub fn unqueue(&mut self, target: Target, index: usize, text: &str) -> Result<bool, String> {
+        if let Target::Worker(id) = target {
+            self.owned(id)?;
+        }
+        let conversation = self
+            .conversation_mut(target)
+            .ok_or_else(|| "there is no such conversation".to_owned())?;
+        if conversation.queue.get(index).map(String::as_str) != Some(text) {
+            return Ok(false);
+        }
+        conversation.queue.remove(index);
+        Ok(true)
+    }
+
+    /// Takes the message at `index` out of what waits and sends it into the
+    /// turn in flight. The service says it ([`Coordinator::said`]) once the
+    /// turn took it, and gives it back ([`Coordinator::requeue`]) when the
+    /// agent takes nothing more while it works.
+    pub fn steer(
+        &mut self,
+        target: Target,
+        index: usize,
+        text: &str,
+    ) -> Result<Vec<Effect>, String> {
+        if !self.conversation(target).is_some_and(|c| c.busy) {
+            return Err("it is not in a turn".to_owned());
+        }
+        if !self.unqueue(target, index, text)? {
+            return Err("that message does not wait any more".to_owned());
+        }
+        Ok(vec![
+            Effect::Changed,
+            Effect::Act {
+                target,
+                action: Action::Prompt(text.to_owned()),
+            },
+        ])
+    }
+
+    /// Leon says something of `target`'s conversation that does not end its
+    /// turn: it is in the log as a note.
+    pub fn noted(&mut self, target: Target, text: &str, now_ms: u64) {
+        if let Some(conversation) = self.conversation_mut(target) {
+            conversation
+                .transcript
+                .push(crate::transcript::Kind::Notice, text, now_ms);
+        }
+    }
+
+    /// The turn took what it was sent in the middle: it is said in the
+    /// conversation.
+    pub fn said(&mut self, target: Target, text: &str, now_ms: u64) {
+        if let Some(conversation) = self.conversation_mut(target) {
+            conversation.transcript.push_said(text, now_ms);
+        }
+    }
+
+    /// What was to be sent into the turn waits again, first.
+    pub fn requeue(&mut self, target: Target, text: String) {
+        if let Some(conversation) = self.conversation_mut(target) {
+            conversation.queue.push_front(text);
+        }
     }
 
     /// Answers a question `target` waits on.
@@ -1060,13 +1230,11 @@ impl Coordinator {
         conversation.busy = false;
         conversation.last_ok = Some(false);
         let text = format!("The agent could not be started: {error}");
-        conversation
-            .transcript
-            .push(Kind::Notice, text.clone(), now_ms);
+        conversation.transcript.push_end(text.clone(), now_ms);
         let mut effects = vec![Effect::Changed];
         match target {
             Target::Brain => effects.push(Effect::Notify {
-                title: "King could not start".to_owned(),
+                title: "Orchestrator could not start".to_owned(),
                 body: text,
                 echo: true,
             }),
@@ -1144,7 +1312,7 @@ impl Coordinator {
                 effects.push(Effect::Changed);
                 match target {
                     Target::Brain => effects.push(Effect::Notify {
-                        title: "King asks".to_owned(),
+                        title: "Orchestrator asks".to_owned(),
                         body: open.text,
                         echo: true,
                     }),
@@ -1312,7 +1480,7 @@ impl Coordinator {
             Target::Brain => {
                 if !waiting {
                     effects.push(Effect::Notify {
-                        title: "King answered".to_owned(),
+                        title: "Orchestrator answered".to_owned(),
                         body: answer.unwrap_or_default(),
                         echo: true,
                     });

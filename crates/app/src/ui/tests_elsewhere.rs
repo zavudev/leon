@@ -747,19 +747,20 @@ fn without_projects(h: &Harness, cx: &mut TestAppContext) -> Vec<String> {
         .collect()
 }
 
+/// Presses the button at the end of the sidebar's filter row.
 fn toggle_show_inactive(h: &Harness, cx: &mut TestAppContext) {
-    h.pick_in_machine_menu(crate::keys::Command::ToggleInactiveSessions, cx);
+    h.mouse_on(
+        "sidebar-show-inactive".to_owned(),
+        gpui_kit::MouseButton::Left,
+        cx,
+    );
     h.settle(cx);
 }
 
-/// What the machine's menu offers for the inactive sessions.
+/// What the button over the tree says it does about the inactive sessions.
 fn inactive_item(h: &Harness, cx: &mut TestAppContext) -> String {
     let show = h.shell(cx, |s| s.show_inactive);
-    crate::ui::menu::items_for_machine(0, show)
-        .into_iter()
-        .find(|item| item.command == crate::keys::Command::ToggleInactiveSessions)
-        .map(|item| item.label)
-        .unwrap_or_default()
+    crate::ui::sidebar::inactive_toggle_tip(show)
 }
 
 #[gpui_kit::test]
@@ -771,16 +772,42 @@ fn inactive_sessions_are_hidden_by_default_and_the_toggle_shows_them_and_is_reme
     assert!(!cx.update(|cx| crate::settings::flag(cx, "sidebar_show_inactive")));
     assert_eq!(without_projects(&h, cx), ["no-active"]);
     assert!(h.shows("tree-no-active", cx));
-    assert_eq!(inactive_item(&h, cx), "Show inactive sessions");
+    assert!(h.shows("sidebar-show-inactive", cx));
+    assert!(inactive_item(&h, cx).starts_with("Show inactive sessions"));
     // On: the whole tree is back.
     toggle_show_inactive(&h, cx);
     assert!(kinds(&h, cx).iter().any(|k| k.starts_with("session:")));
-    assert_eq!(inactive_item(&h, cx), "Hide inactive sessions");
+    assert!(inactive_item(&h, cx).starts_with("Hide inactive sessions"));
     assert!(cx.update(|cx| crate::settings::flag(cx, "sidebar_show_inactive")));
     // Off again: only the active ones.
     toggle_show_inactive(&h, cx);
     assert_eq!(without_projects(&h, cx), ["no-active"]);
     assert!(!cx.update(|cx| crate::settings::flag(cx, "sidebar_show_inactive")));
+}
+
+#[gpui_kit::test]
+fn the_inactive_toggle_sits_in_the_filter_row_beside_the_key_hint_and_not_in_the_menu(
+    cx: &mut TestAppContext,
+) {
+    let (h, _processes, _dir, _path, _id) = rig_filter(cx);
+    let row = h
+        .bounds_of("sidebar-filter".to_owned(), cx)
+        .expect("the filter row is drawn");
+    let button = h
+        .bounds_of("sidebar-show-inactive".to_owned(), cx)
+        .expect("the toggle is drawn");
+    assert!(
+        row.contains(&button.center()),
+        "the toggle is inside the filter row: {button:?} in {row:?}"
+    );
+    // The filter field says its key and the toggle comes after it.
+    assert!(
+        button.left() >= row.left() + row.size.width * 0.5,
+        "{button:?} is at the end of {row:?}"
+    );
+    assert!(crate::ui::menu::items_for_machine(0)
+        .iter()
+        .all(|item| item.command != crate::keys::Command::ToggleInactiveSessions));
 }
 
 #[gpui_kit::test]

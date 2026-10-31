@@ -139,8 +139,8 @@ fn the_command_opens_the_den_and_its_editor_and_done_leaves_it(cx: &mut TestAppC
         Some(dir.path().join("settings.json")),
     );
     h.press("ctrl-shift-p", cx);
-    h.type_text("edit the den", cx);
-    assert_eq!(h.palette_titles(cx)[1], "Edit the Den");
+    h.type_text("edit the office", cx);
+    assert_eq!(h.palette_titles(cx)[1], "Edit the Office");
     h.press("enter", cx);
     assert_eq!(h.main_kind(cx), "den");
     assert!(editing(&h, cx));
@@ -149,7 +149,7 @@ fn the_command_opens_the_den_and_its_editor_and_done_leaves_it(cx: &mut TestAppC
     assert!(!editing(&h, cx));
     h.press("ctrl-shift-p", cx);
     h.type_text("furniture", cx);
-    assert_eq!(h.palette_titles(cx)[1], "Edit the Den");
+    assert_eq!(h.palette_titles(cx)[1], "Edit the Office");
     h.press("enter", cx);
     assert!(editing(&h, cx));
     // Closing the Den closes the editor with it.
@@ -384,7 +384,7 @@ fn a_den_is_chosen_from_pictures_of_the_dens_and_from_the_palette(cx: &mut TestA
         ("nook".to_owned(), "The nook".to_owned(), false)
     );
     assert_eq!(den_setting(cx), "nook");
-    assert_eq!(h.status(), "Den: The nook.");
+    assert_eq!(h.status(), "Office: The nook.");
     assert!(!dir.path().join("dens").exists(), "choosing writes no den");
     // `.` on that strip is the next den.
     h.press(".", cx);
@@ -393,7 +393,7 @@ fn a_den_is_chosen_from_pictures_of_the_dens_and_from_the_palette(cx: &mut TestA
 
     // The palette lists them by name, the one in use marked.
     h.press("ctrl-shift-p", cx);
-    h.type_text("choose a den", cx);
+    h.type_text("choose a room", cx);
     h.press("enter", cx);
     let titles = h.palette_titles(cx);
     assert!(
@@ -417,7 +417,7 @@ fn a_den_is_saved_under_a_name_renamed_and_deleted(cx: &mut TestAppContext) {
     let dens = dir.path().join("dens");
     // A built-in den has no name to change and cannot be deleted.
     h.press("ctrl-shift-p", cx);
-    h.type_text("rename the den", cx);
+    h.type_text("rename the room", cx);
     h.press("enter", cx);
     assert_eq!(
         h.status(),
@@ -425,14 +425,14 @@ fn a_den_is_saved_under_a_name_renamed_and_deleted(cx: &mut TestAppContext) {
     );
     h.press("escape", cx);
     h.press("ctrl-shift-p", cx);
-    h.type_text("delete the den", cx);
+    h.type_text("delete the room", cx);
     h.press("enter", cx);
     assert_eq!(h.status(), "The office is built in: it cannot be deleted.");
     h.press("escape", cx);
 
     // Saved under a name it is a den of the user's: a copy of the office.
     h.press("ctrl-shift-p", cx);
-    h.type_text("save the den as", cx);
+    h.type_text("save the room as", cx);
     h.press("enter", cx);
     h.type_text("Attic", cx);
     h.press("enter", cx);
@@ -448,7 +448,7 @@ fn a_den_is_saved_under_a_name_renamed_and_deleted(cx: &mut TestAppContext) {
     );
     assert_eq!(kept.items, default_layout().items);
     assert!(
-        h.status().starts_with("Saved the den as Attic: "),
+        h.status().starts_with("Saved the room as Attic: "),
         "{}",
         h.status()
     );
@@ -481,7 +481,7 @@ fn a_den_is_saved_under_a_name_renamed_and_deleted(cx: &mut TestAppContext) {
 
     // Renamed, its file is renamed with it.
     h.press("ctrl-shift-p", cx);
-    h.type_text("rename the den", cx);
+    h.type_text("rename the room", cx);
     h.press("enter", cx);
     h.type_text("Loft", cx);
     h.press("enter", cx);
@@ -493,14 +493,14 @@ fn a_den_is_saved_under_a_name_renamed_and_deleted(cx: &mut TestAppContext) {
 
     // Deleting asks first, and "keep" keeps.
     h.press("ctrl-shift-p", cx);
-    h.type_text("delete the den", cx);
+    h.type_text("delete the room", cx);
     h.press("enter", cx);
     assert_eq!(h.palette_titles(cx), ["Delete Loft", "Keep it"]);
     h.press("down", cx);
     h.press("enter", cx);
     assert!(dens.join("loft.json").exists());
     h.press("ctrl-shift-p", cx);
-    h.type_text("delete the den", cx);
+    h.type_text("delete the room", cx);
     h.press("enter", cx);
     h.press("enter", cx);
     assert!(!dens.join("loft.json").exists());
@@ -549,7 +549,7 @@ fn the_den_of_the_setting_is_read_from_its_file_when_the_den_opens(cx: &mut Test
     assert_eq!((room.name.as_str(), room.cols, room.rows), ("Cave", 12, 9));
     assert_eq!(room.items, [Placed::new("desk", 4, 4)]);
     assert_eq!(active(&h, cx), ("cave".to_owned(), "Cave".to_owned(), true));
-    assert_eq!(h.status(), "Den: There is no piece called `throne`.");
+    assert_eq!(h.status(), "Office: There is no piece called `throne`.");
     assert!(
         h.shows("den", cx),
         "a den that lacks nearly everything is drawn"
@@ -561,7 +561,8 @@ fn the_den_of_the_setting_is_read_from_its_file_when_the_den_opens(cx: &mut Test
     h.press_chord("cmd-alt-shift-l", "ctrl-alt-shift-l", cx);
     assert_eq!(layout(&h, cx), default_layout(), "the office stands in");
     assert!(
-        h.status().starts_with("Den: cave.json: This is not a den"),
+        h.status()
+            .starts_with("Office: cave.json: This is not a room"),
         "{}",
         h.status()
     );
@@ -584,7 +585,7 @@ fn the_den_of_the_setting_is_read_from_its_file_when_the_den_opens(cx: &mut Test
         assert_eq!(layout(&h, cx), default_layout());
         assert_eq!(
             h.status(),
-            format!("Den: There is no den called `{missing}`: The office is used instead.")
+            format!("Office: There is no room called `{missing}`: The office is used instead.")
         );
         h.press("escape", cx);
     }
@@ -609,7 +610,7 @@ fn without_a_settings_file_a_changed_den_is_kept_until_the_window_closes(cx: &mu
     cx.update(|cx| h.shell.update(cx, |shell, cx| shell.open_dens_folder(cx)));
     assert_eq!(
         h.status(),
-        "There is no dens folder: the settings are kept in memory."
+        "There is no rooms folder: the settings are kept in memory."
     );
 }
 

@@ -497,7 +497,8 @@ impl Store {
     /// Pins `pinned` sessions in this order, as the pinned order of `parent`;
     /// every other session of that parent goes back to automatic (by
     /// recency). Every pinned session must belong to `parent`. The sidebar
-    /// passes the whole pinned order of a machine (`SessionScope::Machine`).
+    /// passes the whole pinned order, whatever the machine of each session
+    /// (`SessionScope::Pinned`).
     pub fn pin_sessions(&self, parent: &SessionScope, pinned: &[SessionId]) -> Result<()> {
         self.write(StoreChange::Sessions, |tx| {
             for (position, id) in pinned.iter().enumerate() {
@@ -563,6 +564,7 @@ fn scope_holds(connection: &Connection, parent: &SessionScope, session: &Session
             Ok(session.machine_id == *machine && session.cwd == *cwd)
         }
         SessionScope::Machine(machine) => Ok(session.machine_id == *machine),
+        SessionScope::Pinned => Ok(true),
     }
 }
 
@@ -838,7 +840,7 @@ mod tests {
 
     #[test]
     fn the_two_halves_of_a_worktrees_status_are_written_apart_and_kept() {
-        use crate::status::{Checks, Divergence, PullRequest, Review};
+        use crate::status::{Checks, Divergence, PullRequest, PullState, Review};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("leon.db");
         let id = {
@@ -865,6 +867,7 @@ mod tests {
                 .update_worktree_status(&id, |status| {
                     status.pull_request = Some(PullRequest {
                         number: 7,
+                        state: PullState::Open,
                         url: "https://github.com/zavudev/leon/pull/7".into(),
                         draft: false,
                         review: Review::Approved,
@@ -1231,6 +1234,52 @@ mod tests {
             .unwrap();
         assert_eq!(store.session(&web).unwrap().sort_order, None);
         assert_eq!(store.session(&api).unwrap().sort_order, Some(0));
+    }
+
+    #[test]
+    fn the_pins_of_every_machine_are_one_order() {
+        let store = Store::open_in_memory().unwrap();
+        let remote = store
+            .add_machine(
+                "build box",
+                crate::MachineKind::Ssh {
+                    host: "box.example".into(),
+                    user: None,
+                    port: None,
+                    identity_file: None,
+                },
+            )
+            .unwrap();
+        let here = store
+            .upsert_session(&session_at("/srv/api", "here", 100), &[])
+            .unwrap();
+        let mut elsewhere = session_at("/srv/web", "there", 200);
+        elsewhere.machine_id = remote.id.clone();
+        let there = store.upsert_session(&elsewhere, &[]).unwrap();
+        let unpinned = store
+            .upsert_session(&session_at("/srv/api", "idle", 300), &[])
+            .unwrap();
+        let scope = SessionScope::Pinned;
+
+        // Pinned from both machines, in one order.
+        store
+            .pin_sessions(&scope, &[there.clone(), here.clone()])
+            .unwrap();
+        assert_eq!(store.session(&there).unwrap().sort_order, Some(0));
+        assert_eq!(store.session(&here).unwrap().sort_order, Some(1));
+        assert_eq!(store.session(&unpinned).unwrap().sort_order, None);
+
+        // Moving one across the other, and unpinning, take both machines in.
+        store
+            .pin_sessions(&scope, &[here.clone(), there.clone()])
+            .unwrap();
+        assert_eq!(store.session(&here).unwrap().sort_order, Some(0));
+        assert_eq!(store.session(&there).unwrap().sort_order, Some(1));
+        store
+            .pin_sessions(&scope, std::slice::from_ref(&there))
+            .unwrap();
+        assert_eq!(store.session(&here).unwrap().sort_order, None);
+        assert_eq!(store.session(&there).unwrap().sort_order, Some(0));
     }
 
     #[test]

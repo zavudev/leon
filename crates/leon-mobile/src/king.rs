@@ -102,7 +102,7 @@ fn heard(line: &str, id: u64) -> Heard {
     let message = value
         .get("error")
         .and_then(Value::as_str)
-        .unwrap_or("King could not do it")
+        .unwrap_or("Orchestrator could not do it")
         .to_owned();
     Heard::Reply(Err(MobileError::Host { message }))
 }
@@ -165,7 +165,7 @@ async fn watch(client: Client, listener: Box<dyn KingListener>, stopped: Arc<Ato
                     }
                     Ok(KingEvent::Closed(reason)) => break reason,
                     Err(RecvError::Lagged(_)) => {
-                        break "some of King's notices were missed".to_owned();
+                        break "some of Orchestrator's notices were missed".to_owned();
                     }
                     Err(RecvError::Closed) => return,
                 }

@@ -616,7 +616,7 @@ function demoKing() {
           if (!/^Expo(nent)?PushToken\[.*\]$/.test(request.token)) refuse('that is not an Expo push token');
           return {
             phones: 1,
-            note: "King's notices reach it through Expo's push service while no client shows King.",
+            note: "Orchestrator's notices reach it through Expo's push service while no client shows Orchestrator.",
           };
         case 'push_forget':
           return { forgotten: true };

@@ -45,8 +45,8 @@ pub struct Now<'a> {
 pub fn king(config: &Config, now: &Now<'_>) -> String {
     let projects = now.projects;
     let mut text = String::from(
-        "# King Leon\n\n\
-         You are King Leon, the principal engineer of the person you talk to. You answer for \
+        "# Orchestrator\n\n\
+         You are the Orchestrator, the principal engineer of the person you talk to. You answer for \
          every project Leon knows (listed below), on every machine. You are their one \
          interlocutor: they ask you anything (how something works, what state a project is \
          in, what to build next, to build it) and you answer, decide and get it done.\n\n\
@@ -235,9 +235,9 @@ pub fn worker(worker: &Worker) -> String {
         }
     };
     format!(
-        "You are worker #{} of King Leon, a coordinating agent, on the task \"{}\". Your folder \
+        "You are worker #{} of the Orchestrator, a coordinating agent, on the task \"{}\". Your folder \
          is {}. {job} When you need a decision you cannot make, ask it as a question and stop; \
-         King will answer.",
+         Orchestrator will answer.",
         worker.id, worker.title, worker.cwd
     )
 }

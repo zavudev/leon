@@ -11,10 +11,12 @@
 //!
 //! Pure: JSON and text in, data out.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// What was done to a file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ChangeKind {
     /// The file did not exist before.
     Created,
@@ -25,7 +27,8 @@ pub enum ChangeKind {
 }
 
 /// What a line of a change is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LineKind {
     /// Around a change, unchanged.
     Context,
@@ -36,33 +39,37 @@ pub enum LineKind {
 }
 
 /// One line of a change.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffLine {
     /// Kept, added or removed.
     pub kind: LineKind,
     /// The text, without the `+`, `-` or space that marks the kind.
     pub text: String,
     /// Its number in the old file, for a removed or kept line, when known.
+    #[serde(default)]
     pub old: Option<u32>,
     /// Its number in the new file, for an added or kept line, when known.
+    #[serde(default)]
     pub new: Option<u32>,
 }
 
 /// Lines that follow each other in the file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hunk {
     /// The lines, in the order of the file.
+    #[serde(default)]
     pub lines: Vec<DiffLine>,
 }
 
 /// The change of one file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileChange {
     /// The file, as the agent names it.
     pub path: String,
     /// What was done to it.
     pub kind: ChangeKind,
     /// The lines that changed, with the ones around them.
+    #[serde(default)]
     pub hunks: Vec<Hunk>,
 }
 

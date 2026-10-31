@@ -129,7 +129,7 @@ fn the_lines_of_the_voice_document_are_said_as_written() {
     let lines: Vec<String> = (0..2).map(|seed| say("moss", sent.clone(), seed)).collect();
     assert!(lines.contains(&"MOSS sent out EXPLORE!".to_owned()));
     assert!(lines.contains(&"MOSS sent out EXPLORE!\nAn egg is hatching...".to_owned()));
-    assert_eq!(quiet_line().text(), "The den is quiet. Too quiet.");
+    assert_eq!(quiet_line().text(), "The office is quiet. Too quiet.");
     assert_eq!(
         busy_line().text(),
         "The pride is busy.\nYou may go get coffee."

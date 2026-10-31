@@ -111,7 +111,7 @@ export default function Settings() {
             </Txt>
           </View>
 
-          <Section title="King's notices while closed" style={PLAIN} />
+          <Section title="Orchestrator's notices while closed" style={PLAIN} />
           <View style={{ gap: 6 }}>
             <View accessibilityRole="radiogroup" style={{ flexDirection: 'row', gap: 8 }}>
               <Chip title="Off" selected={!kingPush} onPress={() => setKingPush(false)} />
@@ -123,7 +123,7 @@ export default function Settings() {
               />
             </View>
             <Txt variant="small" tone="faint">
-              When King tells you something and Leon is closed, the title and body of its notice go
+              When Orchestrator tells you something and Leon is closed, the title and body of its notice go
               through Expo&apos;s push service to reach this phone.
             </Txt>
             {pushError ? (

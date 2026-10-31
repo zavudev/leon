@@ -14,7 +14,7 @@
 //! off. Both go in the feed ([`crate::feed`]), which keeps them.
 //!
 //! A [`Narrator`] is the queue behind the one line the den says of itself as
-//! a whole, at the foot of the feed (`The den is quiet. Too quiet.`). Lines are typed out a few
+//! a whole, at the foot of the feed (`The office is quiet. Too quiet.`). Lines are typed out a few
 //! characters a tick and then held. It never falls far behind what happens:
 //! while lines wait, each is held only a moment, and of the chatter that
 //! waits only the newest is kept. A line about a permission prompt or a cub
@@ -246,7 +246,7 @@ pub fn narrate(happening: &Happening, seed: u64) -> Option<Line> {
     match &happening.event {
         Event::Joined => plain(wrap(&match pick(2, raw, 1, seed) {
             0 => format!("{n} joined the pride."),
-            _ => format!("{n} padded into the den."),
+            _ => format!("{n} padded into the office."),
         })),
         Event::ToolStarted { kind, tool, detail } => {
             let detail = detail.as_deref().map(str::trim).filter(|d| !d.is_empty());
@@ -399,7 +399,7 @@ pub fn plainly(happening: &Happening) -> Option<String> {
 /// What the box says when nobody is in the den.
 pub fn quiet_line() -> Line {
     Line {
-        rows: vec!["The den is quiet. Too quiet.".to_owned()],
+        rows: vec!["The office is quiet. Too quiet.".to_owned()],
         urgent: false,
     }
 }

@@ -834,8 +834,12 @@ fn a_card_is_given_to_the_king_who_is_told_what_and_where(cx: &mut TestAppContex
     open_board(&h, cx);
     written_elsewhere(&h, "Fix the login", 1, cx);
     h.press("a", cx);
-    assert_eq!(h.main_kind(cx), "king", "King's view opens on it");
-    let end = h.king.take().pop().expect("a line to King's service");
+    assert_eq!(h.main_kind(cx), "king", "Orchestrator's view opens on it");
+    let end = h
+        .king
+        .take()
+        .pop()
+        .expect("a line to Orchestrator's service");
     h.settle(cx);
     let said: Vec<String> = end
         .drain()

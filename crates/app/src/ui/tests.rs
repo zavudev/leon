@@ -557,6 +557,7 @@ fn open_core(
         quit: Rc::new(move |_| quits_in.set(quits_in.get() + 1)),
         theme_poll: None,
         elsewhere_poll: None,
+        pull_request_poll: None,
         usage_timer: false,
         terminate_process: Rc::new(move |pid| {
             terminated_in.lock().unwrap().push(pid);
@@ -694,6 +695,26 @@ impl Harness {
         let at = bounds.center();
         visual.simulate_mouse_down(at, button, gpui_kit::Modifiers::none());
         visual.simulate_mouse_up(at, button, gpui_kit::Modifiers::none());
+        visual.run_until_parked();
+        self.settle(cx);
+    }
+
+    /// A click with the keys `modifiers` held.
+    #[cfg_attr(not(leon_posix_tests), allow(dead_code))]
+    fn mouse_with(
+        &self,
+        selector: String,
+        modifiers: gpui_kit::Modifiers,
+        cx: &mut TestAppContext,
+    ) {
+        let bounds = self
+            .bounds_of(selector.clone(), cx)
+            .unwrap_or_else(|| panic!("{selector} is not drawn"));
+        let mut visual = VisualTestContext::from_window(self.window.into(), cx);
+        let at = bounds.center();
+        let button = gpui_kit::MouseButton::Left;
+        visual.simulate_mouse_down(at, button, modifiers);
+        visual.simulate_mouse_up(at, button, modifiers);
         visual.run_until_parked();
         self.settle(cx);
     }
@@ -1394,6 +1415,7 @@ fn a_worktree_screen_offers_its_actions_and_opens_a_session_from_its_list(cx: &m
 fn open_pull_request(number: u64) -> leon_core::PullRequest {
     leon_core::PullRequest {
         number,
+        state: leon_core::PullState::Open,
         url: format!("https://github.com/zavudev/leon/pull/{number}"),
         draft: false,
         review: leon_core::Review::Approved,
@@ -1728,14 +1750,12 @@ fn the_pinned_section_is_above_the_projects_and_the_newest_pin_is_first(cx: &mut
     let outline = h.outline(cx);
     let section = outline
         .iter()
-        .position(|line| line == "  pinned")
+        .position(|line| line == "pinned")
         .expect("the Pinned section is shown");
-    assert_eq!(outline[section + 1], "    session:brand new");
-    assert_eq!(outline[section + 2], "    session:fix the login bug");
-    assert!(
-        outline[section + 3].starts_with("  project:"),
-        "{outline:?}"
-    );
+    assert_eq!(section, 0, "above the machines: {outline:?}");
+    assert_eq!(outline[section + 1], "  session:brand new");
+    assert_eq!(outline[section + 2], "  session:fix the login bug");
+    assert!(outline[section + 3].starts_with("machine:"), "{outline:?}");
     assert_eq!(
         outline
             .iter()
@@ -1791,6 +1811,177 @@ fn the_pin_of_a_session_row_pins_it_and_pressing_it_again_unpins_it(cx: &mut Tes
         .rows
         .iter()
         .any(|row| matches!(row.kind, Kind::Pinned { .. }))));
+}
+
+/// The id of the session titled `title` in the seeded store.
+fn session_titled(h: &Harness, title: &str) -> leon_core::SessionId {
+    h.store
+        .recent_sessions(&leon_core::SessionFilter::default(), 50)
+        .unwrap()
+        .into_iter()
+        .find(|session| session.title == title)
+        .unwrap()
+        .id
+}
+
+#[gpui_kit::test]
+fn the_pins_of_every_machine_are_one_section_at_the_top_that_says_machine_and_project(
+    cx: &mut TestAppContext,
+) {
+    let h = open(cx, ScriptedRunner::new());
+    let login = session_titled(&h, "fix the login bug");
+    let keys = session_titled(&h, "rotate the keys");
+    // One pin on this machine, one on the build box: one section holds both,
+    // the one pinned last on top.
+    click_pin_of(&h, NodeId::Session(keys.clone()), cx);
+    click_pin_of(&h, NodeId::Session(login.clone()), cx);
+    assert_eq!(h.store.session(&login).unwrap().sort_order, Some(0));
+    assert_eq!(h.store.session(&keys).unwrap().sort_order, Some(1));
+    h.settle(cx);
+    let (sections, lead) = h.shell(cx, |shell| {
+        (
+            shell
+                .rows
+                .iter()
+                .filter(|row| matches!(row.kind, Kind::Pinned { .. }))
+                .count(),
+            shell
+                .rows
+                .iter()
+                .take(3)
+                .map(|row| (row.id.clone(), row.depth, row.machine.clone()))
+                .collect::<Vec<_>>(),
+        )
+    });
+    assert_eq!(sections, 1, "no group of pins is left in any machine");
+    assert_eq!(
+        lead,
+        [
+            (NodeId::Pinned, 0, MachineId::local()),
+            (NodeId::Session(login.clone()), 1, MachineId::local()),
+            (
+                NodeId::Session(keys.clone()),
+                1,
+                h.shell(cx, |shell| shell.snapshot.machines[1].id.clone())
+            ),
+        ],
+        "above every machine, each session on its own machine"
+    );
+    // Each pinned row says where it lives: the machine as a badge, the
+    // project under the title, and the whole of it on hover.
+    let (login_row, keys_row) = (
+        h.row_of(NodeId::Session(login.clone()), cx).unwrap(),
+        h.row_of(NodeId::Session(keys.clone()), cx).unwrap(),
+    );
+    assert!(h.shows_dynamic(format!("tree-machine-{keys_row}"), cx));
+    assert!(h.shows_dynamic(format!("tree-machine-{login_row}"), cx));
+    assert!(h.shows_dynamic(format!("tree-branch-{keys_row}"), cx));
+    let said = h.shell(cx, |shell| {
+        let key = NodeId::Session(keys.clone()).key();
+        let entry = &shell.pinned_rows[&key];
+        (
+            entry.machine_name.clone(),
+            entry.place_label.clone(),
+            entry.tip.clone(),
+            shell.row_branches[&key].clone(),
+        )
+    });
+    assert_eq!(
+        said,
+        (
+            "build box".to_owned(),
+            "infra".to_owned(),
+            "build box \u{b7} infra \u{b7} main".to_owned(),
+            "infra".to_owned()
+        )
+    );
+    // The keyboard goes down the section from its header, across machines.
+    put_cursor(&h, cx, NodeId::Pinned);
+    h.press("down", cx);
+    assert_eq!(
+        h.shell(cx, |s| s.rows[s.cursor.unwrap()].id.clone()),
+        NodeId::Session(login.clone())
+    );
+    h.press("down", cx);
+    assert_eq!(
+        h.shell(cx, |s| s.rows[s.cursor.unwrap()].id.clone()),
+        NodeId::Session(keys.clone())
+    );
+    // Dragging the build box's session above this machine's reorders the one
+    // list.
+    h.drag_rows(keys_row, login_row, 0.25, cx);
+    assert_eq!(h.store.session(&keys).unwrap().sort_order, Some(0));
+    assert_eq!(h.store.session(&login).unwrap().sort_order, Some(1));
+    // Unpinning the one on the build box leaves the other where it is.
+    click_pin_of(&h, NodeId::Session(keys.clone()), cx);
+    assert_eq!(h.store.session(&keys).unwrap().sort_order, None);
+    assert_eq!(h.store.session(&login).unwrap().sort_order, Some(0));
+}
+
+#[gpui_kit::test]
+fn a_pinned_row_wears_the_pull_request_mark_of_its_worktree(cx: &mut TestAppContext) {
+    let h = open(cx, ScriptedRunner::new());
+    let oauth = session_titled(&h, "add oauth");
+    let linked = h
+        .store
+        .projects(Some(&MachineId::local()))
+        .unwrap()
+        .into_iter()
+        .flat_map(|project| h.store.worktrees(&project.id).unwrap())
+        .find(|worktree| worktree.branch.as_deref() == Some("feature/login"))
+        .unwrap();
+    click_pin_of(&h, NodeId::Session(oauth.clone()), cx);
+    let at = h.row_of(NodeId::Session(oauth.clone()), cx).unwrap();
+    assert!(
+        !h.shows_dynamic(format!("tree-merged-{at}"), cx),
+        "nothing is known of its branch yet"
+    );
+    // GitHub says the branch's pull request was merged.
+    h.store
+        .update_worktree_status(&linked.id, |status| {
+            status.pull_request = Some(leon_core::PullRequest {
+                number: 12,
+                state: leon_core::PullState::Merged,
+                url: "https://github.com/zavudev/leon/pull/12".into(),
+                draft: false,
+                review: leon_core::Review::None,
+                checks: leon_core::Checks::None,
+            });
+        })
+        .unwrap();
+    h.settle(cx);
+    let at = h.row_of(NodeId::Session(oauth.clone()), cx).unwrap();
+    assert!(h.shows_dynamic(format!("tree-merged-{at}"), cx));
+    // The worktree's own row says it too, in the same words.
+    let worktree_row = h.row_of(NodeId::Worktree(linked.id.clone()), cx).unwrap();
+    assert!(h.shows_dynamic(format!("tree-merged-{worktree_row}"), cx));
+    // An open one, then a closed one, change the mark of both rows.
+    for (state, draft, prefix) in [
+        (leon_core::PullState::Open, false, "tree-pr-open"),
+        (leon_core::PullState::Open, true, "tree-pr-draft"),
+        (leon_core::PullState::Closed, false, "tree-pr-closed"),
+    ] {
+        h.store
+            .update_worktree_status(&linked.id, |status| {
+                status.pull_request = Some(leon_core::PullRequest {
+                    number: 13,
+                    state,
+                    url: "https://github.com/zavudev/leon/pull/13".into(),
+                    draft,
+                    review: leon_core::Review::None,
+                    checks: leon_core::Checks::None,
+                });
+            })
+            .unwrap();
+        h.settle(cx);
+        let at = h.row_of(NodeId::Session(oauth.clone()), cx).unwrap();
+        let worktree_row = h.row_of(NodeId::Worktree(linked.id.clone()), cx).unwrap();
+        assert!(h.shows_dynamic(format!("{prefix}-{at}"), cx), "{prefix}");
+        assert!(
+            h.shows_dynamic(format!("{prefix}-{worktree_row}"), cx),
+            "{prefix}"
+        );
+    }
 }
 
 #[gpui_kit::test]
@@ -6828,6 +7019,45 @@ mod live {
             dots(&h, cx, "real", "trunk"),
             (Activity::Idle, Activity::Idle)
         );
+    }
+
+    #[gpui_kit::test]
+    fn a_folded_project_spins_while_a_session_under_it_works_and_stops_when_it_does_not(
+        cx: &mut TestAppContext,
+    ) {
+        let h = open_live(cx);
+        let _real = real_worktree(&h, cx);
+        set_waiting_after(&h, cx, HOUR);
+        h.press("ctrl-n", cx);
+        h.press("enter", cx); // Claude Code: prints, and takes the terminal
+        wait_until(&h, cx, "the agent's first line", |h, cx| {
+            screen(h, cx, 1).contains("FAKE-CLAUDE")
+        });
+        assert_eq!(dots(&h, cx, "real", "trunk").1, Activity::Working);
+        let project = NodeId::Project(project_id(&h, "real"));
+        let spinner = |h: &Harness, cx: &mut TestAppContext| {
+            let row = h
+                .row_of(project.clone(), cx)
+                .expect("the project has a row");
+            h.shows_dynamic(format!("tree-project-spinner-{row}"), cx)
+        };
+        assert!(!spinner(&h, cx), "open: the session's own row spins");
+        // Folded, the session is out of sight, so the project says it works.
+        put_cursor_on(&h, cx, project.clone());
+        h.press("left", cx);
+        h.settle(cx);
+        assert!(spinner(&h, cx), "a folded project with a working session");
+        // The agent comes back to its prompt: nothing works, nothing spins.
+        set_waiting_after(&h, cx, Duration::ZERO);
+        script_of(&h, 1).set_foreground(true);
+        h.settle(cx);
+        let id = project_id(&h, "real");
+        assert_eq!(h.shell(cx, |s| s.project_activity(&id)), Activity::Idle);
+        assert!(!spinner(&h, cx), "folded and quiet");
+        // Open again: still nothing on the project row.
+        h.press("right", cx);
+        h.settle(cx);
+        assert!(!spinner(&h, cx));
     }
 
     #[gpui_kit::test]

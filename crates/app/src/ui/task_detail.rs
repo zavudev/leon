@@ -903,12 +903,12 @@ impl Shell {
         );
         if !finished {
             actions = actions.child(
-                pill("task-action-king", "Give it to the King  a", &c).on_click(cx.listener(
-                    |this, _, window, cx| {
+                pill("task-action-king", "Give it to the Orchestrator  a", &c).on_click(
+                    cx.listener(|this, _, window, cx| {
                         this.tasks_send_to_king(window, cx);
                         cx.notify();
-                    },
-                )),
+                    }),
+                ),
             );
         }
         if !finished && self.detail_steps(&card).next().is_some() {

@@ -19,9 +19,8 @@ use leon_core::Divergence;
 use leon_remote::{ChangedFile, PullRequestDraft, Step};
 
 use super::changes::{outcome_of, pull_request_from_message, Outcome};
-use super::chat::Chat;
-use super::chat_view::{button, Look};
-use super::live::LiveId;
+use super::chat_view::{button_tagged, Look};
+use super::edits::Subject;
 use super::shell::Shell;
 use super::widgets::{led, mono};
 use crate::engine::{CommitRequest, ShipReport, ShipRequest};
@@ -187,83 +186,91 @@ impl GitCell {
 
 impl Shell {
     /// What the cell knows, as the buttons judge it.
-    fn chat_git_facts(&self, chat: &Chat) -> Facts {
-        let worktree = self.snapshot.worktree_at(&chat.machine, &chat.cwd);
-        let branch = chat
+    fn chat_git_facts(&self, subject: Subject) -> Facts {
+        let (Some(scene), Some(edits)) = (self.scene(subject), self.edits(subject)) else {
+            return Facts {
+                worktree: false,
+                changed: 0,
+                branch: false,
+                busy: false,
+            };
+        };
+        let worktree = self.snapshot.worktree_at(&scene.machine, scene.cwd);
+        let branch = edits
             .git
             .branch
             .as_ref()
             .or_else(|| worktree.and_then(|worktree| worktree.branch.as_ref()));
         Facts {
             worktree: worktree.is_some(),
-            changed: chat.git.files.as_ref().map_or(0, Vec::len),
+            changed: edits.git.files.as_ref().map_or(0, Vec::len),
             branch: branch.is_some(),
-            busy: chat.git.working.is_some(),
+            busy: edits.git.working.is_some(),
         }
     }
 
     /// Opens the cell, or closes it; opening reads the changed files.
-    pub(super) fn chat_git_toggle(&mut self, id: LiveId, cx: &mut Context<Self>) {
-        let Some(chat) = self.chats.get_mut(&id) else {
+    pub(super) fn chat_git_toggle(&mut self, subject: Subject, cx: &mut Context<Self>) {
+        let Some(edits) = self.edits_mut(subject) else {
             return;
         };
-        chat.git.open = !chat.git.open;
-        let open = chat.git.open;
+        edits.git.open = !edits.git.open;
+        let open = edits.git.open;
         cx.notify();
         if open {
-            self.chat_git_read(id, cx);
+            self.chat_git_read(subject, cx);
         }
     }
 
     /// Closes the cell.
-    pub(super) fn chat_git_close(&mut self, id: LiveId, cx: &mut Context<Self>) {
-        if let Some(chat) = self.chats.get_mut(&id) {
-            if std::mem::take(&mut chat.git.open) {
+    pub(super) fn chat_git_close(&mut self, subject: Subject, cx: &mut Context<Self>) {
+        if let Some(edits) = self.edits_mut(subject) {
+            if std::mem::take(&mut edits.git.open) {
                 cx.notify();
             }
         }
     }
 
     /// Reads the changed files and the branch again.
-    fn chat_git_read(&mut self, id: LiveId, cx: &mut Context<Self>) {
-        let Some(chat) = self.chats.get_mut(&id) else {
+    fn chat_git_read(&mut self, subject: Subject, cx: &mut Context<Self>) {
+        let Some(scene) = self.scene(subject) else {
             return;
         };
-        if self
-            .snapshot
-            .worktree_at(&chat.machine, &chat.cwd)
-            .is_none()
-        {
+        let (machine, cwd) = (scene.machine.clone(), scene.cwd.to_owned());
+        if self.snapshot.worktree_at(&machine, &cwd).is_none() {
             return;
         }
-        chat.git.reads += 1;
-        let read = chat.git.reads;
-        let reading = self
-            .engine
-            .read_changes(chat.machine.clone(), chat.cwd.clone());
+        let Some(edits) = self.edits_mut(subject) else {
+            return;
+        };
+        edits.git.reads += 1;
+        let read = edits.git.reads;
+        let reading = self.engine.read_changes(machine, cwd);
         cx.spawn(async move |this, cx| {
             let answer = reading.await;
             this.update(cx, |this, cx| {
-                let Some(chat) = this.chats.get_mut(&id) else {
+                let Some(edits) = this.edits_mut(subject) else {
                     return;
                 };
-                if chat.git.reads != read {
+                if edits.git.reads != read {
                     return;
                 }
                 match answer {
                     Ok(Ok(changes)) => {
-                        chat.git.branch = changes.branch;
-                        chat.git.files = Some(changes.files);
+                        edits.git.branch = changes.branch;
+                        edits.git.files = Some(changes.files);
                     }
                     // What a step came to is not replaced by a reading that
                     // failed after it.
                     Ok(Err(error)) => {
-                        chat.git
+                        edits
+                            .git
                             .outcome
                             .get_or_insert_with(|| failed("The changes could not be read", error));
                     }
                     Err(error) => {
-                        chat.git
+                        edits
+                            .git
                             .outcome
                             .get_or_insert_with(|| failed("The changes could not be read", error));
                     }
@@ -279,38 +286,39 @@ impl Shell {
     /// engine's `ship`, which stops at the first that fails.
     pub(super) fn chat_git_run(
         &mut self,
-        id: LiveId,
+        subject: Subject,
         action: Action,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(chat) = self.chats.get(&id) else {
+        let Some(scene) = self.scene(subject) else {
             return;
         };
+        let (machine, cwd) = (scene.machine.clone(), scene.cwd.to_owned());
         let Some(project) = self
             .snapshot
-            .worktree_at(&chat.machine, &chat.cwd)
+            .worktree_at(&machine, &cwd)
             .map(|worktree| worktree.project_id.clone())
         else {
             return;
         };
-        if !allowed(self.chat_git_facts(chat)).of(action) {
+        if !allowed(self.chat_git_facts(subject)).of(action) {
             return;
         }
-        let changed = chat.git.files.as_ref().map_or(0, Vec::len);
-        let message = chat.git.message.read(cx).value().trim().to_owned();
+        let Some(edits) = self.edits_mut(subject) else {
+            return;
+        };
+        let changed = edits.git.files.as_ref().map_or(0, Vec::len);
+        let message = edits.git.message.read(cx).value().trim().to_owned();
         let commits = action.commits(changed);
         if commits && message.is_empty() {
             use gpui_kit::Focusable as _;
-            let field = chat.git.message.clone();
+            let field = edits.git.message.clone();
             window.focus(&field.focus_handle(cx), cx);
-            if let Some(chat) = self.chats.get_mut(&id) {
-                chat.git.outcome = Some(refusal("Write a commit message first."));
-            }
+            edits.git.outcome = Some(refusal("Write a commit message first."));
             cx.notify();
             return;
         }
-        let (machine, cwd) = (chat.machine.clone(), chat.cwd.clone());
         let request = ShipRequest {
             machine: machine.clone(),
             project,
@@ -323,16 +331,14 @@ impl Shell {
             push: action.pushes(),
             pull_request: None,
         };
+        edits.git.working = Some(action.working());
+        edits.git.outcome = None;
         // The pull request goes into the branch the repository says, and
         // takes its words from the message or, with nothing to commit, from
         // the commits there are.
         let start = action
             .opens_pull_request()
             .then(|| self.engine.pull_request_start(machine, cwd));
-        if let Some(chat) = self.chats.get_mut(&id) {
-            chat.git.working = Some(action.working());
-            chat.git.outcome = None;
-        }
         let engine = self.engine.clone();
         cx.spawn_in(window, async move |this, cx| {
             let mut request = request;
@@ -374,7 +380,7 @@ impl Shell {
                 }),
             };
             this.update_in(cx, |this, window, cx| {
-                this.chat_git_done(id, report, window, cx)
+                this.chat_git_done(subject, report, window, cx)
             })
             .ok();
         })
@@ -386,22 +392,23 @@ impl Shell {
     /// was used is cleared, and the files are read again.
     fn chat_git_done(
         &mut self,
-        id: LiveId,
+        subject: Subject,
         report: ShipReport,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(chat) = self.chats.get_mut(&id) else {
+        let Some(edits) = self.edits_mut(subject) else {
             return;
         };
-        chat.git.working = None;
-        chat.git.outcome = Some(outcome_of(&report));
+        edits.git.working = None;
+        edits.git.outcome = Some(outcome_of(&report));
         if report.done.iter().any(|(step, _)| *step == Step::Commit) {
-            chat.git
+            edits
+                .git
                 .message
                 .update(cx, |field, cx| field.set_value("", window, cx));
         }
-        self.chat_git_read(id, cx);
+        self.chat_git_read(subject, cx);
         cx.notify();
     }
 
@@ -409,20 +416,21 @@ impl Shell {
     /// upstream; `None` when the store knows of no branch for the folder.
     pub(super) fn chat_branch_label(
         &self,
-        id: LiveId,
-        chat: &Chat,
+        subject: Subject,
         colours: &Palette,
     ) -> Option<AnyElement> {
-        let worktree = self.snapshot.worktree_at(&chat.machine, &chat.cwd)?;
+        let scene = self.scene(subject)?;
+        let worktree = self.snapshot.worktree_at(&scene.machine, scene.cwd)?;
         let branch = worktree.branch.as_deref()?;
         let divergence = self
             .snapshot
             .status(&worktree.id)
             .and_then(|status| status.divergence);
         let words = branch_words(branch, divergence);
+        let tag = subject.tag();
         Some(
             div()
-                .debug_selector(move || format!("chat-branch-{}", id.0))
+                .debug_selector(move || format!("chat-branch-{tag}"))
                 .flex_none()
                 .max_w(px(200.))
                 .truncate()
@@ -438,18 +446,18 @@ impl Shell {
     /// The button of the foot that opens the cell.
     pub(super) fn chat_git_button(
         &self,
-        id: LiveId,
-        chat: &Chat,
+        subject: Subject,
         colours: &Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let name = format!("chat-git-{}", id.0);
+        let name = format!("chat-git-{}", subject.tag());
         let hover = colours.surface_2;
-        let here = self
-            .snapshot
-            .worktree_at(&chat.machine, &chat.cwd)
-            .is_some();
-        let open = chat.git.open;
+        let here = self.scene(subject).is_some_and(|scene| {
+            self.snapshot
+                .worktree_at(&scene.machine, scene.cwd)
+                .is_some()
+        });
+        let open = self.edits(subject).is_some_and(|edits| edits.git.open);
         let button = div()
             .id(SharedString::from(name.clone()))
             .debug_selector(move || name.clone())
@@ -471,7 +479,7 @@ impl Shell {
                 .cursor_pointer()
                 .hover(move |style| style.bg(hover))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.chat_git_toggle(id, cx);
+                    this.chat_git_toggle(subject, cx);
                 }))
                 .into_any_element()
         } else {
@@ -483,17 +491,18 @@ impl Shell {
     /// one came to.
     pub(super) fn chat_git_cell(
         &self,
-        id: LiveId,
-        chat: &Chat,
+        subject: Subject,
         colours: &Palette,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !chat.git.open {
+        let edits = self.edits(subject)?;
+        if !edits.git.open {
             return None;
         }
-        let ok = allowed(self.chat_git_facts(chat));
-        let changed = chat.git.files.as_ref().map(Vec::len);
-        let state = match (&chat.git.working, changed) {
+        let tag = subject.tag();
+        let ok = allowed(self.chat_git_facts(subject));
+        let changed = edits.git.files.as_ref().map(Vec::len);
+        let state = match (&edits.git.working, changed) {
             (Some(working), _) => (*working).to_owned(),
             (None, None) => "Reading the changes\u{2026}".to_owned(),
             (None, Some(0)) => "No changes to commit.".to_owned(),
@@ -506,19 +515,20 @@ impl Shell {
                     look: Look,
                     cx: &mut Context<Self>| {
             let enabled = ok.of(action);
-            let base = button(name, id, label, look, colours);
+            let base = button_tagged(name, &tag, label, look, colours);
             if enabled {
                 base.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.chat_git_run(id, action, window, cx);
+                    this.chat_git_run(subject, action, window, cx);
                 }))
             } else {
                 // Not allowed: faint, and a click does nothing.
                 base.opacity(0.4).cursor_default()
             }
         };
+        let cell = format!("chat-git-cell-{tag}");
         Some(
             div()
-                .debug_selector(move || format!("chat-git-cell-{}", id.0))
+                .debug_selector(move || cell.clone())
                 .w_full()
                 .min_w_0()
                 .p(px(12.))
@@ -553,7 +563,7 @@ impl Shell {
                         .border_color(colours.border)
                         .px(px(4.))
                         .child(
-                            Textarea::new(&chat.git.message)
+                            Textarea::new(&edits.git.message)
                                 .appearance(false)
                                 .bordered(false)
                                 .h(px(56.)),
@@ -602,15 +612,15 @@ impl Shell {
                         ))
                         .child(div().flex_1())
                         .child(
-                            button("chat-git-close", id, "CLOSE", Look::Quiet, colours).on_click(
-                                cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    this.chat_git_close(id, cx);
-                                }),
-                            ),
+                            button_tagged("chat-git-close", &tag, "CLOSE", Look::Quiet, colours)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.chat_git_close(subject, cx);
+                                })),
                         ),
                 )
                 .children(
-                    chat.git
+                    edits
+                        .git
                         .outcome
                         .as_ref()
                         .map(|outcome| self.render_outcome(outcome, colours, cx)),

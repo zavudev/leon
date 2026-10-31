@@ -826,13 +826,13 @@ impl Shell {
     /// their bands, or a sentence for what has none. `lines` finds the lines
     /// again when the list asks for the ones in view.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn diff_body(
+    pub(super) fn diff_body<K: Copy + 'static>(
         &self,
-        id: LiveId,
+        id: K,
         state: &DiffState,
         scroll: &gpui_kit::UniformListScrollHandle,
         names: &'static DiffNames,
-        lines: fn(&Shell, LiveId) -> Option<&[DiffLine]>,
+        lines: fn(&Shell, K) -> Option<&[DiffLine]>,
         colours: &Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {

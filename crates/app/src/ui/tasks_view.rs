@@ -1265,7 +1265,7 @@ impl Shell {
             .child(hint("e", "details"))
             .child(hint("s", "sync with GitHub"))
             .child(hint("w", "create worktree"))
-            .child(hint("a", "give it to the King"))
+            .child(hint("a", "give it to the Orchestrator"))
             .child(hint("r", "run its steps"))
             .child(hint("n", "new"))
             .child(hint("d", "done"))

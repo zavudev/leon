@@ -31,7 +31,7 @@ export function Toast() {
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`${toast.title}. ${toast.line}`}
-        accessibilityHint={'chatId' in toast ? 'Opens the chat.' : 'Opens King.'}
+        accessibilityHint={'chatId' in toast ? 'Opens the chat.' : 'Opens Orchestrator.'}
         onPress={() => openToast(toast)}
         style={({ pressed }) => ({
           flexDirection: 'row',

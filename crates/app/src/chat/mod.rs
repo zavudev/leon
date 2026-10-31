@@ -15,13 +15,12 @@
 //!   way each agent allows;
 //! * [`stamp`]: when a message was said, as a person reads it;
 //! * [`phrase`]: what a stretch of tools says of itself, in words;
+//! * [`paths`]: the files a message names, to open them from it;
 //! * [`find`]: finding words in what was said and answered;
 //! * [`complete`]: what the field offers while a command, a file, a mode or
 //!   a model is being named;
 //! * [`handoff`]: what a new agent is told of the conversation it takes over
 //!   when the person switches agents mid-thread;
-//! * [`harness`]: what a program wrote in the person's name, read back from
-//!   the history as a note;
 //! * [`turn`]: one turn on a pipe, the agent's process and its protocol;
 //! * [`reach`]: that process on the machine it belongs to, this computer or
 //!   another one.
@@ -35,8 +34,8 @@ pub mod checkpoint;
 pub mod complete;
 pub mod find;
 pub mod handoff;
-pub mod harness;
 pub mod model;
+pub mod paths;
 pub mod phrase;
 pub mod reach;
 pub mod rewind;

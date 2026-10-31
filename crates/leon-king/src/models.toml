@@ -1,7 +1,7 @@
 # What Leon knows of model families before anyone measured anything.
 #
 # Talents run from 1 (poor) to 5 (the best there is), and are Leon's starting
-# estimate, nothing more: King replaces them with what it finds out, in
+# estimate, nothing more: Orchestrator replaces them with what it finds out, in
 # king-models.toml in Leon's data folder (the tool model_note), and so can you.
 # No benchmark is written here: a score is only kept with its source and date.
 #

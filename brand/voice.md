@@ -22,7 +22,7 @@ aburrido con total solemnidad, nunca en hacerse el gracioso.
 **Interfaz (toda la app).** Frases llanas, sin broma. Un botón dice lo que
 hace, un error dice qué pasó y qué hacer. Aquí la voz es solo sobriedad.
 
-**La guarida (`The Den`).** El único lugar donde Leon narra. Es un homenaje al
+**La guarida (`The Office`).** El único lugar donde Leon narra. Es un homenaje al
 cuadro de texto de los juegos de criaturas de 8 bits: frases cortas, sujeto
 en mayúsculas, presente o pasado simple, un hecho por línea. El humor sale de
 tratar un `grep` como si fuera un combate.
@@ -35,7 +35,7 @@ gesto de distancia: al pasar el cursor o al seleccionar al cachorro.
 
 | Cosa real | En la guarida |
 |---|---|
-| la vista | the Den |
+| la vista | the Office |
 | todas las sesiones vivas | the pride |
 | una sesión de agente | a lion (lleva el nombre de la sesión, EN MAYÚSCULAS) |
 | un sub-agente | a little one; sale de un huevo junto a quien lo lanzó |
@@ -73,7 +73,7 @@ rotan para no repetir y nunca superan dos líneas de 34 caracteres.
 | lleva rato callado | `MOSS is thinking very hard. Or napping.` |
 | se durmió | `MOSS fell asleep.` |
 | salió con error | `MOSS fainted! (exit 101)` |
-| nadie en la guarida | `The den is quiet. Too quiet.` |
+| nadie en la guarida | `The office is quiet. Too quiet.` |
 | muchos trabajando | `The pride is busy. You may go get coffee.` |
 | resumen de un turno pasado (historial del feed) | `MOSS used 5 tools: Read x3, Edit, Bash.` · `MOSS used Bash.` |
 | el feed, sin nada que contar | `Nothing to tell yet.` |

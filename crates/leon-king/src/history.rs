@@ -78,7 +78,7 @@ const CARRIED_CHARS: usize = 2000;
 pub fn carried(past: &Past, entries: &[Entry]) -> String {
     let mut text = format!(
         "[Leon] This conversation goes on from a longer one that Leon put away to save \
-         tokens (past conversation {}, \"{}\"; `leon king history {}` reads it). Where it \
+         tokens (past conversation {}, \"{}\"; `leon orchestrator history {}` reads it). Where it \
          left off:",
         past.id, past.title, past.id
     );

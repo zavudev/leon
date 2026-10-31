@@ -346,11 +346,8 @@ pub enum Undo {
         /// Its row now.
         to: Option<Shelf>,
     },
-    /// A session was unpinned; `order` is the Pinned section of its machine as
-    /// it was.
+    /// A session was unpinned; `order` is the Pinned section as it was.
     Unpinned {
-        /// The machine.
-        machine: MachineId,
         /// The pinned sessions, first row first.
         order: Vec<SessionId>,
     },
@@ -361,10 +358,8 @@ pub enum Undo {
 pub enum Restore {
     /// Write these rows on the shelves.
     Shelves(Vec<(SessionId, Option<Shelf>)>),
-    /// Pin these sessions on the machine, in this order.
+    /// Pin these sessions, in this order.
     Pins {
-        /// The machine.
-        machine: MachineId,
         /// The pinned sessions, first row first.
         order: Vec<SessionId>,
     },
@@ -387,8 +382,7 @@ pub enum Restore {
 }
 
 impl Undo {
-    /// What puts the step back. `pinned` is the Pinned section of the machine
-    /// now and `known` says whether the store still has a session.
+    /// What puts the step back. `pinned` is the Pinned section now and `known` says whether the store still has a session.
     pub fn restore(&self, pinned: &[SessionId], known: impl Fn(&SessionId) -> bool) -> Restore {
         match self {
             Undo::Shelved { session, was, to } if known(session) => {
@@ -402,8 +396,7 @@ impl Undo {
                 Restore::Shelves(vec![(session.clone(), back)])
             }
             Undo::Shelved { .. } => Restore::Nothing,
-            Undo::Unpinned { machine, order } => Restore::Pins {
-                machine: machine.clone(),
+            Undo::Unpinned { order } => Restore::Pins {
                 order: restored_pins(order, pinned, known),
             },
             Undo::ClosedSleeper(dormant) => Restore::Sleeper(dormant.clone()),
@@ -790,7 +783,6 @@ mod tests {
     #[test]
     fn undoing_an_unpin_puts_the_session_back_in_its_old_place() {
         let undo = Undo::Unpinned {
-            machine: MachineId::local(),
             order: vec![id("a"), id("b"), id("c")],
         };
         // "b" was unpinned; meanwhile "d" was pinned and "c" is gone.
@@ -880,13 +872,7 @@ mod tests {
         );
         assert_eq!(say(shelved(Some(Shelf::Returned))), "Brought build back.");
         assert_eq!(say(shelved(None)), "Brought build back.");
-        assert_eq!(
-            say(Undo::Unpinned {
-                machine: MachineId::local(),
-                order: Vec::new()
-            }),
-            "Unpinned build."
-        );
+        assert_eq!(say(Undo::Unpinned { order: Vec::new() }), "Unpinned build.");
         assert!(say(Undo::Closed(gone(None))).starts_with("Closed build."));
         assert!(say(Undo::Slept(gone(None))).starts_with("Put build to sleep."));
     }

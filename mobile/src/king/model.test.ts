@@ -77,7 +77,7 @@ function entry(seq: number, kind: KingEntry['kind'] = 'agent', said = `entry ${s
   return { seq, atMs: seq * 1000, kind, text: said };
 }
 
-describe('what King says of itself', () => {
+describe('what Orchestrator says of itself', () => {
   test('a status reads its brain, its workers and what was spent', () => {
     const status = parseStatus(STATUS)!;
     expect(status.conversation).toBe(3);
@@ -254,7 +254,7 @@ function worker(over: Partial<KingWorker> = {}, busy = false): KingWorker {
   return { ...status.workers[0]!, ...over };
 }
 
-describe('what King and its workers ask', () => {
+describe('what Orchestrator and its workers ask', () => {
   test('a question is read with how it may be answered; one without an id is left out', () => {
     const [permission, options, two, plan, odd] = questions();
     expect(questions()).toHaveLength(5);

@@ -1,0 +1,17 @@
+[package]
+name = "leon-conversation"
+description = "Leon's conversation model: the events of a turn reduced to the list of things a chat draws, and the words that describe them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+leon-core.workspace = true
+leon-turn.workspace = true
+chrono.workspace = true
+regex = "1"
+
+[dev-dependencies]
+serde_json.workspace = true

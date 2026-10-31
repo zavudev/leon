@@ -71,7 +71,7 @@ impl KingLine {
     pub(crate) fn send(&mut self, line: String) {
         let Some(door) = self.door.clone() else {
             let _ = self.out.try_send(Message::KingClosed {
-                reason: "this computer's Leon has no King to speak to".to_owned(),
+                reason: "this computer's Leon has no Orchestrator to speak to".to_owned(),
             });
             return;
         };
@@ -140,7 +140,9 @@ fn carry(door: &King, waiting: &std::sync::mpsc::Receiver<String>, out: &mpsc::S
             .and_then(|()| connection.write.flush());
         if let Err(error) = written {
             open = None;
-            closed(format!("King's service could not be written to: {error}"));
+            closed(format!(
+                "Orchestrator's service could not be written to: {error}"
+            ));
         }
     }
 }
@@ -152,13 +154,13 @@ fn listen(mut read: Box<dyn BufRead + Send>, out: &mpsc::Sender<Message>, readin
     let reason = loop {
         line.clear();
         match read.read_line(&mut line) {
-            Ok(0) => break "King's service closed the line".to_owned(),
+            Ok(0) => break "Orchestrator's service closed the line".to_owned(),
             Ok(_) => {}
-            Err(error) => break format!("King's service could not be read: {error}"),
+            Err(error) => break format!("Orchestrator's service could not be read: {error}"),
         }
         let line = line.trim_end_matches(['\n', '\r']).to_owned();
         if line.len() > MAX_KING_LINE {
-            break "King sent more than one line may hold".to_owned();
+            break "Orchestrator sent more than one line may hold".to_owned();
         }
         if out.blocking_send(Message::King { line }).is_err() {
             // The session is gone.
@@ -244,7 +246,7 @@ mod tests {
         KingLine::new(None, out).send("status".into());
         assert!(matches!(
             next(&mut rx).await,
-            Message::KingClosed { reason } if reason.contains("no King")
+            Message::KingClosed { reason } if reason.contains("no Orchestrator")
         ));
     }
 }

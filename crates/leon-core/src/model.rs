@@ -177,9 +177,13 @@ pub struct Session {
     pub updated_at: DateTime<Utc>,
     /// Number of messages stored for the session.
     pub message_count: u32,
-    /// Pinned position among the pinned sessions of its machine, when the
-    /// user pinned it; `None` means not pinned. The sidebar's Pinned section
-    /// shows the pinned sessions of a machine in this order.
+    /// Pinned position among the pinned sessions, when the user pinned it;
+    /// `None` means not pinned. The sidebar's one Pinned section shows the
+    /// pinned sessions of every machine in this order. Positions written
+    /// before the section was one (they counted from zero on each machine)
+    /// still read: sessions with the same position are told apart by the order
+    /// of their machines, and the next time the section is ordered it is
+    /// written again as one list.
     pub sort_order: Option<i64>,
     /// The id of the account the session ran with (see [`crate::Account`]);
     /// `None` is the agent's own setup. Resuming the session uses the same one.
@@ -196,8 +200,11 @@ pub enum SessionScope {
     Project(ProjectId),
     /// The sessions of one unsorted folder on a machine.
     Folder(MachineId, String),
-    /// The sessions of one machine: the order its Pinned section shows.
+    /// The sessions of one machine: what the Pinned section of a machine
+    /// showed, before it became one for all of them.
     Machine(MachineId),
+    /// The sessions of every machine: the order the one Pinned section shows.
+    Pinned,
 }
 
 /// One entry of a session transcript.

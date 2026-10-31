@@ -18,7 +18,7 @@
 //! The block is wrapped in a tag ([`marker`]) that the agent records, with the
 //! rest of the message, in its own history: that is how a conversation read
 //! back from there shows the switch and not a page of someone else's words
-//! (`super::harness`, `super::model::Conversation::resumed`).
+//! (`leon_conversation::harness`, `leon_conversation::model::Conversation::resumed`).
 //!
 //! Pure: items in, words out.
 
@@ -32,8 +32,7 @@ use super::phrase;
 /// How long the block is at most, in characters.
 pub const CAP: usize = 24_000;
 
-/// The tag that wraps the block, as the harness's list knows it.
-pub const TAG: &str = "leon-handoff";
+pub use leon_conversation::handoff::{marker, TAG};
 
 /// How long one message of a recent turn is kept, in characters, from the
 /// most to the least: a turn that does not fit with the first is tried with
@@ -52,20 +51,6 @@ const HEADINGS: usize = 160;
 /// How many things to do and how many files the block names at most.
 const MAX_TODOS: usize = 30;
 const MAX_FILES: usize = 40;
-
-/// The opening tag of the block of a switch from `from` to `to`.
-pub fn marker(from: AgentId, to: AgentId) -> String {
-    format!("<{TAG} from=\"{}\" to=\"{}\">", from.as_str(), to.as_str())
-}
-
-/// The agents of the switch a message tells of, when it begins with the
-/// block.
-pub fn parse_marker(text: &str) -> Option<(AgentId, AgentId)> {
-    let rest = text.trim_start().strip_prefix(&format!("<{TAG} from=\""))?;
-    let (from, rest) = rest.split_once("\" to=\"")?;
-    let (to, _) = rest.split_once("\">")?;
-    Some((AgentId::parse(from)?, AgentId::parse(to)?))
-}
 
 /// One turn of the conversation: what the person said and what came of it.
 struct Turn<'a> {
@@ -374,6 +359,7 @@ pub fn text(items: &[Item], from: AgentId, to: AgentId, root: &str, cap: usize) 
 mod tests {
     use super::*;
     use crate::chat::model::{Outcome, Tone};
+    use leon_conversation::handoff::parse_marker;
     use leon_turn::{FileChange, Todo};
 
     const CLAUDE: AgentId = AgentId::CLAUDE;

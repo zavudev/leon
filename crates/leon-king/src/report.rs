@@ -46,8 +46,7 @@ impl TurnStats {
 
     /// Tokens written per second, over the whole turn.
     pub fn per_second(&self) -> Option<f64> {
-        (self.duration_ms > 0 && self.output > 0)
-            .then(|| self.output as f64 * 1000.0 / self.duration_ms as f64)
+        leon_conversation::format::per_second(self.output, self.duration_ms)
     }
 }
 
@@ -145,25 +144,7 @@ impl Report {
     }
 }
 
-/// A count of tokens, short: `950`, `12.3k`, `1.2M`.
-pub fn count(tokens: u64) -> String {
-    match tokens {
-        0..=999 => tokens.to_string(),
-        1_000..=999_999 => format!("{:.1}k", tokens as f64 / 1_000.0),
-        _ => format!("{:.1}M", tokens as f64 / 1_000_000.0),
-    }
-}
-
-/// A span of seconds, short: `45s`, `12m`, `3h10m`, `2d4h`.
-pub fn span(seconds: i64) -> String {
-    let seconds = seconds.max(0);
-    match seconds {
-        0..=59 => format!("{seconds}s"),
-        60..=3599 => format!("{}m", seconds / 60),
-        3600..=86_399 => format!("{}h{:02}m", seconds / 3600, seconds % 3600 / 60),
-        _ => format!("{}d{}h", seconds / 86_400, seconds % 86_400 / 3600),
-    }
-}
+pub use leon_conversation::format::{count, span};
 
 /// The line under King's answer.
 pub fn line(facts: &Facts<'_>) -> String {
@@ -189,7 +170,7 @@ pub fn line(facts: &Facts<'_>) -> String {
     }
     let today_tokens = facts.king_today.total() + facts.workers_today.total();
     let mut today = format!(
-        "Today: {} tokens (King {}, workers {}) · ${:.2}",
+        "Today: {} tokens (Orchestrator {}, workers {}) · ${:.2}",
         count(today_tokens),
         count(facts.king_today.total()),
         count(facts.workers_today.total()),
@@ -291,7 +272,7 @@ mod tests {
         assert_eq!(
             text,
             "This answer: 48.2k tokens (read 45.1k, 31.0k cached · wrote 3.1k) · 62 tok/s · 50s · $0.042\n\
-             Today: 150.2k tokens (King 48.2k, workers 102.0k) · $1.27 of $20.00 ($18.73 left)\n\
+             Today: 150.2k tokens (Orchestrator 48.2k, workers 102.0k) · $1.27 of $20.00 ($18.73 left)\n\
              Left: claude: 5h 66% left, resets in 2h10m, week 88% left"
         );
         let bare = line(&Facts::default());

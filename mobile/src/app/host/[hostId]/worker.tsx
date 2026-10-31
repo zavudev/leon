@@ -58,7 +58,7 @@ export default function Worker() {
   const agent = worker?.conversation.agent ?? '';
   const renderItem = useCallback(
     ({ item }: { item: Piece }) => (
-      <KingPiece piece={item} who={`Worker #${id}`} asker="King" agent={agent} cwd={worker?.cwd} />
+      <KingPiece piece={item} who={`Worker #${id}`} asker="Orchestrator" agent={agent} cwd={worker?.cwd} />
     ),
     [id, agent, worker?.cwd],
   );
@@ -95,7 +95,7 @@ export default function Worker() {
   const stop = () =>
     Alert.alert(
       `Stop worker #${id}?`,
-      'Its turn ends now and what waited for it is dropped. King hears it was stopped; it can be told more later.',
+      'Its turn ends now and what waited for it is dropped. Orchestrator hears it was stopped; it can be told more later.',
       [
         { text: 'Keep it', style: 'cancel' },
         { text: 'Stop', style: 'destructive', onPress: () => void tryKing(hostId, stopWorkerRequest(id)) },

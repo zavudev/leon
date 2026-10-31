@@ -26,7 +26,8 @@ switching to one never restarts it.
 └──────────────────┴─────────────────────────────────────┘
 ```
 
-* **Sidebar**: King pinned at the top, then each project as a heading in
+* **Sidebar**: Orchestrator and the Office pinned at the top (the Office's row counts its
+  lions and lights up when one waits for you), then each project as a heading in
   spaced capitals with its sessions listed under it. A session that ran on a
   branch other than the main checkout has the branch beside its name. Live
   terminals are listed above the history with a status light; exited ones show
@@ -35,9 +36,10 @@ switching to one never restarts it.
   machine its header is left out and the projects sit at the top; with two or
   more each machine has its header. Settings ▸ Sessions ▸ *Show worktrees as
   levels* (`sidebar_tree`) brings back a row for every worktree, which folds.
-  The foot is this machine: its menu holds Home, Tasks, the Den, Connect a
-  machine, Share this machine, the cleaner, the inactive sessions, the
-  appearance, the shortcuts and the settings. When the cleaner would remove
+  The foot is this machine: its menu holds Home, Tasks, the Office, Connect a
+  machine, Share this machine, the cleaner, the appearance, the shortcuts and
+  the settings. The sessions you pinned, on any machine, are one **Pinned**
+  section above the machines. When the cleaner would remove
   worktrees, a note above the foot says how many; a click opens the cleaner
   and its cross hides the note until more can go.
 * **Main pane**: the terminals of the worktree you select, in tabs of split
@@ -198,9 +200,9 @@ cargo run -p leon -- --data-dir /tmp/leon-try --theme dark --theme-name zavu
 Options: `--data-dir <path>` keeps the database and settings elsewhere,
 `--theme <light|dark|system>` overrides the saved appearance for one run,
 `--theme-name <id>` overrides the saved theme (`leon` or `zavu`) for one run
-(see [Themes](#themes)), and `--den` opens on [The Den](docs/DEN.md). A
+(see [Themes](#themes)), and `--den` opens on [The Office](docs/DEN.md). A
 development build also reads `LEON_DEN_CAST=<count>`: that many made-up lions
-in the Den, to look at a full one without starting a dozen agents.
+in the Office, to look at a full one without starting a dozen agents.
 
 The agents themselves are not part of Leon: install the ones you use
 (`claude`, `codex`, `opencode`) on every machine you want to run them on.
@@ -615,30 +617,30 @@ platform (see below).
 | Settings | `⌘,` | `Ctrl+,` |
 | Show usage | `⇧⌘U` | `Ctrl+Shift+Alt+U` |
 | Refresh usage now | palette only | palette only |
-| Open the King | `⌥⇧⌘K` | `Ctrl+Shift+Alt+K` |
-| Change the model King runs on… | palette only | palette only |
-| Change how much King asks… | palette only | palette only |
+| Open the Orchestrator | `⌥⇧⌘K` | `Ctrl+Shift+Alt+K` |
+| Change the model Orchestrator runs on… | palette only | palette only |
+| Change how much Orchestrator asks… | palette only | palette only |
 | Show the task board | `⇧⌘I` | `Ctrl+Shift+Alt+I` |
 | New task… | palette only | palette only |
 | Create worktree for the task… | palette only | palette only |
 | Go home | `⌥⇧⌘H` | `Ctrl+Shift+Alt+H` |
-| Open the Den | `⌥⇧⌘L` | `Ctrl+Shift+Alt+L` |
-| Edit the Den | palette only (`E` in the Den) | palette only (`E` in the Den) |
-| Message the selected lion… | palette only (`I` in the Den) | palette only (`I` in the Den) |
-| Send the selected lion home… | palette only (`H` in the Den) | palette only (`H` in the Den) |
-| Go to the next lion that needs you | palette only (`N` in the Den) | palette only (`N` in the Den) |
-| Interrupt the selected lion | palette only (`X` in the Den) | palette only (`X` in the Den) |
-| Message the pride… | palette only (`P` in the Den) | palette only (`P` in the Den) |
-| Queued messages of the selected lion… | palette only (`Q` in the Den) | palette only (`Q` in the Den) |
-| Hatch a lion… | palette only (`A` in the Den) | palette only (`A` in the Den) |
-| Wake a lion that is at home… | palette only (`W` in the Den) | palette only (`W` in the Den) |
-| Go to a lion… | palette only (`/` in the Den) | palette only (`/` in the Den) |
-| Show the keys of the Den | palette only (`?` in the Den) | palette only (`?` in the Den) |
-| Choose a den… | palette only | palette only |
-| Save the den as… | palette only | palette only |
-| Rename the den… | palette only | palette only |
-| Delete the den… | palette only | palette only |
-| Open dens folder | palette only | palette only |
+| Open the Office | `⌥⇧⌘L` | `Ctrl+Shift+Alt+L` |
+| Edit the Office | palette only (`E` in the Office) | palette only (`E` in the Office) |
+| Message the selected lion… | palette only (`I` in the Office) | palette only (`I` in the Office) |
+| Send the selected lion home… | palette only (`H` in the Office) | palette only (`H` in the Office) |
+| Go to the next lion that needs you | palette only (`N` in the Office) | palette only (`N` in the Office) |
+| Interrupt the selected lion | palette only (`X` in the Office) | palette only (`X` in the Office) |
+| Message the pride… | palette only (`P` in the Office) | palette only (`P` in the Office) |
+| Queued messages of the selected lion… | palette only (`Q` in the Office) | palette only (`Q` in the Office) |
+| Hatch a lion… | palette only (`A` in the Office) | palette only (`A` in the Office) |
+| Wake a lion that is at home… | palette only (`W` in the Office) | palette only (`W` in the Office) |
+| Go to a lion… | palette only (`/` in the Office) | palette only (`/` in the Office) |
+| Show the keys of the Office | palette only (`?` in the Office) | palette only (`?` in the Office) |
+| Choose a room… | palette only | palette only |
+| Save the room as… | palette only | palette only |
+| Rename the room… | palette only | palette only |
+| Delete the room… | palette only | palette only |
+| Open rooms folder | palette only | palette only |
 | Open settings.json | palette only | palette only |
 | Reveal settings folder | palette only | palette only |
 | Larger interface | `⌘=` `⌘+` | `Ctrl+=` `Ctrl++` |
@@ -1033,8 +1035,11 @@ it runs, removed from the history when it does not.
 
 A worktree row says two separate things. At its start, what the branch is
 (its tooltip says it in words): a branch icon (stronger for the main worktree,
-which also has a `MAIN` tag), a merge icon in the accent when GitHub says its
-pull request is merged, and a commit icon for a detached head. At its end, how
+which also has a `MAIN` tag), and when GitHub knows a pull request of the
+branch the icon of its state: a merge icon in the accent once it is merged, a
+pull request icon in green while it is open, in grey while it is a draft and in
+red when it was closed without merging (the tooltip says `PR #12 merged`); a
+commit icon for a detached head. At its end, how
 the agents in it are doing, the same light as a session's: nothing when none is
 live, green when idle, a ring when working, and `WAITING` or `FAILED` in a
 word when they need you. Between them, when something is known, goes the state
@@ -1050,10 +1055,14 @@ same plus the review, and `#123` opens the pull request. A sidebar narrower than
 distance on the worktree refresh (about every 10 seconds for a local project with
 a terminal running in it, and on `Import history and sync worktrees` for the
 rest, remote projects included); the pull request needs the GitHub CLI (`gh`)
-installed and signed in on that machine and an `origin` on GitHub, and is asked
-at most once a minute per project, so a refresh within a minute of the last
-question reads git again but keeps the pull requests of that answer. Without
-them the row shows what it could read.
+installed and signed in on that machine and an `origin` on GitHub. Local
+projects are asked by a timer of the window itself, every 30 seconds while the
+window is in front and every 5 minutes while it is not, and at once when the
+window comes back to the front, when the head or the branch of a worktree
+moves, when an agent's turn ends and when a pull request is opened from Leon
+(never twice within 5 seconds). Without `gh`, signed out or offline a project
+backs off, doubling up to 15 minutes, and says nothing; the row shows what it
+could read. Remote projects are asked when they are opened or refreshed.
 
 The sidebar lists only the active sessions by default: live terminals and
 agents running elsewhere. The toggle beside the filter (also `Show inactive
@@ -1068,7 +1077,11 @@ A session row tells its state at a glance: **running** has the agent's colour,
 a bold title and a light; **asleep** is dimmed, with a moon and `SLEEP`;
 **history only** is grey, with its age alone. A pinned session has its pin at
 the left of its row, in the accent colour; the other rows show theirs while
-they are hovered.
+they are hovered. A folded project shows the spinner of a session that works
+under it on its own row. In the **Pinned** section a row also says where the
+session is: the project (and worktree) under its title, a badge with the
+machine when there is more than one, and the mark of the pull request of its
+worktree; hover it for machine, project and worktree whole.
 
 **Close** is final: it ends the terminal and takes its row out of the sidebar
 with the history session that belongs to it (the agent's own file stays).
@@ -1875,14 +1888,14 @@ purpose:
 
 The home is where the window starts and a place to act from. It is always one
 step away: **Home** in the machine's menu at the foot of the sidebar (with
-**Tasks** and **The Den**; the machine's button marks when a lion waits for
-you), `⌥⇧⌘H` (`Ctrl+Shift+Alt+H`), **View > Go home**, or **Go home** in the
+**Tasks** and **The Office**; the Office's row at the top of the sidebar marks
+when a lion waits for you), `⌥⇧⌘H` (`Ctrl+Shift+Alt+H`), **View > Go home**, or **Go home** in the
 palette. Going home closes nothing: the
 terminals go on running and stay in the sidebar.
 
 On it:
 
-* **Actions**, each a button with its chord: Open the Den first, then a new
+* **Actions**, each a button with its chord: Open the Office first, then a new
   agent session, open a project, go to, search the history, the command
   palette, connect a machine, the shortcuts, usage and settings.
 * **Sessions** at a glance: how many run in this window, how many of them
@@ -1895,13 +1908,13 @@ On it:
 Clicks and keys do the same: when the home has the keyboard, the arrows (or
 `J`/`K`, `Home`, `End`) walk the actions and the rows and `Enter` opens the one
 the keyboard is on. `Tab` goes to the sidebar, as everywhere; there, `Up` from
-the first row of the tree is The Den and then Home, and `Enter` opens the
-one the cursor is on.
+the first row of the tree is the Office's row, then the Orchestrator's, and `Enter` opens
+the one the cursor is on.
 
-## The Den
+## The Office
 
-`⌥⇧⌘L` (`Ctrl+Shift+Alt+L`), **View > Open the Den** and the palette's **Open the
-Den** show the live sessions as lions at work in an office, in the place of
+`⌥⇧⌘L` (`Ctrl+Shift+Alt+L`), **View > Open the Office** and the palette's **Open the
+Office** show the live sessions as lions at work in an office, in the place of
 the main pane; the sidebar stays. The same chord or `Esc` puts back what was
 there. The office is drawn in 2.5D in the colours of your theme; with the
 setting `den_3d` off, or on a computer whose graphics card cannot draw it,
@@ -1946,10 +1959,10 @@ read first; the narrator's lines around them are muted. What a lion did and
 said in a row stands under one heading: the colour of its mane, its name in
 full as far as the row has room, and how long ago it was. The lines under it
 do not say the name again (`used CARGO TEST!` under `MOSS`).
-When the Den opens, the feed already holds the last of each session's past:
+When the Office opens, the feed already holds the last of each session's past:
 its messages, and one line for the tools of each turn, which names them
 (`MOSS used 5 tools: Read x3, Edit, Bash.`), rather than one per tool; the
-same goes for what happened while the Den was closed. It follows its end until you scroll back (the wheel, `Page Up`,
+same goes for what happened while the Office was closed. It follows its end until you scroll back (the wheel, `Page Up`,
 `Page Down`, `Home`); then it stays put and a mark says how many entries are
 new (`End` or a click goes back). `Shift+Up` and `Shift+Down` walk the entries
 and `Enter` opens the message the keyboard is on. Selecting a lion narrows
@@ -1962,7 +1975,7 @@ arrows or `Tab`, for the plain truth: the tool, the file, the command line.
 `Enter` or a double click opens that session's terminal; a sub-agent opens its
 parent's.
 
-**Sessions that run elsewhere are lions too.** The Den also shows the Claude
+**Sessions that run elsewhere are lions too.** The Office also shows the Claude
 Code and Codex sessions of this computer that run in another Leon window or in
 a plain terminal, so one window can watch every agent you have going. They
 are found by the look at the processes that marks sessions "running elsewhere"
@@ -1979,7 +1992,7 @@ shown (never a guess by folder), never one this window runs itself; other
 agents and other machines are left out, since nothing could be said of them.
 `den_elsewhere` turns these lions off.
 
-**A lion can be talked to and sent home from the Den.** With a lion selected,
+**A lion can be talked to and sent home from the Office.** With a lion selected,
 a strip over the foot of the room offers what can be done to it, each with
 its key; the right button on a lion, `M`, `Shift+F10` or the menu key open
 the same list as a menu (Open, Message…, Rename…, Pin, Send home, Close), and Rename, Sleep,
@@ -2008,7 +2021,7 @@ has no live picture, but its history is imported whenever its agent goes
 quiet: its card says the last the history holds, under `LAST IN HISTORY` and
 how long ago that was said.
 
-**The Den is where many agents are steered from.** The roster lists first the
+**The Office is where many agents are steered from.** The roster lists first the
 lions that need you (a permission prompt, then whoever waits longest, then
 one that fainted) and counts them; `N` goes to the next. The card of a lion
 that asks says what it asks in full, the whole command or the question with
@@ -2022,7 +2035,7 @@ joins as an egg; the sessions that were sent home are listed under the
 roster and a click or `W` wakes one; `/` goes to a lion by its name, state or
 folder; `?` lists every key. [docs/DEN.md](docs/DEN.md) has the rules.
 
-**The room is yours to change.** **Edit the Den** (the button over the room,
+**The room is yours to change.** **Edit the Office** (the button over the room,
 the palette, or `E`) opens an editor: pick furniture from a strip of pictures
 and put it down, drag it, turn it (`R`), remove it, lay carpets, repaint the
 floor and the walls, make the room wider or deeper, undo and redo. The lions
@@ -2030,18 +2043,18 @@ keep living in the room meanwhile, and go where the furniture says: a seat
 that faces a computer is a place to work, a bookshelf a place to read, a rack
 a place to run commands; a room without one still works, and a note over the feed
 tells you what is missing. Everything can be done from the keyboard. **Choose
-a den…** switches between six built-in dens (the office, the open plan, the
-library, the server room, the lounge, the nook) and your own. A built-in den
-is never changed: the first change makes a den of yours from it, kept as a
+a room…** switches between six built-in rooms (the office, the open plan, the
+library, the server room, the lounge, the nook) and your own. A built-in room
+is never changed: the first change makes a room of yours from it, kept as a
 JSON file in the `dens` folder beside the settings and written on every
-change; **Save the den as…**, **Rename the den…**, **Delete the den…** and
-**Open dens folder** manage them. A file from somebody else dropped in that
-folder is a den in the list. The editor, the rules, the file format and the
+change; **Save the room as…**, **Rename the room…**, **Delete the room…** and
+**Open rooms folder** manage them. A file from somebody else dropped in that
+folder is a room in the list. The editor, the rules, the file format and the
 catalogue are in [docs/DEN.md](docs/DEN.md).
 
 Where the facts come from: for **Claude Code and Codex sessions of this
 computer**, Leon follows the agent's own transcript while it grows (only while
-the Den is open; nothing is read otherwise). Every other session (a remote
+the Office is open; nothing is read otherwise). Every other session (a remote
 machine, another agent, a plain shell) shows what its terminal says and no
 more: working, waiting or idle, with a `?` when nothing else is known. **A
 pending permission prompt is inferred**: the transcript does not record it, so
@@ -2111,9 +2124,9 @@ Projects, worktrees and sessions keep the order you give them. Drag one onto
 another of the same list to move it (a line marks before or after), or use
 "Move up" / "Move down" in its context menu; the order is stored, so it
 survives restarts, and new projects and worktrees go last. Sessions sort
-themselves by recency until you pin one. A **pinned** session moves to the
-**Pinned** section at the top of its machine, above the projects, and keeps
-the place you give it there: the pin at the left of its row (or "Pin" in its
+themselves by recency until you pin one. A **pinned** session moves to the one
+**Pinned** section at the top of the sidebar, above the machines (the pins of
+every machine are in it together), and keeps the place you give it there: the pin at the left of its row (or "Pin" in its
 menu) puts it on top, "Unpin" sends it back to its worktree or folder by
 recency, dragging a session onto a pinned one places it there, and "Move up" /
 "Move down" reorder the pinned sessions. Projects can only move inside their
@@ -2244,15 +2257,19 @@ its connection light. Hover a dot for its words.
 
 The branch icon after the dot becomes GitHub's icon in the accent — which no
 activity dot wears, so a merged worktree never reads as a running one — when the
-branch's pull request was merged, and stays the branch's own otherwise. Hover it
-for the words. Git alone never makes the claim: a branch inside the project's
+branch's pull request was merged, a pull request icon while it is open (green),
+a draft (grey) or closed unmerged (red), and stays the branch's own otherwise.
+Hover it for the words (`PR #12 merged`). Git alone never makes the claim: a branch inside the project's
 base looks exactly the same whether its work landed there or it never had a
 commit of its own, and a worktree that never did any work is not a merged one.
 So the mark comes from GitHub's record or from nowhere, and only for a project
 whose `origin` is on GitHub: without `gh` installed or logged in the answer
 stays unknown rather than wrong, and the row keeps its branch icon. GitHub is
-asked when a project is opened, discovered or refreshed, and on its own slower
-cadence — not on the ten-second timer, which stays on the machine.
+asked when a project is opened, discovered or refreshed, by a timer of the
+window (every 30 seconds in front, every 5 minutes behind) and at once when the
+window comes back, a head moves, an agent's turn ends or a pull request is
+opened from Leon. The ten-second timer that watches worktrees stays on the
+machine unless something moved.
 
 ### Keeping the worktrees fresh
 
@@ -2282,7 +2299,7 @@ failure.
 agent is one of those two, whose terminal can tell that the agent (and not the
 shell) is in front, and whose session id Leon knows for sure (started with
 `--resume`, or read from the agent's state file or arguments), the light is
-decided from the agent's own transcript, followed whether or not the Den is
+decided from the agent's own transcript, followed whether or not the Office is
 open, and the terminal only breaks the ties. In order: the shell back in front
 or the terminal ended is as above; the turn is over means *finished* (even
 while you type); a question or a plan to approve among the calls in flight
