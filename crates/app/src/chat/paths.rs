@@ -528,8 +528,10 @@ mod tests {
             at("/tmp/a.rs", Some(3), Some(4))
         );
         assert_eq!(spot("file:///tmp/a.rs:9"), at("/tmp/a.rs", Some(9), None));
-        // Not numbers: part of the name.
-        assert_eq!(spot("a:b/c.rs"), at("/work/app/a:b/c.rs", None, None));
+        // Not numbers: part of the name (on Windows `a:` is a drive instead).
+        if !cfg!(windows) {
+            assert_eq!(spot("a:b/c.rs"), at("/work/app/a:b/c.rs", None, None));
+        }
         assert_eq!(spot("src/a.rs:0"), at("/work/app/src/a.rs:0", None, None));
     }
 
