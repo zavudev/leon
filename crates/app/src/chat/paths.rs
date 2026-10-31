@@ -480,8 +480,12 @@ mod tests {
     }
 
     fn spot(token: &str) -> Option<(String, Option<u32>, Option<u32>)> {
-        resolve(token, cwd(), home())
-            .map(|(path, line, col)| (path.to_string_lossy().into_owned(), line, col))
+        resolve(token, cwd(), home()).map(|(path, line, col)| (slashed(&path), line, col))
+    }
+
+    /// A path as the tests spell it: Windows joins with `\`, the tests with `/`.
+    fn slashed(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
     }
 
     fn at(
@@ -539,7 +543,12 @@ mod tests {
             None,
             "no folder to start from"
         );
-        assert!(resolve("/abs/a.rs", None, None).is_some());
+        let absolute = if cfg!(windows) {
+            "C:/abs/a.rs"
+        } else {
+            "/abs/a.rs"
+        };
+        assert!(resolve(absolute, None, None).is_some());
         assert_eq!(resolve("~/a", cwd(), None), None, "no home");
     }
 
@@ -566,7 +575,7 @@ mod tests {
                 (
                     named.how,
                     text[named.range].to_owned(),
-                    named.path.to_string_lossy().into_owned(),
+                    slashed(&named.path),
                 )
             })
             .collect()
