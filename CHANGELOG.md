@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+* The sidebar shows a light only when something wants a look (starting,
+  ended, finished its turn, waiting, asking or failed); a session or project
+  that simply runs has none. The lights of projects, worktrees and sessions
+  stand in one column.
+
 ## [0.15.0] - 2026-10-30
 
 ### Added

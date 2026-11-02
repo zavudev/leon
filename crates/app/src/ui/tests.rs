@@ -7242,6 +7242,50 @@ mod live {
     }
 
     #[gpui_kit::test]
+    fn the_lights_of_a_project_its_worktree_and_its_session_stand_in_one_column(
+        cx: &mut TestAppContext,
+    ) {
+        let h = open_live(cx);
+        let _real = real_worktree(&h, cx);
+        h.press("ctrl-n", cx);
+        h.press("enter", cx); // Claude Code
+        wait_until(&h, cx, "the live row", |h, cx| {
+            h.shows("tree-live-led-1", cx)
+        });
+        let project = h
+            .row_of(NodeId::Project(project_id(&h, "real")), cx)
+            .unwrap();
+        let worktree = h
+            .row_of(NodeId::Worktree(worktree_id(&h, "trunk")), cx)
+            .unwrap();
+        let session = h.bounds_of("tree-live-led-1".to_owned(), cx).unwrap();
+        for mark in [
+            format!("tree-activity-{project}"),
+            format!("tree-activity-{worktree}"),
+        ] {
+            let bounds = h.bounds_of(mark.clone(), cx).unwrap();
+            assert_eq!(bounds.right(), session.right(), "{mark} ends in the column");
+            assert_eq!(bounds.size.width, session.size.width, "{mark} is as wide");
+        }
+        // Flat, the project is a heading with a rule: its light still ends
+        // where the session's does.
+        cx.update(|cx| {
+            settings::set_value(
+                cx,
+                crate::schema::find("sidebar_tree").unwrap(),
+                crate::schema::Value::Bool(false),
+            )
+        });
+        h.settle(cx);
+        let project = h
+            .row_of(NodeId::Project(project_id(&h, "real")), cx)
+            .unwrap();
+        let session = h.bounds_of("tree-live-led-1".to_owned(), cx).unwrap();
+        let heading = h.bounds_of(format!("tree-activity-{project}"), cx).unwrap();
+        assert_eq!(heading.right(), session.right(), "flat, in one column too");
+    }
+
+    #[gpui_kit::test]
     fn a_worktree_waiting_for_you_says_so_in_a_word(cx: &mut TestAppContext) {
         let h = open_live(cx);
         let _real = real_worktree(&h, cx);
