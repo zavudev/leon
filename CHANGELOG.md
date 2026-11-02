@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+* A conversation closed and opened again, or brought back when Leon starts,
+  runs with the permission mode, model and effort it had instead of the
+  agent's own setup. They are kept by session in `chat_choices.json`, next
+  to the settings; one the agent no longer offers is dropped.
+
 ## [0.15.0] - 2026-10-30
 
 ### Added

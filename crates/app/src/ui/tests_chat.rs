@@ -3403,3 +3403,64 @@ fn going_back_to_the_first_message_after_a_switch_hands_the_conversation_over_ag
     });
     assert_eq!(field(&h, cx, 1), "after");
 }
+
+#[gpui_kit::test]
+fn a_conversation_opened_again_runs_with_the_mode_model_and_effort_it_had(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "hello");
+    prints(&h, cx, &[INIT, SAID, RESULT]);
+    exits(&h, cx, 0);
+    cx.update(|cx| {
+        h.shell.update(cx, |shell, cx| {
+            shell.chat_set_mode(LiveId(1), "acceptEdits".to_owned(), cx);
+            shell.chat_set_model(LiveId(1), Some("opus".to_owned()), cx);
+        })
+    });
+    h.settle(cx);
+    cx.update_window(h.window.into(), |_, window, cx| {
+        h.shell
+            .update(cx, |shell, cx| shell.close_chat(LiveId(1), window, cx))
+    })
+    .unwrap();
+    h.settle(cx);
+    // Opened again: the agent's session "s1" is resumed, as it was set.
+    let opened = cx
+        .update_window(h.window.into(), |_, window, cx| {
+            h.shell.update(cx, |shell, cx| {
+                shell.start_live(
+                    Launch::Agent {
+                        kind: AgentId::CLAUDE,
+                        resume: Some("s1".to_owned()),
+                        account: None,
+                    },
+                    &MachineId::local(),
+                    &path,
+                    Place::Session,
+                    None,
+                    window,
+                    cx,
+                )
+            })
+        })
+        .unwrap();
+    assert!(opened);
+    h.settle(cx);
+    h.shell(cx, |shell| {
+        let (_, chat) = shell
+            .chats
+            .iter()
+            .find(|(id, _)| **id != LiveId(1))
+            .expect("the conversation opened again");
+        assert_eq!(chat.mode.as_deref(), Some("acceptEdits"));
+        assert_eq!(chat.model.as_deref(), Some("opus"));
+    });
+    // A new conversation is the agent's own setup.
+    assert!(start(&h, cx, AgentId::CLAUDE, &path));
+    h.shell(cx, |shell| {
+        let newest = shell.chats.keys().max_by_key(|id| id.0).unwrap();
+        assert_eq!(shell.chats[newest].mode, None);
+    });
+}

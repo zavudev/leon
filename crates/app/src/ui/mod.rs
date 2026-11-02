@@ -17,6 +17,7 @@ mod activity;
 mod changes;
 mod changes_view;
 mod chat;
+mod chat_choices;
 mod chat_code;
 mod chat_diff;
 mod chat_find;
