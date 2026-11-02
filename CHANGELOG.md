@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+* A conversation runs commands with `!`, as Claude Code does: `!ls` and Enter
+  shows the command, its folder and its machine on a card, and a second
+  Enter (or **Run**) runs it there. What it prints stays in the conversation
+  and is sent to the agent, which reads it and goes on: at once when it
+  waits, when its turn ends when it works. **Stop** ends a command that takes
+  too long.
+
 ### Changed
 
 * The sidebar shows a light only when something wants a look (starting,

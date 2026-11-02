@@ -24,6 +24,7 @@ mod chat_git;
 mod chat_menu;
 mod chat_recall;
 mod chat_rewind;
+mod chat_shell;
 mod chat_switch;
 mod chat_view;
 mod chat_voice;
