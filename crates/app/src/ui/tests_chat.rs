@@ -485,6 +485,102 @@ fn escape_stops_the_turn_and_what_was_written_meanwhile_is_the_next_one(cx: &mut
 }
 
 #[gpui_kit::test]
+fn a_second_stop_ends_an_agent_that_did_not_listen_to_the_first(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "work");
+    prints(&h, cx, &[INIT, BASH]);
+    h.press("escape", cx);
+    assert!(written(&h).iter().any(|line| line.contains("interrupt")));
+    assert!(!h.chat.0.lock().unwrap().killed, "it is asked first");
+    h.press("escape", cx);
+    assert!(h.chat.0.lock().unwrap().killed, "then it is ended");
+    exits(&h, cx, 143);
+    h.shell(cx, |shell| {
+        let conversation = &shell.chats[&LiveId(1)].conversation;
+        assert_eq!(conversation.phase(), Phase::Idle);
+        assert!(!conversation.failed, "a stop is not a failure");
+        assert!(conversation
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::Notice { text, .. } if text == "Stopped.")));
+    });
+}
+
+#[gpui_kit::test]
+fn a_process_that_outlives_its_answer_does_not_keep_the_conversation_working(
+    cx: &mut TestAppContext,
+) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "start the dev server");
+    prints(&h, cx, &[INIT, SAID, RESULT]);
+    assert!(h.chat.0.lock().unwrap().closed, "it said all it had to say");
+    // Its process runs on for the server it left running. What is said
+    // meanwhile is not lost in a closed pipe: it waits for the next turn.
+    let before = written(&h).len();
+    say(&h, cx, 1, "and then?");
+    assert_eq!(written(&h).len(), before);
+    h.shell(cx, |shell| {
+        let conversation = &shell.chats[&LiveId(1)].conversation;
+        assert_eq!(conversation.phase(), Phase::Working);
+        assert_eq!(conversation.queued.len(), 1);
+    });
+
+    // A moment later the turn is over without it, and what waited is the
+    // next turn, while the server goes on.
+    cx.executor()
+        .advance_clock(crate::ui::chat::LINGER_AFTER + std::time::Duration::from_millis(100));
+    h.settle(cx);
+    assert_eq!(turns(&h).len(), 2, "what waited became a turn");
+    assert!(!h.chat.0.lock().unwrap().killed, "the server runs on");
+    assert!(written(&h).iter().any(|line| line.contains("and then?")));
+    h.shell(cx, |shell| {
+        let conversation = &shell.chats[&LiveId(1)].conversation;
+        assert!(conversation.queued.is_empty());
+        assert_eq!(conversation.phase(), Phase::Starting);
+    });
+
+    // The old process ending is not the new turn's end.
+    let (old, _) = turns(&h)[0].clone();
+    h.chat.0.lock().unwrap().outputs[old]
+        .send(Output::Exited(0))
+        .unwrap();
+    h.settle(cx);
+    h.shell(cx, |shell| {
+        assert!(shell.chats[&LiveId(1)].conversation.running());
+    });
+}
+
+#[gpui_kit::test]
+fn stopping_a_process_that_outlives_its_answer_ends_it(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "start the dev server");
+    prints(&h, cx, &[INIT, SAID, RESULT]);
+    let before = written(&h).len();
+    h.press("escape", cx);
+    assert_eq!(
+        written(&h).len(),
+        before,
+        "nothing is written to a closed pipe"
+    );
+    assert!(h.chat.0.lock().unwrap().killed);
+    exits(&h, cx, 143);
+    h.shell(cx, |shell| {
+        let conversation = &shell.chats[&LiveId(1)].conversation;
+        assert_eq!(conversation.phase(), Phase::Idle);
+        assert!(!conversation.failed);
+    });
+}
+
+#[gpui_kit::test]
 fn every_agent_of_the_protocol_gets_the_same_interface(cx: &mut TestAppContext) {
     let Some((h, _dir, path)) = window(cx) else {
         return;
