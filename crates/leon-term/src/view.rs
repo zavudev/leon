@@ -46,6 +46,15 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// The shortest time between two redraws a terminal asks for because its
+/// program printed: about 60 a second. Every redraw draws the whole window
+/// the terminal is in, and a program that streams text wakes the terminal
+/// far more often than that (up to the refresh rate of the screen, 100 or
+/// 144 times a second); what is printed in between is shown at the next one,
+/// at most this late. Keys typed are not delayed: the first output after a
+/// quiet moment is drawn at once.
+pub const MIN_REDRAW: std::time::Duration = std::time::Duration::from_millis(16);
+
 /// The font a terminal is drawn in.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FontSettings {
@@ -135,6 +144,7 @@ pub struct TerminalView {
     option_as_meta: bool,
     /// Whether a selection is copied to the clipboard when the mouse is let go.
     copy_on_select: bool,
+    min_redraw: std::time::Duration,
     _wake: Task<()>,
 }
 
@@ -181,11 +191,16 @@ impl TerminalView {
             let wake = cx.spawn(async move |this, cx| {
                 while wake_rx.recv_async().await.is_ok() {
                     while wake_rx.try_recv().is_ok() {}
-                    if this
-                        .update(cx, |this: &mut Self, cx| this.woken(cx))
-                        .is_err()
-                    {
+                    let Ok(pause) = this.update(cx, |this: &mut Self, cx| {
+                        this.woken(cx);
+                        this.min_redraw
+                    }) else {
                         break;
+                    };
+                    // What the program prints meanwhile waits for the next
+                    // turn: drawn at most this often, however fast it prints.
+                    if !pause.is_zero() {
+                        cx.background_executor().timer(pause).await;
                     }
                 }
             });
@@ -205,6 +220,7 @@ impl TerminalView {
                 padding: px(0.),
                 option_as_meta: true,
                 copy_on_select: false,
+                min_redraw: MIN_REDRAW,
                 _wake: wake,
             }
         }))
@@ -238,6 +254,12 @@ impl TerminalView {
     /// Chooses whether Alt is Meta (the default) or types composed characters.
     pub fn set_option_as_meta(&mut self, on: bool) {
         self.option_as_meta = on;
+    }
+
+    /// Sets the shortest time between two redraws asked for by output
+    /// ([`MIN_REDRAW`] unless changed); zero draws at every wake.
+    pub fn set_min_redraw(&mut self, pause: std::time::Duration) {
+        self.min_redraw = pause;
     }
 
     /// Chooses whether a selection is copied as soon as the mouse is let go.
@@ -1150,6 +1172,8 @@ mod tests {
             )
             .expect("sh starts")
         });
+        // The test's clock moves only when told: every wake is drawn.
+        cx.update(|cx| view.update(cx, |view, _| view.set_min_redraw(Duration::ZERO)));
         let root = view.clone();
         cx.update(|cx| {
             cx.open_window(

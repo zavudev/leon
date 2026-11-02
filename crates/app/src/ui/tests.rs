@@ -523,6 +523,7 @@ fn open_core(
         voice: Arc::new(voice.clone()),
         ready: READY_NOW,
         reload_throttle: std::time::Duration::ZERO,
+        terminal_redraw: std::time::Duration::ZERO,
         search_debounce: std::time::Duration::ZERO,
         now: fixed_now,
         pick_folder: Rc::new(move |_| {

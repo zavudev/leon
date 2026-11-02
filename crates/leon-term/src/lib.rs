@@ -69,4 +69,4 @@ pub use terminal::{
     RemoteLink, Script, Scripted, SpawnError, Terminal, TerminalEvent, Timings, Wake,
     SCROLLBACK_LINES,
 };
-pub use view::{FontSettings, TerminalView, ViewEvent};
+pub use view::{FontSettings, TerminalView, ViewEvent, MIN_REDRAW};

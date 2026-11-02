@@ -78,6 +78,7 @@ mod shelf;
 mod shell;
 mod shelving;
 mod sidebar;
+mod sidebar_view;
 mod steps;
 mod sweep;
 mod sweep_view;

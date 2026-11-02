@@ -215,6 +215,10 @@ pub struct Options {
     /// After a reload, how long further store changes are batched into the
     /// next one.
     pub reload_throttle: Duration,
+    /// The shortest time between two redraws a terminal asks for because its
+    /// program printed (`leon_term::MIN_REDRAW`); zero in tests, whose clock
+    /// only moves when told.
+    pub terminal_redraw: Duration,
     /// How long the palette waits after the last keystroke before it reads
     /// the store.
     pub search_debounce: Duration,
@@ -378,6 +382,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             reload_throttle: Duration::from_millis(50),
+            terminal_redraw: leon_term::MIN_REDRAW,
             search_debounce: super::palette::SEARCH_DEBOUNCE,
             now: Utc::now,
             pick_folder: Rc::new(system_picker),
@@ -574,6 +579,15 @@ pub struct Shell {
     pub(super) palette: PaletteState,
     /// The count of settings changes the window last acted on.
     pub(super) applied_settings: u64,
+    /// The sidebar, drawn again only when it changed (see `sidebar_view`),
+    /// and the count of settings changes and of rebuilt trees it was last
+    /// drawn with.
+    pub(super) sidebar_view: Option<Entity<super::sidebar_view::SidebarView>>,
+    pub(super) sidebar_settings: u64,
+    pub(super) sidebar_rows: u64,
+    /// How many times the tree's rows were built: a sidebar drawn with fewer
+    /// is drawn again.
+    pub(super) rows_built: u64,
     /// The Settings screen: where the keyboard is in it, what is searched.
     pub(super) settings_ui: SettingsUi,
     /// The "Connect a machine" screen.
@@ -990,6 +1004,10 @@ impl Shell {
             workspaces: Workspaces::default(),
             palette,
             applied_settings: 0,
+            sidebar_view: None,
+            sidebar_settings: 0,
+            sidebar_rows: 0,
+            rows_built: 0,
             settings_ui,
             connect_ui,
             usage: super::usage_view::UsageUi::default(),
@@ -1407,6 +1425,7 @@ impl Shell {
 
     /// Flattens the tree again, from what is open. The cursor follows its node.
     pub(super) fn rebuild_rows(&mut self) {
+        self.rows_built = self.rows_built.wrapping_add(1);
         let key = self
             .cursor
             .and_then(|index| self.rows.get(index))
@@ -4608,6 +4627,9 @@ impl Render for Shell {
         // The file tree follows the folder in view.
         self.files_sync(cx);
         let files_shown = self.files_shown(cx);
+        let sidebar = settings::get(cx)
+            .sidebar_visible
+            .then(|| self.sync_sidebar(cx));
         let (terminal_theme, terminal_font) = (colours.terminal, Self::terminal_font(cx));
         for session in self.live.all() {
             session.view.update(cx, |view, cx| {
@@ -4665,9 +4687,7 @@ impl Render for Shell {
             // other element's (a terminal's "mouse up outside" included).
             .child(self.sidebar_drag_listeners(cx))
             .child(self.row_drop_listeners(cx))
-            .when(settings::get(cx).sidebar_visible, |this| {
-                this.child(self.render_sidebar(&colours, cx))
-            })
+            .children(sidebar)
             .when(files_shown, |this| {
                 this.child(self.render_files_panel(&colours, cx))
             })

@@ -121,6 +121,32 @@ pub fn tooltip_text(command: Command) -> String {
 }
 
 impl Shell {
+    /// The sidebar as the window draws it: its own view, kept from the last
+    /// frame unless something in it changed (see `sidebar_view`). Called
+    /// while the shell is drawn; a change of the settings or a tree built
+    /// again since it was last drawn has it drawn again in this frame, even
+    /// when nobody announced it (the settings are applied while drawing).
+    pub(super) fn sync_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let shell = cx.entity();
+        let view = self
+            .sidebar_view
+            .get_or_insert_with(|| cx.new(|cx| super::sidebar_view::SidebarView::new(&shell, cx)))
+            .clone();
+        let generation = crate::settings::generation(cx);
+        if generation != self.sidebar_settings || self.rows_built != self.sidebar_rows {
+            self.sidebar_settings = generation;
+            self.sidebar_rows = self.rows_built;
+            view.update(cx, |_, cx| cx.notify());
+        }
+        view.cached(
+            gpui_kit::StyleRefinement::default()
+                .flex_none()
+                .w(metrics::SIDEBAR_WIDTH())
+                .h_full(),
+        )
+        .into_any_element()
+    }
+
     pub(super) fn render_sidebar(&self, colours: &Palette, cx: &mut Context<Self>) -> Div {
         let focused = self.pane == Pane::Sidebar;
         let palette = *colours;

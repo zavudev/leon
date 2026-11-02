@@ -592,15 +592,18 @@ impl Shell {
             }
         };
         let colours = theme::palette(cx);
+        let pause = self.options.terminal_redraw;
         let spawn = |backend: &dyn leon_term::Backend, cx: &mut Context<Self>| {
-            TerminalView::spawn_with(
+            let view = TerminalView::spawn_with(
                 backend,
                 &plan.spawn,
                 GridSize::new(START_COLS, START_ROWS),
                 colours.terminal,
                 Self::terminal_font(cx),
                 cx,
-            )
+            )?;
+            view.update(cx, |view, _| view.set_min_redraw(pause));
+            Ok::<_, leon_term::SpawnError>(view)
         };
         // Held by the keeper, when the setting asks for it and it can be
         // reached; otherwise in this window, as ever.
