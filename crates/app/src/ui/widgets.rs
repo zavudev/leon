@@ -160,14 +160,31 @@ pub fn focus_rule(palette: &Palette) -> Div {
         .bg(palette.signal)
 }
 
-/// The light of a project or a worktree row: how the agents in it are doing,
-/// the same colours as the light of a session. Nothing live draws nothing (the
-/// slot stays, so the rows line up): an empty grey square told nothing.
+/// The light of a sidebar row: how the agents in it are doing. Only what asks
+/// for a look draws: nothing live and an idle prompt are the calm states and
+/// leave the slot empty (it stays, so the lights of every row line up in one
+/// column). A green square on every row told nothing.
 pub fn activity_light(activity: Activity, palette: &Palette) -> Div {
     match activity {
-        Activity::Off => div().flex_none().size(px(10.)),
+        Activity::Off | Activity::Idle => light_slot(),
         _ => activity_dot(activity, palette),
     }
+}
+
+/// The ten pixel square every sidebar light sits in, at the end of its row.
+pub fn light_slot() -> Div {
+    div()
+        .flex_none()
+        .size(px(10.))
+        .flex()
+        .items_center()
+        .justify_center()
+}
+
+/// A solid light of one colour in the sidebar's slot, the size of the
+/// activity dots so the column reads as one.
+pub fn slot_light(colour: Hsla) -> Div {
+    light_slot().child(div().size(px(7.)).bg(colour))
 }
 
 /// The dot of a worktree or a project: how its terminals are doing, in the
@@ -177,12 +194,7 @@ pub fn activity_light(activity: Activity, palette: &Palette) -> Div {
 /// turn in the info colour, waiting in the warning colour, an agent that needs an
 /// answer the same square in a ring and failed red.
 pub fn activity_dot(activity: Activity, palette: &Palette) -> Div {
-    let slot = div()
-        .flex_none()
-        .size(px(10.))
-        .flex()
-        .items_center()
-        .justify_center();
+    let slot = light_slot();
     match activity {
         Activity::Off => slot.child(
             div()

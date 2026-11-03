@@ -13,8 +13,8 @@ use super::shelf::{self, ShelfKind};
 use super::shell::{Pane, RowDrag, Shell};
 use super::tree::{folder_name, worktree_label, Kind, Row};
 use super::widgets::{
-    activity_light, checkout_colour, elsewhere_mark, focus_rule, key_cap, led, mark, mono,
-    section_label, Lion,
+    activity_dot, activity_light, checkout_colour, elsewhere_mark, focus_rule, key_cap, led,
+    light_slot, mark, mono, section_label, slot_light, Lion,
 };
 use crate::elsewhere::Holder;
 use crate::engine::MachineState;
@@ -726,6 +726,7 @@ impl Shell {
                 let base = self.draggable_row(row, index, base, colours, cx);
                 let sessions = *sessions;
                 let activity = self.project_activity(&project.id);
+                let spins = project_spins(row.open, self.project_working(&project.id));
                 let deleting = self
                     .deleting
                     .as_ref()
@@ -781,22 +782,31 @@ impl Shell {
                                 .text_color(colours.text_faint),
                         )
                     })
-                    .when(
-                        project_spins(row.open, self.project_working(&project.id)),
-                        |this| {
-                            this.child(
-                                div()
-                                    .debug_selector(move || format!("tree-project-spinner-{index}"))
-                                    .flex_none()
-                                    .child(spinner(colours.success)),
-                            )
-                        },
-                    )
-                    .child(self.dot(index, activity, colours))
+                    .when(spins, |this| {
+                        this.child(
+                            div()
+                                .debug_selector(move || format!("tree-project-spinner-{index}"))
+                                .flex_none()
+                                .child(spinner(colours.success)),
+                        )
+                    })
                     .when(!flat, |this| this.child(count(sessions)))
+                    // The new worktree button shows on hover but always takes
+                    // its room: before the light, so the light stays in the
+                    // column of the sessions' lights.
                     .when(!deleting, |this| {
                         this.child(self.new_worktree_mark(index, &project.id, colours, cx))
                     })
+                    // A folded project that spins says it works already.
+                    .child(self.dot(
+                        index,
+                        if spins && activity == Activity::Working {
+                            Activity::Off
+                        } else {
+                            activity
+                        },
+                        colours,
+                    ))
                     .into_any_element()
             }
             Kind::Worktree { worktree, sessions } => {
@@ -1012,16 +1022,15 @@ impl Shell {
                     )
                     .children(match running {
                         Some((id, state)) => {
-                            let light = live_light(state, colours);
                             let state_label = (!matches!(state, LiveState::Running)).then(|| {
                                 mono(state.label())
                                     .debug_selector(move || format!("tree-live-state-{id}"))
                                     .text_color(colours.text_faint)
                                     .into_any_element()
                             });
-                            let led = div()
+                            let led = self
+                                .session_light(id, state, colours)
                                 .debug_selector(move || format!("tree-live-led-{id}"))
-                                .child(led(light))
                                 .into_any_element();
                             state_label.into_iter().chain([led]).collect()
                         }
@@ -1061,8 +1070,6 @@ impl Shell {
                         icon(IconName::Terminal, px(14.), colours.text_muted).into_any_element()
                     }
                 };
-                // The state is the light's colour, never the icon's.
-                let light = live_light(state, colours);
                 let id = entry.id;
                 let lead = if self.session_activity(id) == Activity::Working {
                     spinner(
@@ -1122,9 +1129,8 @@ impl Shell {
                     })
                     .when(!asleep, |this| {
                         this.child(
-                            div()
-                                .debug_selector(move || format!("tree-live-led-{id}"))
-                                .child(led(light)),
+                            self.session_light(id, state, colours)
+                                .debug_selector(move || format!("tree-live-led-{id}")),
                         )
                     })
                     .into_any_element()
@@ -1587,6 +1593,25 @@ impl Shell {
                 .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                 .into_any_element(),
         )
+    }
+
+    /// The light at the end of a live session's row, in the column of the
+    /// project and worktree dots: the terminal's state while it starts or
+    /// after it ended, then what its agent wants of the person. A session
+    /// that simply runs leaves the slot empty: its bright title and, while it
+    /// works, its spinner already say so.
+    fn session_light(&self, id: super::live::LiveId, state: LiveState, colours: &Palette) -> Div {
+        match state {
+            LiveState::Running => match self.session_activity(id) {
+                activity @ (Activity::TurnOver
+                | Activity::Waiting
+                | Activity::NeedsYou
+                | Activity::Failed) => activity_dot(activity, colours),
+                _ => light_slot(),
+            },
+            // The state is the light's colour, never the icon's.
+            state => slot_light(live_light(state, colours)),
+        }
     }
 
     fn dot(&self, index: usize, activity: Activity, colours: &Palette) -> AnyElement {

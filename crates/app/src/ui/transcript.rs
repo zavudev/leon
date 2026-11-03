@@ -322,6 +322,84 @@ impl Shell {
                         .child(text.clone()),
                 )
                 .into_any_element(),
+            // A command the person ran reads like what they said, with the
+            // shell's `!` in the warning colour, and what it printed under it.
+            Item::Shell(run) => {
+                let status = match &run.result {
+                    None => {
+                        let name = ids.at("shell-running", at);
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                mono(super::king_view::spinner_frame())
+                                    .debug_selector(move || name.clone())
+                                    .text_color(colours.warning),
+                            )
+                            .child(mono("RUNNING").text_color(colours.text_faint))
+                    }
+                    Some(result) => {
+                        let (light, words) = match result.exit {
+                            Some(0) => (colours.success, "DONE".to_owned()),
+                            Some(code) => (colours.error, format!("EXIT {code}")),
+                            None if result.stopped => (colours.warning, "STOPPED".to_owned()),
+                            None => (colours.error, "NOT RUN".to_owned()),
+                        };
+                        let name = ids.at("shell-exit", at);
+                        div()
+                            .debug_selector(move || name.clone())
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(led(light))
+                            .child(mono(words).text_color(colours.text_faint))
+                    }
+                };
+                let output = run
+                    .result
+                    .as_ref()
+                    .map(|result| result.output.trim_end())
+                    .filter(|output| !output.is_empty())
+                    .map(|output| {
+                        let name = ids.at("shell-output", at);
+                        code_cell(&super::chat_shell::shown_output(output), colours)
+                            .debug_selector(move || name.clone())
+                    });
+                div()
+                    .debug_selector({
+                        let name = ids.at("shell", at);
+                        move || name.clone()
+                    })
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .gap(px(10.))
+                    .py(px(2.))
+                    .pl(px(12.))
+                    .border_l_2()
+                    .border_color(colours.warning)
+                    .font_family(fonts::mono())
+                    .font_features(fonts::mono_features())
+                    .child(div().flex_none().text_color(colours.warning).child("!"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .text_color(colours.text)
+                            .child(gpui_kit::base::SelectableText::new(
+                                SharedString::from(ids.at("shell-command", at)),
+                                run.command.clone(),
+                            ))
+                            .children(output)
+                            .child(status),
+                    )
+                    .children(self.transcript_time(ids, at, run.at, colours))
+                    .into_any_element()
+            }
             // A rule with the switch said on it: what is above is the first
             // agent's, what is below the second's.
             Item::Switched { from, to } => {

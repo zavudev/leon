@@ -177,6 +177,8 @@ pub struct Chat {
     /// What the agent it went on with is told before the next message, after
     /// a switch of agents.
     pub handoff: Option<Handoff>,
+    /// The commands the person runs in it with `!`.
+    pub shell: super::chat_shell::ShellUi,
     /// The turn in flight.
     turn: Option<Turn>,
     /// Reads what the turn in flight prints.
@@ -352,7 +354,7 @@ impl Shell {
                 .auto_grow(1, 10)
                 .submit_on_enter(true)
                 .placeholder(format!(
-                    "Ask {} anything  \u{b7}  / for commands  \u{b7}  @ for files",
+                    "Ask {} anything  \u{b7}  / for commands  \u{b7}  @ for files  \u{b7}  ! to run a command",
                     crate::format::agent_name(kind)
                 ))
         });
@@ -376,7 +378,10 @@ impl Shell {
             window,
             move |this, _, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { shift: false, .. } => this.chat_send(id, window, cx),
-                InputEvent::Change => this.chat_typed(id, cx),
+                InputEvent::Change => {
+                    this.chat_shell_typed(id, cx);
+                    this.chat_typed(id, cx);
+                }
                 _ => {}
             },
         );
@@ -439,6 +444,7 @@ impl Shell {
                 recall: None,
                 switchable: Vec::new(),
                 handoff: None,
+                shell: Default::default(),
                 turn: None,
                 reader: None,
                 since: None,
@@ -632,6 +638,16 @@ impl Shell {
             return;
         };
         let typed = chat.input.read(cx).value().trim().to_owned();
+        // `!` runs a command: asked on a card first, run on the second Enter.
+        if let Some(command) = super::chat_shell::command_of(&typed) {
+            if chat.shell.ask.as_deref() == Some(command) {
+                self.chat_shell_run(id, window, cx);
+            } else {
+                let command = command.to_owned();
+                self.chat_shell_ask(id, &command, cx);
+            }
+            return;
+        }
         let Some(text) = super::king::with_attached(&typed, &chat.attached) else {
             // Nothing to say: Enter is the answer the agent waits for.
             self.chat_accept(id, window, cx);
@@ -694,7 +710,16 @@ impl Shell {
         let Some(turn) = chat.turn.as_mut() else {
             return Err(leon_turn::TurnError::TurnEnded);
         };
-        let events = turn.act(Action::Prompt(text.to_owned()))?;
+        // What the person's commands printed meanwhile goes in front.
+        let told = chat.shell.told_text();
+        let prompt = match &told {
+            Some(told) => format!("{told}\n\n{text}"),
+            None => text.to_owned(),
+        };
+        let events = turn.act(Action::Prompt(prompt))?;
+        if told.is_some() {
+            chat.shell.told.clear();
+        }
         chat.conversation.said_at(text, now);
         chat.scroll.scroll_to_bottom();
         self.chat_events(id, events, cx);
@@ -795,6 +820,20 @@ impl Shell {
     /// screen at once, the worktree is snapshotted when there is one, and then
     /// the agent is started ([`Self::chat_launch`]).
     fn chat_begin(&mut self, id: LiveId, prompt: String, cx: &mut Context<Self>) {
+        self.chat_begin_turn(id, prompt, true, cx);
+    }
+
+    /// [`Self::chat_begin`], for a turn the person started with words
+    /// (`said`), or one Leon starts to tell the agent what the person's
+    /// commands printed: then `prompt` is empty, the conversation shows no
+    /// words, and `chat_launch` puts the commands' output in front.
+    pub(super) fn chat_begin_turn(
+        &mut self,
+        id: LiveId,
+        prompt: String,
+        said: bool,
+        cx: &mut Context<Self>,
+    ) {
         let projects = self.engine.prefs().roots.claude_projects;
         let now = Some(self.now().timestamp());
         let Some(chat) = self.chats.get_mut(&id) else {
@@ -814,7 +853,11 @@ impl Shell {
             &chat.cwd,
             local,
         );
-        chat.conversation.sent_at(&prompt, now);
+        if said {
+            chat.conversation.sent_at(&prompt, now);
+        } else {
+            chat.conversation.began();
+        }
         let turn = chat.next_turn;
         chat.next_turn += 1;
         chat.edits.marks.push(Mark {
@@ -876,8 +919,16 @@ impl Shell {
             .handoff
             .as_ref()
             .filter(|handoff| handoff.sent_in.is_none())
-            .map(|handoff| format!("{}\n\n{prompt}", handoff.text));
-        let prompt = handed.clone().unwrap_or(prompt);
+            .map(|handoff| handoff.text.clone());
+        // What the person's commands printed since the agent last heard from
+        // them goes in front of their words too, after a handoff.
+        let told = chat.shell.told_text();
+        let prompt = [handed.clone(), told.clone(), Some(prompt)]
+            .into_iter()
+            .flatten()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
         let spec = TurnSpec {
             program: &program,
             prompt: &prompt,
@@ -901,6 +952,9 @@ impl Shell {
         };
         if let (Some(handoff), Some(_), true) = (chat.handoff.as_mut(), &handed, started.is_ok()) {
             handoff.sent_in = Some(chat.next_turn.saturating_sub(1));
+        }
+        if told.is_some() && started.is_ok() {
+            chat.shell.told.clear();
         }
         match started {
             Ok((turn, output, events)) => {
@@ -934,7 +988,7 @@ impl Shell {
 
     /// Keeps a conversation's spinner turning while its turn goes on: it is
     /// drawn again every frame, and the loop ends with the turn.
-    fn chat_spin(&mut self, id: LiveId, cx: &mut Context<Self>) {
+    pub(super) fn chat_spin(&mut self, id: LiveId, cx: &mut Context<Self>) {
         let Some(chat) = self.chats.get_mut(&id) else {
             return;
         };
@@ -947,7 +1001,8 @@ impl Shell {
                 let Some(chat) = this.chats.get_mut(&id) else {
                     return false;
                 };
-                let going = chat.conversation.running();
+                // A command the person runs has spinners of its own.
+                let going = chat.conversation.running() || chat.shell.running().is_some();
                 if going {
                     cx.notify();
                 } else {
@@ -986,8 +1041,11 @@ impl Shell {
                 .chats
                 .get_mut(&id)
                 .and_then(|chat| chat.conversation.queued.pop_front());
-            if let Some(next) = next {
-                self.chat_begin(id, next, cx);
+            match next {
+                Some(next) => self.chat_begin(id, next, cx),
+                // A command the person ran while the agent worked: the
+                // agent sees what it printed now.
+                None => self.chat_shell_deliver(id, cx),
             }
         }
     }
@@ -1420,6 +1478,17 @@ impl Shell {
                 stroke.modifiers.control && !stroke.modifiers.platform
             };
         if paste && self.chat_paste_image(id, cx) {
+            return true;
+        }
+        // Escape takes back the card that asks before a command runs.
+        if stroke.key == "escape"
+            && !stroke.modifiers.modified()
+            && self
+                .chats
+                .get(&id)
+                .is_some_and(|chat| chat.shell.ask.is_some())
+        {
+            self.chat_shell_cancel(id, cx);
             return true;
         }
         // Escape closes the bar that finds words before it does anything else.
