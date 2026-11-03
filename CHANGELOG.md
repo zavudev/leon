@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-03
+
 ### Added
 
 * A conversation runs commands with `!`, as Claude Code does: `!ls` and Enter
