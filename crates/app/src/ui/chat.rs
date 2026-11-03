@@ -463,6 +463,10 @@ impl Shell {
                 self.workspaces.add_session(machine.as_str(), &root, id);
             }
         }
+        // A session opened again runs as it was set to.
+        if let Some(session) = &resume {
+            self.chat_restore_choices(id, session);
+        }
         if let Some(history) = history {
             self.chat_load_earlier(id, history, cx);
         }
@@ -573,6 +577,7 @@ impl Shell {
                     chat.options = Some(options);
                     chat.probe = None;
                 }
+                this.chat_drop_stale_choices(id);
                 this.chat_look_for_agents(id);
                 cx.notify();
             })
@@ -1132,6 +1137,8 @@ impl Shell {
             self.chat_measure(Subject::Chat(id), cx);
             self.chat_title(id, cx);
         }
+        // The agent may have named the session, or changed its mode.
+        self.chat_remember_choices(id);
         cx.notify();
     }
 

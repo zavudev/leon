@@ -339,6 +339,7 @@ impl Shell {
                 if let Some(chat) = self.chats.get_mut(&id) {
                     chat.effort = effort;
                 }
+                self.chat_remember_choices(id);
                 self.chat_close_menu(id, window, cx);
             }
         }
@@ -384,6 +385,10 @@ impl Shell {
             return;
         };
         chat.mode = Some(mode.clone());
+        self.chat_remember_choices(id);
+        let Some(chat) = self.chats.get_mut(&id) else {
+            return;
+        };
         let live = chat
             .options
             .as_ref()
@@ -417,6 +422,10 @@ impl Shell {
         {
             chat.effort = None;
         }
+        self.chat_remember_choices(id);
+        let Some(chat) = self.chats.get_mut(&id) else {
+            return;
+        };
         let live = chat
             .options
             .as_ref()
