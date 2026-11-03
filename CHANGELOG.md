@@ -32,6 +32,14 @@
 * Stop and `Escape` always stop: an agent whose process takes nothing more is
   ended, and a second Stop ends an agent that did not listen to the first. It
   reads as stopped, not as a failure.
+* The window no longer drags while several agents work and the one on screen
+  streams. Every byte the terminal in view printed drew the whole window
+  again, sidebar included, up to the refresh rate of the screen. The sidebar
+  is now drawn again only when something in it changes, and a terminal asks
+  for at most about 60 redraws a second (what it prints in between shows at
+  the next one, at most 16 ms later). With twelve agents at work and one
+  streaming on a 100 Hz screen, the interface's thread went from 56–70% busy
+  to 25–36%.
 
 ## [0.15.0] - 2026-10-30
 
