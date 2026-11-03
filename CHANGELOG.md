@@ -24,6 +24,14 @@
   runs with the permission mode, model and effort it had instead of the
   agent's own setup. They are kept by session in `chat_choices.json`, next
   to the settings; one the agent no longer offers is dropped.
+* A conversation no longer stays WORKING after its agent answered when the
+  agent left a program running (a development server Claude Code started in
+  the background): a few seconds after the answer the turn is over, the
+  program runs on, and the next message starts the next turn. What was written
+  in the meantime waits for that turn instead of being lost.
+* Stop and `Escape` always stop: an agent whose process takes nothing more is
+  ended, and a second Stop ends an agent that did not listen to the first. It
+  reads as stopped, not as a failure.
 
 ## [0.15.0] - 2026-10-30
 
