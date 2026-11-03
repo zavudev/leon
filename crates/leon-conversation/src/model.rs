@@ -54,6 +54,9 @@ pub enum Item {
         /// The agent that answers from here on.
         to: AgentId,
     },
+    /// A command the person ran from the conversation (`!`), and what it
+    /// printed once it ended.
+    Shell(ShellRun),
     /// Something the conversation itself says: it failed, it was stopped.
     Notice {
         /// How it reads.
@@ -61,6 +64,36 @@ pub enum Item {
         /// The words.
         text: String,
     },
+}
+
+/// A command the person ran from the conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellRun {
+    /// The command, as they wrote it after the `!`.
+    pub command: String,
+    /// When they ran it, in seconds since the epoch, when it is known.
+    pub at: Option<i64>,
+    /// How it ended; nothing while it runs.
+    pub result: Option<ShellResult>,
+}
+
+/// How a command the person ran ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellResult {
+    /// Its exit status; `None` when it could not be run, or was stopped.
+    pub exit: Option<i32>,
+    /// It was ended before its end, by the person or by the time limit: it
+    /// may have done part of its work.
+    pub stopped: bool,
+    /// What it printed, its errors after its output; or why it did not run.
+    pub output: String,
+}
+
+impl ShellResult {
+    /// Whether it ran and exited with status zero.
+    pub fn ok(&self) -> bool {
+        self.exit == Some(0)
+    }
 }
 
 /// How a notice reads.
@@ -298,6 +331,29 @@ impl Conversation {
         self.failed = false;
     }
 
+    /// The person ran `command` from the conversation: it runs now, beside
+    /// whatever the agent is doing. The index of its item, for
+    /// [`Conversation::shell_ended`].
+    pub fn ran_at(&mut self, command: &str, at: Option<i64>) -> usize {
+        self.settle();
+        self.items.push(Item::Shell(ShellRun {
+            command: command.to_owned(),
+            at,
+            result: None,
+        }));
+        self.items.len() - 1
+    }
+
+    /// The command of the item at `index` ended. Nothing happens when that
+    /// item is gone (the conversation was taken back past it) or ended.
+    pub fn shell_ended(&mut self, index: usize, result: ShellResult) {
+        if let Some(Item::Shell(run)) = self.items.get_mut(index) {
+            if run.result.is_none() {
+                run.result = Some(result);
+            }
+        }
+    }
+
     /// Something the conversation says of itself, in the middle of whatever
     /// it is doing: it changes neither the turn in flight nor the questions.
     pub fn noted(&mut self, tone: Tone, text: &str) {
@@ -314,6 +370,18 @@ impl Conversation {
         self.settle();
         self.turn_from = self.items.len();
         self.noted(Tone::Plain, text);
+        self.last_tokens = None;
+        self.running = true;
+        self.heard = false;
+        self.failed = false;
+    }
+
+    /// A turn began that the person did not start with words: the agent is
+    /// told what a command they ran printed, which the conversation shows
+    /// already as the command's item.
+    pub fn began(&mut self) {
+        self.settle();
+        self.turn_from = self.items.len();
         self.last_tokens = None;
         self.running = true;
         self.heard = false;

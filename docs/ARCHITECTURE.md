@@ -1638,6 +1638,25 @@ the list and draws it):
   choosing one drops an effort it lacks. No agent takes an effort while it
   works, so it is always the next turn's (`TurnSpec::effort`).
 
+**What is run rather than said** is a command written after a `!`, as in
+Claude Code (`ui/chat_shell.rs`). Enter does not send it: a card above the
+field shows it whole, with the folder and machine it runs in, and only a
+second Enter (or **Run**) runs it; Escape, **Cancel** or a change to the text
+takes the card back. It runs once, to the end, without a terminal, in the
+conversation's folder on its machine (`Engine::run_typed`, `engine/typed.rs`:
+`sh -c`, PowerShell on a Windows computer without a POSIX shell, through the
+slow runner), beside whatever the agent does; **Stop** ends it. It is an
+`Item::Shell` of its own, drawn like the person's words with a `!` and the
+last lines of what it printed. The agent did not see it, so what it printed
+is sent to the agent, which reads it and goes on: in a turn of its own as
+soon as the command ends when the agent waits (`chat_shell_deliver`,
+`Conversation::began`: no words of the person's on screen), when its turn
+ends when it works, and in front of a message the person queued meanwhile.
+It is written in Claude Code's own tags (`<bash-input>`, `<bash-stdout>`,
+`<bash-stderr>`, each part 20,000 characters at most; `Chat::shell`, taken
+in `chat_launch` and `chat_tell`); those tags are in `harness.rs`'s list,
+so a history read back shows a note.
+
 **What is said rather than typed** is dictation (`crates/leon-voice`,
 `voice.rs`, `ui/chat_voice.rs`). Nothing of it is on until the person asks:
 no model comes with Leon and the microphone is opened only by the field's
