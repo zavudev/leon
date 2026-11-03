@@ -33,16 +33,21 @@ pub struct Recall {
 }
 
 /// The prompts of `items`, newest first, a prompt said twice in a row once.
+/// A command the person ran comes back as they wrote it, `!` first.
 pub fn history(items: &[Item]) -> Vec<String> {
-    let mut prompts: Vec<&str> = Vec::new();
+    let mut prompts: Vec<String> = Vec::new();
     for item in items {
-        if let Item::User { text, .. } = item {
-            if !text.trim().is_empty() && prompts.last() != Some(&text.as_str()) {
-                prompts.push(text);
-            }
+        let text = match item {
+            Item::User { text, .. } => text.clone(),
+            Item::Shell(run) => format!("!{}", run.command),
+            _ => continue,
+        };
+        if !text.trim().is_empty() && prompts.last() != Some(&text) {
+            prompts.push(text);
         }
     }
-    prompts.into_iter().rev().map(str::to_owned).collect()
+    prompts.reverse();
+    prompts
 }
 
 /// Which way the key goes through the history: `Some(true)` for Up (older),

@@ -3403,3 +3403,140 @@ fn going_back_to_the_first_message_after_a_switch_hands_the_conversation_over_ag
     });
     assert_eq!(field(&h, cx, 1), "after");
 }
+
+#[gpui_kit::test]
+fn a_bang_command_is_asked_first_then_run_and_its_output_sent_to_the_agent(
+    cx: &mut TestAppContext,
+) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    h.type_text("!echo hi", cx);
+    assert!(
+        h.shows("chat-shell-send-1", cx),
+        "a command in the field turns the button into its own"
+    );
+    h.press("enter", cx);
+    // Asked first: nothing runs and the agent is told nothing.
+    assert!(h.shows("chat-shell-ask-1", cx));
+    assert!(turns(&h).is_empty(), "the command is not a prompt");
+    let ran = |h: &Harness| {
+        h.runner
+            .calls()
+            .into_iter()
+            .filter(|call| call.program == "sh")
+            .collect::<Vec<_>>()
+    };
+    assert!(ran(&h).is_empty(), "nothing runs before the person says so");
+    assert_eq!(
+        field(&h, cx, 1),
+        "!echo hi",
+        "the command stays in the field"
+    );
+
+    // The second Enter runs it, here, in the conversation's folder.
+    h.runner.queue(leon_remote::Output::ok("hi\n"));
+    h.press("enter", cx);
+    h.settle(cx);
+    let calls = ran(&h);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].args, ["-c", "echo hi"]);
+    assert_eq!(calls[0].cwd.as_deref(), Some(path.as_str()));
+    assert!(!h.shows("chat-shell-ask-1", cx));
+    assert_eq!(field(&h, cx, 1), "");
+    assert!(h.shows("chat-shell-1-0", cx));
+    assert!(h.shows("chat-shell-output-1-0", cx));
+    assert!(h.shows("chat-shell-exit-1-0", cx));
+
+    // The agent waited: it gets what the command printed at once, in a turn
+    // of its own, and the conversation shows the command, not the tags.
+    assert_eq!(turns(&h).len(), 1, "the output is sent to the agent");
+    let sent = written(&h).join("\n");
+    assert!(
+        sent.contains("<bash-input>echo hi</bash-input>")
+            && sent.contains("<bash-stdout>hi</bash-stdout>"),
+        "{sent}"
+    );
+    h.shell(cx, |shell| {
+        let chat = &shell.chats[&LiveId(1)];
+        assert!(chat.shell.told.is_empty(), "sent once");
+        assert_eq!(chat.conversation.phase(), Phase::Starting);
+        assert!(matches!(
+            &chat.conversation.items[..],
+            [Item::Shell(run)] if run.command == "echo hi"
+                && run.result.as_ref().is_some_and(|result| result.ok() && result.output == "hi")
+        ));
+    });
+    prints(&h, cx, &[INIT, SAID, RESULT]);
+    exits(&h, cx, 0);
+    h.shell(cx, |shell| {
+        let chat = &shell.chats[&LiveId(1)];
+        assert!(matches!(
+            &chat.conversation.items[..],
+            [Item::Shell(_), Item::Agent { .. }]
+        ));
+    });
+
+    // The next message is the person's words alone.
+    let before = written(&h).len();
+    say(&h, cx, 1, "thanks");
+    let sent = written(&h)[before..].join("\n");
+    assert!(
+        sent.contains("thanks") && !sent.contains("bash-input"),
+        "{sent}"
+    );
+}
+
+#[gpui_kit::test]
+fn a_command_that_ends_while_the_agent_works_is_sent_when_its_turn_ends(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "work on it");
+    prints(&h, cx, &[INIT]);
+    h.type_text("!git status", cx);
+    h.press("enter", cx);
+    assert!(
+        h.shows("chat-stop-1", cx),
+        "the turn can still be stopped while a command is written"
+    );
+    h.runner.queue(leon_remote::Output::ok("clean\n"));
+    h.press("enter", cx);
+    h.settle(cx);
+    assert_eq!(turns(&h).len(), 1, "the turn in flight is left alone");
+    assert!(!written(&h).join("\n").contains("bash-input"));
+    h.shell(cx, |shell| {
+        assert_eq!(shell.chats[&LiveId(1)].shell.told.len(), 1);
+    });
+    prints(&h, cx, &[SAID, RESULT]);
+    exits(&h, cx, 0);
+    assert_eq!(turns(&h).len(), 2, "its end sends the command's output");
+    let sent = written(&h).join("\n");
+    assert!(sent.contains("<bash-stdout>clean</bash-stdout>"), "{sent}");
+    h.shell(cx, |shell| {
+        assert!(shell.chats[&LiveId(1)].shell.told.is_empty());
+    });
+}
+
+#[gpui_kit::test]
+fn escape_takes_back_the_card_and_leaves_the_command_in_the_field(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    h.type_text("!rm -rf build", cx);
+    h.press("enter", cx);
+    assert!(h.shows("chat-shell-ask-1", cx));
+    h.press("escape", cx);
+    assert!(!h.shows("chat-shell-ask-1", cx));
+    assert_eq!(field(&h, cx, 1), "!rm -rf build");
+    // A change to the words takes the card back too.
+    h.press("enter", cx);
+    assert!(h.shows("chat-shell-ask-1", cx));
+    h.type_text("/", cx);
+    assert!(!h.shows("chat-shell-ask-1", cx));
+    assert!(h.runner.calls().iter().all(|call| call.program != "sh"));
+    assert!(turns(&h).is_empty());
+}

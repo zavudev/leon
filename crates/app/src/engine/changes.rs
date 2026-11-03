@@ -126,7 +126,7 @@ fn capitalised(text: &str) -> String {
 
 impl Engine {
     /// The runner of commands that may take minutes.
-    fn slow(&self) -> SharedRunner {
+    pub(super) fn slow(&self) -> SharedRunner {
         let slow = self
             .inner
             .slow_runner
