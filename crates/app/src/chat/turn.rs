@@ -74,6 +74,9 @@ pub struct Turn {
     transport: Box<dyn Transport>,
     input_closed: bool,
     exited: bool,
+    /// It was asked to stop and has not finished since, or it was killed:
+    /// how it ends is the person's doing, not a failure.
+    stopping: bool,
     /// What the agent listed as its commands and nobody took yet.
     commands: Option<Vec<AgentCommand>>,
 }
@@ -96,6 +99,7 @@ impl Turn {
             transport,
             input_closed: false,
             exited: false,
+            stopping: false,
             commands: None,
         };
         let mut events = Vec::new();
@@ -131,6 +135,22 @@ impl Turn {
                 events = self.session.exited(code);
             }
         }
+        for event in &mut events {
+            if let TurnEvent::Finished {
+                ok,
+                error,
+                interrupted,
+                ..
+            } = event
+            {
+                // Stopped, it ends however it ends: as stopped.
+                if self.stopping && !*ok {
+                    *interrupted = true;
+                    *error = None;
+                }
+                self.stopping = false;
+            }
+        }
         self.settle();
         events
     }
@@ -141,16 +161,34 @@ impl Turn {
         self.commands.take()
     }
 
-    /// The person did something.
+    /// The person did something. A process whose input is closed takes
+    /// nothing more: the turn has ended, even while the process runs on.
     pub fn act(&mut self, action: Action) -> Result<Vec<TurnEvent>, TurnError> {
-        if self.exited {
+        if self.exited || self.input_closed {
             return Err(TurnError::TurnEnded);
         }
+        let interrupt = matches!(action, Action::Interrupt);
         let outgoing = self.session.encode(action)?;
         let mut events = Vec::new();
         self.send(outgoing, &mut events);
+        if interrupt {
+            self.stopping = true;
+        }
         self.settle();
         Ok(events)
+    }
+
+    /// Whether it was asked to stop and has not finished since: asking again
+    /// will not help.
+    pub fn stopping(&self) -> bool {
+        self.stopping
+    }
+
+    /// Whether the agent said all it had to say: its input is closed and it
+    /// takes nothing more. Its process may still run, for a program it left
+    /// running (a development server).
+    pub fn over(&self) -> bool {
+        self.input_closed || self.exited
     }
 
     /// The agent's process id on this computer, when it runs here.
@@ -159,8 +197,11 @@ impl Turn {
         self.transport.pid()
     }
 
-    /// Ends the process now, whatever it is doing.
+    /// Ends the process now, whatever it is doing: how it ends is then
+    /// the person's doing.
     pub fn kill(&mut self) {
+        self.stopping = true;
+        self.input_closed = true;
         self.transport.kill();
     }
 
@@ -486,6 +527,55 @@ mod tests {
         assert_eq!(answered, [TurnEvent::QuestionResolved { id: "q1".into() }]);
         let told = scripted.0.lock().unwrap();
         assert!(told.written.last().unwrap().contains("control_response"));
+    }
+
+    #[test]
+    fn a_process_that_said_all_it_had_to_say_takes_nothing_more() {
+        let (mut turn, scripted, _) = claude("serve");
+        turn.output(Output::Line(
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"s1","queued_turn_count":0}"#.into(),
+        ));
+        // Its process runs on for what it left running.
+        assert!(turn.over());
+        let before = scripted.0.lock().unwrap().written.len();
+        assert_eq!(
+            turn.act(Action::Prompt("more".into())),
+            Err(TurnError::TurnEnded)
+        );
+        assert_eq!(turn.act(Action::Interrupt), Err(TurnError::TurnEnded));
+        assert_eq!(scripted.0.lock().unwrap().written.len(), before);
+    }
+
+    #[test]
+    fn a_turn_stopped_ends_as_stopped_however_its_process_ends() {
+        let (mut turn, scripted, _) = claude("work");
+        assert!(!turn.stopping());
+        turn.act(Action::Interrupt).unwrap();
+        assert!(turn.stopping(), "asked, it has not finished yet");
+        turn.kill();
+        assert!(scripted.0.lock().unwrap().killed);
+        let ended = turn.output(Output::Exited(143));
+        assert!(
+            matches!(
+                ended.first(),
+                Some(TurnEvent::Finished {
+                    interrupted: true,
+                    error: None,
+                    ..
+                })
+            ),
+            "{ended:?}"
+        );
+    }
+
+    #[test]
+    fn a_turn_that_finished_after_a_stop_is_not_stopping_any_more() {
+        let (mut turn, _scripted, _) = claude("work");
+        turn.act(Action::Interrupt).unwrap();
+        turn.output(Output::Line(
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"s1","queued_turn_count":0}"#.into(),
+        ));
+        assert!(!turn.stopping());
     }
 
     #[test]

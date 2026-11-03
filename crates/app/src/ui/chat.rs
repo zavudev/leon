@@ -94,6 +94,21 @@ pub struct Handoff {
     pub sent_in: Option<u32>,
 }
 
+/// How long a process may go on after its agent said all it had to say
+/// before the turn is taken as over and the process as one that runs
+/// something its agent left running (Claude Code's background commands).
+pub(super) const LINGER_AFTER: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// The process of a turn that is over, kept while it runs what its agent
+/// left running.
+struct Lingering {
+    /// The turn it was.
+    generation: u64,
+    turn: Turn,
+    /// Reads it until it ends, so that its end is seen.
+    _reader: Option<Task<()>>,
+}
+
 /// One conversation with an agent.
 pub struct Chat {
     /// The machine it runs on.
@@ -177,10 +192,21 @@ pub struct Chat {
     /// What the agent it went on with is told before the next message, after
     /// a switch of agents.
     pub handoff: Option<Handoff>,
+    /// The commands the person runs in it with `!`.
+    pub shell: super::chat_shell::ShellUi,
     /// The turn in flight.
     turn: Option<Turn>,
     /// Reads what the turn in flight prints.
     reader: Option<Task<()>>,
+    /// Counts the turns started, so that what an older process prints is
+    /// never taken for the turn in flight's.
+    generation: u64,
+    /// Ends the turn in flight once the agent said all it had to say and
+    /// its process runs on anyway (see [`LINGER_AFTER`]).
+    linger: Option<Task<()>>,
+    /// Processes of turns that are over and that run on for what their agent
+    /// left running (a development server): they end with the conversation.
+    lingering: Vec<Lingering>,
     /// When the turn in flight started, in milliseconds since the epoch.
     pub since: Option<u64>,
     /// Draws the conversation again while its turn goes on, for its spinner.
@@ -352,7 +378,7 @@ impl Shell {
                 .auto_grow(1, 10)
                 .submit_on_enter(true)
                 .placeholder(format!(
-                    "Ask {} anything  \u{b7}  / for commands  \u{b7}  @ for files",
+                    "Ask {} anything  \u{b7}  / for commands  \u{b7}  @ for files  \u{b7}  ! to run a command",
                     crate::format::agent_name(kind)
                 ))
         });
@@ -376,7 +402,10 @@ impl Shell {
             window,
             move |this, _, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { shift: false, .. } => this.chat_send(id, window, cx),
-                InputEvent::Change => this.chat_typed(id, cx),
+                InputEvent::Change => {
+                    this.chat_shell_typed(id, cx);
+                    this.chat_typed(id, cx);
+                }
                 _ => {}
             },
         );
@@ -439,8 +468,12 @@ impl Shell {
                 recall: None,
                 switchable: Vec::new(),
                 handoff: None,
+                shell: Default::default(),
                 turn: None,
                 reader: None,
+                generation: 0,
+                linger: None,
+                lingering: Vec::new(),
                 since: None,
                 spin: None,
                 probe: None,
@@ -456,6 +489,10 @@ impl Shell {
                 let root = tree::workspace_root(&self.snapshot, machine, cwd);
                 self.workspaces.add_session(machine.as_str(), &root, id);
             }
+        }
+        // A session opened again runs as it was set to.
+        if let Some(session) = &resume {
+            self.chat_restore_choices(id, session);
         }
         if let Some(history) = history {
             self.chat_load_earlier(id, history, cx);
@@ -567,6 +604,7 @@ impl Shell {
                     chat.options = Some(options);
                     chat.probe = None;
                 }
+                this.chat_drop_stale_choices(id);
                 this.chat_look_for_agents(id);
                 cx.notify();
             })
@@ -627,6 +665,16 @@ impl Shell {
             return;
         };
         let typed = chat.input.read(cx).value().trim().to_owned();
+        // `!` runs a command: asked on a card first, run on the second Enter.
+        if let Some(command) = super::chat_shell::command_of(&typed) {
+            if chat.shell.ask.as_deref() == Some(command) {
+                self.chat_shell_run(id, window, cx);
+            } else {
+                let command = command.to_owned();
+                self.chat_shell_ask(id, &command, cx);
+            }
+            return;
+        }
         let Some(text) = super::king::with_attached(&typed, &chat.attached) else {
             // Nothing to say: Enter is the answer the agent waits for.
             self.chat_accept(id, window, cx);
@@ -689,7 +737,16 @@ impl Shell {
         let Some(turn) = chat.turn.as_mut() else {
             return Err(leon_turn::TurnError::TurnEnded);
         };
-        let events = turn.act(Action::Prompt(text.to_owned()))?;
+        // What the person's commands printed meanwhile goes in front.
+        let told = chat.shell.told_text();
+        let prompt = match &told {
+            Some(told) => format!("{told}\n\n{text}"),
+            None => text.to_owned(),
+        };
+        let events = turn.act(Action::Prompt(prompt))?;
+        if told.is_some() {
+            chat.shell.told.clear();
+        }
         chat.conversation.said_at(text, now);
         chat.scroll.scroll_to_bottom();
         self.chat_events(id, events, cx);
@@ -790,6 +847,20 @@ impl Shell {
     /// screen at once, the worktree is snapshotted when there is one, and then
     /// the agent is started ([`Self::chat_launch`]).
     fn chat_begin(&mut self, id: LiveId, prompt: String, cx: &mut Context<Self>) {
+        self.chat_begin_turn(id, prompt, true, cx);
+    }
+
+    /// [`Self::chat_begin`], for a turn the person started with words
+    /// (`said`), or one Leon starts to tell the agent what the person's
+    /// commands printed: then `prompt` is empty, the conversation shows no
+    /// words, and `chat_launch` puts the commands' output in front.
+    pub(super) fn chat_begin_turn(
+        &mut self,
+        id: LiveId,
+        prompt: String,
+        said: bool,
+        cx: &mut Context<Self>,
+    ) {
         let projects = self.engine.prefs().roots.claude_projects;
         let now = Some(self.now().timestamp());
         let Some(chat) = self.chats.get_mut(&id) else {
@@ -809,7 +880,11 @@ impl Shell {
             &chat.cwd,
             local,
         );
-        chat.conversation.sent_at(&prompt, now);
+        if said {
+            chat.conversation.sent_at(&prompt, now);
+        } else {
+            chat.conversation.began();
+        }
         let turn = chat.next_turn;
         chat.next_turn += 1;
         chat.edits.marks.push(Mark {
@@ -871,8 +946,16 @@ impl Shell {
             .handoff
             .as_ref()
             .filter(|handoff| handoff.sent_in.is_none())
-            .map(|handoff| format!("{}\n\n{prompt}", handoff.text));
-        let prompt = handed.clone().unwrap_or(prompt);
+            .map(|handoff| handoff.text.clone());
+        // What the person's commands printed since the agent last heard from
+        // them goes in front of their words too, after a handoff.
+        let told = chat.shell.told_text();
+        let prompt = [handed.clone(), told.clone(), Some(prompt)]
+            .into_iter()
+            .flatten()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
         let spec = TurnSpec {
             program: &program,
             prompt: &prompt,
@@ -897,15 +980,21 @@ impl Shell {
         if let (Some(handoff), Some(_), true) = (chat.handoff.as_mut(), &handed, started.is_ok()) {
             handoff.sent_in = Some(chat.next_turn.saturating_sub(1));
         }
+        if told.is_some() && started.is_ok() {
+            chat.shell.told.clear();
+        }
         match started {
             Ok((turn, output, events)) => {
+                chat.generation += 1;
+                let generation = chat.generation;
                 chat.since = Some(unique);
                 chat.turn = Some(turn);
+                chat.linger = None;
                 chat.reader = Some(cx.spawn(async move |this, cx| {
                     while let Ok(said) = output.recv_async().await {
                         let last = matches!(said, Output::Exited(_));
                         if this
-                            .update(cx, |this, cx| this.chat_output(id, said, cx))
+                            .update(cx, |this, cx| this.chat_output(id, generation, said, cx))
                             .is_err()
                             || last
                         {
@@ -929,7 +1018,7 @@ impl Shell {
 
     /// Keeps a conversation's spinner turning while its turn goes on: it is
     /// drawn again every frame, and the loop ends with the turn.
-    fn chat_spin(&mut self, id: LiveId, cx: &mut Context<Self>) {
+    pub(super) fn chat_spin(&mut self, id: LiveId, cx: &mut Context<Self>) {
         let Some(chat) = self.chats.get_mut(&id) else {
             return;
         };
@@ -942,7 +1031,8 @@ impl Shell {
                 let Some(chat) = this.chats.get_mut(&id) else {
                     return false;
                 };
-                let going = chat.conversation.running();
+                // A command the person runs has spinners of its own.
+                let going = chat.conversation.running() || chat.shell.running().is_some();
                 if going {
                     cx.notify();
                 } else {
@@ -956,35 +1046,106 @@ impl Shell {
         }));
     }
 
-    /// The process of a conversation's turn said something.
-    pub(super) fn chat_output(&mut self, id: LiveId, output: Output, cx: &mut Context<Self>) {
+    /// The process of a conversation's turn `generation` said something.
+    pub(super) fn chat_output(
+        &mut self,
+        id: LiveId,
+        generation: u64,
+        output: Output,
+        cx: &mut Context<Self>,
+    ) {
         let Some(chat) = self.chats.get_mut(&id) else {
             return;
         };
+        let ended = matches!(output, Output::Exited(_));
+        // The process of a turn that is over already: when it ends, what it
+        // left running ended with it.
+        if generation != chat.generation {
+            if let Some(at) = chat
+                .lingering
+                .iter()
+                .position(|old| old.generation == generation)
+            {
+                if ended {
+                    let mut old = chat.lingering.remove(at);
+                    old.turn.output(output);
+                }
+            }
+            return;
+        }
         let Some(turn) = chat.turn.as_mut() else {
             return;
         };
-        let ended = matches!(output, Output::Exited(_));
         let events = turn.output(output);
         if let Some(listed) = turn.take_commands() {
             chat.commands = listed;
         }
+        let over = !ended && turn.over();
         if ended {
             chat.turn = None;
+            chat.linger = None;
         }
         self.chat_events(id, events, cx);
         if ended {
-            // The agent wrote its session: the history has it at the next
-            // import, and what the person wrote meanwhile is the next turn.
-            self.request_import(cx);
-            let next = self
-                .chats
-                .get_mut(&id)
-                .and_then(|chat| chat.conversation.queued.pop_front());
-            if let Some(next) = next {
-                self.chat_begin(id, next, cx);
-            }
+            self.chat_turn_over(id, cx);
+        } else if over {
+            self.chat_linger_soon(id, generation, cx);
         }
+    }
+
+    /// The turn of a conversation is over: the agent wrote its session, the
+    /// history has it at the next import, and what the person wrote meanwhile
+    /// is the next turn.
+    fn chat_turn_over(&mut self, id: LiveId, cx: &mut Context<Self>) {
+        self.request_import(cx);
+        let next = self
+            .chats
+            .get_mut(&id)
+            .and_then(|chat| chat.conversation.queued.pop_front());
+        match next {
+            Some(next) => self.chat_begin(id, next, cx),
+            // A command the person ran while the agent worked: the agent
+            // sees what it printed now.
+            None => self.chat_shell_deliver(id, cx),
+        }
+    }
+
+    /// The agent of turn `generation` said all it had to say: unless its
+    /// process ends within [`LINGER_AFTER`], the turn is over without it.
+    fn chat_linger_soon(&mut self, id: LiveId, generation: u64, cx: &mut Context<Self>) {
+        let Some(chat) = self.chats.get_mut(&id) else {
+            return;
+        };
+        if chat.linger.is_some() {
+            return;
+        }
+        chat.linger = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(LINGER_AFTER).await;
+            let _ = this.update(cx, |this, cx| this.chat_linger(id, generation, cx));
+        }));
+    }
+
+    /// The process of turn `generation` outlived what its agent said: it runs
+    /// something the agent left running. It is kept, and the conversation
+    /// goes on without it.
+    pub(super) fn chat_linger(&mut self, id: LiveId, generation: u64, cx: &mut Context<Self>) {
+        let Some(chat) = self.chats.get_mut(&id) else {
+            return;
+        };
+        chat.linger = None;
+        if chat.generation != generation || !chat.turn.as_ref().is_some_and(Turn::over) {
+            return;
+        }
+        let (Some(turn), reader) = (chat.turn.take(), chat.reader.take()) else {
+            return;
+        };
+        chat.lingering.push(Lingering {
+            generation,
+            turn,
+            _reader: reader,
+        });
+        self.chat_events(id, vec![TurnEvent::Exited { code: 0 }], cx);
+        self.chat_turn_over(id, cx);
     }
 
     /// Puts the events of a turn in its conversation, and keeps the tree and
@@ -1074,6 +1235,8 @@ impl Shell {
             self.chat_measure(Subject::Chat(id), cx);
             self.chat_title(id, cx);
         }
+        // The agent may have named the session, or changed its mode.
+        self.chat_remember_choices(id);
         cx.notify();
     }
 
@@ -1346,9 +1509,16 @@ impl Shell {
         let Some(turn) = chat.turn.as_mut() else {
             return;
         };
+        // Asked once and still at it, the agent is not listening: it is
+        // ended.
+        if turn.stopping() {
+            turn.kill();
+            return;
+        }
         match turn.act(Action::Interrupt) {
             Ok(events) => self.chat_events(id, events, cx),
-            // An agent that cannot be asked to stop is ended.
+            // An agent that cannot be asked to stop, or whose process runs on
+            // after it said all it had to say, is ended.
             Err(_) => turn.kill(),
         }
     }
@@ -1413,6 +1583,17 @@ impl Shell {
                 stroke.modifiers.control && !stroke.modifiers.platform
             };
         if paste && self.chat_paste_image(id, cx) {
+            return true;
+        }
+        // Escape takes back the card that asks before a command runs.
+        if stroke.key == "escape"
+            && !stroke.modifiers.modified()
+            && self
+                .chats
+                .get(&id)
+                .is_some_and(|chat| chat.shell.ask.is_some())
+        {
+            self.chat_shell_cancel(id, cx);
             return true;
         }
         // Escape closes the bar that finds words before it does anything else.

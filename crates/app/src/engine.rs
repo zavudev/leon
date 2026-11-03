@@ -52,6 +52,7 @@ use crate::project::{self, ProjectState};
 mod changes;
 mod pull_poll;
 mod task_sync;
+mod typed;
 pub use changes::{CommitRequest, ShipReport, ShipRequest};
 
 /// How many folders are resolved with git at the same time while projects are

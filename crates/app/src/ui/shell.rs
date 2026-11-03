@@ -713,6 +713,11 @@ pub struct Shell {
     pub(super) pending_start: Option<super::terminals::PendingStart>,
     /// Where they are remembered, when anywhere.
     dormant_file: Option<PathBuf>,
+    /// What each conversation's session was set to run with (mode, model,
+    /// effort), for when it is opened again.
+    pub(super) chat_choices: super::chat_choices::ChatChoices,
+    /// Where they are remembered, when anywhere.
+    pub(super) chat_choices_file: Option<PathBuf>,
     /// Whether the tree also shows the sessions that are not active (the
     /// setting `sidebar_show_inactive`, off by default, read when the
     /// settings change).
@@ -785,6 +790,7 @@ impl Shell {
         let store = engine.store().clone();
         let snapshot = Snapshot::load(&store).unwrap_or_default();
         let dormant_file = settings::sibling(super::dormant::FILE_NAME, cx);
+        let chat_choices_file = settings::sibling(super::chat_choices::FILE_NAME, cx);
         let dormant = dormant_file
             .as_deref()
             .map(super::dormant::Dormants::load)
@@ -1070,6 +1076,11 @@ impl Shell {
             sweep,
             pending_start: None,
             dormant_file,
+            chat_choices: chat_choices_file
+                .as_deref()
+                .map(super::chat_choices::ChatChoices::load)
+                .unwrap_or_default(),
+            chat_choices_file,
             scripts: super::scripts::ScriptsUi::new(settings::sibling(crate::trust::FILE_NAME, cx)),
             show_inactive: settings::flag(cx, "sidebar_show_inactive"),
             sidebar_tree: settings::flag(cx, "sidebar_tree"),

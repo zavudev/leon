@@ -2,8 +2,36 @@
 
 ## [Unreleased]
 
+### Added
+
+* A conversation runs commands with `!`, as Claude Code does: `!ls` and Enter
+  shows the command, its folder and its machine on a card, and a second
+  Enter (or **Run**) runs it there. What it prints stays in the conversation
+  and is sent to the agent, which reads it and goes on: at once when it
+  waits, when its turn ends when it works. **Stop** ends a command that takes
+  too long.
+
+### Changed
+
+* The sidebar shows a light only when something wants a look (starting,
+  ended, finished its turn, waiting, asking or failed); a session or project
+  that simply runs has none. The lights of projects, worktrees and sessions
+  stand in one column.
+
 ### Fixed
 
+* A conversation closed and opened again, or brought back when Leon starts,
+  runs with the permission mode, model and effort it had instead of the
+  agent's own setup. They are kept by session in `chat_choices.json`, next
+  to the settings; one the agent no longer offers is dropped.
+* A conversation no longer stays WORKING after its agent answered when the
+  agent left a program running (a development server Claude Code started in
+  the background): a few seconds after the answer the turn is over, the
+  program runs on, and the next message starts the next turn. What was written
+  in the meantime waits for that turn instead of being lost.
+* Stop and `Escape` always stop: an agent whose process takes nothing more is
+  ended, and a second Stop ends an agent that did not listen to the first. It
+  reads as stopped, not as a failure.
 * The window no longer drags while several agents work and the one on screen
   streams. Every byte the terminal in view printed drew the whole window
   again, sidebar included, up to the refresh rate of the screen. The sidebar

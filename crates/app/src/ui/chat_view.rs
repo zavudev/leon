@@ -83,6 +83,7 @@ impl Shell {
                     .children(self.chat_rewind_cell(id, chat, colours, cx))
                     .children(self.chat_git_cell(Subject::Chat(id), colours, cx))
                     .children(self.chat_menu(id, chat, colours, cx))
+                    .children(self.chat_shell_cell(id, chat, colours, cx))
                     .child(self.chat_composer(id, chat, colours, cx))
                     .child(chat_foot(
                         id,
@@ -600,6 +601,9 @@ impl Shell {
     ) -> AnyElement {
         let running = chat.conversation.running();
         let queued = chat.conversation.queued.len();
+        // What is written is a command to run (`!`): the field says so, and
+        // its button runs it, after asking, whatever the agent is doing.
+        let command = super::chat_shell::command_of(&chat.input.read(cx).value()).is_some();
         let mode = chat.options.as_ref().and_then(|options| {
             let current = chat.mode.as_ref().or(options.default_mode.as_ref())?;
             options.modes.iter().find(|mode| &mode.id == current)
@@ -686,7 +690,19 @@ impl Shell {
                 .text_color(colours.text_faint),
             );
         }
-        let action = if running {
+        let action = if command {
+            button(
+                "chat-shell-send",
+                id,
+                "RUN \u{2026}",
+                Look::Primary,
+                colours,
+            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.chat_send(id, window, cx);
+            }))
+            .into_any_element()
+        } else if running {
             button("chat-stop", id, "STOP", Look::Outline, colours)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.chat_interrupt(id, cx);
@@ -699,6 +715,14 @@ impl Shell {
                 }))
                 .into_any_element()
         };
+        // A command written during a turn: the turn can still be stopped.
+        let stop_too = (command && running).then(|| {
+            button("chat-stop", id, "STOP", Look::Outline, colours).on_click(cx.listener(
+                move |this, _: &ClickEvent, _, cx| {
+                    this.chat_interrupt(id, cx);
+                },
+            ))
+        });
         let drop_over = colours.surface_2;
         div()
             .id(SharedString::from(format!("chat-composer-{}", id.0)))
@@ -756,8 +780,12 @@ impl Shell {
                             .pl(px(2.))
                             .font_family(fonts::mono())
                             .font_features(fonts::mono_features())
-                            .text_color(colours.signal)
-                            .child(">"),
+                            .text_color(if command {
+                                colours.warning
+                            } else {
+                                colours.signal
+                            })
+                            .child(if command { "!" } else { ">" }),
                     )
                     .child(
                         div()
@@ -783,7 +811,11 @@ impl Shell {
                             .gap(px(6.))
                             .child(self.chat_attach_button(id, colours, cx))
                             .child(self.chat_dictate_button(id, colours, cx))
-                            .child(key_cap(if running { "ESC" } else { "ENTER" }, colours))
+                            .child(key_cap(
+                                if running && !command { "ESC" } else { "ENTER" },
+                                colours,
+                            ))
+                            .children(stop_too)
                             .child(action),
                     ),
             )

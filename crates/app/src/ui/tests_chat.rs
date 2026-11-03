@@ -485,6 +485,102 @@ fn escape_stops_the_turn_and_what_was_written_meanwhile_is_the_next_one(cx: &mut
 }
 
 #[gpui_kit::test]
+fn a_second_stop_ends_an_agent_that_did_not_listen_to_the_first(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "work");
+    prints(&h, cx, &[INIT, BASH]);
+    h.press("escape", cx);
+    assert!(written(&h).iter().any(|line| line.contains("interrupt")));
+    assert!(!h.chat.0.lock().unwrap().killed, "it is asked first");
+    h.press("escape", cx);
+    assert!(h.chat.0.lock().unwrap().killed, "then it is ended");
+    exits(&h, cx, 143);
+    h.shell(cx, |shell| {
+        let conversation = &shell.chats[&LiveId(1)].conversation;
+        assert_eq!(conversation.phase(), Phase::Idle);
+        assert!(!conversation.failed, "a stop is not a failure");
+        assert!(conversation
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::Notice { text, .. } if text == "Stopped.")));
+    });
+}
+
+#[gpui_kit::test]
+fn a_process_that_outlives_its_answer_does_not_keep_the_conversation_working(
+    cx: &mut TestAppContext,
+) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "start the dev server");
+    prints(&h, cx, &[INIT, SAID, RESULT]);
+    assert!(h.chat.0.lock().unwrap().closed, "it said all it had to say");
+    // Its process runs on for the server it left running. What is said
+    // meanwhile is not lost in a closed pipe: it waits for the next turn.
+    let before = written(&h).len();
+    say(&h, cx, 1, "and then?");
+    assert_eq!(written(&h).len(), before);
+    h.shell(cx, |shell| {
+        let conversation = &shell.chats[&LiveId(1)].conversation;
+        assert_eq!(conversation.phase(), Phase::Working);
+        assert_eq!(conversation.queued.len(), 1);
+    });
+
+    // A moment later the turn is over without it, and what waited is the
+    // next turn, while the server goes on.
+    cx.executor()
+        .advance_clock(crate::ui::chat::LINGER_AFTER + std::time::Duration::from_millis(100));
+    h.settle(cx);
+    assert_eq!(turns(&h).len(), 2, "what waited became a turn");
+    assert!(!h.chat.0.lock().unwrap().killed, "the server runs on");
+    assert!(written(&h).iter().any(|line| line.contains("and then?")));
+    h.shell(cx, |shell| {
+        let conversation = &shell.chats[&LiveId(1)].conversation;
+        assert!(conversation.queued.is_empty());
+        assert_eq!(conversation.phase(), Phase::Starting);
+    });
+
+    // The old process ending is not the new turn's end.
+    let (old, _) = turns(&h)[0].clone();
+    h.chat.0.lock().unwrap().outputs[old]
+        .send(Output::Exited(0))
+        .unwrap();
+    h.settle(cx);
+    h.shell(cx, |shell| {
+        assert!(shell.chats[&LiveId(1)].conversation.running());
+    });
+}
+
+#[gpui_kit::test]
+fn stopping_a_process_that_outlives_its_answer_ends_it(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "start the dev server");
+    prints(&h, cx, &[INIT, SAID, RESULT]);
+    let before = written(&h).len();
+    h.press("escape", cx);
+    assert_eq!(
+        written(&h).len(),
+        before,
+        "nothing is written to a closed pipe"
+    );
+    assert!(h.chat.0.lock().unwrap().killed);
+    exits(&h, cx, 143);
+    h.shell(cx, |shell| {
+        let conversation = &shell.chats[&LiveId(1)].conversation;
+        assert_eq!(conversation.phase(), Phase::Idle);
+        assert!(!conversation.failed);
+    });
+}
+
+#[gpui_kit::test]
 fn every_agent_of_the_protocol_gets_the_same_interface(cx: &mut TestAppContext) {
     let Some((h, _dir, path)) = window(cx) else {
         return;
@@ -3402,4 +3498,202 @@ fn going_back_to_the_first_message_after_a_switch_hands_the_conversation_over_ag
             .any(|item| matches!(item, Item::Switched { .. })));
     });
     assert_eq!(field(&h, cx, 1), "after");
+}
+
+#[gpui_kit::test]
+fn a_bang_command_is_asked_first_then_run_and_its_output_sent_to_the_agent(
+    cx: &mut TestAppContext,
+) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    h.type_text("!echo hi", cx);
+    assert!(
+        h.shows("chat-shell-send-1", cx),
+        "a command in the field turns the button into its own"
+    );
+    h.press("enter", cx);
+    // Asked first: nothing runs and the agent is told nothing.
+    assert!(h.shows("chat-shell-ask-1", cx));
+    assert!(turns(&h).is_empty(), "the command is not a prompt");
+    let ran = |h: &Harness| {
+        h.runner
+            .calls()
+            .into_iter()
+            .filter(|call| call.program == "sh")
+            .collect::<Vec<_>>()
+    };
+    assert!(ran(&h).is_empty(), "nothing runs before the person says so");
+    assert_eq!(
+        field(&h, cx, 1),
+        "!echo hi",
+        "the command stays in the field"
+    );
+
+    // The second Enter runs it, here, in the conversation's folder.
+    h.runner.queue(leon_remote::Output::ok("hi\n"));
+    h.press("enter", cx);
+    h.settle(cx);
+    let calls = ran(&h);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].args, ["-c", "echo hi"]);
+    assert_eq!(calls[0].cwd.as_deref(), Some(path.as_str()));
+    assert!(!h.shows("chat-shell-ask-1", cx));
+    assert_eq!(field(&h, cx, 1), "");
+    assert!(h.shows("chat-shell-1-0", cx));
+    assert!(h.shows("chat-shell-output-1-0", cx));
+    assert!(h.shows("chat-shell-exit-1-0", cx));
+
+    // The agent waited: it gets what the command printed at once, in a turn
+    // of its own, and the conversation shows the command, not the tags.
+    assert_eq!(turns(&h).len(), 1, "the output is sent to the agent");
+    let sent = written(&h).join("\n");
+    assert!(
+        sent.contains("<bash-input>echo hi</bash-input>")
+            && sent.contains("<bash-stdout>hi</bash-stdout>"),
+        "{sent}"
+    );
+    h.shell(cx, |shell| {
+        let chat = &shell.chats[&LiveId(1)];
+        assert!(chat.shell.told.is_empty(), "sent once");
+        assert_eq!(chat.conversation.phase(), Phase::Starting);
+        assert!(matches!(
+            &chat.conversation.items[..],
+            [Item::Shell(run)] if run.command == "echo hi"
+                && run.result.as_ref().is_some_and(|result| result.ok() && result.output == "hi")
+        ));
+    });
+    prints(&h, cx, &[INIT, SAID, RESULT]);
+    exits(&h, cx, 0);
+    h.shell(cx, |shell| {
+        let chat = &shell.chats[&LiveId(1)];
+        assert!(matches!(
+            &chat.conversation.items[..],
+            [Item::Shell(_), Item::Agent { .. }]
+        ));
+    });
+
+    // The next message is the person's words alone.
+    let before = written(&h).len();
+    say(&h, cx, 1, "thanks");
+    let sent = written(&h)[before..].join("\n");
+    assert!(
+        sent.contains("thanks") && !sent.contains("bash-input"),
+        "{sent}"
+    );
+}
+
+#[gpui_kit::test]
+fn a_command_that_ends_while_the_agent_works_is_sent_when_its_turn_ends(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "work on it");
+    prints(&h, cx, &[INIT]);
+    h.type_text("!git status", cx);
+    h.press("enter", cx);
+    assert!(
+        h.shows("chat-stop-1", cx),
+        "the turn can still be stopped while a command is written"
+    );
+    h.runner.queue(leon_remote::Output::ok("clean\n"));
+    h.press("enter", cx);
+    h.settle(cx);
+    assert_eq!(turns(&h).len(), 1, "the turn in flight is left alone");
+    assert!(!written(&h).join("\n").contains("bash-input"));
+    h.shell(cx, |shell| {
+        assert_eq!(shell.chats[&LiveId(1)].shell.told.len(), 1);
+    });
+    prints(&h, cx, &[SAID, RESULT]);
+    exits(&h, cx, 0);
+    assert_eq!(turns(&h).len(), 2, "its end sends the command's output");
+    let sent = written(&h).join("\n");
+    assert!(sent.contains("<bash-stdout>clean</bash-stdout>"), "{sent}");
+    h.shell(cx, |shell| {
+        assert!(shell.chats[&LiveId(1)].shell.told.is_empty());
+    });
+}
+
+#[gpui_kit::test]
+fn escape_takes_back_the_card_and_leaves_the_command_in_the_field(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    h.type_text("!rm -rf build", cx);
+    h.press("enter", cx);
+    assert!(h.shows("chat-shell-ask-1", cx));
+    h.press("escape", cx);
+    assert!(!h.shows("chat-shell-ask-1", cx));
+    assert_eq!(field(&h, cx, 1), "!rm -rf build");
+    // A change to the words takes the card back too.
+    h.press("enter", cx);
+    assert!(h.shows("chat-shell-ask-1", cx));
+    h.type_text("/", cx);
+    assert!(!h.shows("chat-shell-ask-1", cx));
+    assert!(h.runner.calls().iter().all(|call| call.program != "sh"));
+    assert!(turns(&h).is_empty());
+}
+
+#[gpui_kit::test]
+fn a_conversation_opened_again_runs_with_the_mode_model_and_effort_it_had(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "hello");
+    prints(&h, cx, &[INIT, SAID, RESULT]);
+    exits(&h, cx, 0);
+    cx.update(|cx| {
+        h.shell.update(cx, |shell, cx| {
+            shell.chat_set_mode(LiveId(1), "acceptEdits".to_owned(), cx);
+            shell.chat_set_model(LiveId(1), Some("opus".to_owned()), cx);
+        })
+    });
+    h.settle(cx);
+    cx.update_window(h.window.into(), |_, window, cx| {
+        h.shell
+            .update(cx, |shell, cx| shell.close_chat(LiveId(1), window, cx))
+    })
+    .unwrap();
+    h.settle(cx);
+    // Opened again: the agent's session "s1" is resumed, as it was set.
+    let opened = cx
+        .update_window(h.window.into(), |_, window, cx| {
+            h.shell.update(cx, |shell, cx| {
+                shell.start_live(
+                    Launch::Agent {
+                        kind: AgentId::CLAUDE,
+                        resume: Some("s1".to_owned()),
+                        account: None,
+                    },
+                    &MachineId::local(),
+                    &path,
+                    Place::Session,
+                    None,
+                    window,
+                    cx,
+                )
+            })
+        })
+        .unwrap();
+    assert!(opened);
+    h.settle(cx);
+    h.shell(cx, |shell| {
+        let (_, chat) = shell
+            .chats
+            .iter()
+            .find(|(id, _)| **id != LiveId(1))
+            .expect("the conversation opened again");
+        assert_eq!(chat.mode.as_deref(), Some("acceptEdits"));
+        assert_eq!(chat.model.as_deref(), Some("opus"));
+    });
+    // A new conversation is the agent's own setup.
+    assert!(start(&h, cx, AgentId::CLAUDE, &path));
+    h.shell(cx, |shell| {
+        let newest = shell.chats.keys().max_by_key(|id| id.0).unwrap();
+        assert_eq!(shell.chats[newest].mode, None);
+    });
 }
