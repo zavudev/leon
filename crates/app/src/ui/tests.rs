@@ -751,6 +751,26 @@ impl Harness {
         self.settle(cx);
     }
 
+    /// Turns the wheel over the middle of a drawn element, `lines` of it:
+    /// positive is up, as a wheel turned back sends it.
+    #[cfg_attr(not(leon_posix_tests), allow(dead_code))]
+    fn scroll_on(&self, selector: &str, lines: f32, cx: &mut TestAppContext) {
+        let bounds = self
+            .bounds_of(selector.to_owned(), cx)
+            .unwrap_or_else(|| panic!("{selector} is not drawn"));
+        let at = bounds.center();
+        let mut visual = VisualTestContext::from_window(self.window.into(), cx);
+        visual.simulate_mouse_move(at, None, gpui_kit::Modifiers::none());
+        visual.simulate_event(gpui_kit::ScrollWheelEvent {
+            position: at,
+            delta: gpui_kit::ScrollDelta::Lines(Point { x: 0., y: lines }),
+            modifiers: gpui_kit::Modifiers::none(),
+            touch_phase: gpui_kit::TouchPhase::Moved,
+        });
+        visual.run_until_parked();
+        self.settle(cx);
+    }
+
     /// Drags a sidebar row onto another one, releasing at `to_fraction` of
     /// the target row's height (below the middle means after it).
     fn drag_rows(&self, from: usize, to: usize, to_fraction: f32, cx: &mut TestAppContext) {

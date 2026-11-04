@@ -49,44 +49,7 @@ pub fn marks(found: &[Match], current: usize) -> HashMap<usize, Mark> {
     marks
 }
 
-/// For each item of a conversation, the index of the child of the list that
-/// draws it: every block is a child, and each card of what a turn changed
-/// that closes it is another. `blocks` are the ends of the blocks (one past
-/// their last item), `cards` the item each card follows. The first child of
-/// the list is the space above it.
-pub fn child_of_items(blocks: &[(usize, usize)], cards: &[usize]) -> Vec<usize> {
-    let mut out = Vec::new();
-    let mut child = 1;
-    for (from, to) in blocks {
-        out.extend(std::iter::repeat_n(child, to - from));
-        child += 1 + cards.iter().filter(|at| *at == to).count();
-    }
-    out
-}
-
 impl Chat {
-    /// For each item of the conversation, the child of its list that draws
-    /// it: what the list scrolls to.
-    pub fn item_children(&self) -> Vec<usize> {
-        use crate::chat::model::{blocks, Block};
-        let blocks: Vec<(usize, usize)> =
-            blocks(&self.conversation.items, self.conversation.running())
-                .iter()
-                .map(|block| match block {
-                    Block::Single(at) => (*at, at + 1),
-                    Block::Work { from, to, .. } => (*from, *to),
-                })
-                .collect();
-        let going = self.conversation.running() || self.launching;
-        let cards: Vec<usize> = self
-            .edits
-            .cards(&self.conversation.items, &self.cwd, going)
-            .iter()
-            .map(|(at, ..)| *at)
-            .collect();
-        child_of_items(&blocks, &cards)
-    }
-
     /// The matches of what the bar looks for, in the conversation as it is.
     pub fn found(&self) -> Vec<Match> {
         match &self.find {
@@ -189,10 +152,7 @@ impl Shell {
         let Some(m) = found.get(bar.current.min(found.len().saturating_sub(1))) else {
             return;
         };
-        let children = chat.item_children();
-        if let Some(child) = children.get(m.item) {
-            chat.scroll.scroll_to_top_of_item(*child);
-        }
+        chat.scroll_to_item(m.item);
     }
 
     /// The bar, over the top right corner of the conversation.
@@ -293,14 +253,5 @@ mod tests {
         assert_eq!(marked[&2], Mark::Current);
         assert_eq!(marked[&5], Mark::Some);
         assert!(marks(&[], 0).is_empty());
-    }
-
-    #[test]
-    fn each_item_knows_the_child_of_the_list_that_draws_it() {
-        // Items 0 | 1 2 3 | 4, a card after item 3's block, then nothing.
-        let blocks = [(0, 1), (1, 4), (4, 5)];
-        let cards = [4];
-        assert_eq!(child_of_items(&blocks, &cards), [1, 2, 2, 2, 4]);
-        assert_eq!(child_of_items(&[], &[]), Vec::<usize>::new());
     }
 }

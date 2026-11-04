@@ -18,7 +18,8 @@
 use gpui_kit::component::input::Textarea;
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, AnyElement, ClickEvent, Context, Div, FontWeight, MouseDownEvent, SharedString, Stateful,
+    div, list, AnyElement, ClickEvent, Context, Div, FontWeight, MouseDownEvent, Pixels,
+    SharedString, Stateful,
 };
 use leon_turn::{ChoiceQuestion, PermissionChoice, PermissionEffect, QuestionKind};
 
@@ -33,8 +34,10 @@ use super::transcript::{
     code_cell, column, plan_card, question_frame, status_line, Folder, Ids, Speaker, Surface,
     Transcript,
 };
-use super::widgets::{attached_files, key_cap, led, mark, mono, with_latest, Lion};
-use crate::chat::model::{blocks, cost_text, duration_text, Block, Item, Level, Phase, Question};
+use super::widgets::{attached_files, key_cap, led, mark, mono, with_latest_list, Lion};
+use crate::chat::model::{
+    blocks, cost_text, duration_text, segments, Block, Item, Level, Phase, Question, Segment,
+};
 use crate::format;
 use crate::icons::{agent_icon, icon, IconName};
 use crate::theme::{fonts, metrics, px, Palette};
@@ -200,6 +203,13 @@ impl Shell {
     }
 
     /// What was said and done, oldest first, scrolling.
+    ///
+    /// The conversation is a list and not a column of every item: a session
+    /// that worked for an hour is thousands of messages and tool calls, and a
+    /// cell per line of them laid out on every frame is what made typing
+    /// while an agent worked crawl. Only what is on screen is drawn, and a
+    /// stretch of work that is open is as many rows as it has steps, so its
+    /// length costs the frame nothing either.
     fn chat_timeline(
         &self,
         id: LiveId,
@@ -209,64 +219,181 @@ impl Shell {
     ) -> AnyElement {
         let items = &chat.conversation.items;
         let running = chat.conversation.running();
-        let speaker = |at: usize| {
-            let who = crate::chat::model::agent_at(items, at, chat.agent);
-            Speaker {
-                agent: Some(who),
-                label: if who == chat.agent {
-                    answered_by(chat)
-                } else {
-                    // Said by the agent before a switch: the model in use now
-                    // is not its.
-                    crate::chat::complete::answered_by(None, format::agent_tag(who))
-                },
-            }
-        };
-        // What is done with the words of the person: put them back to change
-        // them, or say them again.
-        let said_actions =
-            |shell: &Shell, at: usize, group: SharedString, cx: &mut Context<Shell>| {
-                chat.can_rewind(at)
-                    .then(|| shell.chat_said_actions(id, at, group, colours, cx))
-            };
-        let transcript = Transcript {
-            ids: chat_ids(id),
-            surface: Surface::Chat(id),
-            folds: &chat.folds,
-            folder: chat.machine.is_local().then_some(Folder {
-                cwd: Some(chat.cwd.as_str()),
-            }),
-            speaker: &speaker,
-            said_actions: Some(&said_actions),
-        };
-        // The list is the scrolling element itself, so that each of its
-        // children can be scrolled to (the first one is the space above it,
-        // and the gap after the last is the space below).
-        let mut list = vec![div().flex_none().h(px(4.)).into_any_element()];
+        let now = (self.options.now)().timestamp_millis().max(0) as u64;
         let cards = chat
             .edits
             .cards(items, &chat.cwd, running || chat.launching);
         let found = chat.found();
         let marked =
             super::chat_find::marks(&found, chat.find.as_ref().map_or(0, |bar| bar.current));
+        // The list's rows, oldest first, each with the space above it: the
+        // blocks of the conversation keep the column's own gap, the cards
+        // after a turn too, and what a stretch of work holds together sits
+        // closer under the line it folds into.
+        let mut rows: Vec<Row> = Vec::new();
+        // The column opened with the space above its first block, and its
+        // own gap: the first row begins where that block did.
+        let mut gap = px(16.);
         for block in blocks(items, running) {
             let end = match block {
                 Block::Single(at) => at + 1,
                 Block::Work { to, .. } => to,
             };
-            let mark = match block {
-                Block::Single(at) => marked.get(&at).copied(),
-                Block::Work { .. } => None,
-            };
-            let drawn = match block {
-                Block::Single(at) => self.transcript_item(&transcript, at, &items[at], colours, cx),
-                Block::Work { from, to, live } => {
-                    self.transcript_work(&transcript, from, &items[from..to], live, colours, cx)
+            match block {
+                Block::Single(at) => {
+                    rows.push(Row {
+                        what: What::Single(at),
+                        gap,
+                    });
+                    gap = px(12.);
                 }
-            };
-            list.push(
+                Block::Work { from, to, live } => {
+                    let work = &items[from..to];
+                    let parts = segments(work);
+                    let last = parts.len().saturating_sub(1);
+                    let mut at_work = false;
+                    for (n, part) in parts.into_iter().enumerate() {
+                        let gap = if at_work { px(2.) } else { gap };
+                        at_work = true;
+                        match part {
+                            Segment::Edit(at) => rows.push(Row {
+                                what: What::Edit(from + at),
+                                gap,
+                            }),
+                            Segment::Run { from: a, to: b } => {
+                                let (run_from, run_to) = (from + a, from + b);
+                                // Only the last run of the stretch that
+                                // happens now is the one that is live.
+                                let live = live && n == last;
+                                rows.push(Row {
+                                    what: What::RunHead {
+                                        from: run_from,
+                                        to: run_to,
+                                        live,
+                                    },
+                                    gap,
+                                });
+                                if Shell::run_open(&chat.folds, run_from, live) {
+                                    rows.push(Row {
+                                        what: What::RunBody {
+                                            from: run_from,
+                                            to: run_to,
+                                            live,
+                                        },
+                                        gap: px(2.),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    gap = px(12.);
+                }
+            }
+            // The turn that ends here changed files: its card closes it.
+            for (card, (card_end, ..)) in cards.iter().enumerate() {
+                if *card_end == end {
+                    rows.push(Row {
+                        what: What::Card(card),
+                        gap,
+                    });
+                    gap = px(12.);
+                }
+            }
+        }
+        if chat.conversation.phase() != Phase::Idle {
+            rows.push(Row {
+                what: What::Status,
+                gap,
+            });
+        }
+        chat.list_rows(&rows);
+        let colours = *colours;
+        let render = cx.processor(
+            move |this: &mut Shell, index: usize, _window, cx: &mut Context<Shell>| {
+                let Some(chat) = this.chats.get(&id) else {
+                    return div().into_any_element();
+                };
+                let items = &chat.conversation.items;
+                let speaker = |at: usize| {
+                    let who = crate::chat::model::agent_at(items, at, chat.agent);
+                    Speaker {
+                        agent: Some(who),
+                        label: if who == chat.agent {
+                            answered_by(chat)
+                        } else {
+                            // Said by the agent before a switch: the model
+                            // in use now is not its.
+                            crate::chat::complete::answered_by(None, format::agent_tag(who))
+                        },
+                    }
+                };
+                // What is done with the words of the person: put them back
+                // to change them, or say them again.
+                let said_actions =
+                    |shell: &Shell, at: usize, group: SharedString, cx: &mut Context<Shell>| {
+                        chat.can_rewind(at)
+                            .then(|| shell.chat_said_actions(id, at, group, &colours, cx))
+                    };
+                let transcript = Transcript {
+                    ids: chat_ids(id),
+                    surface: Surface::Chat(id),
+                    folds: &chat.folds,
+                    folder: chat.machine.is_local().then_some(Folder {
+                        cwd: Some(chat.cwd.as_str()),
+                    }),
+                    speaker: &speaker,
+                    said_actions: Some(&said_actions),
+                };
+                let Some(row) = rows.get(index) else {
+                    return div().into_any_element();
+                };
+                let drawn = match row.what {
+                    What::Single(at) => items
+                        .get(at)
+                        .map(|item| this.transcript_item(&transcript, at, item, &colours, cx))
+                        .unwrap_or_else(|| div().into_any_element()),
+                    What::Edit(at) => match items.get(at) {
+                        Some(Item::Tool(tool)) => {
+                            this.transcript_edit(&transcript, tool, &colours, cx)
+                        }
+                        _ => div().into_any_element(),
+                    },
+                    What::RunHead { from, to, live } => match items.get(from..to) {
+                        Some(run) => {
+                            this.transcript_run_head(&transcript, from, run, live, &colours, cx)
+                        }
+                        None => div().into_any_element(),
+                    },
+                    What::RunBody { from, to, live } => match items.get(from..to) {
+                        // What a run printed before a screen's worth is not
+                        // drawn while it goes on: it is at the end of it.
+                        Some(run) => this.transcript_run_body(
+                            &transcript,
+                            from,
+                            run,
+                            live,
+                            live.then_some(LIVE_STEPS),
+                            &colours,
+                            cx,
+                        ),
+                        None => div().into_any_element(),
+                    },
+                    What::Card(card) => match cards.get(card) {
+                        Some((_, turn, stats)) => {
+                            this.chat_changed_card(Subject::Chat(id), *turn, stats, &colours, cx)
+                        }
+                        None => div().into_any_element(),
+                    },
+                    What::Status => chat_status(id, chat, now, &colours)
+                        .unwrap_or_else(|| div().into_any_element()),
+                };
+                let mark = match row.what {
+                    What::Single(at) => marked.get(&at).copied(),
+                    _ => None,
+                };
                 div()
-                    .flex_none()
+                    .px(px(16.))
+                    .pt(row.gap)
                     .w_full()
                     .min_w_0()
                     .rounded(metrics::RADIUS())
@@ -277,41 +404,24 @@ impl Shell {
                         }))
                     })
                     .child(drawn)
-                    .into_any_element(),
-            );
-            // The turn that ends here changed files: its card closes it.
-            for (_, turn, stats) in cards.iter().filter(|(at, ..)| *at == end) {
-                list.push(
-                    div()
-                        .flex_none()
-                        .w_full()
-                        .child(self.chat_changed_card(Subject::Chat(id), *turn, stats, colours, cx))
-                        .into_any_element(),
-                );
-            }
-        }
-        let now = (self.options.now)().timestamp_millis().max(0) as u64;
-        if let Some(status) = chat_status(id, chat, now, colours) {
-            list.push(div().flex_none().child(status).into_any_element());
-        }
-        list.push(div().flex_none().h(px(0.)).into_any_element());
-        let scrolling = column()
-            .id(SharedString::from(format!("chat-scroll-{}", id.0)))
+                    .into_any_element()
+            },
+        );
+        let scrolling = with_latest_list(
+            list(chat.list.clone(), render).size_full(),
+            &chat.list,
+            format!("chat-latest-{}", id.0),
+            &colours,
+            cx,
+        );
+        div()
             .debug_selector(move || format!("chat-scroll-{}", id.0))
-            .track_scroll(&chat.scroll)
-            .overflow_y_scroll()
             .flex_1()
             .min_h_0()
-            .px(px(16.))
-            .gap(px(12.))
-            .children(list);
-        with_latest(
-            scrolling,
-            &chat.scroll,
-            format!("chat-latest-{}", id.0),
-            colours,
-            cx,
-        )
+            .w_full()
+            .flex()
+            .child(scrolling)
+            .into_any_element()
     }
 
     /// What the agent asks, with the ways to answer it.
@@ -1112,6 +1222,66 @@ fn answered_by(chat: &Chat) -> String {
         chat.conversation.model.as_deref(),
         format::agent_tag(chat.agent),
     )
+}
+
+/// How many steps of a run that is happening are drawn: what it printed
+/// before that is still in the head's count, and scrolls back into view once
+/// the run is over. While it goes on, laying the whole of it out again on
+/// every frame is what makes the field wait.
+const LIVE_STEPS: usize = 24;
+
+/// One row of a conversation's list, and the space above it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Row {
+    /// What it draws.
+    pub what: What,
+    /// The space between it and the row before it: what the column's gap and
+    /// the stretch of work's own gap were.
+    pub gap: Pixels,
+}
+
+/// What a row of a conversation's list draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum What {
+    /// A block of one item: a message, a note, a list of todos, by index.
+    Single(usize),
+    /// A tool that changed files, by the index of its item.
+    Edit(usize),
+    /// The line a run of thoughts and tools folds into.
+    RunHead {
+        /// The first item of the run.
+        from: usize,
+        /// One past its last.
+        to: usize,
+        /// It is the last thing in the conversation and a turn is in flight.
+        live: bool,
+    },
+    /// The steps of a run that is open, in the frame the drawing gives them.
+    RunBody {
+        /// The first item of the run.
+        from: usize,
+        /// One past its last.
+        to: usize,
+        /// It is the last thing in the conversation and a turn is in flight.
+        live: bool,
+    },
+    /// The card of what a turn changed, by its place among the cards.
+    Card(usize),
+    /// What the agent is doing now.
+    Status,
+}
+
+impl Row {
+    /// Whether the row draws item `at`: what the find bar scrolls to.
+    pub(super) fn covers(&self, at: usize) -> bool {
+        match self.what {
+            What::Single(row) | What::Edit(row) => row == at,
+            What::RunHead { from, to, .. } | What::RunBody { from, to, .. } => {
+                from <= at && at < to
+            }
+            What::Card(_) | What::Status => false,
+        }
+    }
 }
 
 /// What the agent is doing, under the last thing it did, while a turn is in

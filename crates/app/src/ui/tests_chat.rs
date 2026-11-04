@@ -3697,3 +3697,166 @@ fn a_conversation_opened_again_runs_with_the_mode_model_and_effort_it_had(cx: &m
         assert_eq!(shell.chats[newest].mode, None);
     });
 }
+
+/// The agent of the newest turn says `count` messages, one after another.
+fn many(h: &Harness, cx: &mut TestAppContext, count: usize) {
+    let (at, _) = turns(h).pop().expect("a turn was started");
+    let body = "lorem ipsum dolor sit amet ".repeat(40);
+    {
+        let told = h.chat.0.lock().unwrap();
+        for _ in 0..count {
+            told.outputs[at]
+                .send(Output::Line(format!(
+                    r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"{body}"}}]}}}}"#
+                )))
+                .unwrap();
+        }
+    }
+    h.settle(cx);
+}
+
+/// How the conversation of the first chat is scrolled: whether its end is
+/// followed, and the row at the top of its window.
+fn scroll_of(h: &Harness, cx: &mut TestAppContext) -> (bool, usize) {
+    h.shell(cx, |shell| {
+        let list = &shell.chats[&LiveId(1)].list;
+        (list.is_following_tail(), list.logical_scroll_top().item_ix)
+    })
+}
+
+/// A conversation that worked for hours is a list, not a column of every
+/// thing ever said: only the rows on screen are laid out, so a keystroke
+/// costs what it costs in a conversation just started. This is what made
+/// typing hang while an agent worked (the whole session was laid out on
+/// every frame, and every keystroke draws one).
+#[gpui_kit::test]
+fn a_long_conversation_draws_only_what_is_on_screen(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    assert!(start(&h, cx, AgentId::CLAUDE, &path));
+    say(&h, cx, 1, "work");
+    many(&h, cx, 120);
+    // The last thing said is on screen; the first has scrolled out of it and
+    // is not laid out any more.
+    assert!(h.shows_dynamic("chat-agent-1-120".to_owned(), cx));
+    assert!(!h.shows_dynamic("chat-agent-1-1".to_owned(), cx));
+    // The field still takes what is typed into it, and the conversation
+    // shows it.
+    h.type_text("while it works", cx);
+    assert_eq!(field(&h, cx, 1), "while it works");
+    assert!(h.shows("chat-input-1", cx));
+}
+
+/// The person reads back into what was said while the agent works: what is
+/// added to the end does not move the rows they are on, and the end is
+/// followed again once they scroll back to it.
+#[gpui_kit::test]
+fn reading_back_while_the_agent_works_keeps_the_place(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    assert!(start(&h, cx, AgentId::CLAUDE, &path));
+    say(&h, cx, 1, "work");
+    many(&h, cx, 60);
+    let (following, top) = scroll_of(&h, cx);
+    assert!(following, "the end is followed while nobody scrolled");
+    // The wheel goes back into what was said, and the way to the end is
+    // offered from there.
+    h.scroll_on("chat-scroll-1", 20., cx);
+    let (following, reading) = scroll_of(&h, cx);
+    assert!(!following, "a wheel turned up leaves the end behind");
+    assert!(
+        reading < top,
+        "and goes back into the conversation: {reading} of {top}"
+    );
+    assert!(h.shows("chat-latest-1", cx), "and offers the way back");
+    // The agent says more: the reader keeps the row they were on.
+    prints(&h, cx, &[SAID]);
+    assert!(h.shows("chat-composer-1", cx), "a frame was drawn");
+    let (following, top) = scroll_of(&h, cx);
+    assert!(!following);
+    assert_eq!(top, reading);
+    // The button puts it back on its end, and goes with it.
+    h.mouse_on("chat-latest-1".to_owned(), gpui_kit::MouseButton::Left, cx);
+    assert!(h.shows("chat-composer-1", cx), "a frame was drawn");
+    assert!(scroll_of(&h, cx).0, "the end is followed again");
+    assert!(
+        !h.shows("chat-latest-1", cx),
+        "and nothing offers to go there"
+    );
+    // The wheel goes back, and coming down to the end follows it again.
+    h.scroll_on("chat-scroll-1", 20., cx);
+    let mut back = false;
+    for _ in 0..8 {
+        h.scroll_on("chat-scroll-1", -100., cx);
+        assert!(h.shows("chat-composer-1", cx), "a frame was drawn");
+        if scroll_of(&h, cx).0 {
+            back = true;
+            break;
+        }
+    }
+    assert!(back, "the end is followed again at the end");
+}
+
+/// The find bar goes to the row that draws the message it matches, however
+/// far above the window it is: the list scrolls to a row now and not to a
+/// child of a scrolling column, which it does not have.
+#[gpui_kit::test]
+fn find_goes_to_the_message_that_matches(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "work");
+    let (at, _) = turns(&h).pop().expect("a turn was started");
+    {
+        let told = h.chat.0.lock().unwrap();
+        for n in 0..60 {
+            told.outputs[at]
+                .send(Output::Line(format!(
+                    r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"word{n} and the rest of the line"}}]}}}}"#
+                )))
+                .unwrap();
+        }
+    }
+    h.settle(cx);
+    // The third answer is far above the window, and was not laid out.
+    assert!(!h.shows_dynamic("chat-agent-1-3".to_owned(), cx));
+    // Looking for its word brings it into the window.
+    h.press_chord("cmd-f", "ctrl-f", cx);
+    h.type_text("word2", cx);
+    assert!(h.shows_dynamic("chat-agent-1-3".to_owned(), cx));
+}
+
+/// While a run of work goes on, only the end of it is laid out: its first
+/// steps are still counted by its line, and are there again when it is over
+/// and opened.
+#[gpui_kit::test]
+fn a_run_that_goes_on_draws_its_end(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "read everything");
+    let (at, _) = turns(&h).pop().expect("a turn was started");
+    {
+        let told = h.chat.0.lock().unwrap();
+        for n in 0..40 {
+            told.outputs[at]
+                .send(Output::Line(format!(
+                    r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"r{n}","name":"Read","input":{{"file_path":"f{n}.rs"}}}}]}}}}"#
+                )))
+                .unwrap();
+        }
+    }
+    h.settle(cx);
+    // The newest steps are drawn; the oldest of the run are not, while it
+    // goes on.
+    assert!(h.shows_dynamic("chat-tool-1-r39".to_owned(), cx));
+    assert!(!h.shows_dynamic("chat-tool-1-r0".to_owned(), cx));
+    // Once it is over, the whole run is what its line opens to.
+    prints(&h, cx, &[SAID]);
+    h.mouse_on("chat-work-1-1".to_owned(), gpui_kit::MouseButton::Left, cx);
+    assert!(h.shows_dynamic("chat-tool-1-r0".to_owned(), cx));
+}
