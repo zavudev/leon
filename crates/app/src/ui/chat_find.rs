@@ -8,6 +8,7 @@
 //! list scrolls to it.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use gpui_kit::prelude::*;
 use gpui_kit::{div, AnyElement, Context, SharedString, Window};
@@ -37,6 +38,21 @@ pub enum Mark {
     Current,
 }
 
+/// How long the matches of a query are trusted. The bar asks for them on
+/// every frame it is open, and looking for them again each time costs that
+/// frame the whole conversation (9 ms for 240 messages).
+const FOUND_AGE: Duration = Duration::from_millis(250);
+
+/// What the bar last looked for, and what it found.
+pub(super) struct Found {
+    /// The words the matches are of.
+    pub query: String,
+    /// When they were found.
+    pub at: Instant,
+    /// The matches, in the conversation as it was then.
+    pub matches: Vec<Match>,
+}
+
 /// The messages that hold a match, and which of them holds the current one.
 pub fn marks(found: &[Match], current: usize) -> HashMap<usize, Mark> {
     let mut marks: HashMap<usize, Mark> = HashMap::new();
@@ -51,11 +67,26 @@ pub fn marks(found: &[Match], current: usize) -> HashMap<usize, Mark> {
 
 impl Chat {
     /// The matches of what the bar looks for, in the conversation as it is.
+    /// Looked for again once the words change, and once what was found is a
+    /// moment old: the bar is drawn on every frame, and the whole
+    /// conversation is not searched again for each of them.
     pub fn found(&self) -> Vec<Match> {
-        match &self.find {
-            Some(bar) => find::matches(&self.conversation.items, &bar.query),
-            None => Vec::new(),
+        let Some(bar) = &self.find else {
+            return Vec::new();
+        };
+        let mut cache = self.found_cache.borrow_mut();
+        if let Some(last) = cache.as_ref() {
+            if last.query == bar.query && last.at.elapsed() < FOUND_AGE {
+                return last.matches.clone();
+            }
         }
+        let matches = find::matches(&self.conversation.items, &bar.query);
+        *cache = Some(Found {
+            query: bar.query.clone(),
+            at: Instant::now(),
+            matches: matches.clone(),
+        });
+        matches
     }
 }
 

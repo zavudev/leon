@@ -3860,3 +3860,73 @@ fn a_run_that_goes_on_draws_its_end(cx: &mut TestAppContext) {
     h.mouse_on("chat-work-1-1".to_owned(), gpui_kit::MouseButton::Left, cx);
     assert!(h.shows_dynamic("chat-tool-1-r0".to_owned(), cx));
 }
+
+/// What an agent printed between two frames is applied whole, in order: a
+/// burst larger than one batch is neither lost nor reordered.
+#[gpui_kit::test]
+fn a_burst_of_lines_is_applied_whole(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "work");
+    let (at, _) = turns(&h).pop().expect("a turn was started");
+    {
+        let told = h.chat.0.lock().unwrap();
+        for n in 0..300 {
+            told.outputs[at]
+                .send(Output::Line(format!(
+                    r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"line {n}"}}]}}}}"#
+                )))
+                .unwrap();
+        }
+    }
+    h.settle(cx);
+    h.shell(cx, |shell| {
+        let items = &shell.chats[&LiveId(1)].conversation.items;
+        assert_eq!(items.len(), 301, "a message and the 300 lines");
+        let Some(Item::Agent { text, .. }) = items.last() else {
+            panic!("{:?}", items.last());
+        };
+        assert_eq!(text, "line 299");
+    });
+    // The newest is what the conversation shows.
+    assert!(h.shows_dynamic("chat-agent-1-300".to_owned(), cx));
+}
+
+/// The bar looks for its words once and not on every frame: a changed query
+/// is looked for at once, and what was found is looked at again once the
+/// conversation moved and the search is a moment old.
+#[gpui_kit::test]
+fn the_bar_finds_its_words_again_when_they_or_the_conversation_change(cx: &mut TestAppContext) {
+    const ANOTHER: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"One more parser case."}]}}"#;
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "fix the parser");
+    prints(
+        &h,
+        cx,
+        &[
+            INIT,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The Parser is fixed, and the parser tests pass."}]}}"#,
+        ],
+    );
+    let count = |h: &Harness, cx: &mut TestAppContext| {
+        h.shell(cx, |shell| shell.chats[&LiveId(1)].found().len())
+    };
+    h.press_chord("cmd-f", "ctrl-f", cx);
+    h.type_text("parser", cx);
+    assert_eq!(count(&h, cx), 3, "one in the words, two in the answer");
+    // A word that is not there is looked for at once: the query changed.
+    h.type_text("x", cx);
+    assert_eq!(count(&h, cx), 0);
+    h.press("backspace", cx);
+    assert_eq!(count(&h, cx), 3);
+    // More words with the same match arrive, and are found once what was
+    // found is a moment old.
+    prints(&h, cx, &[ANOTHER]);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(count(&h, cx), 4);
+}

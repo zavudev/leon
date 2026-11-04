@@ -15,6 +15,11 @@
   steps only, and is whole again once it is over. It follows its end while
   you are there, and keeps the row you scrolled back to while the turn goes
   on below.
+* A window with several conversations working at once no longer spends its
+  time line by line: what each agent printed between two frames reaches its
+  conversation in one update, and the search bar looks for its words once
+  instead of on every frame (with the bar open, a frame of a 240-message
+  conversation went from 9 ms to 1.3 ms).
 
 ## [0.16.0] - 2026-11-03
 

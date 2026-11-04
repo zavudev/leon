@@ -50,6 +50,11 @@ use crate::engine::{MachineState, StatusKind};
 use crate::launch::{self, Launch};
 use crate::settings;
 
+/// How many lines of a turn are applied in one update: what an agent prints
+/// between two frames, up to a flood of it that must not keep the window from
+/// being drawn.
+const OUTPUT_BATCH: usize = 256;
+
 /// What a conversation is titled from: its first prompt and the first answer,
 /// and where its agent runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -225,6 +230,8 @@ pub struct Chat {
     /// The rows the list was last told about: the row that draws each item,
     /// for the find bar to scroll to.
     rows: RefCell<Vec<Row>>,
+    /// What the find bar last looked for, and what it found.
+    pub(super) found_cache: RefCell<Option<super::chat_find::Found>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -539,6 +546,7 @@ impl Shell {
                 spin: None,
                 probe: None,
                 rows: RefCell::new(Vec::new()),
+                found_cache: RefCell::new(None),
                 _subscriptions: vec![subscription, narrowed, finding],
             },
         );
@@ -1052,16 +1060,33 @@ impl Shell {
                 chat.since = Some(unique);
                 chat.turn = Some(turn);
                 chat.linger = None;
-                chat.reader = Some(cx.spawn(async move |this, cx| {
-                    while let Ok(said) = output.recv_async().await {
-                        let last = matches!(said, Output::Exited(_));
-                        if this
-                            .update(cx, |this, cx| this.chat_output(id, generation, said, cx))
-                            .is_err()
-                            || last
-                        {
+                chat.reader = Some(cx.spawn(async move |this, cx| loop {
+                    let Ok(first) = output.recv_async().await else {
+                        break;
+                    };
+                    // What the agent printed while the last frame was drawn
+                    // goes in one update, so an agent that streams a line at
+                    // a time does not ask the window to be laid out again for
+                    // each of them. The batch is bounded, so a flood of lines
+                    // cannot keep the window from being drawn.
+                    let mut said = vec![first];
+                    while said.len() < OUTPUT_BATCH {
+                        let Ok(more) = output.try_recv() else {
+                            break;
+                        };
+                        let last = matches!(more, Output::Exited(_));
+                        said.push(more);
+                        if last {
                             break;
                         }
+                    }
+                    let last = said.iter().any(|said| matches!(said, Output::Exited(_)));
+                    if this
+                        .update(cx, |this, cx| this.chat_outputs(id, generation, said, cx))
+                        .is_err()
+                        || last
+                    {
+                        break;
                     }
                 }));
                 chat.follow_end();
@@ -1108,18 +1133,18 @@ impl Shell {
         }));
     }
 
-    /// The process of a conversation's turn `generation` said something.
-    pub(super) fn chat_output(
+    /// What a turn `generation` printed while the last frame was drawn, in
+    /// one update, in the order it came.
+    pub(super) fn chat_outputs(
         &mut self,
         id: LiveId,
         generation: u64,
-        output: Output,
+        outputs: Vec<Output>,
         cx: &mut Context<Self>,
     ) {
         let Some(chat) = self.chats.get_mut(&id) else {
             return;
         };
-        let ended = matches!(output, Output::Exited(_));
         // The process of a turn that is over already: when it ends, what it
         // left running ended with it.
         if generation != chat.generation {
@@ -1128,24 +1153,41 @@ impl Shell {
                 .iter()
                 .position(|old| old.generation == generation)
             {
-                if ended {
+                if let Some(exit) = outputs
+                    .into_iter()
+                    .find(|said| matches!(said, Output::Exited(_)))
+                {
                     let mut old = chat.lingering.remove(at);
-                    old.turn.output(output);
+                    old.turn.output(exit);
                 }
             }
             return;
         }
-        let Some(turn) = chat.turn.as_mut() else {
+        let Some(mut turn) = chat.turn.take() else {
             return;
         };
-        let events = turn.output(output);
-        if let Some(listed) = turn.take_commands() {
-            chat.commands = listed;
+        let mut events = Vec::new();
+        let mut commands = None;
+        let mut ended = false;
+        for output in outputs {
+            let last = matches!(output, Output::Exited(_));
+            events.extend(turn.output(output));
+            if let Some(listed) = turn.take_commands() {
+                commands = Some(listed);
+            }
+            if last {
+                ended = true;
+                break;
+            }
+        }
+        if let Some(commands) = commands {
+            chat.commands = commands;
         }
         let over = !ended && turn.over();
         if ended {
-            chat.turn = None;
             chat.linger = None;
+        } else {
+            chat.turn = Some(turn);
         }
         self.chat_events(id, events, cx);
         if ended {
