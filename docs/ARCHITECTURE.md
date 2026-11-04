@@ -1598,6 +1598,23 @@ also `Enter` in an empty field. `Escape` stops the turn. The chips under the
 field are the agent's own permission modes, its models and the efforts of
 the model in use, as the agent on this computer lists them (`Adapter::options`, asked once per conversation).
 
+**It is a list, not a column.** The chat's conversation is laid out as the
+rows of a `ListState` (`ui/chat_view.rs`), and only the rows on screen are
+laid out and drawn: a block of one item, each file change of a stretch of work
+as its own card, the line a run of thoughts and tools folds into, the frame of
+that run while it is open, the card of what a turn changed, and the line of
+what the agent is doing. A session that worked for hours is thousands of
+messages and tool calls, and a keystroke draws the window again: laying all of
+them out on every frame is what made typing while an agent worked crawl.
+While a run is happening, its frame draws only its newest steps (`LIVE_STEPS`),
+so a run that goes on for a hundred calls costs a frame what a screen of it
+does; once it is over, its line opens to the whole of it. The list follows its
+end while the reader is there (`FollowMode::Tail`) and keeps the row they
+scrolled back to while the turn streams below. The rows are told to the list
+between frames (`Chat::list_rows`), which starts the list again at the row the
+reader was on when the conversation changes shape (a run folding, older
+history arriving). King draws its own conversation as a column still.
+
 **What is named rather than written** is one list above the field, the same
 for every agent (`chat/complete.rs` says which rows, `ui/chat_menu.rs` keeps
 the list and draws it):

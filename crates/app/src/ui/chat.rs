@@ -16,12 +16,16 @@
 //! for the agents the protocol knows. Everything else starts in a terminal as
 //! before.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::*;
-use gpui_kit::{Context, Entity, ScrollHandle, Subscription, Task, Window};
+use gpui_kit::{
+    px, Context, Entity, FollowMode, ListAlignment, ListOffset, ListState, Subscription, Task,
+    Window,
+};
 use leon_core::{AgentId, Machine, MachineId, MachineKind, Role, SessionId};
 use leon_turn::{
     Action, AgentCommand, AgentOptions, Answer, ChoiceAnswer, QuestionKind, TurnEvent, TurnSpec,
@@ -31,6 +35,7 @@ use super::activity::Activity;
 use super::chat_git::GitCell;
 use super::chat_menu::Menu;
 use super::chat_rewind::Rewinding;
+use super::chat_view::Row;
 use super::edits::{Edits, Subject};
 use super::live::{LiveId, LiveState};
 use super::shell::{Main, Pane, Shell};
@@ -127,8 +132,12 @@ pub struct Chat {
     pub input: Entity<TextareaState>,
     /// Where the person says what to do instead, with a refusal.
     pub reason: Entity<InputState>,
-    /// The scroll position of the conversation.
-    pub scroll: ScrollHandle,
+    /// The scroll position of the conversation. A conversation is drawn as a
+    /// list, so only what is on screen is laid out: a session that worked
+    /// for an hour costs a frame what a new one does. It follows its end
+    /// while the reader is there, and stays where they left it when they
+    /// scroll back into what was said.
+    pub list: ListState,
     /// Files sent with what is said next: images pasted, as files.
     pub attached: Vec<std::path::PathBuf>,
     /// What was opened or folded by hand: stretches of work and tools.
@@ -213,6 +222,9 @@ pub struct Chat {
     spin: Option<Task<()>>,
     /// Asks the agent what it offers.
     probe: Option<Task<()>>,
+    /// The rows the list was last told about: the row that draws each item,
+    /// for the find bar to scroll to.
+    rows: RefCell<Vec<Row>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -284,9 +296,42 @@ impl Chat {
         self.turn.as_mut()
     }
 
-    /// Whether the conversation is scrolled to its end, give or take a line.
-    fn at_end(&self) -> bool {
-        super::widgets::at_end(&self.scroll)
+    /// Tells the list which rows the conversation has now, so that it lays
+    /// out what is on screen of them and nothing else. The reader keeps the
+    /// row that was at the top of the window; a conversation following its
+    /// end stays there.
+    pub(super) fn list_rows(&self, rows: &[Row]) {
+        *self.rows.borrow_mut() = rows.to_vec();
+        let count = rows.len();
+        if self.list.item_count() == count {
+            return;
+        }
+        let following = self.list.is_following_tail();
+        let anchor = self.list.logical_scroll_top();
+        self.list.reset(count);
+        if following {
+            self.list.set_follow_mode(FollowMode::Tail);
+        } else {
+            self.list.scroll_to(anchor);
+        }
+    }
+
+    /// Puts the conversation back on its end, to be followed as it grows.
+    pub(super) fn follow_end(&self) {
+        self.list.set_follow_mode(FollowMode::Tail);
+    }
+
+    /// Scrolls the conversation to the row that draws item `at`: what the
+    /// find bar goes to when it moves from one match to the next.
+    pub(super) fn scroll_to_item(&self, at: usize) {
+        if let Some(row) = self.rows.borrow().iter().position(|row| row.covers(at)) {
+            // By its place in the list, not by the height of what is above
+            // it: the rows that were never on screen have none.
+            self.list.scroll_to(ListOffset {
+                item_ix: row,
+                offset_in_item: px(0.),
+            });
+        }
     }
 }
 
@@ -427,6 +472,22 @@ impl Shell {
             Some(session) => Conversation::resumed(session.clone(), std::iter::empty()),
             None => Conversation::new(),
         };
+        // A conversation is read at its end while it is in flight, and left
+        // where the reader put it once it is not. The overdraw is how much
+        // above and below the window is measured ahead, a screen's worth: the
+        // wheel can go that far into rows not drawn yet before a frame has
+        // to measure more.
+        let list = ListState::new(0, ListAlignment::Top, px(900.));
+        list.set_follow_mode(FollowMode::Tail);
+        // Drawn again as it scrolls, so the way back to the end comes and
+        // goes with it.
+        let shell = cx.weak_entity();
+        list.set_scroll_handler(move |_, _, cx| {
+            let shell = shell.clone();
+            cx.defer(move |cx| {
+                let _ = shell.update(cx, |_, cx| cx.notify());
+            });
+        });
         self.chats.insert(
             id,
             Chat {
@@ -438,7 +499,7 @@ impl Shell {
                 conversation,
                 input,
                 reason,
-                scroll: ScrollHandle::new(),
+                list,
                 attached: Vec::new(),
                 folds: Folds::default(),
                 picks: HashMap::new(),
@@ -477,6 +538,7 @@ impl Shell {
                 since: None,
                 spin: None,
                 probe: None,
+                rows: RefCell::new(Vec::new()),
                 _subscriptions: vec![subscription, narrowed, finding],
             },
         );
@@ -535,7 +597,7 @@ impl Shell {
                     Role::Tool | Role::System => None,
                 });
                 chat.conversation = Conversation::resumed(session, earlier);
-                chat.scroll.scroll_to_bottom();
+                chat.follow_end();
                 cx.notify();
             })
             .ok();
@@ -748,7 +810,7 @@ impl Shell {
             chat.shell.told.clear();
         }
         chat.conversation.said_at(text, now);
-        chat.scroll.scroll_to_bottom();
+        chat.follow_end();
         self.chat_events(id, events, cx);
         Ok(())
     }
@@ -893,7 +955,7 @@ impl Shell {
             checkpoint: None,
             memory,
         });
-        chat.scroll.scroll_to_bottom();
+        chat.follow_end();
         if !(local && checkpoint::in_worktree(std::path::Path::new(&chat.cwd))) {
             self.chat_launch(id, prompt, cx);
             return;
@@ -1002,14 +1064,14 @@ impl Shell {
                         }
                     }
                 }));
-                chat.scroll.scroll_to_bottom();
+                chat.follow_end();
                 self.chat_events(id, events, cx);
                 self.chat_spin(id, cx);
             }
             Err(error) => {
                 chat.conversation
                     .refused(&format!("The agent could not be started: {error}."));
-                chat.scroll.scroll_to_bottom();
+                chat.follow_end();
                 self.refresh_live();
                 cx.notify();
             }
@@ -1161,7 +1223,6 @@ impl Shell {
         let Some(chat) = self.chats.get_mut(&id) else {
             return;
         };
-        let follow = chat.at_end();
         let before = (chat.state(), chat.activity(), chat.label());
         let mut finished = false;
         // What the person is told when they are not looking: the last thing
@@ -1208,9 +1269,6 @@ impl Shell {
                 finished = true;
             }
             chat.conversation.apply_at(event, now);
-        }
-        if follow {
-            chat.scroll.scroll_to_bottom();
         }
         if before != (chat.state(), chat.activity(), chat.label()) {
             self.rebuild_rows();

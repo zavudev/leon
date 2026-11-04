@@ -157,7 +157,7 @@ impl Shell {
         chat.probe_stop();
         chat.menu = None;
         chat.seen = true;
-        chat.scroll.scroll_to_bottom();
+        chat.follow_end();
         chat.input.update(cx, |input, cx| {
             input.set_placeholder(
                 format!(

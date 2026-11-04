@@ -6,8 +6,8 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{Sizable, Size};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, img, AnyElement, App, ClickEvent, Context, Div, FontWeight, Hsla, ObjectFit, Pixels,
-    ScrollHandle, SharedString, Stateful, Window,
+    div, img, AnyElement, App, ClickEvent, Context, Div, FollowMode, FontWeight, Hsla, List,
+    ListState, ObjectFit, Pixels, ScrollHandle, SharedString, Stateful, Window,
 };
 use leon_mark::{AnimatedMark, Mood};
 use std::path::PathBuf;
@@ -282,6 +282,66 @@ pub(super) fn with_latest(
                                 // At once, not at the next layout, so the
                                 // button is gone when it is drawn again.
                                 to.set_offset(gpui_kit::point(px(0.), -to.max_offset().y));
+                                cx.notify();
+                            }))
+                            .child(icon(IconName::ChevronDown, px(12.), c.text_muted))
+                            .child(mono("LATEST")),
+                    ),
+            )
+        })
+        .into_any_element()
+}
+
+/// A conversation's `list`, with a button over its foot that goes to the
+/// newest of it while it is scrolled up; `name` is the button's selector.
+pub(super) fn with_latest_list(
+    list: List,
+    state: &ListState,
+    name: String,
+    c: &Palette,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    let hover = c.surface_2;
+    let away = !state.is_following_tail();
+    let to = state.clone();
+    div()
+        .relative()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .flex()
+        .flex_col()
+        .child(list)
+        .when(away, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .bottom(px(12.))
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .id(SharedString::from(name.clone()))
+                            .debug_selector(move || name.clone())
+                            .h(px(26.))
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .rounded(metrics::RADIUS())
+                            .border_1()
+                            .border_color(c.elevated_border)
+                            .bg(c.surface)
+                            .shadow_md()
+                            .text_color(c.text_muted)
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(hover))
+                            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                                // At once, not at the next layout, so the
+                                // button is gone when it is drawn again.
+                                to.set_follow_mode(FollowMode::Tail);
                                 cx.notify();
                             }))
                             .child(icon(IconName::ChevronDown, px(12.), c.text_muted))

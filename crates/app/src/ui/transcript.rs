@@ -567,9 +567,18 @@ impl Shell {
         out.into_any_element()
     }
 
-    /// Thoughts and tools that change no file: one line that says what they
-    /// did, and under it, when it is open, each of them.
-    fn transcript_run(
+    /// Whether a run of thoughts and tools is open: open while it happens,
+    /// unless it was folded by hand, and folded once the conversation moved
+    /// on, unless it was opened by hand.
+    pub(super) fn run_open(folds: &Folds, from: usize, live: bool) -> bool {
+        live != folds.work.contains(&from)
+    }
+
+    /// The line a run of thoughts and tools folds into: what it did, and how
+    /// to open or close it. Its steps are drawn by [`Self::transcript_run_body`],
+    /// as their own rows, so a run that went on for a thousand calls costs a
+    /// frame what is on screen of it.
+    pub(super) fn transcript_run_head(
         &self,
         t: &Transcript,
         from: usize,
@@ -580,10 +589,7 @@ impl Shell {
     ) -> AnyElement {
         let ids = &t.ids;
         let surface = t.surface;
-        // Open while it happens; folded once the conversation moved on,
-        // unless it was opened by hand (and the other way round while live).
-        let toggled = t.folds.work.contains(&from);
-        let open = live != toggled;
+        let open = Self::run_open(t.folds, from, live);
         let last = items.iter().rev().find_map(|item| match item {
             Item::Tool(tool) => Some(format!("{} {}", tool.name, tool.summary)),
             _ => None,
@@ -603,9 +609,11 @@ impl Shell {
             colours.text_faint
         };
         let name = ids.at("work", from);
-        let head = div()
+        div()
             .id(SharedString::from(name.clone()))
             .debug_selector(move || name.clone())
+            .w_full()
+            .min_w_0()
             .h(px(24.))
             .px(px(6.))
             .flex()
@@ -639,12 +647,32 @@ impl Shell {
                         .text_color(colours.text_faint)
                         .child(last)
                 }))
-            });
+            })
+            .into_any_element()
+    }
+
+    /// The steps of a run that is open, in the frame the drawing gives them.
+    /// `cap` keeps only their newest: while a run goes on, what it printed
+    /// before a screen's worth is not laid out again on every frame.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn transcript_run_body(
+        &self,
+        t: &Transcript,
+        from: usize,
+        items: &[Item],
+        live: bool,
+        cap: Option<usize>,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ids = &t.ids;
         // Open, the work is a framed block of the drawing: its corners are
         // marked, in the accent while it happens.
         let ticks = format!("{}-work", ids.prefix());
         let mut body = div()
             .relative()
+            .w_full()
+            .min_w_0()
             .px(px(12.))
             .py(px(8.))
             .border_1()
@@ -657,26 +685,58 @@ impl Shell {
             } else {
                 super::lines::frame_ticks(&ticks, colours)
             });
-        if open {
-            for (offset, item) in items.iter().enumerate() {
-                body = body.child(match item {
-                    Item::Tool(tool) => self.transcript_tool(t, tool, colours, cx),
-                    Item::Thought { text } => {
-                        let name = ids.at("thought", from + offset);
-                        div()
-                            .debug_selector(move || name.clone())
-                            .py(px(4.))
-                            .min_w_0()
-                            .italic()
-                            .text_size(metrics::TEXT_SMALL())
-                            .text_color(colours.text_muted)
-                            .child(text.trim().to_owned())
-                            .into_any_element()
-                    }
-                    _ => div().into_any_element(),
-                });
-            }
+        let shown = cap.map_or(items.len(), |cap| items.len().min(cap));
+        let skipped = items.len() - shown;
+        if skipped > 0 {
+            body = body.child(
+                div()
+                    .py(px(4.))
+                    .min_w_0()
+                    .font_family(fonts::mono())
+                    .text_size(metrics::TEXT_SMALL())
+                    .text_color(colours.text_faint)
+                    .child(if skipped == 1 {
+                        "\u{2026} 1 earlier step".to_owned()
+                    } else {
+                        format!("\u{2026} {skipped} earlier steps")
+                    }),
+            );
         }
+        for (offset, item) in items.iter().enumerate().skip(skipped) {
+            body = body.child(match item {
+                Item::Tool(tool) => self.transcript_tool(t, tool, colours, cx),
+                Item::Thought { text } => {
+                    let name = ids.at("thought", from + offset);
+                    div()
+                        .debug_selector(move || name.clone())
+                        .py(px(4.))
+                        .min_w_0()
+                        .italic()
+                        .text_size(metrics::TEXT_SMALL())
+                        .text_color(colours.text_muted)
+                        .child(text.trim().to_owned())
+                        .into_any_element()
+                }
+                _ => div().into_any_element(),
+            });
+        }
+        body.into_any_element()
+    }
+
+    /// A run of thoughts and tools that change no file, as one piece: its
+    /// line, and under it, when it is open, its steps. The chat draws the two
+    /// as rows of their own; King draws them together.
+    fn transcript_run(
+        &self,
+        t: &Transcript,
+        from: usize,
+        items: &[Item],
+        live: bool,
+        colours: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = Self::run_open(t.folds, from, live);
+        let head = self.transcript_run_head(t, from, items, live, colours, cx);
         div()
             .w_full()
             .min_w_0()
@@ -684,7 +744,9 @@ impl Shell {
             .flex_col()
             .gap(px(2.))
             .child(head)
-            .when(open, |this| this.child(body))
+            .when(open, |this| {
+                this.child(self.transcript_run_body(t, from, items, live, None, colours, cx))
+            })
             .into_any_element()
     }
 
@@ -712,17 +774,13 @@ impl Shell {
             .as_ref()
             .map(|outcome| outcome.summary.clone())
             .filter(|summary| !summary.is_empty());
-        let detail = [
-            tool.detail.as_str(),
-            tool.outcome
+        // Whether there is anything behind the line, said without joining
+        // it: what is not shown is never copied, and this runs every frame.
+        let has_detail = !tool.detail.trim().is_empty()
+            || tool
+                .outcome
                 .as_ref()
-                .map_or("", |outcome| outcome.detail.as_str()),
-        ]
-        .into_iter()
-        .filter(|part| !part.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-        let has_detail = !detail.is_empty();
+                .is_some_and(|outcome| !outcome.detail.trim().is_empty());
         div()
             .w_full()
             .min_w_0()
@@ -768,6 +826,16 @@ impl Shell {
                     })),
             )
             .when(open && has_detail, |this| {
+                let detail = [
+                    tool.detail.as_str(),
+                    tool.outcome
+                        .as_ref()
+                        .map_or("", |outcome| outcome.detail.as_str()),
+                ]
+                .into_iter()
+                .filter(|part| !part.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
                 this.child(code_cell(&detail, colours).ml(px(14.)).my(px(4.)))
             })
             .into_any_element()
@@ -776,7 +844,7 @@ impl Shell {
     /// A tool that changes files, as the terminal draws it: for each file a
     /// line of what was done to it and how much, and under it, open unless
     /// it was folded by hand, the diff.
-    fn transcript_edit(
+    pub(super) fn transcript_edit(
         &self,
         t: &Transcript,
         tool: &Tool,
@@ -1148,9 +1216,14 @@ fn diff_block(ids: &Ids, tool: &str, at: usize, change: &FileChange, colours: &P
 
 /// Text as the agent wrote it, in a cell: mono, on the raised surface, as
 /// tall as it needs up to a few lines and scrolling beyond.
+/// How many lines of a tool's detail are drawn: the cell is 240 points tall
+/// and clips what does not fit, so laying out more than this costs the frame
+/// and shows nothing.
+const CELL_LINES: usize = 32;
+
 pub(super) fn code_cell(text: &str, colours: &Palette) -> Div {
     let mut lines = div().flex().flex_col();
-    for line in text.lines() {
+    for line in text.lines().take(CELL_LINES) {
         let colour = if line.starts_with("+ ") {
             colours.success
         } else if line.starts_with("- ") {

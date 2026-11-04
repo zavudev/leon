@@ -289,7 +289,7 @@ impl Shell {
             chat.conversation.items.push(Item::Notice { tone, text });
         }
         chat.seen = true;
-        chat.scroll.scroll_to_bottom();
+        chat.follow_end();
         if asked.resend {
             self.chat_say(id, text, cx);
         } else {

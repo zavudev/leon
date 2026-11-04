@@ -284,7 +284,7 @@ impl Shell {
             .update(cx, |input, cx| input.set_value("", window, cx));
         chat.recall = None;
         let item = chat.conversation.ran_at(&command, now);
-        chat.scroll.scroll_to_bottom();
+        chat.follow_end();
         let job = self
             .engine
             .run_typed(chat.machine.clone(), chat.cwd.clone(), command.clone());
@@ -330,7 +330,7 @@ impl Shell {
         chat.conversation
             .shell_ended(running.item, result_of(&ended));
         chat.shell.told.push(told_of(&running.command, &ended));
-        chat.scroll.scroll_to_bottom();
+        chat.follow_end();
         self.chat_shell_deliver(id, cx);
         cx.notify();
     }

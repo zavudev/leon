@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Fixed
+
+* A long conversation in Leon's own interface no longer makes its field hang
+  while the agent works. The transcript was drawn as one column and laid out
+  again on every frame, and every keystroke draws one: a session that had
+  worked for a while laid out thousands of messages and tool calls to show a
+  dozen lines, so what was typed took seconds to appear. The conversation is
+  a list now, whose rows are laid out only while they are on screen: a
+  message, each file change, the line a stretch of work folds into, the card
+  of what a turn changed. A stretch that is still happening draws its newest
+  steps only, and is whole again once it is over. It follows its end while
+  you are there, and keeps the row you scrolled back to while the turn goes
+  on below.
+
 ## [0.16.0] - 2026-11-03
 
 ### Added
