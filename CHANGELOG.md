@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-04
+
 ### Fixed
 
 * A long conversation in Leon's own interface no longer makes its field hang
