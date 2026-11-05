@@ -1888,14 +1888,15 @@ fn the_pins_of_every_machine_are_one_section_at_the_top_that_says_machine_and_pr
         ],
         "above every machine, each session on its own machine"
     );
-    // Each pinned row says where it lives: the machine as a badge, the
-    // project under the title, and the whole of it on hover.
+    // Each pinned row says where it lives: another machine as a badge (this
+    // one goes without), the project under the title, and the whole of it on
+    // hover.
     let (login_row, keys_row) = (
         h.row_of(NodeId::Session(login.clone()), cx).unwrap(),
         h.row_of(NodeId::Session(keys.clone()), cx).unwrap(),
     );
     assert!(h.shows_dynamic(format!("tree-machine-{keys_row}"), cx));
-    assert!(h.shows_dynamic(format!("tree-machine-{login_row}"), cx));
+    assert!(!h.shows_dynamic(format!("tree-machine-{login_row}"), cx));
     assert!(h.shows_dynamic(format!("tree-branch-{keys_row}"), cx));
     let said = h.shell(cx, |shell| {
         let key = NodeId::Session(keys.clone()).key();
