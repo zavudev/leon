@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-11-05
+
+### Fixed
+
+* Asking Leon's own interface to start a dev server again no longer leaves
+  the conversation unable to run anything. When the agent that had left a
+  server running in the background was ended, the resumed session first
+  answered the notice that the server had stopped, and Leon took that for
+  the end of the turn: it stopped listening, every command then failed with
+  "Stream closed", and the answer was lost. That notice no longer ends the
+  turn.
+* A pinned session on this machine no longer carries a "THIS MACHINE"
+  badge, cut short and of a different width on every row, that pushed the
+  marks after it out of line. Sessions on other machines keep theirs.
+
 ## [0.16.1] - 2026-11-04
 
 ### Fixed
