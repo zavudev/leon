@@ -987,10 +987,14 @@ impl Shell {
                             colours,
                         ),
                     )
-                    // With several machines, the machine of a pinned session.
+                    // With several machines, the machine of a pinned session
+                    // that is not on this one: a local row needs no badge.
                     .children(
                         pinned_here
-                            .filter(|_| super::tree::machine_headers(&self.snapshot))
+                            .filter(|entry| {
+                                !entry.machine.is_local()
+                                    && super::tree::machine_headers(&self.snapshot)
+                            })
                             .map(|entry| {
                                 mono(entry.machine_name.to_uppercase())
                                     .debug_selector(move || format!("tree-machine-{index}"))

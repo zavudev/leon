@@ -111,6 +111,8 @@ pub fn session(unique: u64) -> Box<dyn AgentSession> {
         modes_asked: BTreeMap::new(),
         idle: false,
         interrupting: false,
+        heard: false,
+        notified: false,
     })
 }
 
@@ -191,9 +193,20 @@ struct ClaudeSession {
     idle: bool,
     /// An interrupt was asked for: the next failed result is its doing.
     interrupting: bool,
+    /// It said something since the last prompt was written.
+    heard: bool,
+    /// It told of a background task since its last result.
+    notified: bool,
 }
 
 impl ClaudeSession {
+    /// Whether `result` closes nothing but the notice of a background task:
+    /// it ran no turn, came after the notice, and nothing was said since the
+    /// prompt. A missing count is a real result.
+    fn notice_only(&self, result: &Value) -> bool {
+        self.notified && !self.heard && result["num_turns"].as_u64() == Some(0)
+    }
+
     fn next_id(&mut self, kind: &str) -> String {
         self.unique += 1;
         format!("leon-{kind}-{}", self.unique)
@@ -498,8 +511,12 @@ impl AgentSession for ClaudeSession {
                     let mode = value["permissionMode"].as_str().map(str::to_owned);
                     self.mode_is(mode.as_deref(), step);
                 }
+                if value["subtype"] == "task_notification" {
+                    self.notified = true;
+                }
             }
             Some("assistant") => {
+                self.heard = true;
                 for block in blocks(&value["message"]["content"]) {
                     let name = block["name"].as_str().unwrap_or_default();
                     if block["type"] == "tool_use"
@@ -527,7 +544,15 @@ impl AgentSession for ClaudeSession {
                     }
                 }
             }
+            Some("result") if self.notice_only(value) => {
+                // A resumed session first answers the notice of a
+                // background task the previous process left: no turn ran,
+                // and the prompt is still to be answered.
+                self.notified = false;
+                return;
+            }
             Some("result") => {
+                self.notified = false;
                 let open: Vec<String> = self.asked.keys().cloned().collect();
                 for id in open {
                     self.resolve(&id, step);
@@ -579,6 +604,7 @@ impl AgentSession for ClaudeSession {
         } else if tag == TAG_PROMPT || tag.starts_with("u.") {
             // It has more to answer: its input stays open.
             self.idle = false;
+            self.heard = false;
         } else if tag.starts_with("i.") {
             self.interrupting = true;
         }
@@ -1502,6 +1528,63 @@ mod tests {
         let mut step = Step::default();
         session.delivered(&more[0].tag, &mut step);
         assert!(!session.idle());
+    }
+
+    /// What a resumed session says first when the process before it left a
+    /// background task running: the task's end, and a result of no turn.
+    const STOPPED: &str = r#"{"type":"system","subtype":"task_notification","task_id":"b8v4","tool_use_id":"toolu_1","status":"stopped","output_file":"","summary":"Background shell command didn't finish before the previous session ended","session_id":"s"}"#;
+    const NO_TURN: &str = r#"{"type":"result","subtype":"success","is_error":false,"duration_api_ms":0,"num_turns":0,"stop_reason":null,"session_id":"s","total_cost_usd":0.006,"queued_turn_count":0}"#;
+    const SAYS: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"bun dev","run_in_background":true}}]},"parent_tool_use_id":null}"#;
+
+    #[test]
+    fn the_notice_of_a_task_the_last_process_left_does_not_end_the_turn() {
+        let mut session = fresh();
+        for outgoing in session.first(&TurnSpec {
+            program: "claude",
+            prompt: "start it again",
+            ..TurnSpec::default()
+        }) {
+            session.delivered(&outgoing.tag, &mut Step::default());
+        }
+        read(session.as_mut(), STOPPED);
+        let step = read(session.as_mut(), NO_TURN);
+        assert!(!session.idle(), "the prompt is still to be answered");
+        assert!(step.events.is_empty(), "{:?}", step.events);
+        // Its permission requests are then asked on an open pipe.
+        read(session.as_mut(), INIT);
+        read(session.as_mut(), SAYS);
+        let step = read(
+            session.as_mut(),
+            r#"{"type":"control_request","request_id":"q1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"bun dev"},"tool_use_id":"t1"}}"#,
+        );
+        assert!(matches!(step.events[..], [TurnEvent::Question { .. }]));
+        read(
+            session.as_mut(),
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"running"}]},"parent_tool_use_id":null}"#,
+        );
+        let step = read(session.as_mut(), RESULT);
+        assert!(session.idle());
+        assert!(step
+            .events
+            .iter()
+            .any(|event| matches!(event, TurnEvent::Finished { ok: true, .. })));
+    }
+
+    #[test]
+    fn a_task_that_ends_while_it_works_still_lets_the_turn_end() {
+        let mut session = fresh();
+        session.delivered(TAG_PROMPT, &mut Step::default());
+        read(session.as_mut(), SAYS);
+        read(
+            session.as_mut(),
+            r#"{"type":"result","subtype":"success","is_error":false,"num_turns":2,"session_id":"s","queued_turn_count":1}"#,
+        );
+        assert!(!session.idle());
+        // The task's notice is the queued turn; one that ran nothing still
+        // ends it, for the prompt was answered before.
+        read(session.as_mut(), STOPPED);
+        read(session.as_mut(), NO_TURN);
+        assert!(session.idle());
     }
 
     #[test]
