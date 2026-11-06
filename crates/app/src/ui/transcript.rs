@@ -16,14 +16,15 @@
 //! [`Shell::transcript_work`] for the rest.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use gpui_kit::component::text::TextView;
 use gpui_kit::prelude::*;
-use gpui_kit::{div, AnyElement, ClickEvent, Context, Div, FontWeight, SharedString};
+use gpui_kit::{div, relative, AnyElement, ClickEvent, Context, Div, FontWeight, SharedString};
 use leon_core::AgentId;
 use leon_king::coordinator::Target;
 use leon_turn::{ChangeKind, DiffLine, FileChange, LineKind, TodoStatus};
 
+use super::chat_prose::Prose;
 use super::live::LiveId;
 use super::shell::Shell;
 use super::widgets::{led, mono};
@@ -240,7 +241,7 @@ impl Shell {
                             ))
                             .children(self.transcript_files(ids, at, &files, colours, cx)),
                     )
-                    .children(self.transcript_time(ids, at, *said_at, colours))
+                    .children(self.transcript_time(ids, at, *said_at, &group, colours))
                     .children(
                         t.said_actions
                             .and_then(|actions| actions(self, at, group, cx)),
@@ -254,13 +255,22 @@ impl Shell {
             } => {
                 let who = (t.speaker)(at);
                 let shown = self.transcript_markdown(t, text, *streaming, cx);
-                let palette = *colours;
+                let group = SharedString::from(ids.at("said", at));
                 let code = ids.at("code", at);
+                let message = ids.at("message", at);
+                let prose = Prose {
+                    id: &message,
+                    code: &code,
+                    group: &group,
+                    on_link: Some(Arc::new(super::links::on_link(cx, t.folder.is_some()))),
+                    colours,
+                };
                 div()
                     .debug_selector({
                         let name = ids.at("agent", at);
                         move || name.clone()
                     })
+                    .group(group.clone())
                     .w_full()
                     .min_w_0()
                     .flex()
@@ -274,25 +284,16 @@ impl Shell {
                             .child(agent_mark(who.agent, colours))
                             .child(mono(who.label).text_color(colours.text_faint))
                             .child(div().flex_1())
-                            .children(self.transcript_time(ids, at, *said_at, colours)),
+                            .children(self.transcript_time(ids, at, *said_at, &group, colours)),
                     )
                     .child(
-                        div().w_full().min_w_0().text_color(colours.text).child(
-                            TextView::markdown(
-                                SharedString::from(ids.at("message", at)),
-                                SharedString::from(shown),
-                            )
-                            .selectable(true)
-                            .on_link_click(super::links::on_link(cx, t.folder.is_some()))
-                            .code_block_actions(move |block, _, _| {
-                                super::chat_code::corner(
-                                    code.clone(),
-                                    block.lang().as_deref(),
-                                    block.code(),
-                                    &palette,
-                                )
-                            }),
-                        ),
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .text_color(colours.text)
+                            .text_size(metrics::TEXT_PROSE())
+                            .line_height(relative(metrics::PROSE_LEADING()))
+                            .child(prose.draw(&shown, 0, "")),
                     )
                     .into_any_element()
             }
@@ -366,11 +367,13 @@ impl Shell {
                         code_cell(&super::chat_shell::shown_output(output), colours)
                             .debug_selector(move || name.clone())
                     });
+                let group = SharedString::from(ids.at("said", at));
                 div()
                     .debug_selector({
                         let name = ids.at("shell", at);
                         move || name.clone()
                     })
+                    .group(group.clone())
                     .w_full()
                     .min_w_0()
                     .flex()
@@ -397,7 +400,7 @@ impl Shell {
                             .children(output)
                             .child(status),
                     )
-                    .children(self.transcript_time(ids, at, run.at, colours))
+                    .children(self.transcript_time(ids, at, run.at, &group, colours))
                     .into_any_element()
             }
             // A rule with the switch said on it: what is above is the first
@@ -428,13 +431,15 @@ impl Shell {
         }
     }
 
-    /// When a message was said, small and muted, at the end of its line:
-    /// the time of day, and the date when it was not today.
+    /// When a message was said, small and faint, at the end of its line: the
+    /// time of day, and the date when it was not today. Seen while the
+    /// message (the `group` of its row) is under the pointer.
     fn transcript_time(
         &self,
         ids: &Ids,
         at: usize,
         said: Option<i64>,
+        group: &SharedString,
         colours: &Palette,
     ) -> Option<AnyElement> {
         let said = said?;
@@ -448,6 +453,8 @@ impl Shell {
             div()
                 .debug_selector(move || name.clone())
                 .flex_none()
+                .invisible()
+                .group_hover(group.clone(), |style| style.visible())
                 .font_family(fonts::mono())
                 .font_features(fonts::mono_features())
                 .text_size(metrics::TEXT_LABEL())
@@ -635,7 +642,7 @@ impl Shell {
                 colours.text_faint,
             ))
             .child(led(run_light))
-            .child(mono(work_label(items)).text_color(colours.text_muted))
+            .child(tool_label(work_label(items)).text_color(colours.text_muted))
             .when(!open, |this| {
                 this.children(last.map(|last| {
                     div()
@@ -804,7 +811,7 @@ impl Shell {
                             }))
                     })
                     .child(led(light))
-                    .child(mono(tool.name.to_uppercase()).text_color(colours.text))
+                    .child(tool_label(tool.name.to_uppercase()).text_color(colours.text))
                     .child(
                         div()
                             .flex_1()
@@ -1036,11 +1043,14 @@ pub(super) fn plan_card(frame: Div, ids: &Ids, plan: &str, colours: &Palette) ->
         ids.of("plan-code"),
         ids.of("plan-copy"),
     );
+    let plan_view = format!("{}-{}-plan", ids.prefix(), ids.key());
+    let group = SharedString::from(ids.of("plan-text"));
     frame
         .debug_selector(move || card.clone())
         .child(
             div()
                 .id(SharedString::from(ids.of("plan")))
+                .group(group.clone())
                 .debug_selector(move || page.clone())
                 .max_h(px(360.))
                 .overflow_y_scroll()
@@ -1052,19 +1062,23 @@ pub(super) fn plan_card(frame: Div, ids: &Ids, plan: &str, colours: &Palette) ->
                 .border_color(colours.border)
                 .bg(colours.background)
                 .child(
-                    TextView::markdown(
-                        SharedString::from(format!("{}-{}-plan", ids.prefix(), ids.key())),
-                        SharedString::from(super::chat_code::normalize(plan).into_owned()),
-                    )
-                    .selectable(true)
-                    .code_block_actions(move |block, _, _| {
-                        super::chat_code::corner(
-                            code.clone(),
-                            block.lang().as_deref(),
-                            block.code(),
-                            &palette,
-                        )
-                    }),
+                    div()
+                        .text_size(metrics::TEXT_PROSE())
+                        .line_height(relative(metrics::PROSE_LEADING()))
+                        .child(
+                            Prose {
+                                id: &plan_view,
+                                code: &code,
+                                group: &group,
+                                on_link: None,
+                                colours: &palette,
+                            }
+                            .draw(
+                                &super::chat_code::normalize(plan),
+                                0,
+                                "",
+                            ),
+                        ),
                 ),
         )
         .child(
@@ -1085,6 +1099,15 @@ pub(super) fn plan_card(frame: Div, ids: &Ids, plan: &str, colours: &Palette) ->
                     }),
             ),
         )
+}
+
+/// What a row of work calls itself: its words in the size of the interface and
+/// at rest, so that the line reads as part of the page and the summary beside
+/// it as its detail.
+fn tool_label(words: impl Into<SharedString>) -> Div {
+    mono(words)
+        .font_weight(FontWeight::NORMAL)
+        .text_size(metrics::TEXT_BODY())
 }
 
 /// What the rule of a switch of agents says.

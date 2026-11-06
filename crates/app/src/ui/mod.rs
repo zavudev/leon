@@ -23,6 +23,7 @@ mod chat_diff;
 mod chat_find;
 mod chat_git;
 mod chat_menu;
+mod chat_prose;
 mod chat_recall;
 mod chat_rewind;
 mod chat_shell;

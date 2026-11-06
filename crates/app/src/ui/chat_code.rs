@@ -139,12 +139,14 @@ pub fn label(lang: Option<&str>) -> Option<String> {
 
 /// What sits in the corner of a fenced block: its language and a button that
 /// copies its code. `name` is the selector of the pair; `code` is what the
-/// button copies.
+/// button copies. With a `group`, the pair is only seen while that group is
+/// hovered: the block's page, as the text gets the room.
 pub fn corner(
     name: String,
     lang: Option<&str>,
     code: SharedString,
     colours: &Palette,
+    group: Option<SharedString>,
 ) -> AnyElement {
     let hover = colours.surface_2;
     let copy = format!("{name}-copy");
@@ -157,6 +159,9 @@ pub fn corner(
         .flex()
         .items_center()
         .gap(px(6.))
+        .when_some(group, |this, group| {
+            this.invisible().group_hover(group, |style| style.visible())
+        })
         .children(label(lang).map(|words| {
             mono(words)
                 .debug_selector({
