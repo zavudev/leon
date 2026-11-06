@@ -2421,12 +2421,34 @@ fn a_code_block_says_its_language_and_its_button_copies_the_code(cx: &mut TestAp
     start(&h, cx, AgentId::CLAUDE, &path);
     say(&h, cx, 1, "how do I test");
     prints(&h, cx, &[INIT, CODE, RESULT]);
+    // The corner is out of the way until the answer is under the pointer.
     assert!(h.shows_dynamic("chat-code-1-1".into(), cx));
+    assert!(!h.shows_dynamic("chat-code-1-1-lang".into(), cx));
+    assert!(!h.shows_dynamic("chat-code-1-1-copy".into(), cx));
+    h.hover_on("chat-agent-1-1".into(), cx);
     assert!(h.shows_dynamic("chat-code-1-1-lang".into(), cx));
     assert!(h.shows_dynamic("chat-code-1-1-copy".into(), cx));
     click(&h, cx, "chat-code-1-1-copy");
     let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
     assert_eq!(copied.as_deref().map(str::trim), Some("cargo test"));
+}
+
+const LIST: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Steps:\n\n1. one\n2. two\n   - nested\n\nDone."}]}}"#;
+
+#[gpui_kit::test]
+fn an_answer_with_lists_is_drawn_in_pieces_and_stays_in_its_row(cx: &mut TestAppContext) {
+    let Some((h, _dir, path)) = window(cx) else {
+        return;
+    };
+    start(&h, cx, AgentId::CLAUDE, &path);
+    say(&h, cx, 1, "how");
+    prints(&h, cx, &[INIT, LIST, RESULT]);
+    let answer = h
+        .bounds_of("chat-agent-1-1".into(), cx)
+        .expect("the answer is drawn");
+    // The header, the words, the list (a line for each of its items) and
+    // the closing words: well over a few lines tall.
+    assert!(answer.size.height > gpui_kit::px(100.), "{answer:?}");
 }
 
 const PLAN_QUESTION: &str = r#"{"type":"control_request","request_id":"p1","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","display_name":"ExitPlanMode","input":{"plan":"1. Create hello.txt\n2. Verify it\n"},"tool_use_id":"toolu_p","requires_user_interaction":true}}"#;

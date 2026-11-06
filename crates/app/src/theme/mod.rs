@@ -662,6 +662,39 @@ pub mod metrics {
     pub fn TEXT_BODY() -> Pixels {
         token(13.0)
     }
+    /// The words of an agent's answer: a step above the interface's body.
+    pub fn TEXT_PROSE() -> Pixels {
+        token(14.0)
+    }
+    /// The height of a line of those words, in times their size.
+    pub fn PROSE_LEADING() -> f32 {
+        1.6
+    }
+    /// The space between the paragraphs, lists and blocks of an answer.
+    pub fn PARAGRAPH_GAP() -> Pixels {
+        token(12.0)
+    }
+    /// The space between the items of a list in an answer.
+    pub fn LIST_GAP() -> Pixels {
+        token(4.0)
+    }
+    /// How far the words of a list item are from the edge of the answer: the
+    /// gutter that holds the marker.
+    pub fn LIST_INDENT() -> Pixels {
+        token(32.0)
+    }
+    /// The space between a list's marker and its words.
+    pub fn LIST_MARKER_GAP() -> Pixels {
+        token(8.0)
+    }
+    /// The code of a fenced block in an answer.
+    pub fn TEXT_CODE() -> Pixels {
+        token(13.0)
+    }
+    /// The height of a line of that code.
+    pub fn CODE_LEADING() -> Pixels {
+        token(20.0)
+    }
     /// Secondary text.
     pub fn TEXT_SMALL() -> Pixels {
         token(12.0)
@@ -774,6 +807,8 @@ pub fn apply(id: ThemeId, appearance: Appearance, cx: &mut App) {
         component.colors.ring = palette.signal;
         component.colors.selection = palette.signal.opacity(FIELD_SELECTION);
         component.colors.border = palette.border;
+        // The fill of a fenced block of code and of the corner over it.
+        component.colors.muted = palette.surface;
         component.colors.scrollbar = hsla(0., 0., 0., 0.);
         component.colors.scrollbar_thumb = palette.text_faint.opacity(0.45);
         component.colors.scrollbar_thumb_hover = palette.text_faint.opacity(0.7);

@@ -1598,6 +1598,18 @@ also `Enter` in an empty field. `Escape` stops the turn. The chips under the
 field are the agent's own permission modes, its models and the efforts of
 the model in use, as the agent on this computer lists them (`Adapter::options`, asked once per conversation).
 
+**An answer is drawn airy** (`ui/chat_prose.rs`): 14 px words at 1.6 of line
+height, the paragraphs and blocks a `PARAGRAPH_GAP` apart. gpui-component's
+Markdown view has no hooks for lists (the marker sits against the edge and the
+items touch), so `chat_prose::parts` cuts an answer at its lists: what is not a
+list stays one Markdown view each, and a list is drawn by Leon an item at a
+time, its marker in a gutter of `LIST_INDENT` and the item's own Markdown
+beside it, so a long item wraps under its words. A task list, or an answer with
+links by reference, is left whole. A fenced block is flat, and its language and
+its COPY button, like the time of a message, are only seen while the message is
+under the pointer. `theme::apply` gives gpui-component's `muted` the palette's
+`surface`, which is the fill of those blocks.
+
 **It is a list, not a column.** The chat's conversation is laid out as the
 rows of a `ListState` (`ui/chat_view.rs`), and only the rows on screen are
 laid out and drawn: a block of one item, each file change of a stretch of work
